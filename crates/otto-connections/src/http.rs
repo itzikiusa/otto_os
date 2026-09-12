@@ -192,14 +192,7 @@ async fn check_conn_manage<S: ConnectionsCtx>(
     user: &User,
     conn: &Connection,
 ) -> Result<(), Error> {
-    check_conn_access(
-        ctx,
-        user,
-        conn,
-        WorkspaceRole::Editor,
-        Capability::Admin,
-    )
-    .await
+    check_conn_access(ctx, user, conn, WorkspaceRole::Editor, Capability::Admin).await
 }
 
 /// Shared body of the two gates above: workspace role when the connection has a
@@ -213,8 +206,14 @@ async fn check_conn_access<S: ConnectionsCtx>(
 ) -> Result<(), Error> {
     let enforced = ctx.connections().is_enforced(&conn.id).await?;
     let min = if enforced { WorkspaceRole::Viewer } else { min };
-    let global_cap = if enforced { Capability::View } else { global_cap };
-    ctx.connections().authorize(&conn.id, &user.id, "discover").await?;
+    let global_cap = if enforced {
+        Capability::View
+    } else {
+        global_cap
+    };
+    ctx.connections()
+        .authorize(&conn.id, &user.id, "discover")
+        .await?;
     match &conn.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await,
         None => {
@@ -282,7 +281,11 @@ async fn import_sources<S: ConnectionsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<Vec<SourceStatus>>> {
-    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
+    if !user.is_root || user.disabled {
+        return Err(ApiErr(Error::Forbidden(
+            "root must discover and provision native connection identities".into(),
+        )));
+    }
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -306,7 +309,11 @@ async fn import_scan<S: ConnectionsCtx>(
     Path(ws_id): Path<Id>,
     Json(body): Json<ImportScanBody>,
 ) -> ApiResult<Json<ImportScanResult>> {
-    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
+    if !user.is_root || user.disabled {
+        return Err(ApiErr(Error::Forbidden(
+            "root must discover and provision native connection identities".into(),
+        )));
+    }
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -326,7 +333,11 @@ async fn import_create<S: ConnectionsCtx>(
     Path(ws_id): Path<Id>,
     Json(req): Json<ImportCreateReq>,
 ) -> ApiResult<Json<ImportCreateResult>> {
-    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
+    if !user.is_root || user.disabled {
+        return Err(ApiErr(Error::Forbidden(
+            "root must discover and provision native connection identities".into(),
+        )));
+    }
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -409,7 +420,15 @@ async fn open_connection<S: ConnectionsCtx>(
             Error::Invalid("opening a global connection requires 'workspace_id'".into())
         })?;
     ctx.roles()
-        .check(&user, &ws_id, if ctx.connections().is_enforced(&id).await? { WorkspaceRole::Viewer } else { WorkspaceRole::Editor })
+        .check(
+            &user,
+            &ws_id,
+            if ctx.connections().is_enforced(&id).await? {
+                WorkspaceRole::Viewer
+            } else {
+                WorkspaceRole::Editor
+            },
+        )
         .await?;
     let session = ctx
         .connections()
@@ -448,7 +467,9 @@ async fn test_connection<S: ConnectionsCtx>(
             | ConnectionKind::Clickhouse
             | ConnectionKind::Postgres
     );
-    ctx.connections().authorize(&id, &user.id, "configure").await?;
+    ctx.connections()
+        .authorize(&id, &user.id, "configure")
+        .await?;
     let mut resp = if is_db_kind {
         if let Some(tester) = ctx.db_tester() {
             tester.test_db_connection(&id, &user.id).await?
@@ -475,7 +496,11 @@ async fn pin_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Connection>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.connections().set_pinned(&id, &user.id, req.pinned).await?))
+    Ok(Json(
+        ctx.connections()
+            .set_pinned(&id, &user.id, req.pinned)
+            .await?,
+    ))
 }
 
 // --- SFTP file browser ------------------------------------------------------
@@ -574,7 +599,9 @@ async fn sftp_list<S: ConnectionsCtx>(
         None => sftp.pwd().await.map_err(ApiErr)?,
     };
     let entries = sftp.list(&path).await.map_err(ApiErr)?;
-    ctx.connections().authorize(&id, &user.id, "sftp_read").await?;
+    ctx.connections()
+        .authorize(&id, &user.id, "sftp_read")
+        .await?;
     Ok(Json(SftpListResp {
         path,
         entries: entries
@@ -601,7 +628,9 @@ async fn sftp_download<S: ConnectionsCtx>(
     if ctx.connections().is_enforced(&id).await? {
         let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
         if !current.is_root || current.disabled {
-            return Err(ApiErr(Error::Forbidden("daemon-local transfer paths require root for governed connections".into())));
+            return Err(ApiErr(Error::Forbidden(
+                "daemon-local transfer paths require root for governed connections".into(),
+            )));
         }
     }
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_read").await?;
@@ -646,12 +675,16 @@ async fn sftp_upload<S: ConnectionsCtx>(
     if ctx.connections().is_enforced(&id).await? {
         let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
         if !current.is_root || current.disabled {
-            return Err(ApiErr(Error::Forbidden("daemon-local transfer paths require root for governed connections".into())));
+            return Err(ApiErr(Error::Forbidden(
+                "daemon-local transfer paths require root for governed connections".into(),
+            )));
         }
     }
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     let local = expand_home(&req.local_path);
-    sftp.upload(&local, &req.remote_path).await.map_err(ApiErr)?;
+    sftp.upload(&local, &req.remote_path)
+        .await
+        .map_err(ApiErr)?;
     Ok(StatusCode::OK)
 }
 
@@ -732,7 +765,9 @@ async fn sftp_read<S: ConnectionsCtx>(
     // Always clean up the temp dir, success or not.
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let (text, truncated) = resp?;
-    ctx.connections().authorize(&id, &user.id, "sftp_read").await?;
+    ctx.connections()
+        .authorize(&id, &user.id, "sftp_read")
+        .await?;
     Ok(Json(SftpReadResp { text, truncated }))
 }
 
@@ -775,22 +810,38 @@ async fn list_sections<S: ConnectionsCtx>(
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
     let sections = ctx.connections().list_sections().await?;
-    if user.is_root { return Ok(Json(sections)); }
+    if user.is_root {
+        return Ok(Json(sections));
+    }
     let connections = ctx.connections().list_for(&ws_id, &user.id).await?;
-    let mut visible: std::collections::HashSet<Id> = connections.into_iter().filter_map(|c| c.section_id).collect();
+    let mut visible: std::collections::HashSet<Id> = connections
+        .into_iter()
+        .filter_map(|c| c.section_id)
+        .collect();
     for section in &sections {
-        if section.created_by == user.id { visible.insert(section.id.clone()); }
+        if section.created_by == user.id {
+            visible.insert(section.id.clone());
+        }
     }
     loop {
         let mut changed = false;
         for section in &sections {
             if visible.contains(&section.id) {
-                if let Some(parent) = &section.parent_id { changed |= visible.insert(parent.clone()); }
+                if let Some(parent) = &section.parent_id {
+                    changed |= visible.insert(parent.clone());
+                }
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
-    Ok(Json(sections.into_iter().filter(|s| visible.contains(&s.id)).collect()))
+    Ok(Json(
+        sections
+            .into_iter()
+            .filter(|s| visible.contains(&s.id))
+            .collect(),
+    ))
 }
 
 /// POST /workspaces/{id}/connection-sections — editor

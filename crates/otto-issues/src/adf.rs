@@ -267,7 +267,11 @@ mod tests {
         let input = "First paragraph\n\nSecond paragraph";
         let doc = text_to_adf(input);
         let content = doc["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "Expected 2 content nodes, got: {content:?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "Expected 2 content nodes, got: {content:?}"
+        );
         assert_eq!(content[0]["type"], "paragraph");
         assert_eq!(content[1]["type"], "paragraph");
         // Check text content
@@ -296,7 +300,11 @@ mod tests {
         let input = "Intro text\n\n- Bullet A\n- Bullet B";
         let doc = text_to_adf(input);
         let content = doc["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "Expected paragraph + bulletList: {content:?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "Expected paragraph + bulletList: {content:?}"
+        );
         assert_eq!(content[0]["type"], "paragraph");
         assert_eq!(content[1]["type"], "bulletList");
         let items = content[1]["content"].as_array().unwrap();
@@ -363,7 +371,10 @@ mod tests {
             }]
         });
         let md = adf_to_markdown(&adf);
-        assert!(md.contains("[click here](https://example.com)"), "Got: {md:?}");
+        assert!(
+            md.contains("[click here](https://example.com)"),
+            "Got: {md:?}"
+        );
     }
 
     #[test]
@@ -441,8 +452,14 @@ mod tests {
         let input = "First para\n\nSecond para\n\n- Alpha\n- Beta";
         let adf = text_to_adf(input);
         let md = adf_to_markdown(&adf);
-        assert!(md.contains("First para"), "round-trip lost 'First para': {md:?}");
-        assert!(md.contains("Second para"), "round-trip lost 'Second para': {md:?}");
+        assert!(
+            md.contains("First para"),
+            "round-trip lost 'First para': {md:?}"
+        );
+        assert!(
+            md.contains("Second para"),
+            "round-trip lost 'Second para': {md:?}"
+        );
         assert!(md.contains("- Alpha"), "round-trip lost '- Alpha': {md:?}");
         assert!(md.contains("- Beta"), "round-trip lost '- Beta': {md:?}");
     }
@@ -482,8 +499,14 @@ mod tests {
         });
         let md = adf_to_markdown(&adf);
         assert!(md.contains("# Summary"), "Missing heading: {md:?}");
-        assert!(md.contains("[the docs](https://docs.example.com)"), "Missing link: {md:?}");
-        assert!(md.contains("for details."), "Missing paragraph text: {md:?}");
+        assert!(
+            md.contains("[the docs](https://docs.example.com)"),
+            "Missing link: {md:?}"
+        );
+        assert!(
+            md.contains("for details."),
+            "Missing paragraph text: {md:?}"
+        );
         assert!(md.contains("- Point one"), "Missing bullet: {md:?}");
         assert!(md.contains("- Point two"), "Missing bullet: {md:?}");
     }

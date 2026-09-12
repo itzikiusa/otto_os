@@ -156,8 +156,12 @@ fn delay_session_input(
 // ---------------------------------------------------------------------------
 
 impl otto_sessions::SessionsCtx for ServerCtx {
-    fn check_resource<'a>(&'a self, user: &'a otto_core::domain::User, session: &'a otto_core::domain::Session) -> BoxFuture<'a, Result<()>> {
-        Box::pin(crate::resource_sessions::check(self,user,session))
+    fn check_resource<'a>(
+        &'a self,
+        user: &'a otto_core::domain::User,
+        session: &'a otto_core::domain::Session,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(crate::resource_sessions::check(self, user, session))
     }
 
     fn resource_bound(&self, session: &otto_core::domain::Session) -> bool {
@@ -248,10 +252,17 @@ impl otto_k8s::MonitorSink for UsageSink {
     fn exec<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<()>> {
         Box::pin(async move { self.0.exec_sql(sql).await })
     }
-    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<()>> {
+    fn insert_ndjson<'a>(
+        &'a self,
+        table: &'a str,
+        ndjson: &'a str,
+    ) -> otto_k8s::BoxFut<'a, otto_core::Result<()>> {
         Box::pin(async move { self.0.insert_ndjson(table, ndjson).await })
     }
-    fn query_rows<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>> {
+    fn query_rows<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> otto_k8s::BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>> {
         Box::pin(async move { self.0.query_rows(sql).await })
     }
 }
@@ -291,14 +302,16 @@ impl otto_connections::DbTester for DbViewerTester {
         user_id: &'a Id,
     ) -> BoxFuture<'a, Result<otto_core::api::TestConnectionResp>> {
         Box::pin(async move {
-            let r = self.db.test(id,user_id).await?;
+            let r = self.db.test(id, user_id).await?;
             Ok(otto_core::api::TestConnectionResp {
                 ok: r.ok,
                 latency_ms: r.latency_ms,
                 // Include the server version in the message when the probe
                 // succeeds (the CLI path's message is just "ok" with no detail).
                 message: if r.ok {
-                    r.server_version.map(|v| format!("ok — {v}")).unwrap_or(r.message)
+                    r.server_version
+                        .map(|v| format!("ok — {v}"))
+                        .unwrap_or(r.message)
                 } else {
                     r.message
                 },
@@ -662,9 +675,14 @@ impl Spawner for PtySpawner {
                     let result: Result<()> = async {
                         let current = manager.get(&session_id).await?;
                         input_user(&pool, &user_id, &current).await?;
-                        manager.input(&session_id, format!("{cmd}\n").as_bytes()).await
-                    }.await;
-                    if let Err(e) = result { tracing::warn!(session = %session_id, "first_command denied or failed: {e}"); }
+                        manager
+                            .input(&session_id, format!("{cmd}\n").as_bytes())
+                            .await
+                    }
+                    .await;
+                    if let Err(e) = result {
+                        tracing::warn!(session = %session_id, "first_command denied or failed: {e}");
+                    }
                 });
             }
             Ok(session)
@@ -756,8 +774,7 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // runs the agent inline and may write a new `suggested` story version.
         .route(
             "/product/stories/{sid}/refinement-threads",
-            post(crate::product_refine::create_thread)
-                .get(crate::product_refine::list_threads),
+            post(crate::product_refine::create_thread).get(crate::product_refine::list_threads),
         )
         .route(
             "/product/refinement-threads/{tid}",
@@ -892,8 +909,14 @@ async fn orchestrate(
     // The planner spawns a real claude session in the workspace root —
     // pre-trust the folder so the PTY never stalls on the trust dialog.
     otto_sessions::trust::ensure_trusted("claude", &ws.root_path);
-    let sessions = input_agents(&ctx, &user.id, &ws_id).await.map_err(ApiError)?;
-    let connections = ctx.connections.list_for(&ws_id, &user.id).await.map_err(ApiError)?;
+    let sessions = input_agents(&ctx, &user.id, &ws_id)
+        .await
+        .map_err(ApiError)?;
+    let connections = ctx
+        .connections
+        .list_for(&ws_id, &user.id)
+        .await
+        .map_err(ApiError)?;
     // Effective default agent for this workspace: per-workspace setting, else
     // the global default, else "claude". Steers spawn_sessions in the planner.
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
@@ -956,7 +979,9 @@ async fn workspace_broadcast(
     }
     // Treat an empty target list the same as "no targets" → broadcast to all.
     let targets = req.session_ids.filter(|ids| !ids.is_empty());
-    let session_ids = broadcast_sessions(&ctx, &user.id, &ws_id, text, targets.as_deref()).await.map_err(ApiError)?;
+    let session_ids = broadcast_sessions(&ctx, &user.id, &ws_id, text, targets.as_deref())
+        .await
+        .map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
 }
 
@@ -976,23 +1001,47 @@ async fn workspace_relay(
     if text.is_empty() {
         return Err(ApiError(Error::Invalid("relay text is empty".into())));
     }
-    let candidates = input_agents(&ctx, &user.id, &ws_id).await.map_err(ApiError)?;
-    let addressable: Vec<_> = candidates.iter().map(|s| otto_sessions::names::Addressable {
-        id: s.id.clone(),
-        handle: s.meta.get("name_handle").and_then(Value::as_str).unwrap_or(&s.title).to_string(),
-        full: s.meta.get("name_full").and_then(Value::as_str).unwrap_or(&s.title).to_string(),
-        title: s.title.clone(),
-    }).collect();
+    let candidates = input_agents(&ctx, &user.id, &ws_id)
+        .await
+        .map_err(ApiError)?;
+    let addressable: Vec<_> = candidates
+        .iter()
+        .map(|s| otto_sessions::names::Addressable {
+            id: s.id.clone(),
+            handle: s
+                .meta
+                .get("name_handle")
+                .and_then(Value::as_str)
+                .unwrap_or(&s.title)
+                .to_string(),
+            full: s
+                .meta
+                .get("name_full")
+                .and_then(Value::as_str)
+                .unwrap_or(&s.title)
+                .to_string(),
+            title: s.title.clone(),
+        })
+        .collect();
     let resolved = otto_sessions::names::resolve_address(text, &addressable);
     let mut session_ids = Vec::new();
     for id in &resolved.targets {
-        if submit_session_text(&ctx, &user.id, id, resolved.text.trim()).await.is_ok() { session_ids.push(id.clone()); }
+        if submit_session_text(&ctx, &user.id, id, resolved.text.trim())
+            .await
+            .is_ok()
+        {
+            session_ids.push(id.clone());
+        }
     }
     Ok(Json(otto_core::api::RelayResp {
         session_ids,
         broadcast: resolved.broadcast,
         unaddressed: resolved.targets.is_empty(),
-        text: if resolved.targets.is_empty() {text.to_string()} else {resolved.text},
+        text: if resolved.targets.is_empty() {
+            text.to_string()
+        } else {
+            resolved.text
+        },
     }))
 }
 
@@ -1029,9 +1078,7 @@ async fn analyze(
     // spawning any agent sessions. Mirrors the review start_review gate exactly.
     {
         let verdict = crate::routes::usage::check_budget(
-            &ctx,
-            &ws_id,
-            "", // provider resolved below; gate workspace-level cap here
+            &ctx, &ws_id, "", // provider resolved below; gate workspace-level cap here
         )
         .await;
         if verdict.blocked {
@@ -1929,7 +1976,9 @@ fn is_safe_skill_package_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn remove_staged_package_path(path: &std::path::Path) -> std::result::Result<(), String> {
@@ -1948,10 +1997,14 @@ fn collect_staged_package_files(
     root: &std::path::Path,
     out: &mut Vec<String>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(kind) = entry.file_type() else { continue };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         if kind.is_dir() {
             collect_staged_package_files(&path, root, out);
         } else if kind.is_file() {
@@ -2490,8 +2543,11 @@ async fn run_review(
             // The core only reaches its own teardown on the summarize path; an
             // error anywhere else would otherwise leave the reviewers' PTYs live.
             if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
-                let ids: Vec<String> =
-                    review.agents.iter().filter_map(|a| a.session_id.clone()).collect();
+                let ids: Vec<String> = review
+                    .agents
+                    .iter()
+                    .filter_map(|a| a.session_id.clone())
+                    .collect();
                 crate::review_session::stop_review_sessions(&ctx.manager, &ids).await;
             }
             let msg = e.to_string();
@@ -2811,7 +2867,11 @@ async fn run_review_core(
         // temp file for the in-flight injection path, DB row (0100) so retry
         // survives reboots / temp sweeps / daemon redeploys.
         let _ = std::fs::write(crate::review_session::prompt_path(review_id, i), &prompt);
-        if let Err(e) = ctx.reviews_store.set_agent_prompt(review_id, i, &prompt).await {
+        if let Err(e) = ctx
+            .reviews_store
+            .set_agent_prompt(review_id, i, &prompt)
+            .await
+        {
             tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
         }
         let max_attempts = cfg.max_attempts;
@@ -3039,9 +3099,7 @@ async fn summarize_and_persist(
     // all `high`. The run looked clean; it was truncated twice over. Scale the
     // budget with the work: ~1s per finding on top of a 2-minute floor, capped
     // at 20 minutes so a wedged summarizer still fails rather than hanging.
-    let summarizer_timeout = Duration::from_secs(
-        (120 + total_findings as u64).clamp(120, 1_200),
-    );
+    let summarizer_timeout = Duration::from_secs((120 + total_findings as u64).clamp(120, 1_200));
     tracing::info!(
         review = %review_id,
         "running summarizer agent ({total_findings} findings in, {}s budget)",
@@ -3139,7 +3197,11 @@ async fn summarize_and_persist(
     //    engine owns the `state` axis; the workflow `status` is untouched).
     tracing::info!(review = %review_id, "storing {} draft comments", parsed.len());
     // PR #0 is the local-review sentinel → dedup within the review, not across PRs.
-    let pr_opt = if pr_number == 0 { None } else { Some(pr_number) };
+    let pr_opt = if pr_number == 0 {
+        None
+    } else {
+        Some(pr_number)
+    };
     let mut seen_fingerprints: Vec<String> = Vec::new();
     for c in parsed {
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
@@ -3257,7 +3319,11 @@ pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (
 /// Short, human-facing one-liners for a review's OPEN findings (severity dot + a
 /// truncated first line + path:line), highest-severity first, capped at `max`.
 /// Used to stream a review step's findings into a chat thread.
-pub(crate) async fn review_finding_briefs(ctx: &ServerCtx, review_id: &Id, max: usize) -> Vec<String> {
+pub(crate) async fn review_finding_briefs(
+    ctx: &ServerCtx,
+    review_id: &Id,
+    max: usize,
+) -> Vec<String> {
     let all = ctx
         .findings_store
         .list_for_review(review_id)
@@ -3284,7 +3350,12 @@ pub(crate) async fn review_finding_briefs(ctx: &ServerCtx, review_id: &Id, max: 
                 "warn" => "🟡",
                 _ => "🔵",
             };
-            let first = f.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            let first = f
+                .body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
             let body = if first.chars().count() > 140 {
                 format!("{}…", first.chars().take(140).collect::<String>())
             } else {
@@ -3387,7 +3458,11 @@ pub(crate) fn workflow_review_config_from_json(
     let str_list = |v: &Value, k: &str| -> Vec<String> {
         v.get(k)
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let agents: Vec<ReviewAgentCfg> = reviewers
@@ -3440,7 +3515,11 @@ pub(crate) fn workflow_review_config_from_json(
         base.agents = agents;
     }
     if let Some(s) = summarizer {
-        if let Some(p) = s.get("provider").and_then(Value::as_str).filter(|x| !x.is_empty()) {
+        if let Some(p) = s
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|x| !x.is_empty())
+        {
             base.summarizer.provider = p.to_string();
             base.summarizer.providers = vec![];
         }
@@ -3453,8 +3532,10 @@ pub(crate) fn workflow_review_config_from_json(
             .map(str::trim)
             .filter(|x| !x.is_empty())
         {
-            base.summarizer.prompt =
-                format!("{}\n\n--- Additional summarizer guidance ---\n{instr}", base.summarizer.prompt);
+            base.summarizer.prompt = format!(
+                "{}\n\n--- Additional summarizer guidance ---\n{instr}",
+                base.summarizer.prompt
+            );
         }
     }
     base
@@ -3462,8 +3543,15 @@ pub(crate) fn workflow_review_config_from_json(
 
 /// Open-finding counts for a review bucketed by the reviewer severity vocabulary
 /// (`bug`/`warn`/`info`). Backs the workflow `review_run` configurable scoring.
-pub(crate) async fn review_open_counts_by_severity(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
-    let all = ctx.findings_store.list_for_review(review_id).await.unwrap_or_default();
+pub(crate) async fn review_open_counts_by_severity(
+    ctx: &ServerCtx,
+    review_id: &Id,
+) -> (u64, u64, u64) {
+    let all = ctx
+        .findings_store
+        .list_for_review(review_id)
+        .await
+        .unwrap_or_default();
     let is_open = |f: &otto_state::ReviewFindingRow| {
         matches!(
             f.state,
@@ -3568,7 +3656,11 @@ async fn run_pr_review_inner(
     const DIFF_RENDER_CAP: usize = 200_000;
     let (diff_for_agents, diff_truncated) = render_diff(&diff_resp, DIFF_RENDER_CAP);
     if diff_truncated {
-        tracing::warn!("diff truncated to {} chars for review {}", DIFF_RENDER_CAP, review_id);
+        tracing::warn!(
+            "diff truncated to {} chars for review {}",
+            DIFF_RENDER_CAP,
+            review_id
+        );
     }
 
     // 3. Optionally fetch the linked Jira story.
@@ -3724,10 +3816,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
         // A1 verified-review loop: findings list, lifecycle state update, and
         // merge-readiness assembly. Registered here (not in routes/mod.rs) so
         // they share the review-module handler context.
-        .route(
-            "/reviews/{review_id}/findings",
-            get(list_review_findings),
-        )
+        .route("/reviews/{review_id}/findings", get(list_review_findings))
         .route(
             "/reviews/{review_id}/findings/{fingerprint}/state",
             post(set_finding_state),
@@ -3738,10 +3827,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
         )
         // PR-keyed twin of the row above: the merge modal asks by (repo, PR)
         // and gets the same numbers whether or not a review run exists.
-        .route(
-            "/repos/{id}/prs/{number}/readiness",
-            get(get_pr_readiness),
-        )
+        .route("/repos/{id}/prs/{number}/readiness", get(get_pr_readiness))
 }
 
 // ---------------------------------------------------------------------------
@@ -3807,11 +3893,19 @@ async fn set_finding_state(
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
     let new_state = otto_state::FindingState::parse(&body.state).ok_or_else(|| {
-        ApiError(Error::Invalid(format!("unknown finding state: {}", body.state)))
+        ApiError(Error::Invalid(format!(
+            "unknown finding state: {}",
+            body.state
+        )))
     })?;
     let row = ctx
         .findings_store
-        .set_state(&review_id, &fingerprint, new_state, body.fix_session_id.as_deref())
+        .set_state(
+            &review_id,
+            &fingerprint,
+            new_state,
+            body.fix_session_id.as_deref(),
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(row))
@@ -3857,7 +3951,10 @@ pub(crate) async fn local_branch_facts(
     let git = otto_git::LocalGit::new(repo_path);
     // `is_ancestor_of` guard_refs BOTH arguments; run it first so an
     // option-like provider value never reaches the `rev-list` argv below.
-    let fresh = match git.is_ancestor_of(&format!("origin/{target}"), source).await {
+    let fresh = match git
+        .is_ancestor_of(&format!("origin/{target}"), source)
+        .await
+    {
         Ok(true) => "fresh",
         Ok(false) => "behind",
         Err(otto_core::Error::Invalid(_)) => return (None, "unknown"),
@@ -3902,7 +3999,10 @@ pub(crate) async fn compute_readiness(
                 .await
                 .map_err(ApiError)?;
             let is_unresolved = |s: FindingStatus| {
-                matches!(s, FindingStatus::Open | FindingStatus::Accepted | FindingStatus::Fixed)
+                matches!(
+                    s,
+                    FindingStatus::Open | FindingStatus::Accepted | FindingStatus::Fixed
+                )
             };
             Some(ReadinessReview {
                 review_id: rev.id.clone(),
@@ -3951,7 +4051,10 @@ pub(crate) async fn compute_readiness(
             .as_ref()
             .and_then(|d| d.summary.ci_status.clone())
             .unwrap_or_else(|| "none".to_string()),
-        approvals: detail.as_ref().map(|d| d.approved_by.len() as u64).unwrap_or(0),
+        approvals: detail
+            .as_ref()
+            .map(|d| d.approved_by.len() as u64)
+            .unwrap_or(0),
         mergeable: detail.as_ref().and_then(|d| d.mergeable),
         conflicts: false,
         review: review_block,
@@ -3986,7 +4089,13 @@ async fn get_merge_readiness(
     let (unresolved_total, blocker_count, total_findings) = r
         .review
         .as_ref()
-        .map(|rv| (rv.unresolved_total, rv.unresolved_blocker_count, rv.total_findings))
+        .map(|rv| {
+            (
+                rv.unresolved_total,
+                rv.unresolved_blocker_count,
+                rv.total_findings,
+            )
+        })
         .unwrap_or((0, 0, 0));
 
     Ok(Json(serde_json::json!({
@@ -4099,7 +4208,11 @@ pub(crate) fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> Strin
 /// named lens itself — so it never suppresses the correct skill on claude (which
 /// may still invoke `Skill(<lens>)`, the same method). Empty `skill_text` ⇒ the
 /// agent prompt is returned unchanged (mirrors [`compose_draft_prompt`]).
-pub(crate) fn compose_review_lens_prompt(lens: &str, skill_text: &str, agent_prompt: &str) -> String {
+pub(crate) fn compose_review_lens_prompt(
+    lens: &str,
+    skill_text: &str,
+    agent_prompt: &str,
+) -> String {
     if skill_text.trim().is_empty() {
         return agent_prompt.to_string();
     }
@@ -4199,7 +4312,10 @@ mod commit_pr_draft_tests {
             jira_key_from_branch("feature/PROJ-16232-rate-limit").as_deref(),
             Some("PROJ-16232")
         );
-        assert_eq!(jira_key_from_branch("PROJ-445").as_deref(), Some("PROJ-445"));
+        assert_eq!(
+            jira_key_from_branch("PROJ-445").as_deref(),
+            Some("PROJ-445")
+        );
         assert_eq!(
             jira_key_from_branch("bugfix/PROJ-7").as_deref(),
             Some("PROJ-7")
@@ -4232,7 +4348,10 @@ mod commit_pr_draft_tests {
             "PROJ-7 fix: thing\n\n- detail one\n- detail two"
         );
         // Single-line commit message.
-        assert_eq!(ensure_jira_in_commit("chore: bump", "AB-1"), "AB-1 chore: bump");
+        assert_eq!(
+            ensure_jira_in_commit("chore: bump", "AB-1"),
+            "AB-1 chore: bump"
+        );
     }
 
     #[test]
@@ -4242,7 +4361,10 @@ mod commit_pr_draft_tests {
 
     #[test]
     fn compose_prepends_skill() {
-        assert_eq!(compose_draft_prompt("SKILL", "BASE"), "SKILL\n\n---\n\nBASE");
+        assert_eq!(
+            compose_draft_prompt("SKILL", "BASE"),
+            "SKILL\n\n---\n\nBASE"
+        );
     }
 }
 
@@ -4254,8 +4376,14 @@ mod review_lens_prompt_tests {
     fn empty_skill_returns_agent_prompt_unchanged() {
         // No lens method resolved ⇒ the agent prompt is returned byte-for-byte
         // (no directive, no separator), identical to the prior behaviour.
-        assert_eq!(compose_review_lens_prompt("grill", "", "DO REVIEW"), "DO REVIEW");
-        assert_eq!(compose_review_lens_prompt("", "   ", "DO REVIEW"), "DO REVIEW");
+        assert_eq!(
+            compose_review_lens_prompt("grill", "", "DO REVIEW"),
+            "DO REVIEW"
+        );
+        assert_eq!(
+            compose_review_lens_prompt("", "   ", "DO REVIEW"),
+            "DO REVIEW"
+        );
     }
 
     #[test]
@@ -4336,7 +4464,10 @@ mod orchestrator_tests {
         // say the user never chose it).
         assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "default"));
         cfg.mode = Some(ReviewMode::Orchestrator);
-        assert_eq!(mode_source(&cfg), (ReviewMode::Orchestrator, "stored config"));
+        assert_eq!(
+            mode_source(&cfg),
+            (ReviewMode::Orchestrator, "stored config")
+        );
         // An explicitly stored fan-out is still "stored", not "default".
         cfg.mode = Some(ReviewMode::FanOut);
         assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "stored config"));
@@ -4356,8 +4487,14 @@ mod orchestrator_tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].provider, "claude");
         assert_eq!(runs[1].provider, "codex");
-        assert_eq!(runs[0].display_name, "claude \u{00b7} orchestrator (3 lenses)");
-        assert_eq!(runs[1].display_name, "codex \u{00b7} orchestrator (3 lenses)");
+        assert_eq!(
+            runs[0].display_name,
+            "claude \u{00b7} orchestrator (3 lenses)"
+        );
+        assert_eq!(
+            runs[1].display_name,
+            "codex \u{00b7} orchestrator (3 lenses)"
+        );
         // Empty lens: `lens_covered_by` must never retire an orchestrator row
         // because one lens finished on the other provider.
         assert!(runs.iter().all(|r| r.lens.is_empty()));
@@ -4456,7 +4593,10 @@ mod orchestrator_tests {
         );
         assert!(out.contains("you MAY run the listed check commands"));
         // …and only once: the read-only lens must not inherit the licence.
-        assert_eq!(out.matches("you MAY run the listed check commands").count(), 1);
+        assert_eq!(
+            out.matches("you MAY run the listed check commands").count(),
+            1
+        );
     }
 
     #[test]
@@ -4524,7 +4664,10 @@ mod orchestrator_tests {
             let first_spawn = plan.iter().map(|(_, s)| *s).min().unwrap();
             // R3: a Stop that lands mid-stagger must reach every reviewer, so
             // no flag may be registered after the first spawn.
-            assert!(last_register < first_spawn, "register must precede every spawn");
+            assert!(
+                last_register < first_spawn,
+                "register must precede every spawn"
+            );
             // One stagger sleep between consecutive spawns, none before the first.
             assert_eq!(plan.iter().filter(|(_, s)| *s > first_spawn).count(), n - 1);
         }
@@ -4542,14 +4685,12 @@ mod staged_skill_package_tests {
         let tmp = tempfile::tempdir().unwrap();
         let library = otto_context::Library::new(tmp.path().join("library"));
         let bundle = tmp.path().join("bundle");
-        let staged = stage_skill_packages_at(
-            &library,
-            &["skills-reviewer".to_string()],
-            &bundle,
-        )
-        .unwrap();
+        let staged =
+            stage_skill_packages_at(&library, &["skills-reviewer".to_string()], &bundle).unwrap();
         assert_eq!(staged.root, bundle.to_string_lossy());
-        assert!(staged.files["skills-reviewer"].iter().any(|path| path == "SKILL.md"));
+        assert!(staged.files["skills-reviewer"]
+            .iter()
+            .any(|path| path == "SKILL.md"));
         assert!(staged.files["skills-reviewer"]
             .iter()
             .any(|path| path == "references/review-rubric.md"));
@@ -4575,12 +4716,8 @@ mod staged_skill_package_tests {
         let library = otto_context::Library::new(&library_root);
         let bundle = tmp.path().join("bundle");
 
-        let staged = stage_skill_packages_at(
-            &library,
-            &["skills-reviewer".to_string()],
-            &bundle,
-        )
-        .unwrap();
+        let staged =
+            stage_skill_packages_at(&library, &["skills-reviewer".to_string()], &bundle).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(bundle.join("skills/skills-reviewer/SKILL.md")).unwrap(),
@@ -4767,7 +4904,11 @@ const DRAFT_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(30
 /// to the user's default agent model, which is what made drafting take minutes.
 pub(crate) async fn pr_draft_model(ctx: &ServerCtx) -> String {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
-    let value = repo.get(otto_state::PR_DRAFT_MODEL_KEY).await.ok().flatten();
+    let value = repo
+        .get(otto_state::PR_DRAFT_MODEL_KEY)
+        .await
+        .ok()
+        .flatten();
     otto_state::pr_draft_model_from(value.as_ref())
 }
 
@@ -4985,7 +5126,10 @@ async fn draft_commit_message(
     // Prefer the staged diff (what's actually about to be committed). When the
     // index is empty, fall back to the full working diff so the button is still
     // useful before staging.
-    let staged = git.staged_diff_text().await.map_err(crate::error::ApiError)?;
+    let staged = git
+        .staged_diff_text()
+        .await
+        .map_err(crate::error::ApiError)?;
     let (diff, from_staged) = if staged.trim().is_empty() {
         let working = git
             .working_diff_text()
@@ -5071,7 +5215,11 @@ async fn draft_commit_message(
     });
     let title = format!(
         "Commit draft · {}",
-        if branch.trim().is_empty() { "HEAD" } else { branch.as_str() }
+        if branch.trim().is_empty() {
+            "HEAD"
+        } else {
+            branch.as_str()
+        }
     );
     let (reply, session_id) = crate::agent_session::run_session_turn(
         &ctx,
@@ -5229,8 +5377,7 @@ async fn retry_review_agent(
     };
     // Register a FRESH per-agent cancel flag (replacing any tripped one from a
     // prior Stop) so the retried agent is stoppable exactly like the original.
-    let agent_cancel =
-        register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
+    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     tokio::spawn(async move {
         crate::review_session::run_agent_session_with_recovery(
@@ -5317,8 +5464,7 @@ async fn retry_summarizer(
         .any(|f| !f.body.trim().is_empty())
     {
         return Err(crate::error::ApiError(Error::Invalid(
-            "no stored agent findings with content to summarize — re-run the review instead"
-                .into(),
+            "no stored agent findings with content to summarize — re-run the review instead".into(),
         )));
     }
 
@@ -5345,7 +5491,11 @@ async fn retry_summarizer(
         let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
         // A re-run replaces the previous draft comments; posted/approved/
         // declined ones are user decisions and stay untouched.
-        match ctx_bg.reviews_store.delete_draft_comments(&review_id_bg).await {
+        match ctx_bg
+            .reviews_store
+            .delete_draft_comments(&review_id_bg)
+            .await
+        {
             Ok(n) if n > 0 => {
                 tracing::info!(review = %review_id_bg, "summarizer retry: cleared {n} draft comments")
             }
@@ -5390,7 +5540,10 @@ async fn retry_summarizer(
                 return;
             }
         };
-        let _ = ctx_bg.reviews_store.set_status(&review_id_bg, status, None).await;
+        let _ = ctx_bg
+            .reviews_store
+            .set_status(&review_id_bg, status, None)
+            .await;
         let _ = ctx_bg.events.send(Event::ReviewChanged {
             workspace_id: workspace.id.clone(),
             session_id: None,
@@ -5465,7 +5618,10 @@ async fn stop_review_agent(
         let mut row = review.agents[index].clone();
         row.status = "error".into();
         row.note = "stopped by user".into();
-        let _ = ctx.reviews_store.set_agent_at(&review_id, index, &row).await;
+        let _ = ctx
+            .reviews_store
+            .set_agent_at(&review_id, index, &row)
+            .await;
     }
     // Reuse the existing review WS family so open panels refresh.
     let _ = ctx.events.send(Event::ReviewChanged {
@@ -5857,7 +6013,10 @@ async fn start_local_review(
     // and a truly unresolvable base reports the candidates tried instead of a
     // raw "git exited 128".
     let want = Some(body.base.as_str()).filter(|s| !s.trim().is_empty());
-    let resolved = git.resolve_base(want).await.map_err(crate::error::ApiError)?;
+    let resolved = git
+        .resolve_base(want)
+        .await
+        .map_err(crate::error::ApiError)?;
     let diff_text = match git.diff_text_against(&resolved.diff_ref).await {
         Ok(d) => d,
         Err(e) => {
@@ -5927,13 +6086,26 @@ async fn start_local_review(
             .await
             .ok()
             .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches { source, dest: body.base.clone() });
+            .map(|source| ReviewBranches {
+                source,
+                dest: body.base.clone(),
+            });
         tokio::spawn(async move {
             // Local/working-tree review: no PR, so pr_number = 0 (the fingerprint
             // accommodates pr 0).
             run_review(
-                ctx_bg, review_id, repo_path, diff_text, None, None, workspace, repo_id_bg, 0,
-                local_branches, None, None,
+                ctx_bg,
+                review_id,
+                repo_path,
+                diff_text,
+                None,
+                None,
+                workspace,
+                repo_id_bg,
+                0,
+                local_branches,
+                None,
+                None,
             )
             .await;
         });
@@ -6098,7 +6270,14 @@ async fn handoff_review(
         .map_err(crate::error::ApiError)?;
 
     // Write the prompt into the session after a short delay (mirrors PtySpawner).
-    delay_session_input(&ctx, &user, &session.id, prompt, Duration::from_millis(1500), token);
+    delay_session_input(
+        &ctx,
+        &user,
+        &session.id,
+        prompt,
+        Duration::from_millis(1500),
+        token,
+    );
 
     Ok(Json(session))
 }
@@ -6251,9 +6430,7 @@ async fn put_repo_review_config(
         )));
     }
     if let Some(pid) = &body.preset_id {
-        if body.config.is_none()
-            && !load_review_presets(&ctx).await.iter().any(|p| &p.id == pid)
-        {
+        if body.config.is_none() && !load_review_presets(&ctx).await.iter().any(|p| &p.id == pid) {
             return Err(crate::error::ApiError(Error::Invalid(format!(
                 "unknown preset id: {pid}"
             ))));
@@ -6411,7 +6588,14 @@ async fn update_providers(
 
     // Write the compound command into the PTY shortly after spawn, mirroring
     // the PtySpawner pattern used for connection first_command.
-    delay_session_input(&ctx, &user, &session.id, compound, Duration::from_millis(800), token);
+    delay_session_input(
+        &ctx,
+        &user,
+        &session.id,
+        compound,
+        Duration::from_millis(800),
+        token,
+    );
 
     Ok(Json(session))
 }
@@ -6468,10 +6652,20 @@ async fn open_agent_session(
         meta: Some(meta),
         model: req.model,
     };
-    let ws = WorkspacesRepo::new(ctx.pool.clone()).get(&ws_id).await.map_err(ApiError)?;
-    let session = ctx.manager.create(&ws, &user.id, create, None).await.map_err(ApiError)?;
+    let ws = WorkspacesRepo::new(ctx.pool.clone())
+        .get(&ws_id)
+        .await
+        .map_err(ApiError)?;
+    let session = ctx
+        .manager
+        .create(&ws, &user.id, create, None)
+        .await
+        .map_err(ApiError)?;
 
-    let prompt = req.prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let prompt = req
+        .prompt
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
     let prompt_dispatch = match prompt {
         Some(prompt) => {
             let manager = ctx.manager.clone();
@@ -6507,9 +6701,13 @@ async fn session_message(
     if text.is_empty() {
         return Err(ApiError(Error::Invalid("message text is empty".into())));
     }
-    let session = input_session(&ctx, &user.id, &session_id).await.map_err(ApiError)?;
+    let session = input_session(&ctx, &user.id, &session_id)
+        .await
+        .map_err(ApiError)?;
     if session.kind != SessionKind::Agent {
-        return Err(ApiError(Error::Invalid("messages can only be sent to agent sessions".into())));
+        return Err(ApiError(Error::Invalid(
+            "messages can only be sent to agent sessions".into(),
+        )));
     }
     if !matches!(
         session.status,
@@ -6522,8 +6720,13 @@ async fn session_message(
             session.status.as_str()
         ))));
     }
-    submit_session_text(&ctx, &user.id, &session_id, text).await.map_err(ApiError)?;
-    Ok(Json(otto_core::api::SessionMessageResp { session_id, delivered: true }))
+    submit_session_text(&ctx, &user.id, &session_id, text)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(otto_core::api::SessionMessageResp {
+        session_id,
+        delivered: true,
+    }))
 }
 
 /// Query of `GET /sessions/{id}/wait`.
@@ -6561,10 +6764,16 @@ async fn wait_session(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if wanted.iter().any(|w| w == session.status.as_str()) {
-            return Ok(Json(otto_core::api::WaitSessionResp { session, reached: true }));
+            return Ok(Json(otto_core::api::WaitSessionResp {
+                session,
+                reached: true,
+            }));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(Json(otto_core::api::WaitSessionResp { session, reached: false }));
+            return Ok(Json(otto_core::api::WaitSessionResp {
+                session,
+                reached: false,
+            }));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
@@ -6873,10 +7082,14 @@ async fn db_explain_with_agent(
     axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(body): Json<DbExplainReq>,
 ) -> ApiResult<Json<Session>> {
-    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(
-        &user, otto_core::domain::Feature::Agents, otto_core::domain::Capability::Edit,
-        "Database explanations require permission to run host agents",
-    ).await?;
+    otto_state::GrantsRepo::new(ctx.pool.clone())
+        .check_global(
+            &user,
+            otto_core::domain::Feature::Agents,
+            otto_core::domain::Capability::Edit,
+            "Database explanations require permission to run host agents",
+        )
+        .await?;
     let conn = ctx
         .db_explorer
         .get_connection(&conn_id)
@@ -6931,15 +7144,29 @@ async fn db_explain_with_agent(
         model: None,
         meta: Some(serde_json::json!({"source":"db_assist", "connection_id":conn_id})),
     };
-    let resource = otto_core::access::ResourceRef { kind: otto_core::access::ResourceKind::Connection, id: conn_id.clone(), child: None };
-    otto_rbac::ResourceAccess::new(ctx.pool.clone()).check(&user, &resource, "db_query").await.map_err(ApiError)?;
+    let resource = otto_core::access::ResourceRef {
+        kind: otto_core::access::ResourceKind::Connection,
+        id: conn_id.clone(),
+        child: None,
+    };
+    otto_rbac::ResourceAccess::new(ctx.pool.clone())
+        .check(&user, &resource, "db_query")
+        .await
+        .map_err(ApiError)?;
     let session = ctx
         .manager
         .create(&ws, &user.id, req, None)
         .await
         .map_err(ApiError)?;
 
-    delay_session_input(&ctx, &user, &session.id, prompt, Duration::from_millis(1500), token);
+    delay_session_input(
+        &ctx,
+        &user,
+        &session.id,
+        prompt,
+        Duration::from_millis(1500),
+        token,
+    );
 
     Ok(Json(session))
 }
@@ -7020,7 +7247,14 @@ async fn inject_session(
 
     // Write the bundle into the session after a short settle delay.
     let payload = bundle.markdown.clone();
-    delay_session_input(&ctx, &user, &session.id, payload, Duration::from_secs(6), token);
+    delay_session_input(
+        &ctx,
+        &user,
+        &session.id,
+        payload,
+        Duration::from_secs(6),
+        token,
+    );
 
     // Record an inject event.
     ctx.product_repo
@@ -7094,7 +7328,14 @@ async fn attach_product_story(
 
     // Push the bundle into the live PTY after a short settle delay.
     let payload = bundle.markdown.clone();
-    delay_session_input(&ctx, &user, &session.id, payload, Duration::from_secs(2), token);
+    delay_session_input(
+        &ctx,
+        &user,
+        &session.id,
+        payload,
+        Duration::from_secs(2),
+        token,
+    );
 
     // Tag the session meta with the attached story.
     let updated = ctx
@@ -7365,8 +7606,14 @@ mod readiness_tests {
         std::fs::create_dir_all(&work).unwrap();
 
         // Bare origin with `main` and `feature`, then a clone that moves ahead.
-        git(&origin, &["init", "-q", "--bare", "--initial-branch=main", "."]);
-        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), "work"]);
+        git(
+            &origin,
+            &["init", "-q", "--bare", "--initial-branch=main", "."],
+        );
+        git(
+            tmp.path(),
+            &["clone", "-q", origin.to_str().unwrap(), "work"],
+        );
         git(&work, &["config", "user.name", "t"]);
         git(&work, &["config", "user.email", "t@example.com"]);
         git(&work, &["config", "commit.gpgsign", "false"]);

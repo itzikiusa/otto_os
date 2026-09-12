@@ -180,7 +180,10 @@ pub fn status_samples(p: &PodSnap, now: DateTime<Utc>) -> Vec<Sample> {
     vec![
         mk("restarts_total", restarts as f64),
         mk("ready", if p.ready { 1.0 } else { 0.0 }),
-        mk("phase_running", if p.phase == "Running" { 1.0 } else { 0.0 }),
+        mk(
+            "phase_running",
+            if p.phase == "Running" { 1.0 } else { 0.0 },
+        ),
         mk("mem_limit_bytes", p.mem_limit as f64),
         mk("cpu_request_millis", p.cpu_request as f64),
         mk("pod_age_seconds", age as f64),
@@ -239,7 +242,9 @@ async fn action_hints<S: K8sCtx>(ctx: &S, cluster_id: &Id, now: DateTime<Utc>) -
         }
     };
     rows.into_iter()
-        .filter(|r| r.action.starts_with("k8s.action.") && r.target.as_deref() == Some(cluster_id.as_str()))
+        .filter(|r| {
+            r.action.starts_with("k8s.action.") && r.target.as_deref() == Some(cluster_id.as_str())
+        })
         .filter_map(|r| {
             let d = r.detail?;
             let name = d.get("name")?.as_str()?.to_string();
@@ -253,10 +258,17 @@ async fn action_hints<S: K8sCtx>(ctx: &S, cluster_id: &Id, now: DateTime<Utc>) -
                 name
             };
             Some(ActionHint {
-                namespace: d.get("ns").and_then(Value::as_str).unwrap_or("").to_string(),
+                namespace: d
+                    .get("ns")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 workload,
                 at: r.ts,
-                actor: r.user_id.map(|u| u.to_string()).unwrap_or_else(|| "otto".into()),
+                actor: r
+                    .user_id
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "otto".into()),
             })
         })
         .collect()
@@ -291,8 +303,16 @@ async fn scrape_pod(
                     let parsed = match probe.format {
                         ProbeFormat::Prometheus => {
                             if (200..300).contains(&r.status) {
-                                let mut parsed = parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, cfg.series_cap as usize);
-                                parsed.samples = parse::collapse_labels_with(std::mem::take(&mut parsed.samples), cfg.request_labels);
+                                let mut parsed = parse::parse_prometheus(
+                                    &r.body,
+                                    &probe.include,
+                                    &probe.exclude,
+                                    cfg.series_cap as usize,
+                                );
+                                parsed.samples = parse::collapse_labels_with(
+                                    std::mem::take(&mut parsed.samples),
+                                    cfg.request_labels,
+                                );
                                 parsed
                             } else {
                                 Parsed {
@@ -382,7 +402,10 @@ pub async fn run_cycle<S: K8sCtx>(
     // 1. Sweep.
     let mut cur = Snapshot::new();
     for ns in &namespaces {
-        match k.json(["get", "pods", "-n", ns.as_str(), "-o", "json"]).await {
+        match k
+            .json(["get", "pods", "-n", ns.as_str(), "-o", "json"])
+            .await
+        {
             Ok(list) => cur.extend(classify::snapshot_from_pod_list(&list)),
             Err(e) => {
                 status.last_error = format!("list pods in {ns}: {e}");
@@ -400,13 +423,23 @@ pub async fn run_cycle<S: K8sCtx>(
     let mut samples_nd = String::new();
     for p in cur.values() {
         let container = p.containers.keys().next().cloned().unwrap_or_default();
-        samples_nd.push_str(&samples_ndjson(&cid, now, p, &container, &status_samples(p, now), &BTreeMap::new()));
+        samples_nd.push_str(&samples_ndjson(
+            &cid,
+            now,
+            p,
+            &container,
+            &status_samples(p, now),
+            &BTreeMap::new(),
+        ));
     }
 
     // 2. Events.
     let mut events: Vec<EventHint> = Vec::new();
     for ns in &namespaces {
-        match k.json(["get", "events", "-n", ns.as_str(), "-o", "json"]).await {
+        match k
+            .json(["get", "events", "-n", ns.as_str(), "-o", "json"])
+            .await
+        {
             Ok(list) => events.extend(parse_event_hints(&list, prev_cycle_at)),
             Err(e) => tracing::debug!("k8s monitor: events in {ns}: {e}"),
         }
@@ -414,7 +447,11 @@ pub async fn run_cycle<S: K8sCtx>(
 
     // 3. Metrics-server (re-probed every cycle, never cached) — unless the
     // config turns it off (RBAC that will never be granted = a wasted call).
-    let mut ms_state = if cfg.metrics_server { "absent".to_string() } else { "disabled".to_string() };
+    let mut ms_state = if cfg.metrics_server {
+        "absent".to_string()
+    } else {
+        "disabled".to_string()
+    };
     let ms_namespaces: &[String] = if cfg.metrics_server { &namespaces } else { &[] };
     for ns in ms_namespaces {
         match resources::pod_metrics(&k, Some(ns)).await {
@@ -437,7 +474,14 @@ pub async fn run_cycle<S: K8sCtx>(
                                 value: c.mem_bytes as f64,
                             },
                         ];
-                        samples_nd.push_str(&samples_ndjson(&cid, now, p, &c.name, &smp, &BTreeMap::new()));
+                        samples_nd.push_str(&samples_ndjson(
+                            &cid,
+                            now,
+                            p,
+                            &c.name,
+                            &smp,
+                            &BTreeMap::new(),
+                        ));
                     }
                 }
             }
@@ -495,7 +539,10 @@ pub async fn run_cycle<S: K8sCtx>(
                     async move { scrape_pod(k, cid, transport, cfg, &pod, now).await }
                 })
                 .collect();
-            let keys: Vec<String> = targets.iter().map(|p| classify::snap_key(&p.namespace, &p.name)).collect();
+            let keys: Vec<String> = targets
+                .iter()
+                .map(|p| classify::snap_key(&p.namespace, &p.name))
+                .collect();
             let results: Vec<(bool, u32, u32, String, String)> =
                 stream::iter(futs).buffered(concurrency).collect().await;
             for (key, (ok, pe, cp, nd, version)) in keys.into_iter().zip(results) {
@@ -614,7 +661,11 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
             }
             match sink.exec(&schema::schema_sql(cfg.retention_days)).await {
                 Ok(()) => {
-                    let _ = sink.exec(&schema::alter_ttl_sql(cfg.retention_days.max(largest_retention(&repo).await))).await;
+                    let _ = sink
+                        .exec(&schema::alter_ttl_sql(
+                            cfg.retention_days.max(largest_retention(&repo).await),
+                        ))
+                        .await;
                     schema_ready = true;
                 }
                 Err(e) => {
@@ -681,7 +732,12 @@ pub async fn run_loop<S: K8sCtx>(ctx: S, cluster_id: Id, cancel: Arc<AtomicBool>
 async fn largest_retention(repo: &K8sMonitorRepo) -> u32 {
     repo.list_enabled()
         .await
-        .map(|rows| rows.iter().map(|r| r.retention_days.clamp(1, 90) as u32).max().unwrap_or(14))
+        .map(|rows| {
+            rows.iter()
+                .map(|r| r.retention_days.clamp(1, 90) as u32)
+                .max()
+                .unwrap_or(14)
+        })
         .unwrap_or(14)
 }
 
@@ -782,7 +838,10 @@ mod tests {
             involved_name: "frb-1".into(),
         };
         let nd = events_ndjson("c1", Utc::now(), &[c], &[ev], &Snapshot::new());
-        let lines: Vec<Value> = nd.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let lines: Vec<Value> = nd
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["kind"], "restart");
         assert_eq!(lines[0]["class"], "oom");
@@ -800,7 +859,9 @@ mod tests {
             {"reason":"Scheduled","message":"m","lastTimestamp":"2026-09-05T08:00:00Z","involvedObject":{"kind":"Pod","name":"p","namespace":"ns"}},
             {"reason":"Killing","message":"old","lastTimestamp":"2026-09-05T07:00:00Z","involvedObject":{"kind":"Pod","name":"p","namespace":"ns"}}
         ]});
-        let since = DateTime::parse_from_rfc3339("2026-09-05T07:30:00Z").unwrap().with_timezone(&Utc);
+        let since = DateTime::parse_from_rfc3339("2026-09-05T07:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let h = parse_event_hints(&list, Some(since));
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].reason, "OOMKilling");

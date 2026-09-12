@@ -25,7 +25,7 @@ use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, compact_count, Capabilities, CancelToken, Column, ColumnDef, CompletionContext,
+    self, compact_count, CancelToken, Capabilities, Column, ColumnDef, CompletionContext,
     CompletionResponse, DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath,
     ObjectDetail, ObjectHit, ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest,
     QueryResult, ResolvedConfig, SchemaNode, TestResult,
@@ -94,7 +94,10 @@ impl Driver for MysqlDriver {
                 });
             }
         };
-        let version: String = match sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await {
+        let version: String = match sqlx::query_scalar("SELECT VERSION()")
+            .fetch_one(&pool)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 return Ok(TestResult {
@@ -114,32 +117,71 @@ impl Driver for MysqlDriver {
         })
     }
 
-    async fn native_grants(&self, cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
+    async fn native_grants(
+        &self,
+        cfg: &ResolvedConfig,
+    ) -> Result<Vec<crate::native_access::NativeGrant>> {
         use crate::native_access::{mysql_grants, setup_error};
         let pool = self.pool(cfg).await?;
-        let rows = sqlx::query("SHOW GRANTS").fetch_all(&pool).await.map_err(types::upstream)?;
-        let rows: Vec<String> = rows.iter().map(|r| r.try_get(0)).collect::<std::result::Result<_, _>>().map_err(types::upstream)?;
+        let rows = sqlx::query("SHOW GRANTS")
+            .fetch_all(&pool)
+            .await
+            .map_err(types::upstream)?;
+        let rows: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get(0))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(types::upstream)?;
         let mut grants = mysql_grants(&rows)?;
         for grant in &grants {
-            if grant.operation == "db_query" && !rows.iter().any(|r| r.contains("SHOW VIEW") && r.contains(&format!(" ON `{}`.* TO ", grant.child))) {
-                return Err(setup_error("query credentials need SHOW VIEW so definer-view privileges can be inspected"));
+            if grant.operation == "db_query"
+                && !rows.iter().any(|r| {
+                    r.contains("SHOW VIEW") && r.contains(&format!(" ON `{}`.* TO ", grant.child))
+                })
+            {
+                return Err(setup_error(
+                    "query credentials need SHOW VIEW so definer-view privileges can be inspected",
+                ));
             }
         }
         // A definer view can read another database using its owner's rights.
         // Routines/roles are already excluded by SHOW GRANTS above.
-        let views: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.views WHERE security_type <> 'INVOKER'")
-            .fetch_one(&pool).await.map_err(types::upstream)?;
-        if views != 0 { return Err(setup_error("definer views require a separately verified adapter")); }
+        let views: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.views WHERE security_type <> 'INVOKER'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(types::upstream)?;
+        if views != 0 {
+            return Err(setup_error(
+                "definer views require a separately verified adapter",
+            ));
+        }
         // Trigger metadata is hidden without TRIGGER. Refuse write credentials
         // without that inspection privilege rather than treating an empty list
         // as proof. Even visible triggers are refused (definer side effects).
         for grant in &grants {
             if grant.operation == "db_data" {
-                let trigger_grant = rows.iter().any(|r| r.contains("TRIGGER") && r.contains(&format!(" ON `{}`.* TO ", grant.child)));
-                if !trigger_grant { return Err(setup_error("data-write credentials need inspectable trigger privileges")); }
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = ?")
-                    .bind(&grant.child).fetch_one(&pool).await.map_err(types::upstream)?;
-                if count != 0 { return Err(setup_error("native triggers may cross the permitted database scope")); }
+                let trigger_grant = rows.iter().any(|r| {
+                    r.contains("TRIGGER") && r.contains(&format!(" ON `{}`.* TO ", grant.child))
+                });
+                if !trigger_grant {
+                    return Err(setup_error(
+                        "data-write credentials need inspectable trigger privileges",
+                    ));
+                }
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = ?",
+                )
+                .bind(&grant.child)
+                .fetch_one(&pool)
+                .await
+                .map_err(types::upstream)?;
+                if count != 0 {
+                    return Err(setup_error(
+                        "native triggers may cross the permitted database scope",
+                    ));
+                }
             }
         }
         if grants.iter().any(|g| g.operation == "db_data") {
@@ -147,7 +189,10 @@ impl Driver for MysqlDriver {
             // DELETE/UPDATE may cascade into them. Without a separate complete
             // catalog inspector, such credentials require all-database data
             // permission. An empty child represents that explicit broad ceiling.
-            grants.push(crate::native_access::NativeGrant { child: String::new(), operation: "db_data" });
+            grants.push(crate::native_access::NativeGrant {
+                child: String::new(),
+                operation: "db_data",
+            });
         }
         Ok(grants)
     }
@@ -179,7 +224,8 @@ impl Driver for MysqlDriver {
         parent: &NodePath,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
-        self.schema_children_with_counts(cfg, parent, filter, false).await
+        self.schema_children_with_counts(cfg, parent, filter, false)
+            .await
     }
 
     async fn search_objects(
@@ -229,11 +275,23 @@ impl Driver for MysqlDriver {
                     return None;
                 }
                 schemas.insert(schema.clone());
-                let path = NodePath::parse(&format!("db:{schema}")).child(seg, &name).to_id();
-                Some(ObjectHit { schema, name, kind, path })
+                let path = NodePath::parse(&format!("db:{schema}"))
+                    .child(seg, &name)
+                    .to_id();
+                Some(ObjectHit {
+                    schema,
+                    name,
+                    kind,
+                    path,
+                })
             })
             .collect();
-        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
+        Ok(ObjectSearchResult {
+            hits,
+            truncated,
+            scanned: schemas.len(),
+            supported: true,
+        })
     }
 
     async fn schema_children_with_counts(
@@ -255,7 +313,9 @@ impl Driver for MysqlDriver {
 
         // db:<n>/folder:tables | folder:views -> the objects in that folder (filter by name).
         if let Some(folder) = parent.get("folder") {
-            return self.objects_in_folder(cfg, &db, folder, filter, counts).await;
+            return self
+                .objects_in_folder(cfg, &db, folder, filter, counts)
+                .await;
         }
 
         // db:<n> -> the object folders; no per-folder filter at this level.
@@ -264,10 +324,18 @@ impl Driver for MysqlDriver {
         // kind — with their count as dimmed detail — so the many databases without
         // routines stay uncluttered.
         let mut folders = vec![
-            SchemaNode::new(parent.child("folder", "tables").to_id(), "Tables", NodeKind::Folder)
-                .expandable(),
-            SchemaNode::new(parent.child("folder", "views").to_id(), "Views", NodeKind::Folder)
-                .expandable(),
+            SchemaNode::new(
+                parent.child("folder", "tables").to_id(),
+                "Tables",
+                NodeKind::Folder,
+            )
+            .expandable(),
+            SchemaNode::new(
+                parent.child("folder", "views").to_id(),
+                "Views",
+                NodeKind::Folder,
+            )
+            .expandable(),
         ];
         // Best-effort routine counts; on error (e.g. no privilege on
         // information_schema.routines) we simply omit the routine folders rather
@@ -494,8 +562,13 @@ impl Driver for MysqlDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        if cfg.params.get("__read_only_execution").and_then(Value::as_bool)==Some(true) {
-            return governed_read(&self.pool(cfg).await?,req,token).await;
+        if cfg
+            .params
+            .get("__read_only_execution")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return governed_read(&self.pool(cfg).await?, req, token).await;
         }
         let text = req.statement.trim();
         if text.is_empty() {
@@ -529,7 +602,11 @@ impl Driver for MysqlDriver {
             let sql = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
                 if ri.sql.trim_start().to_uppercase().starts_with("SELECT") {
                     // "SELECT /*+ MAX_EXECUTION_TIME(N) */ ..."
-                    ri.sql.replacen("SELECT", &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"), 1)
+                    ri.sql.replacen(
+                        "SELECT",
+                        &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),
+                        1,
+                    )
                 } else {
                     ri.sql.clone()
                 }
@@ -587,7 +664,10 @@ impl Driver for MysqlDriver {
         }
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
-        let mut conn = conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
+        let mut conn = conn
+            .begin_with("START TRANSACTION READ ONLY")
+            .await
+            .map_err(types::upstream)?;
         if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&use_db_sql(db)))
@@ -656,14 +736,20 @@ impl Driver for MysqlDriver {
             return Err(types::invalid("empty statement"));
         }
         if !is_read_statement(statement) {
-            return Err(types::invalid("export supports row-returning statements only"));
+            return Err(types::invalid(
+                "export supports row-returning statements only",
+            ));
         }
 
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
-        let mut conn = conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
+        let mut conn = conn
+            .begin_with("START TRANSACTION READ ONLY")
+            .await
+            .map_err(types::upstream)?;
         if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
+            (&mut *conn)
+                .execute(sqlx::raw_sql(&use_db_sql(db)))
                 .await
                 .map_err(types::upstream)?;
         }
@@ -741,9 +827,18 @@ impl MysqlDriver {
             ),
         };
         let rows: Vec<(String, String)> = if let Some(pat) = name_filter {
-            sqlx::query_as(sql).bind(db).bind(table).bind(pat).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(table)
+                .bind(pat)
+                .fetch_all(&pool)
+                .await
         } else {
-            sqlx::query_as(sql).bind(db).bind(table).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(table)
+                .fetch_all(&pool)
+                .await
         }
         .map_err(types::upstream)?;
         Ok(rows
@@ -807,9 +902,18 @@ impl MysqlDriver {
             ),
         };
         let rows: Vec<(String,)> = if let Some(pat) = name_filter {
-            sqlx::query_as(sql).bind(db).bind(table_type).bind(pat).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(table_type)
+                .bind(pat)
+                .fetch_all(&pool)
+                .await
         } else {
-            sqlx::query_as(sql).bind(db).bind(table_type).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(table_type)
+                .fetch_all(&pool)
+                .await
         }
         .map_err(types::upstream)?;
         // The db node only carries `db:<n>`, not the folder; build children off
@@ -881,9 +985,18 @@ impl MysqlDriver {
             ),
         };
         let rows: Vec<(String,)> = if let Some(pat) = name_filter {
-            sqlx::query_as(sql).bind(db).bind(routine_type).bind(pat).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(routine_type)
+                .bind(pat)
+                .fetch_all(&pool)
+                .await
         } else {
-            sqlx::query_as(sql).bind(db).bind(routine_type).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(routine_type)
+                .fetch_all(&pool)
+                .await
         }
         .map_err(types::upstream)?;
         let db_path = NodePath::parse(&format!("db:{db}"));
@@ -908,8 +1021,10 @@ impl MysqlDriver {
         // Preserve first-seen order of Key_name, columns ordered by Seq_in_index.
         let mut order: Vec<String> = Vec::new();
         #[allow(clippy::type_complexity)]
-        let mut by_name: std::collections::HashMap<String, (bool, Option<String>, Vec<(i64, String)>)> =
-            std::collections::HashMap::new();
+        let mut by_name: std::collections::HashMap<
+            String,
+            (bool, Option<String>, Vec<(i64, String)>),
+        > = std::collections::HashMap::new();
         for row in rows {
             let key_name: String = row.try_get("Key_name").unwrap_or_default();
             let non_unique: i64 = try_get_int(&row, "Non_unique").unwrap_or(1);
@@ -967,7 +1082,8 @@ impl MysqlDriver {
         .map_err(types::upstream)?;
 
         let mut order: Vec<String> = Vec::new();
-        let mut by_name: std::collections::HashMap<String, ForeignKey> = std::collections::HashMap::new();
+        let mut by_name: std::collections::HashMap<String, ForeignKey> =
+            std::collections::HashMap::new();
         for r in rows {
             let entry = by_name.entry(r.constraint_name.clone()).or_insert_with(|| {
                 order.push(r.constraint_name.clone());
@@ -998,8 +1114,15 @@ impl MysqlDriver {
         is_view: bool,
     ) -> Result<String> {
         let kw = if is_view { "VIEW" } else { "TABLE" };
-        let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(table));
-        let row = sqlx::query(&sql).fetch_one(pool).await.map_err(types::upstream)?;
+        let sql = format!(
+            "SHOW CREATE {kw} `{}`.`{}`",
+            esc_ident(db),
+            esc_ident(table)
+        );
+        let row = sqlx::query(&sql)
+            .fetch_one(pool)
+            .await
+            .map_err(types::upstream)?;
         // The DDL is the 2nd column for tables; for views it's "Create View"
         // (also the 2nd column). Read by index for robustness.
         let ddl: String = row.try_get(1).map_err(types::upstream)?;
@@ -1094,7 +1217,10 @@ impl MysqlDriver {
     ) -> Result<Option<String>> {
         let kw = if is_function { "FUNCTION" } else { "PROCEDURE" };
         let sql = format!("SHOW CREATE {kw} `{}`.`{}`", esc_ident(db), esc_ident(name));
-        let row = sqlx::query(&sql).fetch_one(pool).await.map_err(types::upstream)?;
+        let row = sqlx::query(&sql)
+            .fetch_one(pool)
+            .await
+            .map_err(types::upstream)?;
         let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
         Ok(ddl)
     }
@@ -1124,7 +1250,11 @@ impl MysqlDriver {
             ),
         };
         let rows: Vec<(String,)> = if let Some(pat) = name_filter {
-            sqlx::query_as(sql).bind(db).bind(pat).fetch_all(&pool).await
+            sqlx::query_as(sql)
+                .bind(db)
+                .bind(pat)
+                .fetch_all(&pool)
+                .await
         } else {
             sqlx::query_as(sql).bind(db).fetch_all(&pool).await
         }
@@ -1132,7 +1262,13 @@ impl MysqlDriver {
         let db_path = NodePath::parse(&format!("db:{db}"));
         Ok(rows
             .into_iter()
-            .map(|(name,)| SchemaNode::new(db_path.child("trigger", &name).to_id(), name, NodeKind::Trigger))
+            .map(|(name,)| {
+                SchemaNode::new(
+                    db_path.child("trigger", &name).to_id(),
+                    name,
+                    NodeKind::Trigger,
+                )
+            })
             .collect())
     }
 
@@ -1163,7 +1299,11 @@ impl MysqlDriver {
 
         // `.ok().flatten()`: a hard error or a NULL definition (privilege missing)
         // both collapse to `None`.
-        let ddl = self.show_create_trigger(&pool, &db, &name).await.ok().flatten();
+        let ddl = self
+            .show_create_trigger(&pool, &db, &name)
+            .await
+            .ok()
+            .flatten();
 
         let mut detail = ObjectDetail::new(name, NodeKind::Trigger);
         if let Some(m) = meta {
@@ -1193,7 +1333,10 @@ impl MysqlDriver {
             .await
             .map_err(types::upstream)?;
         let sql = format!("SHOW CREATE TRIGGER `{}`", esc_ident(name));
-        let row = sqlx::query(&sql).fetch_one(&mut *conn).await.map_err(types::upstream)?;
+        let row = sqlx::query(&sql)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
         let ddl: Option<String> = row.try_get(2).map_err(types::upstream)?;
         Ok(ddl)
     }
@@ -1400,9 +1543,7 @@ impl MysqlDriver {
 /// Build a fresh `MySqlPool` from a resolved config. Never called directly by
 /// the driver methods — they go through [`MysqlDriver::pool`] for caching.
 async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
-    let mut opts = MySqlConnectOptions::new()
-        .host(&cfg.host)
-        .port(cfg.port);
+    let mut opts = MySqlConnectOptions::new().host(&cfg.host).port(cfg.port);
     if let Some(user) = cfg.user.as_deref().filter(|s| !s.is_empty()) {
         opts = opts.username(user);
     }
@@ -1419,7 +1560,12 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
     // cert's name can never match), and an explicit `tls.server_name` override
     // has no sqlx surface to honour — both keep chain-only verification.
     let hostname_checkable = cfg.param_str("__tunnel_host").is_none()
-        && cfg.tls.server_name.as_deref().filter(|s| !s.is_empty()).is_none();
+        && cfg
+            .tls
+            .server_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_none();
     let ssl_mode = match cfg.tls.mode {
         types::TlsMode::Disabled => MySqlSslMode::Disabled,
         types::TlsMode::Preferred => MySqlSslMode::Preferred,
@@ -1502,10 +1648,18 @@ fn first_keyword(statement: &str) -> String {
     loop {
         if let Some(rest) = s.strip_prefix("--") {
             // Line comment: skip to end of line.
-            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once('\n')
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
             // Block comment: skip to closing.
-            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once("*/")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else {
             break;
         }
@@ -1544,9 +1698,10 @@ async fn run_read(
     // can't be server-cancelled.
     capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
-        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
     }
     exec_read_conn(&mut conn, statement, max_rows).await
 }
@@ -1561,9 +1716,10 @@ async fn run_write(
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
-        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
     }
     exec_write_conn(&mut conn, statement).await
 }
@@ -1586,9 +1742,10 @@ async fn run_batch(
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     capture_conn_id(&mut conn, token).await;
     if let Some(db) = active_db {
-        (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -1669,10 +1826,7 @@ async fn exec_read_conn(
 
 /// Run a write/DDL statement on an already-prepared connection and return the
 /// affected-row acknowledgement.
-async fn exec_write_conn(
-    conn: &mut sqlx::MySqlConnection,
-    statement: &str,
-) -> Result<QueryResult> {
+async fn exec_write_conn(conn: &mut sqlx::MySqlConnection, statement: &str) -> Result<QueryResult> {
     let res = sqlx::query(statement)
         .execute(&mut *conn)
         .await
@@ -1712,7 +1866,9 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     // without this branch a DECIMAL cell — i.e. every money/balance column —
     // fell through to Null. Same class as the DATETIME fix above.
     if let Ok(v) = row.try_get::<Option<sqlx::types::BigDecimal>, _>(idx) {
-        return v.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|n| Value::String(n.to_string()))
+            .unwrap_or(Value::Null);
     }
     // Temporal types (DATETIME / TIMESTAMP / DATE / TIME). sqlx's MySQL driver
     // does NOT decode these as String or Vec<u8> — their `Type::compatible` check
@@ -1796,7 +1952,8 @@ fn string_to_json(v: Option<String>) -> Value {
 /// `YYYY-MM-DD HH:MM:SS` (MySQL's native form), `NaiveDate`/`NaiveTime` as their
 /// date/time parts. Null if absent.
 fn temporal_to_json<T: ToString>(v: Option<T>) -> Value {
-    v.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null)
+    v.map(|t| Value::String(t.to_string()))
+        .unwrap_or(Value::Null)
 }
 
 /// Pure shaping of an optional f64 (Null if absent or non-finite).
@@ -1890,15 +2047,90 @@ struct FkRow {
 // --- Completion data --------------------------------------------------------
 
 const KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-    "ALTER", "DROP", "TABLE", "VIEW", "INDEX", "DATABASE", "SCHEMA", "JOIN", "INNER", "LEFT",
-    "RIGHT", "OUTER", "CROSS", "ON", "USING", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET",
-    "AS", "DISTINCT", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS", "CASE",
-    "WHEN", "THEN", "ELSE", "END", "UNION", "ALL", "ANY", "ASC", "DESC", "PRIMARY", "KEY",
-    "FOREIGN", "REFERENCES", "UNIQUE", "DEFAULT", "AUTO_INCREMENT", "CONSTRAINT", "WITH",
-    "RECURSIVE", "TRUNCATE", "REPLACE", "IGNORE", "DUPLICATE", "INTERVAL", "CAST", "CONVERT",
-    "USE", "SHOW", "DESCRIBE", "EXPLAIN", "GRANT", "REVOKE", "BEGIN", "COMMIT", "ROLLBACK",
-    "TRANSACTION", "ENGINE", "CHARSET", "COLLATE", "TEMPORARY", "IF",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TABLE",
+    "VIEW",
+    "INDEX",
+    "DATABASE",
+    "SCHEMA",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "USING",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "AS",
+    "DISTINCT",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "LIKE",
+    "BETWEEN",
+    "EXISTS",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "UNION",
+    "ALL",
+    "ANY",
+    "ASC",
+    "DESC",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "DEFAULT",
+    "AUTO_INCREMENT",
+    "CONSTRAINT",
+    "WITH",
+    "RECURSIVE",
+    "TRUNCATE",
+    "REPLACE",
+    "IGNORE",
+    "DUPLICATE",
+    "INTERVAL",
+    "CAST",
+    "CONVERT",
+    "USE",
+    "SHOW",
+    "DESCRIBE",
+    "EXPLAIN",
+    "GRANT",
+    "REVOKE",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "ENGINE",
+    "CHARSET",
+    "COLLATE",
+    "TEMPORARY",
+    "IF",
 ];
 
 const FUNCTIONS: &[(&str, &str)] = &[
@@ -1907,9 +2139,15 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("AVG", "AVG(expr) — average of values"),
     ("MIN", "MIN(expr) — minimum value"),
     ("MAX", "MAX(expr) — maximum value"),
-    ("GROUP_CONCAT", "GROUP_CONCAT(expr) — concatenated group values"),
+    (
+        "GROUP_CONCAT",
+        "GROUP_CONCAT(expr) — concatenated group values",
+    ),
     ("CONCAT", "CONCAT(str1, str2, ...) — concatenate strings"),
-    ("CONCAT_WS", "CONCAT_WS(sep, str1, ...) — concat with separator"),
+    (
+        "CONCAT_WS",
+        "CONCAT_WS(sep, str1, ...) — concat with separator",
+    ),
     ("SUBSTRING", "SUBSTRING(str, pos, len) — substring"),
     ("SUBSTR", "SUBSTR(str, pos, len) — substring"),
     ("LENGTH", "LENGTH(str) — byte length"),
@@ -1940,7 +2178,10 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("NOW", "NOW() — current datetime"),
     ("CURDATE", "CURDATE() — current date"),
     ("CURTIME", "CURTIME() — current time"),
-    ("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP() — current datetime"),
+    (
+        "CURRENT_TIMESTAMP",
+        "CURRENT_TIMESTAMP() — current datetime",
+    ),
     ("UNIX_TIMESTAMP", "UNIX_TIMESTAMP(date) — epoch seconds"),
     ("FROM_UNIXTIME", "FROM_UNIXTIME(ts) — datetime from epoch"),
     ("DATE", "DATE(expr) — date part"),
@@ -1952,7 +2193,10 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("MINUTE", "MINUTE(time) — minute"),
     ("SECOND", "SECOND(time) — second"),
     ("DATE_ADD", "DATE_ADD(date, INTERVAL n unit) — add interval"),
-    ("DATE_SUB", "DATE_SUB(date, INTERVAL n unit) — subtract interval"),
+    (
+        "DATE_SUB",
+        "DATE_SUB(date, INTERVAL n unit) — subtract interval",
+    ),
     ("DATEDIFF", "DATEDIFF(d1, d2) — days between"),
     ("DATE_FORMAT", "DATE_FORMAT(date, fmt) — format date"),
     ("COALESCE", "COALESCE(a, b, ...) — first non-null"),
@@ -1963,7 +2207,10 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("LEAST", "LEAST(a, b, ...) — smallest value"),
     ("CAST", "CAST(expr AS type) — type cast"),
     ("CONVERT", "CONVERT(expr, type) — type conversion"),
-    ("JSON_EXTRACT", "JSON_EXTRACT(json, path) — extract from JSON"),
+    (
+        "JSON_EXTRACT",
+        "JSON_EXTRACT(json, path) — extract from JSON",
+    ),
     ("JSON_OBJECT", "JSON_OBJECT(k, v, ...) — build JSON object"),
     ("JSON_ARRAY", "JSON_ARRAY(v, ...) — build JSON array"),
     ("MD5", "MD5(str) — MD5 hash"),
@@ -1975,22 +2222,55 @@ const FUNCTIONS: &[(&str, &str)] = &[
 
 /// Native read-only transaction protects against effects hidden in a read
 /// expression. RAII rollback also cleans up cancelled or failed reads.
-async fn governed_read(pool:&sqlx::MySqlPool,req:&QueryRequest,token:&CancelToken)->Result<QueryResult> {
-    let mut conn=pool.acquire().await.map_err(types::upstream)?;
-    capture_conn_id(&mut conn,token).await;
-    if let Some(db)=req.node.as_deref().filter(|n|!n.is_empty()) {(&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db))).await.map_err(types::upstream)?;}
-    let mut tx=conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
-    let spans=split_statements(req.statement.trim(),SqlDialect::Mysql);
-    if spans.is_empty(){return Err(types::invalid("empty statement"));}
-    let max_rows=req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);let single=spans.len()==1;let mut results=Vec::new();
+async fn governed_read(
+    pool: &sqlx::MySqlPool,
+    req: &QueryRequest,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn, token).await;
+    if let Some(db) = req.node.as_deref().filter(|n| !n.is_empty()) {
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
+    }
+    let mut tx = conn
+        .begin_with("START TRANSACTION READ ONLY")
+        .await
+        .map_err(types::upstream)?;
+    let spans = split_statements(req.statement.trim(), SqlDialect::Mysql);
+    if spans.is_empty() {
+        return Err(types::invalid("empty statement"));
+    }
+    let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
+    let single = spans.len() == 1;
+    let mut results = Vec::new();
     for span in spans {
-        let started=Instant::now();
-        let limited=types::inject_row_limit(&span.text,max_rows.saturating_add(1),req.offset);
-        let mut sql=if single{limited.sql}else{span.text.clone()};
-        if let Some(ms)=req.timeout_ms.filter(|ms|*ms>0) {if sql.trim_start().to_uppercase().starts_with("SELECT") {sql=sql.replacen("SELECT",&format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),1);}}
-        let mut result=exec_read_conn(&mut tx,&sql,max_rows).await?;
-        result.stats.duration_ms=started.elapsed().as_millis() as u64;result.stats.row_count=result.rows.len();
-        if single{result.auto_limited=limited.limited.then_some(max_rows as u64)}else{result.statement=Some(types::statement_preview(&span.text));}
+        let started = Instant::now();
+        let limited = types::inject_row_limit(&span.text, max_rows.saturating_add(1), req.offset);
+        let mut sql = if single {
+            limited.sql
+        } else {
+            span.text.clone()
+        };
+        if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
+            if sql.trim_start().to_uppercase().starts_with("SELECT") {
+                sql = sql.replacen(
+                    "SELECT",
+                    &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),
+                    1,
+                );
+            }
+        }
+        let mut result = exec_read_conn(&mut tx, &sql, max_rows).await?;
+        result.stats.duration_ms = started.elapsed().as_millis() as u64;
+        result.stats.row_count = result.rows.len();
+        if single {
+            result.auto_limited = limited.limited.then_some(max_rows as u64)
+        } else {
+            result.statement = Some(types::statement_preview(&span.text));
+        }
         results.push(result);
     }
     tx.rollback().await.map_err(types::upstream)?;
@@ -2021,7 +2301,9 @@ mod tests {
         assert!(is_read_statement("DESC users"));
         assert!(is_read_statement("DESCRIBE users"));
         assert!(is_read_statement("EXPLAIN SELECT 1"));
-        assert!(is_read_statement("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        assert!(is_read_statement(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
     }
 
     #[test]

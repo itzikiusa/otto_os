@@ -171,7 +171,10 @@ impl SandboxPolicy {
 
         // Writable roots (everything else stays read-only).
         for r in &self.writable_roots {
-            p.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escape(r)));
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                escape(r)
+            ));
         }
 
         // Network.
@@ -215,7 +218,9 @@ fn canonicalize_lenient(p: &Path) -> PathBuf {
 
 /// Escape a path for inclusion in an SBPL string literal.
 fn escape(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
+    p.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -286,7 +291,10 @@ mod tests {
     fn for_tool_confines_writes_to_out_dir_and_cuts_network() {
         let out = std::env::temp_dir().join("otto-tool-out");
         let pol = SandboxPolicy::for_tool(&out);
-        assert!(pol.writable_roots.iter().any(|r| r.ends_with("otto-tool-out")));
+        assert!(pol
+            .writable_roots
+            .iter()
+            .any(|r| r.ends_with("otto-tool-out")));
         // A tool never gets the workspace-ish agent dirs…
         assert!(!pol.writable_roots.iter().any(|r| r.ends_with(".claude")));
         // …nor any network.
@@ -302,14 +310,16 @@ mod tests {
         let home = PathBuf::from("/home/u");
         let data = PathBuf::from("/home/u/.otto/data");
         let gitdir = PathBuf::from("/work/project/.git");
-        let pol =
-            SandboxPolicy::for_agent(&cwd, &home, &data, std::slice::from_ref(&gitdir), NetworkPolicy::Full);
+        let pol = SandboxPolicy::for_agent(
+            &cwd,
+            &home,
+            &data,
+            std::slice::from_ref(&gitdir),
+            NetworkPolicy::Full,
+        );
         // cwd, git dir, and an agent config dir are all writable.
         assert!(pol.writable_roots.iter().any(|r| r.ends_with("project")));
-        assert!(pol
-            .writable_roots
-            .iter()
-            .any(|r| r.ends_with(".claude")));
+        assert!(pol.writable_roots.iter().any(|r| r.ends_with(".claude")));
         // network policy is carried through.
         assert_eq!(pol.network, NetworkPolicy::Full);
     }

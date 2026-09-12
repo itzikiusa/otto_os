@@ -239,7 +239,10 @@ mod tests {
 
         // A "db"-scoped section is a separate tree: its top-level position
         // restarts at 0 and it never shows up in the "connections" listing.
-        let db_top = repo.create(&ws, None, "Clusters", "db", &user).await.unwrap();
+        let db_top = repo
+            .create(&ws, None, "Clusters", "db", &user)
+            .await
+            .unwrap();
         assert_eq!(db_top.scope, "db");
         assert_eq!(db_top.position, 0);
         assert_eq!(repo.list_for_ws(&ws, "db").await.unwrap().len(), 1);

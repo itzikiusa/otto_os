@@ -118,10 +118,19 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
         .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
-        .route("/repos/{id}/worktrees/remove", post(repo_worktree_remove::<S>))
-        .route("/repos/{id}/worktrees/prune", post(repo_worktree_prune::<S>))
+        .route(
+            "/repos/{id}/worktrees/remove",
+            post(repo_worktree_remove::<S>),
+        )
+        .route(
+            "/repos/{id}/worktrees/prune",
+            post(repo_worktree_prune::<S>),
+        )
         .route("/repos/{id}/submodules", get(repo_submodules::<S>))
-        .route("/repos/{id}/submodules/update", post(repo_submodule_update::<S>))
+        .route(
+            "/repos/{id}/submodules/update",
+            post(repo_submodule_update::<S>),
+        )
         .route("/repos/{id}/fetch", post(repo_fetch::<S>))
         .route("/repos/{id}/diff", get(repo_diff::<S>))
         .route("/repos/{id}/stage", post(repo_stage::<S>))
@@ -140,8 +149,14 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/tag", post(repo_tag_create::<S>))
         .route("/repos/{id}/tag/push", post(repo_tag_push::<S>))
         .route("/repos/{id}/tag/delete", post(repo_tag_delete::<S>))
-        .route("/repos/{id}/api-collections/pull", post(repo_collections_pull::<S>))
-        .route("/repos/{id}/api-collections/push", post(repo_collections_push::<S>))
+        .route(
+            "/repos/{id}/api-collections/pull",
+            post(repo_collections_pull::<S>),
+        )
+        .route(
+            "/repos/{id}/api-collections/push",
+            post(repo_collections_push::<S>),
+        )
         .route("/repos/{id}/stash", post(repo_stash::<S>))
         // local merge + conflict resolution (#4)
         .route("/repos/{id}/merge", post(repo_merge::<S>))
@@ -288,7 +303,11 @@ async fn authorized_repo_account<S: GitCtx>(
 /// Resolve the push/pull token for a repo's bound account, enforcing the S4
 /// ownership guard. `None` when no account is bound (ssh remotes work through the
 /// user's agent); `Forbidden` when the caller does not own the bound account.
-pub(crate) async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
+pub(crate) async fn optional_token<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+) -> Result<Option<String>> {
     match authorized_repo_account(s, user, repo).await? {
         Some(account) => secret(s.secrets(), &account.token_ref).await,
         None => Ok(None),
@@ -875,7 +894,12 @@ async fn clone_into_workspace<S: GitCtx>(
         .ok_or_else(|| Error::Invalid("cannot derive repo name from clone url".into()))?;
     // Clone INTO a user-chosen parent dir when provided (`~` expanded), else the
     // workspace root. The repo lands at `<base>/<name>`.
-    let base = match req.clone_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let base = match req
+        .clone_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(dir) => expand_home(dir),
         None => ws.root_path.clone(),
     };
@@ -1223,7 +1247,12 @@ async fn repo_log<S: GitCtx>(
     // must be able to walk back to the ROOT commit — a silent .min(500) here made
     // older commits unreachable no matter what the client asked for.
     let limit = q.limit.unwrap_or(50);
-    let blank = |s: &Option<String>| s.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let blank = |s: &Option<String>| {
+        s.as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
     let opts = crate::history::LogOpts {
         limit,
         skip: q.skip.unwrap_or(0),
@@ -1307,9 +1336,7 @@ async fn repo_commit<S: GitCtx>(
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let sha = git
-        .commit_signed(&req.message, req.amend, req.sign)
-        .await?;
+    let sha = git.commit_signed(&req.message, req.amend, req.sign).await?;
     Ok(Json(serde_json::json!({ "sha": sha })))
 }
 
@@ -1455,7 +1482,11 @@ async fn repo_collections_push<S: GitCtx>(
     let mut staged: Vec<String> = Vec::new();
     for f in &req.files {
         let safe = f.name.replace(['/', '\\'], "_");
-        let safe = if safe.ends_with(".json") { safe } else { format!("{safe}.json") };
+        let safe = if safe.ends_with(".json") {
+            safe
+        } else {
+            format!("{safe}.json")
+        };
         let rel = format!("collections/{safe}");
         tokio::fs::write(base.join(&rel), &f.content)
             .await
@@ -1466,7 +1497,9 @@ async fn repo_collections_push<S: GitCtx>(
     let sha = git.commit(&req.message, false).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let push_out = git.push(token).await?;
-    Ok(Json(serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() })))
+    Ok(Json(
+        serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() }),
+    ))
 }
 
 /// `POST /repos/{id}/checkout` — switch branches. NEVER pulls, fetches or
@@ -1563,7 +1596,10 @@ async fn repo_branch_create<S: GitCtx>(
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.create_branch(
         req.name.trim(),
-        req.start_point.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        req.start_point
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
         req.checkout.unwrap_or(false),
     )
     .await?;
@@ -1670,7 +1706,10 @@ async fn repo_tag_create<S: GitCtx>(
     git.create_tag(
         name,
         req.sha.trim(),
-        req.message.as_deref().map(str::trim).filter(|m| !m.is_empty()),
+        req.message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty()),
     )
     .await?;
     if req.push.unwrap_or(false) {
@@ -2283,16 +2322,14 @@ mod tests {
     async fn seed_workspace(pool: &SqlitePool) -> Id {
         let wid = new_id();
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&wid)
-        .bind("ws")
-        .bind("/tmp")
-        .bind(&now)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&wid)
+            .bind("ws")
+            .bind("/tmp")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .unwrap();
         wid
     }
 
@@ -2398,10 +2435,12 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(authorized_repo_account(&ctx, &auth(&other, false), &unbound)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            authorized_repo_account(&ctx, &auth(&other, false), &unbound)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(optional_token(&ctx, &auth(&other, false), &unbound)
             .await
             .unwrap()
@@ -2893,5 +2932,4 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
-
 }

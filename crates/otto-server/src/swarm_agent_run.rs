@@ -22,7 +22,9 @@ use otto_core::Id;
 use otto_state::{NewRun, RunPatch};
 
 use crate::agent_run::{watch_for_result, FailReason, WatchStatus};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER, WAITING_IDLE};
+use crate::review_session::{
+    bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER, WAITING_IDLE,
+};
 use crate::state::ServerCtx;
 use crate::swarm_run::emit_run;
 
@@ -85,7 +87,10 @@ pub fn begin(swarm_id: &str) -> CancelState {
         flag: Arc::new(AtomicBool::new(false)),
         sessions: Arc::new(Mutex::new(Vec::new())),
     };
-    registry().lock().unwrap().insert(swarm_id.to_string(), cs.clone());
+    registry()
+        .lock()
+        .unwrap()
+        .insert(swarm_id.to_string(), cs.clone());
     cs
 }
 
@@ -216,7 +221,11 @@ pub async fn run_swarm_agent(
             .swarm_repo
             .update_run(
                 &run_id,
-                RunPatch { session_id: Some(Some(sid.clone())), status: Some("running".into()), ..Default::default() },
+                RunPatch {
+                    session_id: Some(Some(sid.clone())),
+                    status: Some("running".into()),
+                    ..Default::default()
+                },
             )
             .await;
         emit_run(ctx, &run_id).await;
@@ -233,7 +242,9 @@ pub async fn run_swarm_agent(
                 let _ = ctx.manager.input(&sid, b"\r").await;
             }
         } else {
-            tracing::warn!("swarm_agent_run: TUI never settled for session {sid} — prompt not injected");
+            tracing::warn!(
+                "swarm_agent_run: TUI never settled for session {sid} — prompt not injected"
+            );
             last_reason = Some(FailReason::Exited);
             let _ = ctx.manager.kill_session(&sid).await;
             continue;
@@ -243,20 +254,32 @@ pub async fn run_swarm_agent(
         // swallowed paste. Re-inject once, else kill + retry this attempt.
         if provider == "claude"
             && !crate::review_session::claude_prompt_landed(
-                &ctx.manager, &sid, cwd, 0, crate::review_session::PROMPT_LAND_WAIT,
+                &ctx.manager,
+                &sid,
+                cwd,
+                0,
+                crate::review_session::PROMPT_LAND_WAIT,
             )
             .await
         {
-            tracing::warn!("swarm_agent_run: prompt didn't land in session {sid} — re-injecting once");
+            tracing::warn!(
+                "swarm_agent_run: prompt didn't land in session {sid} — re-injecting once"
+            );
             let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
             tokio::time::sleep(PASTE_TO_ENTER).await;
             let _ = ctx.manager.input(&sid, b"\r").await;
             if !crate::review_session::claude_prompt_landed(
-                &ctx.manager, &sid, cwd, 0, crate::review_session::PROMPT_LAND_WAIT,
+                &ctx.manager,
+                &sid,
+                cwd,
+                0,
+                crate::review_session::PROMPT_LAND_WAIT,
             )
             .await
             {
-                tracing::warn!("swarm_agent_run: prompt never landed in session {sid} — retrying attempt");
+                tracing::warn!(
+                    "swarm_agent_run: prompt never landed in session {sid} — retrying attempt"
+                );
                 last_reason = Some(FailReason::Stuck);
                 let _ = ctx.manager.kill_session(&sid).await;
                 continue;
@@ -284,7 +307,13 @@ pub async fn run_swarm_agent(
                     };
                     let _ = ctx
                         .swarm_repo
-                        .update_run(&rid, RunPatch { status: Some(status.into()), ..Default::default() })
+                        .update_run(
+                            &rid,
+                            RunPatch {
+                                status: Some(status.into()),
+                                ..Default::default()
+                            },
+                        )
                         .await;
                     emit_run(ctx, &rid).await;
                 }
@@ -331,12 +360,26 @@ pub async fn run_swarm_agent(
 }
 
 /// Patch a run's status (+ optional error/finished_at) and emit the update.
-async fn set_run(ctx: &ServerCtx, run_id: &str, status: &str, error: Option<String>, finished: bool) {
+async fn set_run(
+    ctx: &ServerCtx,
+    run_id: &str,
+    status: &str,
+    error: Option<String>,
+    finished: bool,
+) {
     let patch = RunPatch {
         status: Some(status.to_string()),
         error: error.map(Some),
-        started_at: if status == "running" && !finished { Some(Some(chrono::Utc::now())) } else { None },
-        finished_at: if finished { Some(Some(chrono::Utc::now())) } else { None },
+        started_at: if status == "running" && !finished {
+            Some(Some(chrono::Utc::now()))
+        } else {
+            None
+        },
+        finished_at: if finished {
+            Some(Some(chrono::Utc::now()))
+        } else {
+            None
+        },
         ..Default::default()
     };
     let _ = ctx.swarm_repo.update_run(&run_id.to_string(), patch).await;

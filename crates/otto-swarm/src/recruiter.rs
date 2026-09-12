@@ -18,9 +18,7 @@ pub const RECRUITER_SKILL_CAP: usize = 40;
 /// Used by the otto-server recruiter endpoint (pure so it is unit-testable).
 pub fn cap_skills_for_role(all_skills: &[String], role: &str, cap: usize) -> Vec<String> {
     let role_lower = role.to_lowercase();
-    let role_words: std::collections::HashSet<&str> = role_lower
-        .split_whitespace()
-        .collect();
+    let role_words: std::collections::HashSet<&str> = role_lower.split_whitespace().collect();
     let mut scored: Vec<(usize, &String)> = all_skills
         .iter()
         .map(|name| {
@@ -237,8 +235,7 @@ pub fn discovery_planner_prompt(
         .map(|a| format!("- {} ({})", a.title, a.name))
         .collect();
     let roles_block = if roles.is_empty() {
-        "(no preset agents — tasks will be picked up by whichever agents the swarm has)"
-            .to_string()
+        "(no preset agents — tasks will be picked up by whichever agents the swarm has)".to_string()
     } else {
         roles.join("\n")
     };
@@ -284,7 +281,11 @@ pub fn planner_summarizer_prompt(
         .collect();
     let mut blocks = String::new();
     for (i, c) in candidates.iter().enumerate() {
-        blocks.push_str(&format!("\n--- Candidate plan {} ---\n{}\n", i + 1, c.trim()));
+        blocks.push_str(&format!(
+            "\n--- Candidate plan {} ---\n{}\n",
+            i + 1,
+            c.trim()
+        ));
     }
     format!(
         r#"You are the lead planner reconciling several independent task breakdowns for the same goal.
@@ -363,7 +364,8 @@ mod tests {
         assert!(
             capped.len() <= RECRUITER_SKILL_CAP,
             "expected ≤ {} skills, got {}",
-            RECRUITER_SKILL_CAP, capped.len()
+            RECRUITER_SKILL_CAP,
+            capped.len()
         );
     }
 
@@ -371,7 +373,11 @@ mod tests {
     fn cap_skills_fewer_than_cap_returns_all() {
         let skills: Vec<String> = (0..10).map(|i| format!("skill-{i}")).collect();
         let capped = cap_skills_for_role(&skills, "developer", RECRUITER_SKILL_CAP);
-        assert_eq!(capped.len(), 10, "all skills should be returned when count < cap");
+        assert_eq!(
+            capped.len(),
+            10,
+            "all skills should be returned when count < cap"
+        );
     }
 
     #[test]

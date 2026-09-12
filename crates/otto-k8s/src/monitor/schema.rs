@@ -84,7 +84,10 @@ pub fn purge_cluster_sql(cluster_id: &str, before_date: Option<&str>) -> Vec<Str
         }
         q
     };
-    vec![mk("k8s_samples", "sample_date"), mk("k8s_events", "event_date")]
+    vec![
+        mk("k8s_samples", "sample_date"),
+        mk("k8s_events", "event_date"),
+    ]
 }
 
 #[cfg(test)]

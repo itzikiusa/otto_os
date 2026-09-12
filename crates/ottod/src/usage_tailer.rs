@@ -133,7 +133,12 @@ struct Attribution {
 impl UsageTailer {
     /// Build the tailer. `data_dir` holds the persisted cursor file; `home` is
     /// the root for the `~/.claude` and `~/.codex` transcript trees.
-    pub fn new(usage: Arc<UsageEngine>, pool: SqlitePool, data_dir: PathBuf, home: PathBuf) -> Self {
+    pub fn new(
+        usage: Arc<UsageEngine>,
+        pool: SqlitePool,
+        data_dir: PathBuf,
+        home: PathBuf,
+    ) -> Self {
         let cursors = CursorStore::load(data_dir.join("usage_tailer.json"));
         let seen = SeenKeys::load(data_dir.join("usage_tailer_seen.json"), SEEN_KEYS_CAP);
         let codex_counters = CodexCounterStore::load(
@@ -600,8 +605,7 @@ impl UsageTailer {
             for m in read_subdirs(&y) {
                 for d in read_subdirs(&m) {
                     for f in read_files_with_ext(&d, "jsonl") {
-                        if f
-                            .file_name()
+                        if f.file_name()
                             .and_then(|n| n.to_str())
                             .map(|n| n.starts_with("rollout-"))
                             .unwrap_or(false)
@@ -813,7 +817,11 @@ async fn read_last_codex_usage(file: &Path, model: &str) -> Option<otto_usage::P
             let mut buf = vec![0u8; (end - start) as usize];
             f.read_exact(&mut buf).ok()?;
             let text = String::from_utf8_lossy(&buf);
-            if let Some(total) = text.lines().rev().find_map(|line| parse_codex_line(line, &model)) {
+            if let Some(total) = text
+                .lines()
+                .rev()
+                .find_map(|line| parse_codex_line(line, &model))
+            {
                 return Some(total);
             }
             if start == floor {
@@ -852,13 +860,9 @@ mod tests {
 
     #[test]
     fn codex_thread_uuid_from_rollout_filename() {
-        let f = Path::new(
-            "/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl",
-        );
-        assert_eq!(
-            codex_thread_uuid(f),
-            "019ed94a-994a-7010-b01f-9b840c5b7068"
-        );
+        let f =
+            Path::new("/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
+        assert_eq!(codex_thread_uuid(f), "019ed94a-994a-7010-b01f-9b840c5b7068");
     }
 
     #[tokio::test]
@@ -869,9 +873,8 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("otto-codex-tail-test-{nonce}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join(
-            "rollout-2026-07-12T20-00-00-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl",
-        );
+        let file =
+            dir.join("rollout-2026-07-12T20-00-00-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
         let old = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":5}}}}"#;
         let new = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":120,"output_tokens":9,"reasoning_output_tokens":4}}}}"#;
         let padding = "tool output\n".repeat(60_000);

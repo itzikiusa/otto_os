@@ -53,7 +53,8 @@ async fn code_chunks_are_searchable() {
         .await
         .unwrap();
     assert!(
-        hits.iter().any(|h| h.memory.body.contains("ManualReviewRequired")),
+        hits.iter()
+            .any(|h| h.memory.body.contains("ManualReviewRequired")),
         "should find the withdrawal-review code chunk"
     );
     assert!(hits.iter().all(|h| h.memory.collection == "code"));

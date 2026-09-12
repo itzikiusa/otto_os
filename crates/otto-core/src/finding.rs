@@ -144,7 +144,10 @@ impl FindingSeverity {
 ///
 /// Keeps review findings honestly anchored so the board/Proof Pack never show an
 /// inverted or phantom line range.
-pub fn normalize_line_range(line: Option<u32>, line_end: Option<u32>) -> (Option<u32>, Option<u32>) {
+pub fn normalize_line_range(
+    line: Option<u32>,
+    line_end: Option<u32>,
+) -> (Option<u32>, Option<u32>) {
     match (line, line_end) {
         (None, _) => (None, None),
         (Some(start), Some(end)) if end > start => (Some(start), Some(end)),
@@ -166,20 +169,20 @@ pub struct Finding {
     pub pr_number: Option<u64>,
     pub fingerprint: String,
     // --- the 11 required fields ---
-    pub severity: FindingSeverity,        // (2)
-    pub category: Option<String>,         // (3)
-    pub path: Option<String>,             // (4) file
-    pub line: Option<u32>,                // (4) range start
-    pub line_end: Option<u32>,            // (4) range end
+    pub severity: FindingSeverity, // (2)
+    pub category: Option<String>,  // (3)
+    pub path: Option<String>,      // (4) file
+    pub line: Option<u32>,         // (4) range start
+    pub line_end: Option<u32>,     // (4) range end
     pub title: String,
     pub body: String,
-    pub evidence: String,                 // (5)
-    pub agent_reasoning_summary: String,  // (6)
-    pub suggested_fix: Option<String>,    // (7)
-    pub status: FindingStatus,            // (8)
-    pub linked_commit: Option<String>,    // (9)
-    pub linked_test: Option<String>,      // (10)
-    pub reviewer: String,                 // (11) current disposition owner
+    pub evidence: String,                // (5)
+    pub agent_reasoning_summary: String, // (6)
+    pub suggested_fix: Option<String>,   // (7)
+    pub status: FindingStatus,           // (8)
+    pub linked_commit: Option<String>,   // (9)
+    pub linked_test: Option<String>,     // (10)
+    pub reviewer: String,                // (11) current disposition owner
     // --- workflow state / gates / artifacts ---
     /// Engine DETECTION lifecycle (read-only here): open|fixing|resolved|regressed|declined.
     pub state: String,
@@ -339,8 +342,8 @@ mod tests {
         }
         // A few representative ILLEGAL edges.
         let illegal = [
-            (Open, Fixed),            // fix goes via accepted, not directly
-            (Open, Verified),         // can't verify an untouched finding
+            (Open, Fixed),    // fix goes via accepted, not directly
+            (Open, Verified), // can't verify an untouched finding
             (Waived, Verified),
             (Waived, Fixed),
             (FalsePositive, Fixed),

@@ -109,7 +109,9 @@ pub fn remove_lens_findings_files(review_id: &str, agent_index: usize) {
 /// [`remove_lens_findings_files`] rooted at an explicit directory.
 pub fn remove_lens_findings_files_in(dir: &Path, review_id: &str, agent_index: usize) {
     let prefix = format!("otto-review-{review_id}-{agent_index}-");
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -365,8 +367,8 @@ pub async fn run_agent_session(
 ) -> RunOutcome {
     let path = findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path); // clear any stale file
-    // …and any per-lens file a previous attempt left behind: the orchestrator
-    // merges every file it finds, so a stale one would re-import dead findings.
+                                         // …and any per-lens file a previous attempt left behind: the orchestrator
+                                         // merges every file it finds, so a stale one would re-import dead findings.
     remove_lens_findings_files(review_id, agent_index);
     let prompt = augment_prompt(base_prompt, &path.to_string_lossy());
 
@@ -436,7 +438,12 @@ pub async fn run_agent_session(
         pending_aware: true,
         lens_files: lens_slugs
             .iter()
-            .map(|slug| (slug.clone(), lens_findings_path(review_id, agent_index, slug)))
+            .map(|slug| {
+                (
+                    slug.clone(),
+                    lens_findings_path(review_id, agent_index, slug),
+                )
+            })
             .collect(),
     };
     watch_for_result_guarded(
@@ -453,23 +460,36 @@ pub async fn run_agent_session(
         guard,
         |st| async move {
             let (status, note) = match st {
-                WatchStatus::Waiting => {
-                    ("waiting", "looks blocked on input — Open it to respond".to_string())
-                }
+                WatchStatus::Waiting => (
+                    "waiting",
+                    "looks blocked on input — Open it to respond".to_string(),
+                ),
                 WatchStatus::Resumed => ("running", String::new()),
             };
-            persist_agent(states, reviews, review_id, agent_index, move |s: &mut ReviewAgentState| {
-                s.status = status.into();
-                s.note = note;
-            })
+            persist_agent(
+                states,
+                reviews,
+                review_id,
+                agent_index,
+                move |s: &mut ReviewAgentState| {
+                    s.status = status.into();
+                    s.note = note;
+                },
+            )
             .await;
         },
         |note: String| async move {
             // Progress only — never touches `status`, so a "waiting" row set by
             // the hook above keeps its state while the note advances.
-            persist_agent(states, reviews, review_id, agent_index, move |s: &mut ReviewAgentState| {
-                s.note = note;
-            })
+            persist_agent(
+                states,
+                reviews,
+                review_id,
+                agent_index,
+                move |s: &mut ReviewAgentState| {
+                    s.note = note;
+                },
+            )
             .await;
         },
     )
@@ -511,7 +531,9 @@ fn review_error_note(reason: Option<FailReason>) -> String {
         Some(FailReason::SessionGone) => "session is no longer live",
         Some(FailReason::CreateFailed) => "could not start",
         Some(FailReason::Stopped) => "stopped by user",
-        Some(FailReason::Superseded) => "skipped — this lens was already covered by a sibling reviewer",
+        Some(FailReason::Superseded) => {
+            "skipped — this lens was already covered by a sibling reviewer"
+        }
         None => "unknown error",
     }
     .to_string()
@@ -580,8 +602,20 @@ pub async fn run_agent_session_with_recovery(
         give_up,
         |_attempt| {
             run_agent_session(
-                manager, reviews, states, ws, user, provider, model, cwd, review_id, agent_index,
-                base_prompt, timeout, skills_add_dir, lens_slugs,
+                manager,
+                reviews,
+                states,
+                ws,
+                user,
+                provider,
+                model,
+                cwd,
+                review_id,
+                agent_index,
+                base_prompt,
+                timeout,
+                skills_add_dir,
+                lens_slugs,
             )
         },
     )
@@ -599,7 +633,10 @@ pub async fn run_agent_session_with_recovery(
             s.findings = persisted;
         })
         .await;
-        AgentRunResult { findings, errored: false }
+        AgentRunResult {
+            findings,
+            errored: false,
+        }
     } else if outcome.reason == Some(FailReason::Superseded) {
         let by = {
             let g = states.lock().await;
@@ -610,7 +647,10 @@ pub async fn run_agent_session_with_recovery(
             s.note = format!("skipped — {} already covered this lens", by);
         })
         .await;
-        AgentRunResult { findings: Vec::new(), errored: true }
+        AgentRunResult {
+            findings: Vec::new(),
+            errored: true,
+        }
     } else {
         let note = review_error_note(outcome.reason);
         persist_agent(states, reviews, review_id, agent_index, move |s| {
@@ -618,7 +658,10 @@ pub async fn run_agent_session_with_recovery(
             s.note = note;
         })
         .await;
-        AgentRunResult { findings: Vec::new(), errored: true }
+        AgentRunResult {
+            findings: Vec::new(),
+            errored: true,
+        }
     }
 }
 
@@ -824,7 +867,9 @@ fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str)
     if probe.is_empty() {
         return true;
     }
-    let Some(h) = manager.live_handle(sid) else { return false };
+    let Some(h) = manager.live_handle(sid) else {
+        return false;
+    };
     let raw = String::from_utf8_lossy(&h.scrollback(200)).into_owned();
     let norm: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     screen_shows_paste(&norm, probe)
@@ -921,7 +966,9 @@ mod tests {
     #[test]
     fn findings_path_unique_per_agent() {
         assert_ne!(findings_path("r", 0), findings_path("r", 1));
-        assert!(findings_path("r", 2).to_string_lossy().ends_with("otto-review-r-2.json"));
+        assert!(findings_path("r", 2)
+            .to_string_lossy()
+            .ends_with("otto-review-r-2.json"));
     }
 
     #[test]
@@ -956,7 +1003,10 @@ mod tests {
         // The per-agent Stop endpoint persists "stopped by user" directly; the
         // recovery loop re-persists via this note when it unwinds — the two
         // must agree or the row flickers between wordings.
-        assert_eq!(review_error_note(Some(FailReason::Stopped)), "stopped by user");
+        assert_eq!(
+            review_error_note(Some(FailReason::Stopped)),
+            "stopped by user"
+        );
     }
 
     #[test]
@@ -965,7 +1015,10 @@ mod tests {
         // findings), and the watch loop must accept it instead of waiting for
         // the stuck trip to kill + respawn it.
         assert_eq!(parse_findings_array("[]").map(|v| v.len()), Some(0));
-        assert_eq!(parse_findings_array("```json\n[]\n```").map(|v| v.len()), Some(0));
+        assert_eq!(
+            parse_findings_array("```json\n[]\n```").map(|v| v.len()),
+            Some(0)
+        );
         assert_eq!(
             parse_findings_array("[{\"body\":\"n\"}]").map(|v| v.len()),
             Some(1)
@@ -1013,7 +1066,10 @@ mod tests {
         // Rows without a lens (summarizer, legacy rows) never match anything.
         assert_eq!(lens_covered_by(&states, 4), None);
         // A "done" row of a DIFFERENT lens doesn't count.
-        let solo = vec![st("A", "A", "claude", "error"), st("B", "B", "codex", "done")];
+        let solo = vec![
+            st("A", "A", "claude", "error"),
+            st("B", "B", "codex", "done"),
+        ];
         assert_eq!(lens_covered_by(&solo, 0), None);
         // Out of range.
         assert_eq!(lens_covered_by(&solo, 9), None);
@@ -1021,7 +1077,10 @@ mod tests {
 
     #[test]
     fn stuck_note_reports_the_real_window() {
-        assert_eq!(review_error_note(Some(FailReason::Stuck)), "stuck — no output for 15m");
+        assert_eq!(
+            review_error_note(Some(FailReason::Stuck)),
+            "stuck — no output for 15m"
+        );
     }
 
     #[test]
@@ -1056,7 +1115,9 @@ mod tests {
         assert_eq!(f[0].path.as_deref(), Some("libs/a/b.component.ts"));
         assert_eq!(f[0].line, Some(208));
         assert_eq!(f[0].severity, "warn"); // major → warn
-        assert!(f[0].body.starts_with("Add-mode pricing table never refills"));
+        assert!(f[0]
+            .body
+            .starts_with("Add-mode pricing table never refills"));
         assert!(f[0].body.contains("Failure scenario: Open dialog twice"));
     }
 
@@ -1097,7 +1158,10 @@ mod tests {
 
         // The sanitizer is what keeps a lens name out of the filesystem: it is
         // used both as a path component and as this label.
-        assert_eq!(sanitize_lens_slug("Correctness/../review"), "correctness-review");
+        assert_eq!(
+            sanitize_lens_slug("Correctness/../review"),
+            "correctness-review"
+        );
         assert_eq!(sanitize_lens_slug("  Go  Code   Review "), "go-code-review");
         assert_eq!(sanitize_lens_slug("--grill--"), "grill");
         assert_eq!(sanitize_lens_slug("***"), "");
@@ -1112,8 +1176,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let merged = findings_path_in(dir, "R1", 0);
-        let mine = ["correctness", "security"]
-            .map(|s| lens_findings_path_in(dir, "R1", 0, s));
+        let mine = ["correctness", "security"].map(|s| lens_findings_path_in(dir, "R1", 0, s));
         let other_agent = lens_findings_path_in(dir, "R1", 1, "correctness");
         let other_review = lens_findings_path_in(dir, "R2", 0, "correctness");
         for p in [&merged, &mine[0], &mine[1], &other_agent, &other_review] {

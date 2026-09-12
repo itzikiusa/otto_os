@@ -193,8 +193,10 @@ impl ResolvedConfig {
         // Read-only is scoped by a rollback-on-drop native transaction, not a
         // pool/session setting. It must not orphan the tracked pool key when a
         // separately authorized development mutation chooses writable execution.
-        let mut cache_params=self.params.clone();
-        if let Some(map)=cache_params.as_object_mut(){map.remove("__read_only_execution");}
+        let mut cache_params = self.params.clone();
+        if let Some(map) = cache_params.as_object_mut() {
+            map.remove("__read_only_execution");
+        }
         let raw = format!(
             "{engine}|{host}|{port}|{user}|pw{password_len}|{database}|\
              {tls_mode:?}|{verify}|{ca}|{cert}|{key}|{server_name}|{params}",
@@ -215,7 +217,11 @@ impl ResolvedConfig {
             // differ only by timezone on separate cached sessions.
             params = serde_json::to_string(&cache_params).unwrap_or_default(),
         );
-        format!("{}|{:x}", self.engine.as_str(), Sha256::digest(raw.as_bytes()))
+        format!(
+            "{}|{:x}",
+            self.engine.as_str(),
+            Sha256::digest(raw.as_bytes())
+        )
     }
 }
 
@@ -315,7 +321,11 @@ impl ObjectSearchReq {
     }
     /// Hit cap, clamped so a wide search can never stream an unbounded list.
     pub fn capped(&self) -> usize {
-        if self.limit == 0 { DEFAULT_SEARCH_LIMIT } else { self.limit.min(MAX_SEARCH_LIMIT) }
+        if self.limit == 0 {
+            DEFAULT_SEARCH_LIMIT
+        } else {
+            self.limit.min(MAX_SEARCH_LIMIT)
+        }
     }
     /// `true` when this kind should be returned (empty `kinds` = all objects).
     pub fn wants(&self, kind: &str) -> bool {
@@ -877,7 +887,11 @@ impl CompletionItem {
             score: None,
         }
     }
-    pub fn detailed(label: impl Into<String>, kind: CompletionKind, detail: impl Into<String>) -> Self {
+    pub fn detailed(
+        label: impl Into<String>,
+        kind: CompletionKind,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             label: label.into(),
             kind,
@@ -1066,7 +1080,10 @@ pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> R
     // / EXPLAIN are row-returning but REJECT a trailing LIMIT, so never touch
     // them — appending `LIMIT n` there is a syntax error.
     let head = strip_leading_comments(&lower);
-    let first_word: String = head.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let first_word: String = head
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
     if first_word != "select" && first_word != "with" && !head.starts_with('(') {
         return unchanged();
     }
@@ -1083,8 +1100,14 @@ pub fn inject_row_limit(statement: &str, limit: usize, offset: Option<u64>) -> R
     }
     // Clauses after which a trailing LIMIT is invalid or changes meaning.
     const SKIP: &[&str] = &[
-        "format ", "settings ", "into outfile", "into dumpfile", "for update",
-        "for share", " union ", "limit by",
+        "format ",
+        "settings ",
+        "into outfile",
+        "into dumpfile",
+        "for update",
+        "for share",
+        " union ",
+        "limit by",
     ];
     for kw in SKIP {
         if lower.contains(kw) {
@@ -1106,9 +1129,17 @@ fn strip_leading_comments(sql: &str) -> &str {
     let mut s = sql.trim_start();
     loop {
         if let Some(rest) = s.strip_prefix("--") {
-            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once('\n')
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once("*/")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else {
             break;
         }
@@ -1125,8 +1156,7 @@ fn has_word_then_digit(haystack: &str, word: &str) -> bool {
     while let Some(pos) = haystack[from..].find(word) {
         let start = from + pos;
         let end = start + word.len();
-        let before_ok = start == 0
-            || !matches!(bytes[start - 1], b'a'..=b'z' | b'0'..=b'9' | b'_');
+        let before_ok = start == 0 || !matches!(bytes[start - 1], b'a'..=b'z' | b'0'..=b'9' | b'_');
         // after the word, skip spaces, then require a digit
         let mut i = end;
         while i < bytes.len() && bytes[i] == b' ' {
@@ -1178,8 +1208,20 @@ pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
 /// command document or translated SQL contains none of these openers.
 pub fn looks_like_mongosh_script(statement: &str) -> bool {
     const OPENERS: [&str; 14] = [
-        "const ", "let ", "var ", "function ", "if (", "if(", "for (", "for(", "while (",
-        "while(", "try ", "try{", "throw ", "print(",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "if (",
+        "if(",
+        "for (",
+        "for(",
+        "while (",
+        "while(",
+        "try ",
+        "try{",
+        "throw ",
+        "print(",
     ];
     let mut in_block_comment = false;
     for raw in statement.lines() {
@@ -1330,18 +1372,20 @@ fn mongo_is_write(statement: &str) -> bool {
     }
     // Split exactly like the executor, then classify each piece. Blank /
     // comment-only input executes nothing, so it isn't a write.
-    crate::drivers::mongodb::split_statements(s).iter().any(|stmt| {
-        // A Mongo connection also accepts SQL: `run` translates a `SELECT`
-        // into a find/aggregate via `mongo_sql`. `looks_like_sql` only matches
-        // a leading `SELECT` (and `translate` rejects anything that isn't a
-        // single SELECT), so no mutating SQL can enter through here;
-        // `sql_is_write` still decides.
-        if crate::drivers::mongo_sql::looks_like_sql(stmt) {
-            sql_is_write(stmt)
-        } else {
-            !crate::drivers::mongodb::statement_is_read_only(stmt)
-        }
-    })
+    crate::drivers::mongodb::split_statements(s)
+        .iter()
+        .any(|stmt| {
+            // A Mongo connection also accepts SQL: `run` translates a `SELECT`
+            // into a find/aggregate via `mongo_sql`. `looks_like_sql` only matches
+            // a leading `SELECT` (and `translate` rejects anything that isn't a
+            // single SELECT), so no mutating SQL can enter through here;
+            // `sql_is_write` still decides.
+            if crate::drivers::mongo_sql::looks_like_sql(stmt) {
+                sql_is_write(stmt)
+            } else {
+                !crate::drivers::mongodb::statement_is_read_only(stmt)
+            }
+        })
 }
 
 /// `GET /db/mongosh` response: whether the `mongosh` CLI — used to execute
@@ -1379,7 +1423,9 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
             }
         }
         Value::Array(a) => Value::Array(a.into_iter().map(cap_cell).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, val)| (k, cap_cell(val))).collect()),
+        Value::Object(o) => {
+            Value::Object(o.into_iter().map(|(k, val)| (k, cap_cell(val))).collect())
+        }
         other => other,
     }
 }
@@ -1401,22 +1447,30 @@ mod tests {
         assert!(looks_like_mongosh_script(
             "/* header\n multi-line */\nfunction seed(x) { return x; }\nseed(1)"
         ));
-        assert!(looks_like_mongosh_script("const d = db.getSiblingDB(\"promotions\");"));
+        assert!(looks_like_mongosh_script(
+            "const d = db.getSiblingDB(\"promotions\");"
+        ));
         assert!(looks_like_mongosh_script("print(\"hello\")"));
         assert!(looks_like_mongosh_script(
             "db.getSiblingDB(\"promotions\").achievements.find({})"
         ));
 
         // Native command surface → NOT a script.
-        assert!(!looks_like_mongosh_script("db.customers.find({ city: \"Rome\" })"));
+        assert!(!looks_like_mongosh_script(
+            "db.customers.find({ city: \"Rome\" })"
+        ));
         assert!(!looks_like_mongosh_script(
             "db.orders.insertOne({\n  status: \"pending\",\n  items: [{ qty: 1 }]\n})"
         ));
         assert!(!looks_like_mongosh_script(
             "db.a.deleteOne({ _id: 1 });\ndb.b.insertOne({ _id: 1 })"
         ));
-        assert!(!looks_like_mongosh_script("{ \"find\": \"customers\", \"limit\": 5 }"));
-        assert!(!looks_like_mongosh_script("SELECT * FROM customers WHERE id = 1"));
+        assert!(!looks_like_mongosh_script(
+            "{ \"find\": \"customers\", \"limit\": 5 }"
+        ));
+        assert!(!looks_like_mongosh_script(
+            "SELECT * FROM customers WHERE id = 1"
+        ));
         // A commented-out const does not make a plain command a script.
         assert!(!looks_like_mongosh_script("// const x = 1;\ndb.c.find({})"));
     }
@@ -1437,7 +1491,10 @@ mod tests {
             );
         }
         // Plain reads stay reads.
-        assert!(!statement_is_write(Engine::Mongodb, "db.customers.find({})"));
+        assert!(!statement_is_write(
+            Engine::Mongodb,
+            "db.customers.find({})"
+        ));
     }
 
     /// The classifier splits and parses like the EXECUTOR: a write hidden in a
@@ -1477,7 +1534,10 @@ mod tests {
             r#"db.a.aggregate([{"$match":{"k":1}},{"$count":"n"}])"#
         ));
         // Unparseable input fails closed.
-        assert!(statement_is_write(Engine::Mongodb, "db.c.unknownMethod({})"));
+        assert!(statement_is_write(
+            Engine::Mongodb,
+            "db.c.unknownMethod({})"
+        ));
     }
 
     #[test]
@@ -1486,18 +1546,41 @@ mod tests {
         // that is one round trip per database.
         let req = ObjectSearchReq::default();
         assert!(!req.all_schemas());
-        assert!(ObjectSearchReq { scope: "all".into(), ..Default::default() }.all_schemas());
-        assert!(ObjectSearchReq { scope: "ALL".into(), ..Default::default() }.all_schemas());
-        assert!(!ObjectSearchReq { scope: "schema".into(), ..Default::default() }.all_schemas());
+        assert!(ObjectSearchReq {
+            scope: "all".into(),
+            ..Default::default()
+        }
+        .all_schemas());
+        assert!(ObjectSearchReq {
+            scope: "ALL".into(),
+            ..Default::default()
+        }
+        .all_schemas());
+        assert!(!ObjectSearchReq {
+            scope: "schema".into(),
+            ..Default::default()
+        }
+        .all_schemas());
     }
 
     #[test]
     fn search_limit_is_defaulted_and_capped() {
         assert_eq!(ObjectSearchReq::default().capped(), DEFAULT_SEARCH_LIMIT);
-        assert_eq!(ObjectSearchReq { limit: 25, ..Default::default() }.capped(), 25);
+        assert_eq!(
+            ObjectSearchReq {
+                limit: 25,
+                ..Default::default()
+            }
+            .capped(),
+            25
+        );
         // A caller asking for a million hits gets the ceiling, not a firehose.
         assert_eq!(
-            ObjectSearchReq { limit: 1_000_000, ..Default::default() }.capped(),
+            ObjectSearchReq {
+                limit: 1_000_000,
+                ..Default::default()
+            }
+            .capped(),
             MAX_SEARCH_LIMIT
         );
     }
@@ -1508,7 +1591,10 @@ mod tests {
         assert!(any.wants("table"));
         assert!(any.wants("view"));
         assert!(any.wants("collection"));
-        let only_views = ObjectSearchReq { kinds: vec!["view".into()], ..Default::default() };
+        let only_views = ObjectSearchReq {
+            kinds: vec!["view".into()],
+            ..Default::default()
+        };
         assert!(only_views.wants("view"));
         assert!(only_views.wants("VIEW")); // kind matching is case-insensitive
         assert!(!only_views.wants("table"));
@@ -1586,7 +1672,8 @@ mod tests {
     fn tls_verify_defaults_true_only_when_absent() {
         // Absent → defaults true (a hand-written secure config); explicit false is
         // honoured (what the importer now writes so it doesn't force verification).
-        let absent: TlsConfig = serde_json::from_value(serde_json::json!({"mode":"required"})).unwrap();
+        let absent: TlsConfig =
+            serde_json::from_value(serde_json::json!({"mode":"required"})).unwrap();
         assert!(absent.verify);
         let explicit: TlsConfig =
             serde_json::from_value(serde_json::json!({"mode":"required","verify":false})).unwrap();
@@ -1674,9 +1761,10 @@ mod tests {
         // …and round-trips through deserialization (defaults to None when absent).
         let back: QueryResult = serde_json::from_value(wire).unwrap();
         assert_eq!(back.next_cursor, paged.next_cursor);
-        let plain: QueryResult =
-            serde_json::from_str(r#"{"columns":[],"rows":[],"stats":{"duration_ms":0,"row_count":0},"truncated":false}"#)
-                .unwrap();
+        let plain: QueryResult = serde_json::from_str(
+            r#"{"columns":[],"rows":[],"stats":{"duration_ms":0,"row_count":0},"truncated":false}"#,
+        )
+        .unwrap();
         assert!(plain.next_cursor.is_none());
     }
 
@@ -1709,12 +1797,17 @@ mod tests {
     fn leaves_existing_limit_untouched() {
         let r = inject_row_limit("SELECT * FROM t LIMIT 5", 1000, None);
         assert_eq!(r.sql, "SELECT * FROM t LIMIT 5");
-        assert!(!r.limited, "an explicit user LIMIT bails ⇒ no auto_limit / pager");
+        assert!(
+            !r.limited,
+            "an explicit user LIMIT bails ⇒ no auto_limit / pager"
+        );
     }
 
     #[test]
     fn appends_after_order_by() {
-        assert!(inject_row_limit("select a from t order by a", 50, None).sql.ends_with(" LIMIT 50"));
+        assert!(inject_row_limit("select a from t order by a", 50, None)
+            .sql
+            .ends_with(" LIMIT 50"));
     }
 
     #[test]
@@ -1760,15 +1853,26 @@ mod tests {
         ] {
             let r = inject_row_limit(sql, 1000, None);
             assert_eq!(r.sql, sql, "must not touch: {sql}");
-            assert!(!r.limited, "non-paginatable read must not be flagged auto-limited: {sql}");
+            assert!(
+                !r.limited,
+                "non-paginatable read must not be flagged auto-limited: {sql}"
+            );
         }
     }
 
     #[test]
     fn injects_after_leading_comment_and_for_cte_and_paren() {
-        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10, None).sql.ends_with(" LIMIT 10"));
-        assert!(inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10, None).sql.ends_with(" LIMIT 10"));
-        assert!(inject_row_limit("(SELECT * FROM t)", 10, None).sql.ends_with(" LIMIT 10"));
+        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10, None)
+            .sql
+            .ends_with(" LIMIT 10"));
+        assert!(
+            inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10, None)
+                .sql
+                .ends_with(" LIMIT 10")
+        );
+        assert!(inject_row_limit("(SELECT * FROM t)", 10, None)
+            .sql
+            .ends_with(" LIMIT 10"));
     }
 
     #[test]
@@ -1792,9 +1896,16 @@ mod tests {
         // Parity with the pager contract: OFFSET is honoured ONLY alongside an
         // injected LIMIT, so a user's explicit LIMIT (which bails) can never gain
         // a server OFFSET, and a non-paginatable read stays byte-identical.
-        for sql in ["SELECT * FROM t LIMIT 5", "SHOW TABLES", "SELECT 1; SELECT 2"] {
+        for sql in [
+            "SELECT * FROM t LIMIT 5",
+            "SHOW TABLES",
+            "SELECT 1; SELECT 2",
+        ] {
             let r = inject_row_limit(sql, 25, Some(100));
-            assert_eq!(r.sql, sql, "bailed statement must be unchanged even with offset: {sql}");
+            assert_eq!(
+                r.sql, sql,
+                "bailed statement must be unchanged even with offset: {sql}"
+            );
             assert!(!r.limited);
         }
     }
@@ -1806,7 +1917,11 @@ mod tests {
         assert_eq!(statement_preview("  SELECT\n  1  "), "SELECT 1");
         let long = "SELECT ".to_string() + &"a,".repeat(100);
         let p = statement_preview(&long);
-        assert!(p.chars().count() <= 80, "preview must be ≤80 chars, got {}", p.chars().count());
+        assert!(
+            p.chars().count() <= 80,
+            "preview must be ≤80 chars, got {}",
+            p.chars().count()
+        );
         assert!(p.ends_with('…'), "clipped preview ends with an ellipsis");
     }
 
@@ -1827,7 +1942,11 @@ mod tests {
         // Three → first on top, order preserved in more_results.
         let three = fold_batch_results(vec![mk("a"), mk("b"), mk("c")]);
         assert_eq!(three.statement.as_deref(), Some("a"));
-        let rest: Vec<_> = three.more_results.iter().map(|r| r.statement.as_deref()).collect();
+        let rest: Vec<_> = three
+            .more_results
+            .iter()
+            .map(|r| r.statement.as_deref())
+            .collect();
         assert_eq!(rest, vec![Some("b"), Some("c")]);
     }
 
@@ -1975,11 +2094,20 @@ mod tests {
             "SELECT 1; DELETE FROM t; SELECT 2", // write in the middle
             "SELECT 1; SELECT 2; DROP TABLE t",  // write last
         ] {
-            assert!(statement_is_write(Engine::Mysql, sql), "mysql missed batch write: {sql}");
-            assert!(statement_is_write(Engine::Clickhouse, sql), "ch missed batch write: {sql}");
+            assert!(
+                statement_is_write(Engine::Mysql, sql),
+                "mysql missed batch write: {sql}"
+            );
+            assert!(
+                statement_is_write(Engine::Clickhouse, sql),
+                "ch missed batch write: {sql}"
+            );
         }
         // An all-read batch stays a read (passes the gate unconfirmed).
-        assert!(!statement_is_write(Engine::Mysql, "SELECT 1; SHOW TABLES; SELECT 2"));
+        assert!(!statement_is_write(
+            Engine::Mysql,
+            "SELECT 1; SHOW TABLES; SELECT 2"
+        ));
     }
 
     #[test]
@@ -2024,7 +2152,9 @@ mod tests {
         assert!(!is_write("db.users.getIndices()"));
         // Same collection-less raw command doc rule as above: not executable ⇒
         // fails closed. The runnable JSON spelling stays a read.
-        assert!(!is_write("{ \"collection\": \"users\", \"op\": \"listIndexes\" }"));
+        assert!(!is_write(
+            "{ \"collection\": \"users\", \"op\": \"listIndexes\" }"
+        ));
         assert!(is_write("{ \"listIndexes\": \"users\" }"));
         // Mutating the indexes is still a write.
         assert!(is_write("db.users.createIndex({a:1})"));
@@ -2040,7 +2170,9 @@ mod tests {
         // `write_blocked` on a guarded connection).
         let is_write = |s: &str| statement_is_write(Engine::Mongodb, s);
         assert!(!is_write("SELECT * FROM users"));
-        assert!(!is_write("select name, age from users where age > 21 limit 10"));
+        assert!(!is_write(
+            "select name, age from users where age > 21 limit 10"
+        ));
         assert!(!is_write("  SELECT count(*) FROM orders  "));
         // Mutating SQL never matches `looks_like_sql` (it only accepts a leading
         // SELECT), so it still falls through to "unrecognised ⇒ write".

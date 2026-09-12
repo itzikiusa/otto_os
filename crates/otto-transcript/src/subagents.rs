@@ -66,7 +66,11 @@ pub fn read_subagents(transcript_path: &Path) -> Vec<SubagentMeta> {
             tool_use_id: string_of(&v, "toolUseId"),
         });
     }
-    out.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.agent_id.cmp(&b.agent_id)));
+    out.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
     out
 }
 

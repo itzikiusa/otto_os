@@ -37,7 +37,11 @@ async fn list_refs(
 ) -> ApiResult<Json<Vec<CanvasSceneSummary>>> {
     let session = ctx.manager.get(&sid).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Viewer).await?;
-    let refs = ctx.canvas_repo.list_refs_for_session(&sid).await.map_err(ApiError)?;
+    let refs = ctx
+        .canvas_repo
+        .list_refs_for_session(&sid)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(refs))
 }
 
@@ -58,7 +62,12 @@ async fn add_ref(
         .get(&req.scene_id)
         .await
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(otto_core::Error::NotFound(format!("canvas scene {}", req.scene_id))))?;
+        .ok_or_else(|| {
+            ApiError(otto_core::Error::NotFound(format!(
+                "canvas scene {}",
+                req.scene_id
+            )))
+        })?;
     if scene.workspace_id != session.workspace_id {
         return Err(ApiError(otto_core::Error::NotFound(
             "canvas scene not in this session's workspace".into(),
@@ -88,7 +97,10 @@ async fn remove_ref(
     let session = ctx.manager.get(&sid).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
 
-    ctx.canvas_repo.remove_ref(&scene_id, &sid).await.map_err(ApiError)?;
+    ctx.canvas_repo
+        .remove_ref(&scene_id, &sid)
+        .await
+        .map_err(ApiError)?;
 
     let _ = ctx.events.send(Event::CanvasRefsChanged {
         workspace_id: session.workspace_id,

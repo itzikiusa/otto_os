@@ -73,7 +73,9 @@ impl RealProposalProducer {
     async fn run_one(&self, prompt: &str, cwd: &str, provider: &str) -> Result<String> {
         if provider == "claude" {
             // None = provider default model.
-            self.orchestrator.run_agent(prompt, cwd, None, self.timeout).await
+            self.orchestrator
+                .run_agent(prompt, cwd, None, self.timeout)
+                .await
         } else {
             // codex/agy/custom → headless CLI exec (best-effort print mode for
             // custom providers; a non-supporting CLI errors and is skipped).
@@ -97,7 +99,10 @@ impl ProposalProducer for RealProposalProducer {
             if let Ok(p) = parse_proposal(&reply) {
                 return Ok(p);
             }
-            tracing::warn!(provider, "self-improvement: first proposal unparseable; retrying once");
+            tracing::warn!(
+                provider,
+                "self-improvement: first proposal unparseable; retrying once"
+            );
             // Attempt 2: append a stricter reminder.
             let strict = format!(
                 "{prompt}\n\nIMPORTANT: your previous reply was not valid JSON. Reply with \
@@ -105,7 +110,9 @@ impl ProposalProducer for RealProposalProducer {
             );
             let reply = self.run_one(&strict, cwd, provider).await?;
             parse_proposal(&reply).map_err(|e| {
-                Error::Upstream(format!("analysis agent ({provider}) returned no valid proposal: {e}"))
+                Error::Upstream(format!(
+                    "analysis agent ({provider}) returned no valid proposal: {e}"
+                ))
             })
         })
     }

@@ -708,15 +708,34 @@ impl FileState {
 fn lang_from_ext(path: &str) -> Option<String> {
     let ext = std::path::Path::new(path).extension()?.to_str()?;
     let lang = match ext {
-        "rs" => "rust", "go" => "go", "py" => "python", "js" | "mjs" | "cjs" => "javascript",
-        "ts" | "mts" | "cts" => "typescript", "tsx" => "tsx", "jsx" => "jsx",
-        "svelte" => "svelte", "vue" => "vue",
-        "java" => "java", "kt" => "kotlin", "scala" => "scala",
-        "c" | "h" => "c", "cpp" | "cc" | "cxx" | "hpp" => "cpp",
-        "cs" => "csharp", "rb" => "ruby", "php" => "php", "swift" => "swift",
-        "sh" | "bash" | "zsh" => "shell", "yaml" | "yml" => "yaml", "toml" => "toml",
-        "json" => "json", "md" => "markdown", "sql" => "sql", "html" => "html",
-        "css" => "css", "scss" | "sass" => "scss", "xml" => "xml",
+        "rs" => "rust",
+        "go" => "go",
+        "py" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "svelte" => "svelte",
+        "vue" => "vue",
+        "java" => "java",
+        "kt" => "kotlin",
+        "scala" => "scala",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "swift" => "swift",
+        "sh" | "bash" | "zsh" => "shell",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "json" => "json",
+        "md" => "markdown",
+        "sql" => "sql",
+        "html" => "html",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "xml" => "xml",
         _ => return None,
     };
     Some(lang.to_string())
@@ -1229,7 +1248,10 @@ prunable gitdir file points to non-existent location
         assert!(wts[2].branch.is_none());
         assert!(wts[2].prunable);
         // no trailing blank line required
-        assert_eq!(parse_worktree_list("worktree /a\nHEAD abc\ndetached").len(), 1);
+        assert_eq!(
+            parse_worktree_list("worktree /a\nHEAD abc\ndetached").len(),
+            1
+        );
         assert!(parse_worktree_list("").is_empty());
     }
 

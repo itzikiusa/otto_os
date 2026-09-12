@@ -85,7 +85,11 @@ pub fn nudgeable(session: &Session) -> bool {
 /// live descendant of the PTY's root process (`pid`)? Pure — the caller passes
 /// the `ps` snapshot — so both branches are unit-testable. A bare agent
 /// session (its own provider is claude/codex) is always "running".
-pub fn nested_agent_alive(session: &Session, pid: Option<u32>, table: &[otto_sessions::nested::ProcInfo]) -> bool {
+pub fn nested_agent_alive(
+    session: &Session,
+    pid: Option<u32>,
+    table: &[otto_sessions::nested::ProcInfo],
+) -> bool {
     if matches!(session.provider.as_str(), "claude" | "codex") {
         return true;
     }
@@ -125,7 +129,10 @@ fn note_working(sid: &Id) -> Instant {
 }
 
 fn forget(sid: &Id) {
-    first_working().lock().unwrap_or_else(|p| p.into_inner()).remove(sid);
+    first_working()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(sid);
 }
 
 /// Start the sweep loop. Returns the task handle (kept alive by the daemon).
@@ -185,7 +192,9 @@ pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) {
             return;
         }
     };
-    let Ok(session) = ctx.manager.get(session_id).await else { return };
+    let Ok(session) = ctx.manager.get(session_id).await else {
+        return;
+    };
     if !nudgeable(&session) {
         tracing::debug!(session = %session_id, provider = %session.provider, "nudge sweep: session cannot take a nudge");
         return;
@@ -217,7 +226,10 @@ pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) {
                 .filter(|p| {
                     // Both clocks must have run 120 s: since the task appeared
                     // AND since the session was first seen working.
-                    let since_task = now.signed_duration_since(p.created_at).to_std().unwrap_or_default();
+                    let since_task = now
+                        .signed_duration_since(p.created_at)
+                        .to_std()
+                        .unwrap_or_default();
                     since_task >= MAX_DEFER && working_since.elapsed() >= MAX_DEFER
                 })
                 .collect()
@@ -235,7 +247,13 @@ pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) {
                 return;
             }
         }
-        let text = nudge_text(&sanitize_prompt_text(&p.title), p.description.as_deref().map(sanitize_prompt_text).as_deref());
+        let text = nudge_text(
+            &sanitize_prompt_text(&p.title),
+            p.description
+                .as_deref()
+                .map(sanitize_prompt_text)
+                .as_deref(),
+        );
         if let Err(e) = ctx.manager.submit_text(session_id, &text).await {
             tracing::warn!(session = %session_id, "nudge sweep: submit failed: {e}");
             let _ = repo.unclaim_nudge(&p.task_id).await;
@@ -250,7 +268,10 @@ pub async fn sweep_session(ctx: &ServerCtx, session_id: &Id) {
                 source: TrailSource::Otto,
                 kind: TrailKind::Task,
                 level: TrailLevel::Info,
-                summary: format!("Board task sent to agent: {}", otto_transcript::util::clip(&p.title, 120)),
+                summary: format!(
+                    "Board task sent to agent: {}",
+                    otto_transcript::util::clip(&p.title, 120)
+                ),
                 detail: None,
             })
             .await;
@@ -281,7 +302,8 @@ fn tui_ready(handle: &otto_pty::PtyHandle) -> bool {
 /// True when the session's current screen shows a trust/approval prompt.
 fn approval_pending(handle: &otto_pty::PtyHandle, provider: &str) -> bool {
     let screen = strip_ansi(&handle.screen_snapshot()).to_lowercase();
-    otto_sessions::prompt_guard::detect_approval(provider, &screen).is_some() || looks_like_permission_prompt(&screen)
+    otto_sessions::prompt_guard::detect_approval(provider, &screen).is_some()
+        || looks_like_permission_prompt(&screen)
 }
 
 /// Permission prompts the prompt-guard deliberately does NOT auto-answer.
@@ -320,7 +342,10 @@ pub fn strip_ansi(bytes: &[u8]) -> String {
                 Some(b']') => {
                     // OSC … BEL or ESC \
                     i += 1;
-                    while i < bytes.len() && bytes[i] != 0x07 && !(bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\')) {
+                    while i < bytes.len()
+                        && bytes[i] != 0x07
+                        && !(bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\'))
+                    {
                         i += 1;
                     }
                     i += if bytes.get(i) == Some(&0x1b) { 2 } else { 1 };
@@ -371,7 +396,10 @@ mod tests {
     #[test]
     fn sanitize_strips_control_chars_and_paste_terminators() {
         // ESC is dropped, so the remaining `[201~` can no longer end a paste.
-        assert_eq!(sanitize_prompt_text("a\x1b[201~b\nc\td\r\n  e"), "a[201~b c d e");
+        assert_eq!(
+            sanitize_prompt_text("a\x1b[201~b\nc\td\r\n  e"),
+            "a[201~b c d e"
+        );
         assert_eq!(sanitize_prompt_text("\u{0}\u{7}plain"), "plain");
     }
 
@@ -395,7 +423,10 @@ mod tests {
         };
         assert!(nudgeable(&s));
         s.provider = "shell".into();
-        assert!(!nudgeable(&s), "a bare shell would run the line as a command");
+        assert!(
+            !nudgeable(&s),
+            "a bare shell would run the line as a command"
+        );
         // A terminal in which the user launched claude (captured nested provider)
         // is running a chat TUI → nudgeable, like the transcript/resume paths.
         s.meta = serde_json::json!({ "nested_provider": "claude", "nested_cwd": "/x" });
@@ -438,7 +469,11 @@ mod tests {
         let alive = [
             proc(100, 1, "/bin/zsh -l"),
             proc(200, 100, "zsh"),
-            proc(300, 200, "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+            proc(
+                300,
+                200,
+                "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            ),
         ];
         assert!(nested_agent_alive(&s, Some(100), &alive));
         // Gone: only the shell remains → refused (the paste would run as a command).
@@ -455,11 +490,14 @@ mod tests {
 
     #[test]
     fn ansi_is_stripped_and_prompts_detected() {
-        let screen = b"\x1b[2J\x1b[H\x1b[1mDo you want to proceed?\x1b[0m\r\n> Yes\r\n  No, esc to cancel";
+        let screen =
+            b"\x1b[2J\x1b[H\x1b[1mDo you want to proceed?\x1b[0m\r\n> Yes\r\n  No, esc to cancel";
         let plain = strip_ansi(screen).to_lowercase();
         assert!(plain.contains("do you want to proceed?"));
         assert!(looks_like_permission_prompt(&plain));
-        assert!(!looks_like_permission_prompt("compiling otto-server v0.1.0"));
+        assert!(!looks_like_permission_prompt(
+            "compiling otto-server v0.1.0"
+        ));
         assert_eq!(MAX_DEFER, Duration::from_secs(120));
     }
 }

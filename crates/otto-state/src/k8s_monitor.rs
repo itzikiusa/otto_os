@@ -124,7 +124,10 @@ fn row_to_status(r: &sqlx::sqlite::SqliteRow) -> K8sMonitorStatusRow {
         pods_scraped: r.get("pods_scraped"),
         pods_failed: r.get("pods_failed"),
         cycle_ms: r.get("cycle_ms"),
-        snapshot: json_or(&r.get::<String, _>("snapshot_json"), Value::Object(Default::default())),
+        snapshot: json_or(
+            &r.get::<String, _>("snapshot_json"),
+            Value::Object(Default::default()),
+        ),
     }
 }
 
@@ -186,10 +189,11 @@ impl K8sMonitorRepo {
 
     /// Every enabled config (the scheduler's reconcile input), cluster-sorted.
     pub async fn list_enabled(&self) -> Result<Vec<K8sMonitorConfigRow>> {
-        let rows = sqlx::query("SELECT * FROM k8s_monitor_configs WHERE enabled = 1 ORDER BY cluster_id")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list k8s monitor configs"))?;
+        let rows =
+            sqlx::query("SELECT * FROM k8s_monitor_configs WHERE enabled = 1 ORDER BY cluster_id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list k8s monitor configs"))?;
         Ok(rows.iter().map(row_to_config).collect())
     }
 
@@ -300,8 +304,13 @@ mod tests {
     async fn cascade_with_cluster() {
         let pool = pool_with_cluster().await;
         let repo = K8sMonitorRepo::new(pool.clone());
-        repo.upsert_config(&K8sMonitorConfigRow::default_for("c1")).await.unwrap();
-        sqlx::query("DELETE FROM k8s_clusters WHERE id = 'c1'").execute(&pool).await.unwrap();
+        repo.upsert_config(&K8sMonitorConfigRow::default_for("c1"))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM k8s_clusters WHERE id = 'c1'")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(repo.get_config("c1").await.unwrap().is_none());
     }
 }

@@ -236,7 +236,9 @@ impl SwarmService {
                 ProjectPatch {
                     name: req.name,
                     description: req.description,
-                    repo_path: req.repo_path.map(|p| Some(otto_core::paths::expand_tilde(&p))),
+                    repo_path: req
+                        .repo_path
+                        .map(|p| Some(otto_core::paths::expand_tilde(&p))),
                     goal_md: req.goal_md.map(Some),
                     // story_id is an internal Plan → Swarm back-link, not editable
                     // via the project PATCH endpoint — leave it unchanged.

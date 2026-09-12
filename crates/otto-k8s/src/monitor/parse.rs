@@ -122,7 +122,12 @@ pub fn parse_prometheus(text: &str, include: &[String], exclude: &[String], cap:
     p
 }
 
-fn parse_prometheus_all(text: &str, include: &[String], exclude: &[String], hard_cap: usize) -> Parsed {
+fn parse_prometheus_all(
+    text: &str,
+    include: &[String],
+    exclude: &[String],
+    hard_cap: usize,
+) -> Parsed {
     let mut p = Parsed::default();
     for raw in text.lines() {
         let line = raw.trim();
@@ -285,7 +290,10 @@ pub fn collapse_labels_with(samples: Vec<Sample>, request_labels: bool) -> Vec<S
                 kept.entry("path".to_string()).or_insert(v);
             }
         }
-        let key = (s.metric.clone(), kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let key = (
+            s.metric.clone(),
+            kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        );
         match index.get(&key) {
             Some(&i) => out[i].value += s.value,
             None => {
@@ -303,7 +311,11 @@ pub fn collapse_labels_with(samples: Vec<Sample>, request_labels: bool) -> Vec<S
 
 /// Health probe: `up` (1 on 2xx) + the raw `http_status`.
 pub fn parse_health(status: u16) -> Parsed {
-    let up = if (200..300).contains(&status) { 1.0 } else { 0.0 };
+    let up = if (200..300).contains(&status) {
+        1.0
+    } else {
+        0.0
+    };
     Parsed {
         samples: vec![
             Sample {
@@ -454,13 +466,19 @@ nan_metric NaN
         assert_eq!(get.value, 1027.0);
         assert_eq!(get.labels["path"], "/a\"b");
         assert_eq!(get.labels["code"], "200");
-        assert!(p.samples.iter().any(|s| s.metric == "http_request_duration_seconds_bucket"
-            && s.labels["le"] == "+Inf"
-            && s.value == 9.0));
+        assert!(p
+            .samples
+            .iter()
+            .any(|s| s.metric == "http_request_duration_seconds_bucket"
+                && s.labels["le"] == "+Inf"
+                && s.value == 9.0));
         let p2 = parse_prometheus(t, &[], &["*_bucket".into()], SERIES_CAP);
         assert!(!p2.samples.iter().any(|s| s.metric.ends_with("_bucket")));
         assert!(!p2.samples.iter().any(|s| s.value.is_nan()), "NaN dropped");
-        assert!(p2.samples.iter().any(|s| s.metric == "go_goroutines" && s.value == 84.0));
+        assert!(p2
+            .samples
+            .iter()
+            .any(|s| s.metric == "go_goroutines" && s.value == 84.0));
         assert!(!p2.capped);
     }
 
@@ -481,33 +499,63 @@ nan_metric NaN
         let mut t = String::new();
         for i in 0..40 {
             for le in ["0.1", "0.5", "1", "+Inf"] {
-                t.push_str(&format!("http_request_duration_seconds_bucket{{path=\"/p{i}\",le=\"{le}\"}} 1\n"));
+                t.push_str(&format!(
+                    "http_request_duration_seconds_bucket{{path=\"/p{i}\",le=\"{le}\"}} 1\n"
+                ));
             }
         }
         // …then per-path _count / _sum (an API gateway has hundreds of paths)…
         for i in 0..40 {
-            t.push_str(&format!("http_request_duration_seconds_count{{path=\"/p{i}\"}} 9\n"));
-            t.push_str(&format!("http_request_duration_seconds_sum{{path=\"/p{i}\"}} 1.5\n"));
+            t.push_str(&format!(
+                "http_request_duration_seconds_count{{path=\"/p{i}\"}} 9\n"
+            ));
+            t.push_str(&format!(
+                "http_request_duration_seconds_sum{{path=\"/p{i}\"}} 1.5\n"
+            ));
         }
         // …and only then the request counter.
         for i in 0..40 {
-            t.push_str(&format!("http_requests_total{{path=\"/p{i}\",code=\"200\"}} 5\n"));
+            t.push_str(&format!(
+                "http_requests_total{{path=\"/p{i}\",code=\"200\"}} 5\n"
+            ));
         }
         let p = parse_prometheus(&t, &[], &[], 100);
         assert!(p.capped);
         assert_eq!(p.samples.len(), 100);
-        assert_eq!(p.samples.iter().filter(|s| s.metric == "http_requests_total").count(), 40, "tier 0 kept whole");
         assert_eq!(
-            p.samples.iter().filter(|s| s.metric.ends_with("_count") || s.metric.ends_with("_sum")).count(),
+            p.samples
+                .iter()
+                .filter(|s| s.metric == "http_requests_total")
+                .count(),
+            40,
+            "tier 0 kept whole"
+        );
+        assert_eq!(
+            p.samples
+                .iter()
+                .filter(|s| s.metric.ends_with("_count") || s.metric.ends_with("_sum"))
+                .count(),
             60,
             "tier 1 fills the rest"
         );
-        assert_eq!(p.samples.iter().filter(|s| s.metric.ends_with("_bucket")).count(), 0, "buckets go first");
+        assert_eq!(
+            p.samples
+                .iter()
+                .filter(|s| s.metric.ends_with("_bucket"))
+                .count(),
+            0,
+            "buckets go first"
+        );
     }
 
     #[test]
     fn prometheus_malformed_labels_counted() {
-        let p = parse_prometheus("a{x=\"unterminated} 1\nb{=\"v\"} 2\nc{x=\"v\" 3\n", &[], &[], 10);
+        let p = parse_prometheus(
+            "a{x=\"unterminated} 1\nb{=\"v\"} 2\nc{x=\"v\" 3\n",
+            &[],
+            &[],
+            10,
+        );
         assert_eq!(p.samples.len(), 0);
         assert_eq!(p.parse_errors, 3);
     }
@@ -524,7 +572,12 @@ nan_metric NaN
         let p = parse_json(
             body,
             &[
-                m("memory_stats.sys", Some("mem_sys_bytes"), None, Unit::BytesHuman),
+                m(
+                    "memory_stats.sys",
+                    Some("mem_sys_bytes"),
+                    None,
+                    Unit::BytesHuman,
+                ),
                 m("go_routines_num", Some("goroutines"), None, Unit::Number),
                 m("build_info.version", None, Some("version"), Unit::Number),
                 m("arr.0.v", Some("arr_v"), None, Unit::Number),
@@ -532,11 +585,29 @@ nan_metric NaN
             ],
         );
         assert_eq!(
-            p.samples.iter().find(|s| s.metric == "mem_sys_bytes").unwrap().value,
+            p.samples
+                .iter()
+                .find(|s| s.metric == "mem_sys_bytes")
+                .unwrap()
+                .value,
             27.0 * 1024.0 * 1024.0
         );
-        assert_eq!(p.samples.iter().find(|s| s.metric == "goroutines").unwrap().value, 88.0);
-        assert_eq!(p.samples.iter().find(|s| s.metric == "arr_v").unwrap().value, 7.0);
+        assert_eq!(
+            p.samples
+                .iter()
+                .find(|s| s.metric == "goroutines")
+                .unwrap()
+                .value,
+            88.0
+        );
+        assert_eq!(
+            p.samples
+                .iter()
+                .find(|s| s.metric == "arr_v")
+                .unwrap()
+                .value,
+            7.0
+        );
         assert_eq!(p.labels["version"], "5.02.25");
         assert_eq!(p.parse_errors, 1);
         assert_eq!(parse_json("not json", &[]).parse_errors, 1);
@@ -544,14 +615,29 @@ nan_metric NaN
 
     #[test]
     fn units() {
-        assert_eq!(parse_unit(&json!("1.5 GiB"), &Unit::BytesHuman), Some(1.5 * 1073741824.0));
-        assert_eq!(parse_unit(&json!("512Mi"), &Unit::BytesHuman), Some(512.0 * 1048576.0));
-        assert_eq!(parse_unit(&json!("2GB"), &Unit::BytesHuman), Some(2.0 * 1073741824.0));
+        assert_eq!(
+            parse_unit(&json!("1.5 GiB"), &Unit::BytesHuman),
+            Some(1.5 * 1073741824.0)
+        );
+        assert_eq!(
+            parse_unit(&json!("512Mi"), &Unit::BytesHuman),
+            Some(512.0 * 1048576.0)
+        );
+        assert_eq!(
+            parse_unit(&json!("2GB"), &Unit::BytesHuman),
+            Some(2.0 * 1073741824.0)
+        );
         assert_eq!(parse_unit(&json!("1024"), &Unit::BytesHuman), Some(1024.0));
         assert_eq!(parse_unit(&json!(4096), &Unit::BytesHuman), Some(4096.0));
         assert_eq!(parse_unit(&json!("3 parsecs"), &Unit::BytesHuman), None);
-        assert_eq!(parse_unit(&json!("1m30s"), &Unit::DurationHuman), Some(90.0));
-        assert_eq!(parse_unit(&json!("250ms"), &Unit::DurationHuman), Some(0.25));
+        assert_eq!(
+            parse_unit(&json!("1m30s"), &Unit::DurationHuman),
+            Some(90.0)
+        );
+        assert_eq!(
+            parse_unit(&json!("250ms"), &Unit::DurationHuman),
+            Some(0.25)
+        );
         assert_eq!(parse_unit(&json!("1h"), &Unit::DurationHuman), Some(3600.0));
         assert_eq!(parse_unit(&json!("12"), &Unit::DurationHuman), Some(12.0));
         assert_eq!(parse_unit(&json!("45%"), &Unit::Percent), Some(45.0));
@@ -564,15 +650,38 @@ nan_metric NaN
     fn collapse_sums_across_dropped_labels_and_keeps_code_and_le() {
         let mk = |m: &str, l: &[(&str, &str)], v: f64| Sample {
             metric: m.into(),
-            labels: l.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            labels: l
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             value: v,
         };
         let out = collapse_labels(vec![
-            mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 5.0),
-            mk("http_requests_total", &[("path", "/b"), ("method", "POST"), ("code", "200")], 7.0),
-            mk("http_requests_total", &[("path", "/b"), ("code", "500")], 1.0),
-            mk("http_request_duration_seconds_bucket", &[("path", "/a"), ("le", "0.1")], 3.0),
-            mk("http_request_duration_seconds_bucket", &[("path", "/b"), ("le", "0.1")], 4.0),
+            mk(
+                "http_requests_total",
+                &[("path", "/a"), ("method", "GET"), ("code", "200")],
+                5.0,
+            ),
+            mk(
+                "http_requests_total",
+                &[("path", "/b"), ("method", "POST"), ("code", "200")],
+                7.0,
+            ),
+            mk(
+                "http_requests_total",
+                &[("path", "/b"), ("code", "500")],
+                1.0,
+            ),
+            mk(
+                "http_request_duration_seconds_bucket",
+                &[("path", "/a"), ("le", "0.1")],
+                3.0,
+            ),
+            mk(
+                "http_request_duration_seconds_bucket",
+                &[("path", "/b"), ("le", "0.1")],
+                4.0,
+            ),
             mk("up", &[], 1.0),
         ]);
         assert_eq!(out.len(), 4);
@@ -589,16 +698,39 @@ nan_metric NaN
     fn collapse_keeps_path_and_method_only_when_asked_and_never_on_buckets() {
         let mk = |m: &str, l: &[(&str, &str)], v: f64| Sample {
             metric: m.into(),
-            labels: l.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            labels: l
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             value: v,
         };
         let out = collapse_labels_with(
             vec![
-                mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 5.0),
-                mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 2.0),
-                mk("http_server_requests_seconds_count", &[("uri", "/b"), ("method", "POST"), ("status", "200")], 7.0),
-                mk("http_request_duration_seconds_bucket", &[("path", "/a"), ("le", "0.1")], 3.0),
-                mk("http_request_duration_seconds_bucket", &[("path", "/b"), ("le", "0.1")], 4.0),
+                mk(
+                    "http_requests_total",
+                    &[("path", "/a"), ("method", "GET"), ("code", "200")],
+                    5.0,
+                ),
+                mk(
+                    "http_requests_total",
+                    &[("path", "/a"), ("method", "GET"), ("code", "200")],
+                    2.0,
+                ),
+                mk(
+                    "http_server_requests_seconds_count",
+                    &[("uri", "/b"), ("method", "POST"), ("status", "200")],
+                    7.0,
+                ),
+                mk(
+                    "http_request_duration_seconds_bucket",
+                    &[("path", "/a"), ("le", "0.1")],
+                    3.0,
+                ),
+                mk(
+                    "http_request_duration_seconds_bucket",
+                    &[("path", "/b"), ("le", "0.1")],
+                    4.0,
+                ),
                 mk("mem_sys_bytes", &[("path", "/x")], 1.0),
             ],
             true,
@@ -619,7 +751,13 @@ nan_metric NaN
     fn health_probe() {
         let p = parse_health(503);
         assert!(p.samples.iter().any(|s| s.metric == "up" && s.value == 0.0));
-        assert!(p.samples.iter().any(|s| s.metric == "http_status" && s.value == 503.0));
-        assert!(parse_health(200).samples.iter().any(|s| s.metric == "up" && s.value == 1.0));
+        assert!(p
+            .samples
+            .iter()
+            .any(|s| s.metric == "http_status" && s.value == 503.0));
+        assert!(parse_health(200)
+            .samples
+            .iter()
+            .any(|s| s.metric == "up" && s.value == 1.0));
     }
 }

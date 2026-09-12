@@ -121,7 +121,11 @@ impl GoldenTasksRepo {
 
     /// List golden tasks for a workspace, optionally narrowed to one repo, newest
     /// first.
-    pub async fn list(&self, workspace_id: &str, repo_key: Option<&str>) -> Result<Vec<GoldenTask>> {
+    pub async fn list(
+        &self,
+        workspace_id: &str,
+        repo_key: Option<&str>,
+    ) -> Result<Vec<GoldenTask>> {
         let rows = if let Some(rk) = repo_key {
             sqlx::query(
                 "SELECT * FROM eval_golden_tasks WHERE workspace_id = ? AND repo_key = ? ORDER BY created_at DESC",
@@ -198,15 +202,21 @@ pub struct EvalMatricesRepo {
 }
 
 fn row_to_matrix(r: &sqlx::sqlite::SqliteRow) -> Result<EvalMatrix> {
-    let providers: Vec<String> =
-        serde_json::from_str(&r.try_get::<String, _>("providers_json").unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_default();
-    let skills: Vec<String> =
-        serde_json::from_str(&r.try_get::<String, _>("skills_json").unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_default();
-    let prompts: Vec<MatrixPrompt> =
-        serde_json::from_str(&r.try_get::<String, _>("prompts_json").unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_default();
+    let providers: Vec<String> = serde_json::from_str(
+        &r.try_get::<String, _>("providers_json")
+            .unwrap_or_else(|_| "[]".into()),
+    )
+    .unwrap_or_default();
+    let skills: Vec<String> = serde_json::from_str(
+        &r.try_get::<String, _>("skills_json")
+            .unwrap_or_else(|_| "[]".into()),
+    )
+    .unwrap_or_default();
+    let prompts: Vec<MatrixPrompt> = serde_json::from_str(
+        &r.try_get::<String, _>("prompts_json")
+            .unwrap_or_else(|_| "[]".into()),
+    )
+    .unwrap_or_default();
     Ok(EvalMatrix {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
@@ -333,11 +343,27 @@ mod tests {
         let repo = GoldenTasksRepo::new(pool);
 
         let a = repo
-            .create("ws1", "repoA", &input("task A"), "manual", None, None, "root")
+            .create(
+                "ws1",
+                "repoA",
+                &input("task A"),
+                "manual",
+                None,
+                None,
+                "root",
+            )
             .await
             .unwrap();
         let _b = repo
-            .create("ws1", "repoB", &input("task B"), "manual", None, None, "root")
+            .create(
+                "ws1",
+                "repoB",
+                &input("task B"),
+                "manual",
+                None,
+                None,
+                "root",
+            )
             .await
             .unwrap();
         assert_eq!(a.origin, "manual");
@@ -365,7 +391,15 @@ mod tests {
         let repo = GoldenTasksRepo::new(pool);
         assert!(repo.find_by_source_iter("iterX").await.unwrap().is_none());
         let g = repo
-            .create("ws1", "repoA", &input("reg"), "regression", Some("ev1"), Some("iterX"), "root")
+            .create(
+                "ws1",
+                "repoA",
+                &input("reg"),
+                "regression",
+                Some("ev1"),
+                Some("iterX"),
+                "root",
+            )
             .await
             .unwrap();
         assert_eq!(g.origin, "regression");
@@ -373,7 +407,15 @@ mod tests {
         assert_eq!(found.map(|t| t.id), Some(g.id));
         // The unique partial index rejects a second regression from the same iter.
         let dup = repo
-            .create("ws1", "repoA", &input("reg2"), "regression", Some("ev1"), Some("iterX"), "root")
+            .create(
+                "ws1",
+                "repoA",
+                &input("reg2"),
+                "regression",
+                Some("ev1"),
+                Some("iterX"),
+                "root",
+            )
             .await;
         assert!(dup.is_err());
     }

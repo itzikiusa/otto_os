@@ -172,7 +172,10 @@ async fn mongo_run() {
         ..Default::default()
     };
     let json_result = d.run(&cfg, &json_req).await.expect("run(json find)");
-    assert!(json_result.rows.len() >= 4, "json find should return >=4 rows");
+    assert!(
+        json_result.rows.len() >= 4,
+        "json find should return >=4 rows"
+    );
 }
 
 /// completion offers the $match operator and the customers collection.
@@ -227,7 +230,9 @@ async fn mongo_completion_collection_and_method() {
     };
     let c = d.completion(&cfg, &coll_ctx).await.expect("completion");
     assert!(
-        c.items.iter().any(|i| i.label == "orders" && i.kind == CompletionKind::Collection),
+        c.items
+            .iter()
+            .any(|i| i.label == "orders" && i.kind == CompletionKind::Collection),
         "db. should list collections"
     );
     assert!(
@@ -243,7 +248,9 @@ async fn mongo_completion_collection_and_method() {
     };
     let m = d.completion(&cfg, &method_ctx).await.expect("completion");
     assert!(
-        m.items.iter().any(|i| i.label == "find" && i.kind == CompletionKind::Command),
+        m.items
+            .iter()
+            .any(|i| i.label == "find" && i.kind == CompletionKind::Command),
         "db.orders. should offer methods"
     );
 }
@@ -273,8 +280,14 @@ async fn mongo_completion_fields_index_first() {
             .score
             .unwrap_or(0)
     };
-    assert!(field("customerId") > field("totalCents"), "indexed field ranks first");
-    assert!(field("status") > field("totalCents"), "indexed field ranks first");
+    assert!(
+        field("customerId") > field("totalCents"),
+        "indexed field ranks first"
+    );
+    assert!(
+        field("status") > field("totalCents"),
+        "indexed field ranks first"
+    );
 }
 
 /// Embedded-field support: `db.profiles.find({ ` offers the parent `address`
@@ -300,7 +313,10 @@ async fn mongo_completion_embedded_paths() {
         .filter(|i| i.kind == CompletionKind::Field)
         .map(|i| i.label.as_str())
         .collect();
-    assert!(labels.contains(&"address"), "parent path offered: {labels:?}");
+    assert!(
+        labels.contains(&"address"),
+        "parent path offered: {labels:?}"
+    );
     assert!(
         labels.contains(&"address.city"),
         "indexed embedded path offered: {labels:?}"
@@ -330,7 +346,10 @@ async fn mongo_import_rows_inserts_batches() {
     let d = MongoDriver::default();
     let cfg = cfg();
     let coll = "e2e_import_scratch";
-    let stmt = |s: &str| QueryRequest { statement: s.into(), ..Default::default() };
+    let stmt = |s: &str| QueryRequest {
+        statement: s.into(),
+        ..Default::default()
+    };
 
     // Clean slate — deleteMany IS a parsed console op (drop() is not; a silently
     // failed cleanup left duplicate _ids behind for the next run).
@@ -376,5 +395,8 @@ async fn mongo_query_plan_returns_stage_tree() {
         .await
         .expect("query_plan");
     assert_eq!(plan.engine, "mongodb");
-    assert!(!plan.root.op.is_empty(), "plan root should carry a stage op");
+    assert!(
+        !plan.root.op.is_empty(),
+        "plan root should carry a stage op"
+    );
 }

@@ -205,8 +205,14 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/test", post(test::<S>))
         .route("/connections/{id}/db/capabilities", get(capabilities::<S>))
         .route("/connections/{id}/db/schema", get(schema_root::<S>))
-        .route("/connections/{id}/db/schema/children", post(schema_children::<S>))
-        .route("/connections/{id}/db/search-objects", post(search_objects::<S>))
+        .route(
+            "/connections/{id}/db/schema/children",
+            post(schema_children::<S>),
+        )
+        .route(
+            "/connections/{id}/db/search-objects",
+            post(search_objects::<S>),
+        )
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
@@ -277,15 +283,24 @@ async fn check_conn_role<S: DbViewerCtx>(
     user: &User,
     conn: &Connection,
     min: WorkspaceRole,
- ) -> Result<(), Error> {
+) -> Result<(), Error> {
     let enforced = if let Some(pool) = ctx.pool() {
-        crate::access::policy(&pool, &conn.id).await?.mode == otto_core::access::AccessMode::Enforced
-    } else { false };
+        crate::access::policy(&pool, &conn.id).await?.mode
+            == otto_core::access::AccessMode::Enforced
+    } else {
+        false
+    };
     let min = if enforced { WorkspaceRole::Viewer } else { min };
     if enforced {
-        let pool = ctx.pool().ok_or_else(|| Error::Forbidden("resource authorization unavailable".into()))?;
+        let pool = ctx
+            .pool()
+            .ok_or_else(|| Error::Forbidden("resource authorization unavailable".into()))?;
         let current = crate::access::current_user(&pool, conn, &user.id).await?;
-        if !otto_rbac::resource_access::ResourceAccess::new(pool).evaluate(&current, &crate::access::target(&conn.id, None), "discover").await?.allowed {
+        if !otto_rbac::resource_access::ResourceAccess::new(pool)
+            .evaluate(&current, &crate::access::target(&conn.id, None), "discover")
+            .await?
+            .allowed
+        {
             return Err(Error::NotFound("connection".into()));
         }
     }
@@ -370,7 +385,12 @@ async fn test_unsaved<S: DbViewerCtx>(
         .check(&user, &req.workspace_id, WorkspaceRole::Editor)
         .await
         .map_err(|_| otto_core::Error::Forbidden("editor role required".into()))?;
-    Ok(Json(ctx.db().test_config(req.kind, req.params, req.secret).await?).into_response())
+    Ok(Json(
+        ctx.db()
+            .test_config(req.kind, req.params, req.secret)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn capabilities<S: DbViewerCtx>(
@@ -403,7 +423,13 @@ async fn schema_children<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     Ok(Json(
         ctx.db()
-            .schema_children_with_counts(&id, &user.id, &req.path, req.filter.as_deref(), req.counts)
+            .schema_children_with_counts(
+                &id,
+                &user.id,
+                &req.path,
+                req.filter.as_deref(),
+                req.counts,
+            )
             .await?,
     )
     .into_response())
@@ -430,7 +456,12 @@ async fn object_detail<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().object_detail(&id, &user.id, &req.path, req.approx_row_count).await?).into_response())
+    Ok(Json(
+        ctx.db()
+            .object_detail(&id, &user.id, &req.path, req.approx_row_count)
+            .await?,
+    )
+    .into_response())
 }
 
 /// Read-only relationship graph (ERD) for a schema: tables + columns + FK edges.
@@ -446,7 +477,12 @@ async fn schema_graph<S: DbViewerCtx>(
     // Default to 60 tables; clamp so a request can't fan out into thousands of
     // per-table introspection round-trips.
     let max_tables = req.max_tables.unwrap_or(60).clamp(1, 200);
-    Ok(Json(ctx.db().schema_graph(&id, &user.id, &req.schema, max_tables).await?).into_response())
+    Ok(Json(
+        ctx.db()
+            .schema_graph(&id, &user.id, &req.schema, max_tables)
+            .await?,
+    )
+    .into_response())
 }
 
 async fn run_query<S: DbViewerCtx>(
@@ -498,7 +534,10 @@ async fn query_plan<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let plan = ctx.db().query_plan(&id, &user.id, &req.statement, node).await?;
+    let plan = ctx
+        .db()
+        .query_plan(&id, &user.id, &req.statement, node)
+        .await?;
     Ok(Json(plan).into_response())
 }
 
@@ -683,7 +722,15 @@ async fn export_query<S: DbViewerCtx>(
             ChannelWriter { tx: writer_tx },
         ));
         if let Err(e) = db
-            .export_to_writer(&conn_id, &uid, &statement, node.as_deref(), export_format, None, w)
+            .export_to_writer(
+                &conn_id,
+                &uid,
+                &statement,
+                node.as_deref(),
+                export_format,
+                None,
+                w,
+            )
             .await
         {
             // Surface a mid-stream failure as a stream error so the download
@@ -1088,7 +1135,9 @@ async fn mongosh_info<S: DbViewerCtx>(
     }
     let probe = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new("mongosh").arg("--version").output(),
+        tokio::process::Command::new("mongosh")
+            .arg("--version")
+            .output(),
     )
     .await;
     let info = match probe {
@@ -1116,7 +1165,9 @@ async fn list_saved<S: DbViewerCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Viewer)
+        .await?;
     // Root sees all saved queries in the workspace; non-root callers see only
     // their own (#L12). The `created_by` column has been present since 0021, so
     // no legacy-null concern here.
@@ -1134,7 +1185,9 @@ async fn create_saved<S: DbViewerCtx>(
     Path(wid): Path<Id>,
     Json(req): Json<NewSavedQueryReq>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Editor)
+        .await?;
     let saved = ctx
         .db()
         .create_saved(NewSavedQuery {
@@ -1158,7 +1211,9 @@ async fn update_saved<S: DbViewerCtx>(
     // (owner / ws-Admin / root) — saved queries are owner-private. Unknown id →
     // `get_saved` errors (404) before any mutation.
     let saved = ctx.db().get_saved(&qid).await?;
-    if let Some(conn) = &saved.connection_id { ctx.db().authorize(conn, &user.id, None, "db_query").await?; }
+    if let Some(conn) = &saved.connection_id {
+        ctx.db().authorize(conn, &user.id, None, "db_query").await?;
+    }
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1178,7 +1233,9 @@ async fn delete_saved<S: DbViewerCtx>(
     // Deletion requires editor on the workspace the query was saved in, AND
     // ownership (owner / ws-Admin / root) — saved queries are owner-private.
     let saved = ctx.db().get_saved(&qid).await?;
-    if let Some(conn) = &saved.connection_id { ctx.db().authorize(conn, &user.id, None, "db_query").await?; }
+    if let Some(conn) = &saved.connection_id {
+        ctx.db().authorize(conn, &user.id, None, "db_query").await?;
+    }
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1194,7 +1251,9 @@ async fn list_dashboards<S: DbViewerCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Viewer)
+        .await?;
     // Root sees all dashboards; non-root sees only their own (#L13).
     let dashboards = if user.is_root {
         ctx.db().list_dashboards(&wid).await?
@@ -1210,7 +1269,9 @@ async fn create_dashboard<S: DbViewerCtx>(
     Path(wid): Path<Id>,
     Json(req): Json<CreateDashboardReq>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Editor)
+        .await?;
     Ok(Json(ctx.db().create_dashboard(&wid, &req.name, &user.id).await?).into_response())
 }
 
@@ -1271,7 +1332,9 @@ async fn list_widgets<S: DbViewerCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(wid): Path<Id>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Viewer)
+        .await?;
     // Root sees all widgets; non-root sees only their own (#L13).
     let widgets = if user.is_root {
         ctx.db().list_widgets(&wid).await?
@@ -1287,7 +1350,9 @@ async fn create_widget<S: DbViewerCtx>(
     Path(wid): Path<Id>,
     Json(req): Json<CreateWidgetReq>,
 ) -> ApiResult<Response> {
-    ctx.roles().check(&user, &wid, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &wid, WorkspaceRole::Editor)
+        .await?;
     let widget = ctx
         .db()
         .create_widget(NewWidget {
@@ -1312,7 +1377,9 @@ async fn update_widget<S: DbViewerCtx>(
     Json(req): Json<UpdateWidgetReq>,
 ) -> ApiResult<Response> {
     let widget = ctx.db().get_widget(&id).await?;
-    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
+    ctx.db()
+        .authorize(&widget.connection_id, &user.id, None, "db_query")
+        .await?;
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1338,7 +1405,9 @@ async fn delete_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let widget = ctx.db().get_widget(&id).await?;
-    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
+    ctx.db()
+        .authorize(&widget.connection_id, &user.id, None, "db_query")
+        .await?;
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1353,7 +1422,9 @@ async fn run_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
     let widget = ctx.db().get_widget(&id).await?;
-    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
+    ctx.db()
+        .authorize(&widget.connection_id, &user.id, None, "db_query")
+        .await?;
     // Security (audit S7): `run_widget` executes the widget's stored statement
     // through the SAME `DbViewerService::run` path as `run_query` — which can
     // run arbitrary SQL/commands, including writes and DDL. It must therefore
@@ -1467,7 +1538,11 @@ mod tests {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
             .await
             .expect("in-memory pool");
         sqlx::migrate!("../otto-state/migrations")
@@ -1716,6 +1791,10 @@ mod tests {
         require_owner_or_ws_admin(&root_ctx, &user(true), &alice_id, &ws)
             .await
             .expect("root allowed");
-        assert_eq!(*root_stub.last_min.lock().unwrap(), None, "root short-circuits");
+        assert_eq!(
+            *root_stub.last_min.lock().unwrap(),
+            None,
+            "root short-circuits"
+        );
     }
 }

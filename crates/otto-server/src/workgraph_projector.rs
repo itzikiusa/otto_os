@@ -237,7 +237,12 @@ async fn ingest_trail(
     if !matches!(kind.as_str(), "tool" | "command" | "skill") {
         return;
     }
-    let item = match ctx.workgraph.repo().find_session_item(workspace_id, session_id).await {
+    let item = match ctx
+        .workgraph
+        .repo()
+        .find_session_item(workspace_id, session_id)
+        .await
+    {
         Ok(Some(it)) => it,
         _ => return,
     };
@@ -451,13 +456,12 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         Ok(r) => r,
         Err(_) => return,
     };
-    let repo_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM repos WHERE id = ?")
-            .bind(&review.repo_id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .ok()
-            .flatten();
+    let repo_name: Option<String> = sqlx::query_scalar("SELECT name FROM repos WHERE id = ?")
+        .bind(&review.repo_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
     let repo_label = repo_name.clone().unwrap_or_else(|| review.repo_id.clone());
     let status = WorkStatus::from_source(WorkKind::Review, &enum_str(&review.status));
     let title = format!("Review · {} PR #{}", repo_label, review.pr_number);
@@ -528,7 +532,10 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         cost_so_far: Some(0.0),
         risk_level: risk(WorkKind::Pr, &repo_label),
         result_summary: None,
-        context_summary: Some(format!("Pull request #{} in {}", review.pr_number, repo_label)),
+        context_summary: Some(format!(
+            "Pull request #{} in {}",
+            review.pr_number, repo_label
+        )),
         started_by_id: None,
     };
     let pr_item = match ctx.workgraph.record(pr_up).await {
@@ -584,7 +591,10 @@ async fn upsert_product_story_row(ctx: &ServerCtx, story: &otto_state::ProductSt
         cost_so_far: Some(0.0),
         risk_level: risk(WorkKind::ProductStory, &story.title),
         result_summary: None,
-        context_summary: Some(format!("{} story · stage {}", story.source_kind, story.stage)),
+        context_summary: Some(format!(
+            "{} story · stage {}",
+            story.source_kind, story.stage
+        )),
         started_by_id: None,
     };
     if let Err(e) = ctx.workgraph.record(up).await {
@@ -633,16 +643,15 @@ pub async fn refresh_item_cost(ctx: &ServerCtx, workspace_id: &Id, item: &otto_s
     }
     if let Some(tot) = ctx.usage.session_totals_for(&item.source_id, None).await {
         if tot.cost_usd > 0.0 && (tot.cost_usd - item.cost_so_far).abs() > f64::EPSILON {
-            let _ = ctx.workgraph.set_cost(workspace_id, &item.id, tot.cost_usd).await;
+            let _ = ctx
+                .workgraph
+                .set_cost(workspace_id, &item.id, tot.cost_usd)
+                .await;
         }
     }
 }
 
-async fn backfill_workspace(
-    ctx: &ServerCtx,
-    ws_id: &Id,
-    all_stories: &[otto_state::ProductStory],
-) {
+async fn backfill_workspace(ctx: &ServerCtx, ws_id: &Id, all_stories: &[otto_state::ProductStory]) {
     // Sessions (+ external triggers).
     if let Ok(sessions) = ctx.manager.list_by_workspace(ws_id).await {
         for s in &sessions {

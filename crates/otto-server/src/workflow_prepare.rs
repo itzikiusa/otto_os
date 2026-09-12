@@ -20,7 +20,12 @@ use crate::state::ServerCtx;
 /// already knows the exact key) → the first Jira-key-shaped token found by
 /// scanning `input.prompt`, then `input.msg` (free text — must be scanned).
 pub(crate) fn extract_jira_key(params: &Value, input: &Value) -> Option<String> {
-    if let Some(k) = params.get("key").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(k) = params
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return Some(k.to_string());
     }
     if let Some(k) = input
@@ -115,7 +120,11 @@ pub(crate) async fn resolve_jira_account(
             return Ok(a);
         }
     }
-    let all = ctx.issues_store.list_all_accounts().await.map_err(|e| e.to_string())?;
+    let all = ctx
+        .issues_store
+        .list_all_accounts()
+        .await
+        .map_err(|e| e.to_string())?;
     all.into_iter()
         .find(|a| matches!(a.provider, otto_core::domain::IssueProviderKind::Jira))
         .ok_or_else(|| "no Jira account configured".to_string())
@@ -154,8 +163,11 @@ pub(crate) fn render_issue_md(issue: &otto_issues::IssueFull) -> String {
         md.push_str("\n\n");
     }
 
-    let custom_fields: Vec<&otto_issues::JiraField> =
-        issue.fields.iter().filter(|f| !f.value.trim().is_empty()).collect();
+    let custom_fields: Vec<&otto_issues::JiraField> = issue
+        .fields
+        .iter()
+        .filter(|f| !f.value.trim().is_empty())
+        .collect();
     if !custom_fields.is_empty() {
         md.push_str("## Fields\n\n");
         for f in custom_fields {
@@ -167,7 +179,10 @@ pub(crate) fn render_issue_md(issue: &otto_issues::IssueFull) -> String {
     if !issue.comments.is_empty() {
         md.push_str("## Comments\n\n");
         for c in &issue.comments {
-            md.push_str(&format!("**{}** ({}):\n{}\n\n", c.author, c.created, c.body_md));
+            md.push_str(&format!(
+                "**{}** ({}):\n{}\n\n",
+                c.author, c.created, c.body_md
+            ));
         }
     }
 
@@ -185,7 +200,10 @@ pub(crate) fn render_issue_md(issue: &otto_issues::IssueFull) -> String {
     if !issue.attachments.is_empty() {
         md.push_str("## Attachments\n\n");
         for a in &issue.attachments {
-            md.push_str(&format!("- {} ({}, {} bytes) — {}\n", a.filename, a.mime, a.size, a.author));
+            md.push_str(&format!(
+                "- {} ({}, {} bytes) — {}\n",
+                a.filename, a.mime, a.size, a.author
+            ));
         }
         md.push('\n');
     }
@@ -200,11 +218,26 @@ mod tests {
 
     #[test]
     fn key_extraction_order_and_shape() {
-        assert_eq!(extract_jira_key(&json!({"key":"AB-1"}), &json!({})), Some("AB-1".into()));
-        assert_eq!(extract_jira_key(&json!({}), &json!({"jira_ticket":"PROJ-9"})), Some("PROJ-9".into()));
-        assert_eq!(extract_jira_key(&json!({}), &json!({"prompt":"please do PROJ-123 now"})), Some("PROJ-123".into()));
-        assert_eq!(extract_jira_key(&json!({}), &json!({"msg":"see K2X-77."})), Some("K2X-77".into()));
-        assert_eq!(extract_jira_key(&json!({}), &json!({"prompt":"lowercase ab-1 or A-2 or X9"})), None);
+        assert_eq!(
+            extract_jira_key(&json!({"key":"AB-1"}), &json!({})),
+            Some("AB-1".into())
+        );
+        assert_eq!(
+            extract_jira_key(&json!({}), &json!({"jira_ticket":"PROJ-9"})),
+            Some("PROJ-9".into())
+        );
+        assert_eq!(
+            extract_jira_key(&json!({}), &json!({"prompt":"please do PROJ-123 now"})),
+            Some("PROJ-123".into())
+        );
+        assert_eq!(
+            extract_jira_key(&json!({}), &json!({"msg":"see K2X-77."})),
+            Some("K2X-77".into())
+        );
+        assert_eq!(
+            extract_jira_key(&json!({}), &json!({"prompt":"lowercase ab-1 or A-2 or X9"})),
+            None
+        );
         assert_eq!(extract_jira_key(&json!({}), &json!({})), None);
     }
 
@@ -213,11 +246,17 @@ mod tests {
     #[test]
     fn key_extraction_precedence() {
         assert_eq!(
-            extract_jira_key(&json!({"key":"AB-1"}), &json!({"jira_ticket": "CD-2", "prompt": "do EF-3"})),
+            extract_jira_key(
+                &json!({"key":"AB-1"}),
+                &json!({"jira_ticket": "CD-2", "prompt": "do EF-3"})
+            ),
             Some("AB-1".into())
         );
         assert_eq!(
-            extract_jira_key(&json!({}), &json!({"jira_ticket": "CD-2", "prompt": "do EF-3"})),
+            extract_jira_key(
+                &json!({}),
+                &json!({"jira_ticket": "CD-2", "prompt": "do EF-3"})
+            ),
             Some("CD-2".into())
         );
         assert_eq!(

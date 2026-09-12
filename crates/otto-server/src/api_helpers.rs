@@ -36,7 +36,7 @@ fn tokenize(input: &str) -> Vec<String> {
             '\\' => {
                 has_token = true;
                 match chars.next() {
-                    Some('\n') => {}            // line continuation
+                    Some('\n') => {} // line continuation
                     Some('\r') => {
                         if chars.peek() == Some(&'\n') {
                             chars.next();
@@ -206,8 +206,8 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
             // Flags that take a value we don't model — consume the value so it
             // isn't mistaken for the URL.
             "-A" | "--user-agent" | "-e" | "--referer" | "-b" | "--cookie" | "-o" | "--output"
-            | "--url" | "-m" | "--max-time" | "--connect-timeout" | "-x" | "--proxy"
-            | "-w" | "--write-out" | "-T" | "--upload-file" | "-E" | "--cert" | "--key" => {
+            | "--url" | "-m" | "--max-time" | "--connect-timeout" | "-x" | "--proxy" | "-w"
+            | "--write-out" | "-T" | "--upload-file" | "-E" | "--cert" | "--key" => {
                 let val = take_val(inline_val);
                 if flag == "--url" {
                     if let Some(v) = val {
@@ -264,9 +264,11 @@ pub fn parse_curl(input: &str) -> Result<ParsedCurl> {
                 query.push(part);
             }
         } else {
-            let ct = explicit_content_type.as_deref().unwrap_or("").to_lowercase();
-            let looks_form = is_urlencoded_data
-                || ct.contains("application/x-www-form-urlencoded");
+            let ct = explicit_content_type
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            let looks_form = is_urlencoded_data || ct.contains("application/x-www-form-urlencoded");
             let looks_json = ct.contains("application/json") || is_json(&combined_data);
             if looks_form && !looks_json {
                 body_mode = "form".to_string();
@@ -502,10 +504,7 @@ fn enabled_entries(v: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(arr) = v.as_array() {
         for item in arr {
-            let enabled = item
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let enabled = item.get("enabled").and_then(Value::as_bool).unwrap_or(true);
             if !enabled {
                 continue;
             }
@@ -839,7 +838,10 @@ mod tests {
         let p = parse_curl("curl 'https://api.example.com/search?q=rust&page=2'").unwrap();
         assert_eq!(p.url, "https://api.example.com/search");
         let q = keys(&p.query);
-        assert_eq!(q, vec![("q".into(), "rust".into()), ("page".into(), "2".into())]);
+        assert_eq!(
+            q,
+            vec![("q".into(), "rust".into()), ("page".into(), "2".into())]
+        );
     }
 
     #[test]
@@ -856,7 +858,10 @@ mod tests {
         assert_eq!(p.auth["token"], "abc123");
         // Authorization header is folded into auth, Content-Type stays.
         let hdrs = keys(&p.headers);
-        assert_eq!(hdrs, vec![("Content-Type".into(), "application/json".into())]);
+        assert_eq!(
+            hdrs,
+            vec![("Content-Type".into(), "application/json".into())]
+        );
         // Body parses back to JSON.
         let v: Value = serde_json::from_str(&p.body).unwrap();
         assert_eq!(v["name"], "widget");
@@ -896,7 +901,10 @@ mod tests {
         assert_eq!(p.method, "GET");
         assert_eq!(p.body_mode, "none");
         let q = keys(&p.query);
-        assert_eq!(q, vec![("q".into(), "rust".into()), ("n".into(), "10".into())]);
+        assert_eq!(
+            q,
+            vec![("q".into(), "rust".into()), ("n".into(), "10".into())]
+        );
     }
 
     #[test]
@@ -961,8 +969,16 @@ mod tests {
         assert_eq!(op["x-otto-settings"]["timeout_ms"], 5000);
         assert!(op.get("x-otto-graphql-variables").is_none());
         assert!(op.to_string().find("pm.environment").is_none());
-        assert!(op["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "dry"));
-        assert!(op["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "X-Trace"));
+        assert!(op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "dry"));
+        assert!(op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "X-Trace"));
         assert_eq!(
             op["requestBody"]["content"]["application/json"]["example"]["name"],
             "x"
@@ -1005,35 +1021,144 @@ mod tests {
     #[test]
     fn assert_status_and_duration() {
         // status eq (number vs number, and number vs string both pass)
-        assert!(eval_assertion(&json!({"kind":"status","op":"eq","value":200}), Some(200), 5, &Value::Null).passed);
-        assert!(eval_assertion(&json!({"kind":"status","op":"eq","value":"200"}), Some(200), 5, &Value::Null).passed);
-        assert!(eval_assertion(&json!({"kind":"status","op":"ne","value":404}), Some(200), 5, &Value::Null).passed);
+        assert!(
+            eval_assertion(
+                &json!({"kind":"status","op":"eq","value":200}),
+                Some(200),
+                5,
+                &Value::Null
+            )
+            .passed
+        );
+        assert!(
+            eval_assertion(
+                &json!({"kind":"status","op":"eq","value":"200"}),
+                Some(200),
+                5,
+                &Value::Null
+            )
+            .passed
+        );
+        assert!(
+            eval_assertion(
+                &json!({"kind":"status","op":"ne","value":404}),
+                Some(200),
+                5,
+                &Value::Null
+            )
+            .passed
+        );
         // missing status (network error) never matches a numeric eq
-        assert!(!eval_assertion(&json!({"kind":"status","op":"eq","value":200}), None, 5, &Value::Null).passed);
+        assert!(
+            !eval_assertion(
+                &json!({"kind":"status","op":"eq","value":200}),
+                None,
+                5,
+                &Value::Null
+            )
+            .passed
+        );
         // duration lt / gt
-        assert!(eval_assertion(&json!({"kind":"duration_ms","op":"lt","value":1000}), Some(200), 42, &Value::Null).passed);
-        assert!(!eval_assertion(&json!({"kind":"duration_ms","op":"gt","value":1000}), Some(200), 42, &Value::Null).passed);
+        assert!(
+            eval_assertion(
+                &json!({"kind":"duration_ms","op":"lt","value":1000}),
+                Some(200),
+                42,
+                &Value::Null
+            )
+            .passed
+        );
+        assert!(
+            !eval_assertion(
+                &json!({"kind":"duration_ms","op":"gt","value":1000}),
+                Some(200),
+                42,
+                &Value::Null
+            )
+            .passed
+        );
     }
 
     #[test]
     fn assert_json_path_ops() {
         let body = json!({ "token": "xyz", "n": 7, "tags": ["a", "b"], "msg": "hello world" });
         // eq on extracted string
-        assert!(eval_assertion(&json!({"kind":"json_path","path":"token","op":"eq","value":"xyz"}), Some(200), 1, &body).passed);
+        assert!(
+            eval_assertion(
+                &json!({"kind":"json_path","path":"token","op":"eq","value":"xyz"}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
         // numeric lt/gt
-        assert!(eval_assertion(&json!({"kind":"json_path","path":"n","op":"gt","value":5}), Some(200), 1, &body).passed);
-        assert!(!eval_assertion(&json!({"kind":"json_path","path":"n","op":"lt","value":5}), Some(200), 1, &body).passed);
+        assert!(
+            eval_assertion(
+                &json!({"kind":"json_path","path":"n","op":"gt","value":5}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
+        assert!(
+            !eval_assertion(
+                &json!({"kind":"json_path","path":"n","op":"lt","value":5}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
         // contains on array membership and on string substring
-        assert!(eval_assertion(&json!({"kind":"json_path","path":"tags","op":"contains","value":"a"}), Some(200), 1, &body).passed);
-        assert!(eval_assertion(&json!({"kind":"json_path","path":"msg","op":"contains","value":"world"}), Some(200), 1, &body).passed);
+        assert!(
+            eval_assertion(
+                &json!({"kind":"json_path","path":"tags","op":"contains","value":"a"}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
+        assert!(
+            eval_assertion(
+                &json!({"kind":"json_path","path":"msg","op":"contains","value":"world"}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
         // missing path → Null, eq against a value fails (but ne passes)
-        assert!(!eval_assertion(&json!({"kind":"json_path","path":"nope","op":"eq","value":"x"}), Some(200), 1, &body).passed);
-        assert!(eval_assertion(&json!({"kind":"json_path","path":"nope","op":"ne","value":"x"}), Some(200), 1, &body).passed);
+        assert!(
+            !eval_assertion(
+                &json!({"kind":"json_path","path":"nope","op":"eq","value":"x"}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
+        assert!(
+            eval_assertion(
+                &json!({"kind":"json_path","path":"nope","op":"ne","value":"x"}),
+                Some(200),
+                1,
+                &body
+            )
+            .passed
+        );
     }
 
     #[test]
     fn assert_unknown_kind_is_failed_not_panic() {
-        let r = eval_assertion(&json!({"kind":"weird","op":"eq","value":1}), Some(200), 1, &Value::Null);
+        let r = eval_assertion(
+            &json!({"kind":"weird","op":"eq","value":1}),
+            Some(200),
+            1,
+            &Value::Null,
+        );
         assert!(!r.passed);
         assert!(r.desc.contains("unknown"));
     }

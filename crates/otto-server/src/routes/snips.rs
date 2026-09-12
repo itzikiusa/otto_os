@@ -239,8 +239,8 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
 /// one; they're keyed off no sidecar, so nothing else ever removes them).
 async fn prune_old(ctx: &ServerCtx) {
     let cutoff = Utc::now() - chrono::Duration::days(RETENTION_DAYS);
-    let cutoff_sys = std::time::SystemTime::now()
-        - Duration::from_secs(60 * 60 * 24 * RETENTION_DAYS as u64);
+    let cutoff_sys =
+        std::time::SystemTime::now() - Duration::from_secs(60 * 60 * 24 * RETENTION_DAYS as u64);
     let pending_cutoff = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
     let Ok(mut entries) = tokio::fs::read_dir(snips_dir(ctx)).await else {
         return;
@@ -401,8 +401,7 @@ async fn run_capture(out: &Path) -> Result<CaptureOutcome, Error> {
         return Ok(CaptureOutcome::Captured(bytes));
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if stderr.contains("authoriz") || stderr.contains("permission") || stderr.contains("declined")
-    {
+    if stderr.contains("authoriz") || stderr.contains("permission") || stderr.contains("declined") {
         return Err(Error::Internal(
             "screen capture was blocked by macOS. Grant Screen Recording to \"ottod\" in \
              System Settings → Privacy & Security → Screen Recording, then retry."
@@ -441,7 +440,9 @@ pub async fn capture_snip(State(ctx): State<ServerCtx>) -> ApiResult<Json<Captur
             snip: None,
         })),
         CaptureOutcome::Captured(bytes) => {
-            let snip = store_snip(&ctx, &bytes, "capture").await.map_err(ApiError)?;
+            let snip = store_snip(&ctx, &bytes, "capture")
+                .await
+                .map_err(ApiError)?;
             copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id).map_err(ApiError)?).await;
             Ok(Json(CaptureSnipResp {
                 cancelled: false,
@@ -487,7 +488,10 @@ fn serve_png(bytes: Vec<u8>, name: &str) -> ApiResult<Response> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{name}\""))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{name}\""),
+        )
         .header("x-content-type-options", "nosniff")
         .body(Body::from(bytes))
         .map_err(|e| ApiError(Error::Internal(format!("build response: {e}"))))
@@ -593,5 +597,4 @@ mod tests {
         assert!(!valid_id("short"));
         assert!(!valid_id(&"x".repeat(65)));
     }
-
 }

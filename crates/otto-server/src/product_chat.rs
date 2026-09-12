@@ -18,7 +18,6 @@
 //!   POST /api/v1/product/discovery-chats/{cid}/archive   (ws editor) → DiscoveryChat
 //!   POST /api/v1/product/discovery-chats/{cid}/apply     (ws editor) → ApplyResult
 
-
 use axum::extract::{Path, State};
 use axum::Json;
 use otto_core::domain::{User, WorkspaceRole};
@@ -252,7 +251,12 @@ pub async fn send_message(
         otto_core::provider::global_default(global_default.as_ref()),
     ]);
     let mut meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
-    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(m) = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
         meta["model"] = json!(m);
     }
     let (raw, sid) = crate::agent_session::run_session_turn(
@@ -314,12 +318,13 @@ pub async fn apply_action(
             // current one.
             let title = match action.get("title").and_then(|t| t.as_str()) {
                 Some(t) if !t.trim().is_empty() => t.to_string(),
-                _ => ctx
-                    .product_repo
-                    .get_story(&chat.story_id)
-                    .await
-                    .map_err(ApiError)?
-                    .title,
+                _ => {
+                    ctx.product_repo
+                        .get_story(&chat.story_id)
+                        .await
+                        .map_err(ApiError)?
+                        .title
+                }
             };
             ctx.product
                 .update_draft_body(&chat.story_id, &title, body_md, &user.id)
@@ -431,7 +436,11 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
     // Latest relevant version: suggested > draft > source > the title.
     let mut body = String::new();
     for kind in ["suggested", "draft", "source"] {
-        if let Ok(Some(v)) = ctx.product_repo.latest_version_of_kind(story_id, kind).await {
+        if let Ok(Some(v)) = ctx
+            .product_repo
+            .latest_version_of_kind(story_id, kind)
+            .await
+        {
             if !v.body_md.trim().is_empty() {
                 body = v.body_md;
                 break;
@@ -461,12 +470,7 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
             } else {
                 None
             };
-            attachments.push((
-                a.filename,
-                a.mime,
-                path.display().to_string(),
-                inlined,
-            ));
+            attachments.push((a.filename, a.mime, path.display().to_string(), inlined));
         }
     }
 
@@ -606,7 +610,11 @@ fn build_chat_prompt(context: &str, history: &[DiscoveryChatMessage], new_messag
         s.push_str("## Conversation so far\n");
         // Skip the just-added user message (it's appended last below).
         for m in &history[..history.len().saturating_sub(1)] {
-            let who = if m.role == "agent" { "Assistant" } else { "User" };
+            let who = if m.role == "agent" {
+                "Assistant"
+            } else {
+                "User"
+            };
             s.push_str(&format!("{who}: {}\n", m.body));
         }
         s.push('\n');
@@ -687,7 +695,11 @@ fn mermaid_from_nodes(nodes: &[Value], edges: &[Value]) -> String {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        if s.is_empty() { "n".to_string() } else { s }
+        if s.is_empty() {
+            "n".to_string()
+        } else {
+            s
+        }
     };
     let mut out = String::from("flowchart TD\n");
     for (i, n) in nodes.iter().enumerate() {
@@ -705,8 +717,14 @@ fn mermaid_from_nodes(nodes: &[Value], edges: &[Value]) -> String {
         out.push_str(&format!("  {id}[\"{}\"]\n", label.replace('"', "'")));
     }
     for e in edges {
-        let from = e.get("from").or_else(|| e.get("source")).and_then(Value::as_str);
-        let to = e.get("to").or_else(|| e.get("target")).and_then(Value::as_str);
+        let from = e
+            .get("from")
+            .or_else(|| e.get("source"))
+            .and_then(Value::as_str);
+        let to = e
+            .get("to")
+            .or_else(|| e.get("target"))
+            .and_then(Value::as_str);
         if let (Some(f), Some(t)) = (from, to) {
             out.push_str(&format!("  {} --> {}\n", sid(f), sid(t)));
         }
@@ -805,7 +823,8 @@ mod tests {
     fn canvas_doc_from_mermaid_action() {
         // Regression: must be the FILE-BACKED shape (format+source) — the
         // legacy nodes[] shape rendered a permanently blank canvas.
-        let action = json!({"type":"create_canvas","title":"Seq","mermaid":"sequenceDiagram\n A->>B: x"});
+        let action =
+            json!({"type":"create_canvas","title":"Seq","mermaid":"sequenceDiagram\n A->>B: x"});
         let doc = canvas_doc_from_action(&action, "Seq");
         assert_eq!(doc["type"], "otto-canvas");
         assert_eq!(doc["format"], "mermaid");
@@ -827,7 +846,10 @@ mod tests {
         let src = doc["source"].as_str().unwrap();
         assert!(src.starts_with("flowchart TD"));
         assert!(src.contains("a[\"Start\"]"));
-        assert!(src.contains("b_2[\"End 'quoted'\"]"), "sanitized id + quotes: {src}");
+        assert!(
+            src.contains("b_2[\"End 'quoted'\"]"),
+            "sanitized id + quotes: {src}"
+        );
         assert!(src.contains("a --> b_2"));
     }
 }

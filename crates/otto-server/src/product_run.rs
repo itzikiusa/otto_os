@@ -38,9 +38,7 @@ use otto_core::api::CreateSessionReq;
 use otto_core::domain::SessionKind;
 use otto_core::workref::WorkRef;
 use otto_core::Id;
-use otto_state::{
-    LearningPatch, NewAnalysisAgent, NewEvent, NewLearning, NewQuestion, StoryPatch,
-};
+use otto_state::{LearningPatch, NewAnalysisAgent, NewEvent, NewLearning, NewQuestion, StoryPatch};
 use tracing::warn;
 
 use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
@@ -214,7 +212,10 @@ pub async fn run_lens_session(
     let mut session_meta = serde_json::json!({ "source": appearance.source });
     if let Some(obj) = session_meta.as_object_mut() {
         if let Some(m) = model.filter(|s| !s.trim().is_empty()) {
-            obj.insert("model".to_string(), serde_json::Value::String(m.trim().to_string()));
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String(m.trim().to_string()),
+            );
         }
         if let Some(w) = work {
             obj.insert("work".to_string(), w);
@@ -667,7 +668,9 @@ pub fn new_cancel_registry() -> CancelRegistry {
 
 fn register_cancel(reg: &CancelRegistry, agent_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
-    reg.lock().unwrap().insert(agent_id.to_string(), Arc::clone(&flag));
+    reg.lock()
+        .unwrap()
+        .insert(agent_id.to_string(), Arc::clone(&flag));
     flag
 }
 
@@ -726,8 +729,19 @@ pub async fn run_agent_with_recovery(
         cancel.as_ref(),
         |_attempt| {
             run_lens_session(
-                ctx, ws, user_id, provider, model, work.clone(), cwd, prompt, out_path,
-                timeout, agent_id, appearance, on_session,
+                ctx,
+                ws,
+                user_id,
+                provider,
+                model,
+                work.clone(),
+                cwd,
+                prompt,
+                out_path,
+                timeout,
+                agent_id,
+                appearance,
+                on_session,
             )
         },
     )
@@ -785,10 +799,13 @@ pub async fn run_analysis(
 
     // Build the enriched context document and write it to a temp file shared
     // by all lens agents. On error, fall back to bare story body.
-    let context_path = std::env::temp_dir()
-        .join(format!("otto-product-{analysis_id}-context.md"));
+    let context_path = std::env::temp_dir().join(format!("otto-product-{analysis_id}-context.md"));
     {
-        let context_md = match ctx.product.build_agent_context(&story_id, focus.as_deref()).await {
+        let context_md = match ctx
+            .product
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 warn!("product_run: build_agent_context: {e}; falling back to story body");
@@ -1073,7 +1090,7 @@ pub async fn run_analysis(
             &ws,
             &user_id,
             &summarizer_provider,
-            None,   // no model override for the summarizer; uses provider default
+            None, // no model override for the summarizer; uses provider default
             summarizer_work,
             &summarizer_cwd,
             &prompt,
@@ -1103,13 +1120,7 @@ pub async fn run_analysis(
                 (Some(_), _) => {
                     let _ = ctx
                         .product_repo
-                        .set_agent_status(
-                            &agent.id,
-                            "done",
-                            result.raw.as_deref(),
-                            None,
-                            true,
-                        )
+                        .set_agent_status(&agent.id, "done", result.raw.as_deref(), None, true)
                         .await;
                 }
                 (None, _) => {
@@ -1297,9 +1308,8 @@ pub async fn run_analysis(
     }
 
     // 8. Append event ---------------------------------------------------------
-    let summary_event = format!(
-        "analysis completed: {lens_count} lens agent(s), {question_count} new question(s)"
-    );
+    let summary_event =
+        format!("analysis completed: {lens_count} lens agent(s), {question_count} new question(s)");
     if let Err(e) = ctx
         .product_repo
         .add_event(NewEvent {
@@ -1344,9 +1354,7 @@ pub async fn retry_analysis_agent(
 
     // 2. Verify the agent belongs to the requested analysis.
     if agent.analysis_id != analysis_id {
-        warn!(
-            "product_run(retry): agent {agent_id} does not belong to analysis {analysis_id}"
-        );
+        warn!("product_run(retry): agent {agent_id} does not belong to analysis {analysis_id}");
         return;
     }
 
@@ -1357,7 +1365,13 @@ pub async fn retry_analysis_agent(
             warn!("product_run(retry): get_analysis {analysis_id}: {e}");
             let _ = ctx
                 .product_repo
-                .set_agent_status(&agent_id, "error", None, Some("retry: analysis not found"), true)
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: analysis not found"),
+                    true,
+                )
                 .await;
             return;
         }
@@ -1369,7 +1383,13 @@ pub async fn retry_analysis_agent(
             warn!("product_run(retry): get_story {}: {e}", analysis.story_id);
             let _ = ctx
                 .product_repo
-                .set_agent_status(&agent_id, "error", None, Some("retry: story not found"), true)
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: story not found"),
+                    true,
+                )
                 .await;
             return;
         }
@@ -1393,9 +1413,12 @@ pub async fn retry_analysis_agent(
     // 5. Pre-trust provider. As in the fan-out, a missing story cwd falls back to
     // the shared temp dir; rewrite that to a unique per-session subdir so codex
     // usage attributes this retry 1:1 by cwd. A real story cwd passes unchanged.
-    let cwd = session_cwd(&story.cwd.clone().unwrap_or_else(|| {
-        std::env::temp_dir().to_string_lossy().to_string()
-    }));
+    let cwd = session_cwd(
+        &story
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string()),
+    );
     otto_sessions::trust::ensure_trusted(&agent.provider, &cwd);
 
     // 6. Rebuild context file (shared with this analysis's context path, or
@@ -1411,18 +1434,32 @@ pub async fn retry_analysis_agent(
             warn!("product_run(retry): unsafe analysis id {analysis_id}");
             let _ = ctx
                 .product_repo
-                .set_agent_status(&agent_id, "error", None, Some("retry: unsafe analysis id"), true)
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: unsafe analysis id"),
+                    true,
+                )
                 .await;
             return;
         }
     };
     if !context_path.exists() {
         // Context file was cleaned up; rebuild it.
-        let context_md = match ctx.product.build_agent_context(&analysis.story_id, None).await {
+        let context_md = match ctx
+            .product
+            .build_agent_context(&analysis.story_id, None)
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 warn!("product_run(retry): build_agent_context: {e}; falling back to story body");
-                let body = match ctx.product_repo.latest_source_version(&analysis.story_id).await {
+                let body = match ctx
+                    .product_repo
+                    .latest_source_version(&analysis.story_id)
+                    .await
+                {
                     Ok(Some(v)) => v.body_md,
                     _ => String::new(),
                 };
@@ -1454,7 +1491,13 @@ pub async fn retry_analysis_agent(
             warn!("product_run(retry): unsafe agent id {agent_id}");
             let _ = ctx
                 .product_repo
-                .set_agent_status(&agent_id, "error", None, Some("retry: unsafe agent id"), true)
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: unsafe agent id"),
+                    true,
+                )
                 .await;
             return;
         }
@@ -1474,7 +1517,7 @@ pub async fn retry_analysis_agent(
         &ws,
         &user_id,
         &agent.provider,
-        None,   // retry path: no model override; agent row already has its provider
+        None, // retry path: no model override; agent row already has its provider
         retry_work,
         &cwd,
         &prompt,
@@ -1577,7 +1620,13 @@ pub async fn reap_orphaned_agents_on_startup(ctx: ServerCtx) {
             Err(_) => {
                 let _ = ctx
                     .product_repo
-                    .set_agent_status(&agent.id, "error", None, Some("interrupted (restart); analysis gone"), true)
+                    .set_agent_status(
+                        &agent.id,
+                        "error",
+                        None,
+                        Some("interrupted (restart); analysis gone"),
+                        true,
+                    )
                     .await;
                 continue;
             }
@@ -1587,7 +1636,13 @@ pub async fn reap_orphaned_agents_on_startup(ctx: ServerCtx) {
             Err(_) => {
                 let _ = ctx
                     .product_repo
-                    .set_agent_status(&agent.id, "error", None, Some("interrupted (restart); story gone"), true)
+                    .set_agent_status(
+                        &agent.id,
+                        "error",
+                        None,
+                        Some("interrupted (restart); story gone"),
+                        true,
+                    )
                     .await;
                 continue;
             }
@@ -1615,7 +1670,10 @@ pub async fn reap_orphaned_agents_on_startup(ctx: ServerCtx) {
         let ws = match ctx.workspaces.get(&story.workspace_id).await {
             Ok(w) => w,
             Err(e) => {
-                warn!("orphan reaper: workspace {} load failed: {e}", story.workspace_id);
+                warn!(
+                    "orphan reaper: workspace {} load failed: {e}",
+                    story.workspace_id
+                );
                 continue;
             }
         };
@@ -1654,10 +1712,7 @@ const REWRITE_OUTPUT_CONTRACT: &str = r#"Respond with EXACTLY ONE ```json code b
 /// arbitrarily large context.
 ///
 /// Prompt body: writer skill body + file-read directive + OUTPUT CONTRACT.
-pub fn build_rewrite_prompt(
-    writer_skill_body: &str,
-    context_path: &str,
-) -> String {
+pub fn build_rewrite_prompt(writer_skill_body: &str, context_path: &str) -> String {
     let mut prompt = String::new();
 
     // 1. Writer skill body
@@ -1734,9 +1789,7 @@ pub async fn run_rewrite(
         .context_library
         .get_skill(writer_skill_name)
         .map(|s| s.body)
-        .or_else(|| {
-            otto_product::skill_body(writer_skill_name).map(|s| s.to_string())
-        })
+        .or_else(|| otto_product::skill_body(writer_skill_name).map(|s| s.to_string()))
         .unwrap_or_default();
 
     // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
@@ -1744,11 +1797,15 @@ pub async fn run_rewrite(
     //    (build_agent_context provides story body + Jira + learnings; we enrich
     //    further here with the answered questions and analysis summary).
     let rewrite_id = otto_core::new_id();
-    let context_path = std::env::temp_dir()
-        .join(format!("otto-product-rewrite-{rewrite_id}-context.md"));
+    let context_path =
+        std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}-context.md"));
 
     {
-        let mut context_md = match ctx.product.build_agent_context(&story_id, focus.as_deref()).await {
+        let mut context_md = match ctx
+            .product
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 warn!("product_run(rewrite): build_agent_context: {e}");
@@ -1807,8 +1864,7 @@ pub async fn run_rewrite(
     }
 
     // 4. Build prompt (references the context file) + out_path for JSON output.
-    let out_path = std::env::temp_dir()
-        .join(format!("otto-product-rewrite-{rewrite_id}.json"));
+    let out_path = std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}.json"));
     let base_prompt = build_rewrite_prompt(&skill_body, &context_path.to_string_lossy());
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
@@ -1844,7 +1900,9 @@ pub async fn run_rewrite(
     .await;
 
     // 7. Parse + persist the outcome.
-    let output_opt = result.raw.as_deref()
+    let output_opt = result
+        .raw
+        .as_deref()
         .and_then(extract_json_block)
         .and_then(|v| serde_json::from_value::<RewriteFindings>(v).ok());
 
@@ -1983,10 +2041,7 @@ fn default_priority() -> String {
 /// now lives in a separate CONTEXT file read by the agent.
 ///
 /// Prompt body: tests skill body + file-read directive + OUTPUT CONTRACT.
-pub fn build_tests_prompt(
-    tests_skill_body: &str,
-    context_path: &str,
-) -> String {
+pub fn build_tests_prompt(tests_skill_body: &str, context_path: &str) -> String {
     let mut prompt = String::new();
 
     // 1. Tests skill body
@@ -2056,11 +2111,14 @@ pub async fn run_generate_tests(
 
     // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
     let gen_id = otto_core::new_id();
-    let context_path = std::env::temp_dir()
-        .join(format!("otto-product-tests-{gen_id}-context.md"));
+    let context_path = std::env::temp_dir().join(format!("otto-product-tests-{gen_id}-context.md"));
 
     {
-        let mut context_md = match ctx.product.build_agent_context(&story_id, focus.as_deref()).await {
+        let mut context_md = match ctx
+            .product
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 warn!("product_run(generate_tests): build_agent_context: {e}");
@@ -2119,8 +2177,7 @@ pub async fn run_generate_tests(
     }
 
     // 4. Build prompt (references the context file) + out_path for JSON output.
-    let out_path = std::env::temp_dir()
-        .join(format!("otto-product-tests-{gen_id}.json"));
+    let out_path = std::env::temp_dir().join(format!("otto-product-tests-{gen_id}.json"));
     let base_prompt = build_tests_prompt(&skill_body, &context_path.to_string_lossy());
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
@@ -2154,7 +2211,9 @@ pub async fn run_generate_tests(
     .await;
 
     // 7. Parse + persist the outcome.
-    let parsed_opt = result.raw.as_deref()
+    let parsed_opt = result
+        .raw
+        .as_deref()
         .and_then(extract_json_block)
         .and_then(|v| serde_json::from_value::<GenTestcases>(v).ok());
 
@@ -2456,11 +2515,14 @@ pub async fn run_generate_plan(
     // 3. Build context file (Jira details + answered Q&A + analysis summary +
     //    approved test cases + learnings).
     let plan_id = otto_core::new_id();
-    let context_path = std::env::temp_dir()
-        .join(format!("otto-product-plan-{plan_id}-context.md"));
+    let context_path = std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-context.md"));
 
     {
-        let mut context_md = match ctx.product.build_agent_context(&story_id, focus.as_deref()).await {
+        let mut context_md = match ctx
+            .product
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 warn!("product_run(plan): build_agent_context: {e}");
@@ -2641,8 +2703,8 @@ pub async fn run_generate_plan(
         let planner_cwd = session_cwd(&cwd);
 
         set.spawn(async move {
-            let out_path = std::env::temp_dir()
-                .join(format!("otto-product-plan-{plan_id}-{i}.json"));
+            let out_path =
+                std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-{i}.json"));
             let base_prompt = build_plan_prompt(&skill_body, &context_path_str);
             let mut prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
             if !interactive {
@@ -2708,8 +2770,8 @@ pub async fn run_generate_plan(
         0 => None,
         1 => Some(candidates.remove(0).1),
         _ => {
-            let out_path = std::env::temp_dir()
-                .join(format!("otto-product-plan-{plan_id}-summary.json"));
+            let out_path =
+                std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-summary.json"));
             let base = build_plan_summarizer_prompt(
                 &skill_body,
                 &story.title,
@@ -2894,9 +2956,11 @@ pub fn build_improve_narrative_from_tests(
 
     s.push_str("## Test Cases\n\n");
     for case in cases {
-        let needs_emphasis =
-            case.status == "changes_requested"
-                || case.review_note.as_ref().is_some_and(|n| !n.trim().is_empty());
+        let needs_emphasis = case.status == "changes_requested"
+            || case
+                .review_note
+                .as_ref()
+                .is_some_and(|n| !n.trim().is_empty());
 
         if needs_emphasis {
             s.push_str("### [FEEDBACK] ");
@@ -2933,7 +2997,10 @@ pub fn build_improve_narrative_from_tests(
     }
 
     let approved = cases.iter().filter(|c| c.status == "approved").count();
-    let changed = cases.iter().filter(|c| c.status == "changes_requested").count();
+    let changed = cases
+        .iter()
+        .filter(|c| c.status == "changes_requested")
+        .count();
     let total = cases.len();
     s.push_str(&format!(
         "## Summary\n\n{total} case(s) total: {approved} approved, {changed} with changes requested.\n"
@@ -2969,8 +3036,10 @@ pub fn build_improve_narrative_from_clarifications(
     s.push_str(&story.source_key);
     s.push_str("\n\n");
 
-    let answered: Vec<&otto_state::ProductQuestion> =
-        questions.iter().filter(|q| q.status == "answered").collect();
+    let answered: Vec<&otto_state::ProductQuestion> = questions
+        .iter()
+        .filter(|q| q.status == "answered")
+        .collect();
 
     if answered.is_empty() {
         s.push_str("## Answered Questions\n\n(none)\n\n");
@@ -3052,7 +3121,10 @@ mod tests {
             "rewritten cwd must live under the temp dir; got {out}"
         );
         // ...and it must actually exist on disk (created by the helper).
-        assert!(out_path.exists(), "rewritten cwd must exist on disk; got {out}");
+        assert!(
+            out_path.exists(),
+            "rewritten cwd must exist on disk; got {out}"
+        );
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(out_path);
@@ -3167,11 +3239,8 @@ mod tests {
 
     #[test]
     fn build_analysis_prompt_includes_prior_summary_when_given() {
-        let prompt = build_analysis_prompt(
-            "skill",
-            "/tmp/ctx.md",
-            Some("Previously we found X and Y."),
-        );
+        let prompt =
+            build_analysis_prompt("skill", "/tmp/ctx.md", Some("Previously we found X and Y."));
         assert!(
             prompt.contains("Previously we found X and Y."),
             "prompt must include prior summary"
@@ -3397,23 +3466,40 @@ mod tests {
     #[test]
     fn build_plan_summarizer_prompt_includes_candidates_and_consolidate_contract() {
         let candidates = vec![
-            ("claude".to_string(), "### Task 1: A\n- [ ] do a".to_string()),
+            (
+                "claude".to_string(),
+                "### Task 1: A\n- [ ] do a".to_string(),
+            ),
             ("codex".to_string(), "### Task 1: B\n- [ ] do b".to_string()),
         ];
-        let prompt = build_plan_summarizer_prompt(
-            "synth skill",
-            "Login Story",
-            "/tmp/ctx.md",
-            &candidates,
-        );
+        let prompt =
+            build_plan_summarizer_prompt("synth skill", "Login Story", "/tmp/ctx.md", &candidates);
         // Consolidation instruction + the plan output contract marker.
-        assert!(prompt.to_lowercase().contains("consolidate"), "must instruct consolidation:\n{prompt}");
-        assert!(prompt.contains("plan_markdown"), "must keep the plan_markdown contract:\n{prompt}");
-        assert!(prompt.contains("EXACTLY ONE"), "must include the EXACTLY ONE contract text:\n{prompt}");
+        assert!(
+            prompt.to_lowercase().contains("consolidate"),
+            "must instruct consolidation:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("plan_markdown"),
+            "must keep the plan_markdown contract:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "must include the EXACTLY ONE contract text:\n{prompt}"
+        );
         // Each candidate is labelled by provider and fed in verbatim.
-        assert!(prompt.contains("Plan (claude)"), "must label the claude candidate:\n{prompt}");
-        assert!(prompt.contains("Plan (codex)"), "must label the codex candidate:\n{prompt}");
-        assert!(prompt.contains("- [ ] do a"), "must include the first candidate body:\n{prompt}");
+        assert!(
+            prompt.contains("Plan (claude)"),
+            "must label the claude candidate:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Plan (codex)"),
+            "must label the codex candidate:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("- [ ] do a"),
+            "must include the first candidate body:\n{prompt}"
+        );
         // Story title + context path are referenced.
         assert!(prompt.contains("Login Story"));
         assert!(prompt.contains("/tmp/ctx.md"));
@@ -3423,9 +3509,15 @@ mod tests {
     fn autonomy_directive_instructs_no_questions_and_assumptions() {
         // The non-interactive directive must tell the agent to work unattended,
         // not ask questions, and state assumptions.
-        assert!(PLAN_AUTONOMY_DIRECTIVE.to_uppercase().contains("UNATTENDED"));
-        assert!(PLAN_AUTONOMY_DIRECTIVE.to_lowercase().contains("do not ask"));
-        assert!(PLAN_AUTONOMY_DIRECTIVE.to_lowercase().contains("assumption"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_uppercase()
+            .contains("UNATTENDED"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_lowercase()
+            .contains("do not ask"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_lowercase()
+            .contains("assumption"));
     }
 
     #[test]
@@ -3506,7 +3598,12 @@ mod tests {
         let story = make_story("Add Payment Gateway");
         let cases = vec![
             make_testcase("Happy path checkout", "happy", "approved", None),
-            make_testcase("Invalid card number", "validation", "changes_requested", Some("Too generic, add specific error codes")),
+            make_testcase(
+                "Invalid card number",
+                "validation",
+                "changes_requested",
+                Some("Too generic, add specific error codes"),
+            ),
         ];
         let narrative = super::build_improve_narrative_from_tests(&story, &cases);
         assert!(
@@ -3518,9 +3615,12 @@ mod tests {
     #[test]
     fn narrative_from_tests_highlights_changes_requested_case() {
         let story = make_story("Checkout Feature");
-        let cases = vec![
-            make_testcase("Invalid card number", "validation", "changes_requested", Some("Too generic, add specific error codes")),
-        ];
+        let cases = vec![make_testcase(
+            "Invalid card number",
+            "validation",
+            "changes_requested",
+            Some("Too generic, add specific error codes"),
+        )];
         let narrative = super::build_improve_narrative_from_tests(&story, &cases);
         assert!(
             narrative.contains("Invalid card number"),
@@ -3539,9 +3639,12 @@ mod tests {
     #[test]
     fn narrative_from_tests_flags_nonempty_review_note() {
         let story = make_story("My Story");
-        let cases = vec![
-            make_testcase("Edge case timeout", "edge", "approved", Some("Consider shorter timeout")),
-        ];
+        let cases = vec![make_testcase(
+            "Edge case timeout",
+            "edge",
+            "approved",
+            Some("Consider shorter timeout"),
+        )];
         let narrative = super::build_improve_narrative_from_tests(&story, &cases);
         assert!(
             narrative.contains("Consider shorter timeout"),
@@ -3553,7 +3656,11 @@ mod tests {
     // build_improve_narrative_from_clarifications
     // -----------------------------------------------------------------------
 
-    fn make_question_full(text: &str, status: &str, answer: Option<&str>) -> otto_state::ProductQuestion {
+    fn make_question_full(
+        text: &str,
+        status: &str,
+        answer: Option<&str>,
+    ) -> otto_state::ProductQuestion {
         use chrono::Utc;
         let dummy = otto_core::new_id();
         otto_state::ProductQuestion {
@@ -3589,11 +3696,16 @@ mod tests {
     fn narrative_from_clarifications_contains_answered_question() {
         let story = make_story("User Authentication Story");
         let questions = vec![
-            make_question_full("What OAuth providers are supported?", "answered", Some("Google and GitHub only.")),
+            make_question_full(
+                "What OAuth providers are supported?",
+                "answered",
+                Some("Google and GitHub only."),
+            ),
             make_question_full("Unanswered question", "open", None),
         ];
         let notes = vec![];
-        let narrative = super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
+        let narrative =
+            super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
         assert!(
             narrative.contains("What OAuth providers are supported?"),
             "narrative must contain answered question text; got:\n{narrative}"
@@ -3613,10 +3725,12 @@ mod tests {
     fn narrative_from_clarifications_contains_note_body() {
         let story = make_story("Payment Story");
         let questions = vec![];
-        let notes = vec![
-            make_note("Remember to handle 3DS authentication flow", Some("security")),
-        ];
-        let narrative = super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
+        let notes = vec![make_note(
+            "Remember to handle 3DS authentication flow",
+            Some("security"),
+        )];
+        let narrative =
+            super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
         assert!(
             narrative.contains("Remember to handle 3DS authentication flow"),
             "narrative must contain the note body; got:\n{narrative}"

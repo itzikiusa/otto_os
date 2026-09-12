@@ -85,8 +85,16 @@ const WF_OPS: &[WfOp] = &[
         canonical: "status",
         variant: WfControl::Status,
         synonyms: &[
-            "status", "status?", "progress", "update", "how's it going",
-            "hows it going", "where are we", "what's the status", "whats the status", "?",
+            "status",
+            "status?",
+            "progress",
+            "update",
+            "how's it going",
+            "hows it going",
+            "where are we",
+            "what's the status",
+            "whats the status",
+            "?",
         ],
         description: "current step + progress",
         example: "`status` or `progress`",
@@ -95,8 +103,14 @@ const WF_OPS: &[WfOp] = &[
         canonical: "skip",
         variant: WfControl::Skip,
         synonyms: &[
-            "skip", "skip step", "skip stage", "skip this", "skip this step", "skip it",
-            "next", "move on",
+            "skip",
+            "skip step",
+            "skip stage",
+            "skip this",
+            "skip this step",
+            "skip it",
+            "next",
+            "move on",
         ],
         description: "skip the current step and continue",
         example: "`skip` or `next`",
@@ -105,8 +119,16 @@ const WF_OPS: &[WfOp] = &[
         canonical: "abort",
         variant: WfControl::Abort,
         synonyms: &[
-            "abort", "cancel", "stop", "halt", "kill", "terminate", "cancel run",
-            "stop run", "kill it", "abort run",
+            "abort",
+            "cancel",
+            "stop",
+            "halt",
+            "kill",
+            "terminate",
+            "cancel run",
+            "stop run",
+            "kill it",
+            "abort run",
         ],
         description: "cancel the run and stop its agents",
         example: "`abort` or `cancel`",
@@ -114,7 +136,16 @@ const WF_OPS: &[WfOp] = &[
     WfOp {
         canonical: "help",
         variant: WfControl::Help,
-        synonyms: &["help", "commands", "usage", "options", "what can you do", "how do i", "?help", "h"],
+        synonyms: &[
+            "help",
+            "commands",
+            "usage",
+            "options",
+            "what can you do",
+            "how do i",
+            "?help",
+            "h",
+        ],
         description: "this guide",
         example: "`help`",
     },
@@ -189,14 +220,22 @@ pub fn wf_controls_help() -> String {
     s.push_str(WF_TRIGGER_FIELD_NOTES);
     s.push_str("\n\n*2. Control a running workflow* — reply in the run's thread:\n");
     for op in WF_OPS {
-        let others: Vec<&str> =
-            op.synonyms.iter().copied().filter(|x| *x != op.canonical).take(4).collect();
+        let others: Vec<&str> = op
+            .synonyms
+            .iter()
+            .copied()
+            .filter(|x| *x != op.canonical)
+            .take(4)
+            .collect();
         let also = if others.is_empty() {
             String::new()
         } else {
             format!(" (also: {})", others.join(", "))
         };
-        s.push_str(&format!("• *{}* — {} · e.g. {}{}\n", op.canonical, op.description, op.example, also));
+        s.push_str(&format!(
+            "• *{}* — {} · e.g. {}{}\n",
+            op.canonical, op.description, op.example, also
+        ));
     }
     s.trim_end().to_string()
 }
@@ -433,8 +472,11 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
         // Label: value
         if let Some((label, val)) = line.split_once(':') {
             let key = label.trim().to_lowercase();
-            let is_labelish =
-                !key.is_empty() && key.len() <= 24 && key.chars().all(|c| c.is_alphabetic() || c == ' ' || c == '_');
+            let is_labelish = !key.is_empty()
+                && key.len() <= 24
+                && key
+                    .chars()
+                    .all(|c| c.is_alphabetic() || c == ' ' || c == '_');
             if is_labelish {
                 let v = val.trim().to_string();
                 current_label = Some(key.clone());
@@ -477,7 +519,10 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
         })
         .unwrap_or_default();
 
-    let jira_ticket = resolve_jira_key(pick(&["jira ticket", "jira", "jira_ticket", "ticket"]), text);
+    let jira_ticket = resolve_jira_key(
+        pick(&["jira ticket", "jira", "jira_ticket", "ticket"]),
+        text,
+    );
     // Only the branch name matters here — trailing guidance like
     // "…, create wt from it" is dropped (the run already creates a worktree);
     // we keep just the part before the first comma.
@@ -487,8 +532,8 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
     let (branch, rescued_pr_branch, branch_note) =
         split_branch_fields(declared_branch, jira_ticket.as_deref());
     // An explicit source-branch field always wins over a rescued `Branch:`.
-    let pr_branch = pick(&["pr branch", "source", "source branch", "feature branch"])
-        .or(rescued_pr_branch);
+    let pr_branch =
+        pick(&["pr branch", "source", "source branch", "feature branch"]).or(rescued_pr_branch);
 
     Some(WorkflowCommand {
         name,
@@ -571,7 +616,13 @@ pub fn parse_run_command(text: &str) -> Option<(String, String, bool)> {
 /// absent `thread` in the spec matches any thread (including none), a
 /// present one requires an exact match; `mention_only` (default false)
 /// requires `has_mention`.
-pub fn binding_matches(spec: &Value, channel: &str, chat: &str, thread: Option<&str>, has_mention: bool) -> bool {
+pub fn binding_matches(
+    spec: &Value,
+    channel: &str,
+    chat: &str,
+    thread: Option<&str>,
+    has_mention: bool,
+) -> bool {
     if spec.get("channel").and_then(Value::as_str) != Some(channel) {
         return false;
     }
@@ -583,7 +634,10 @@ pub fn binding_matches(spec: &Value, channel: &str, chat: &str, thread: Option<&
             return false;
         }
     }
-    let mention_only = spec.get("mention_only").and_then(Value::as_bool).unwrap_or(false);
+    let mention_only = spec
+        .get("mention_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if mention_only && !has_mention {
         return false;
     }
@@ -614,7 +668,8 @@ fn binding_candidates<'a>(
     // Stable sort: thread-pinned specs sort before unpinned ones; relative
     // order within each group is preserved (matches the old best-match loop,
     // which kept the first pinned/unpinned candidate it saw).
-    matches.sort_by_key(|t| std::cmp::Reverse(t.spec.get("thread").and_then(Value::as_str).is_some()));
+    matches
+        .sort_by_key(|t| std::cmp::Reverse(t.spec.get("thread").and_then(Value::as_str).is_some()));
     matches
 }
 
@@ -645,7 +700,10 @@ impl WorkflowChatTriggerImpl {
             wf.id,
             wf.workspace_id
         );
-        let run = repo.create_run(&wf.id, &wf.workspace_id, &input, None).await.ok()?;
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &input, None)
+            .await
+            .ok()?;
         let ws = self.ctx.workspaces.get(&wf.workspace_id).await.ok()?;
         crate::workflow_engine::spawn_run(
             self.ctx.clone(),
@@ -683,7 +741,9 @@ impl WorkflowChatTriggerImpl {
         let ids = repo.list_active_run_ids_global().await.ok()?;
         let mut fallback: Option<WorkflowRun> = None;
         for id in ids {
-            let Ok(run) = repo.get_run(&id).await else { continue };
+            let Ok(run) = repo.get_run(&id).await else {
+                continue;
+            };
             let i = &run.input;
             let str_at = |k: &str| i.get(k).and_then(Value::as_str);
             let ws_ok = str_at("origin_workspace_id") == Some(workspace_id)
@@ -714,7 +774,10 @@ impl WorkflowChatTriggerImpl {
             .and_then(Value::as_str)
             .or(wf_name)
             .unwrap_or("workflow");
-        let mut lines = vec![format!("📊 *{name}* — run `{short}` · {}", run.status.as_str())];
+        let mut lines = vec![format!(
+            "📊 *{name}* — run `{short}` · {}",
+            run.status.as_str()
+        )];
         for n in &run.nodes {
             let icon = match n.status {
                 NodeStatus::Success => "✓",
@@ -755,7 +818,10 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         if let Some(cmd) = parse_workflow_command(text) {
             // Workflows are a GLOBAL library: resolve by name across all
             // workspaces, preferring one in the message's own workspace.
-            let wf = match repo.find_by_name(&cmd.name, &workspace_id.to_string()).await {
+            let wf = match repo
+                .find_by_name(&cmd.name, &workspace_id.to_string())
+                .await
+            {
                 Ok(Some(w)) => w,
                 Ok(None) => {
                     tracing::info!(
@@ -812,7 +878,9 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             if let Some(note) = &cmd.branch_note {
                 detail.push_str(&format!("\n⚠️ {note}"));
             }
-            return self.start_named(wf, input, Some(detail), channel, chat).await;
+            return self
+                .start_named(wf, input, Some(detail), channel, chat)
+                .await;
         }
 
         // (2) Simplified `run <name>: <prompt>` / `workflow <name>: …` command.
@@ -941,7 +1009,13 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                     reply.push_str("\n\n*3. Available workflows* (use as `Name:`):\n");
                     for w in wfs {
                         // First line of the description as a one-line hint.
-                        let hint = w.description.lines().next().unwrap_or("").trim().to_string();
+                        let hint = w
+                            .description
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
                         if hint.is_empty() {
                             reply.push_str(&format!("• *{}*\n", w.name));
                         } else {
@@ -950,7 +1024,9 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                     }
                 }
             }
-            return Some(WorkflowChatAck { reply: reply.trim_end().to_string() });
+            return Some(WorkflowChatAck {
+                reply: reply.trim_end().to_string(),
+            });
         }
 
         // status / skip / abort target the run active on THIS thread.
@@ -962,7 +1038,9 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         match control {
             WfControl::Status => {
                 let wf_name = repo.get(&run.workflow_id).await.ok().map(|w| w.name);
-                Some(WorkflowChatAck { reply: self.run_status_summary(&run, wf_name.as_deref()) })
+                Some(WorkflowChatAck {
+                    reply: self.run_status_summary(&run, wf_name.as_deref()),
+                })
             }
             WfControl::Skip => {
                 if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
@@ -977,7 +1055,13 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 // the run to Canceled + emit. The engine's cancel poll then stops
                 // the in-flight node and kills the run's sessions.
                 match repo
-                    .update_run(&run.id, RunStatus::Canceled, &run.nodes, Some("canceled"), true)
+                    .update_run(
+                        &run.id,
+                        RunStatus::Canceled,
+                        &run.nodes,
+                        Some("canceled"),
+                        true,
+                    )
                     .await
                 {
                     Ok(rev) => {
@@ -1030,7 +1114,10 @@ mod tests {
         // guidance is dropped — only the branch name survives (honored, never overridden).
         assert_eq!(cmd.branch.as_deref(), Some("release/base-branch"));
         assert_eq!(cmd.relevant_info, vec!["~/a", "~/b"]);
-        assert_eq!(cmd.goals, vec!["100% test coverage", "under 2 minutes runtime"]);
+        assert_eq!(
+            cmd.goals,
+            vec!["100% test coverage", "under 2 minutes runtime"]
+        );
         // A real base branch is left alone, and names nothing else.
         assert_eq!(cmd.pr, None);
         assert_eq!(cmd.pr_branch, None);
@@ -1048,10 +1135,18 @@ mod tests {
                     Working Directory: /r\n\
                     Branch: feature/PROJ-5282\n";
         let cmd = parse_workflow_command(text).expect("should parse");
-        assert_eq!(cmd.branch, None, "a ticket-named branch must not become the base");
+        assert_eq!(
+            cmd.branch, None,
+            "a ticket-named branch must not become the base"
+        );
         assert_eq!(cmd.pr_branch.as_deref(), Some("feature/PROJ-5282"));
-        let note = cmd.branch_note.expect("the reinterpretation must be announced");
-        assert!(note.contains("feature/PROJ-5282") && note.contains("SOURCE"), "{note}");
+        let note = cmd
+            .branch_note
+            .expect("the reinterpretation must be announced");
+        assert!(
+            note.contains("feature/PROJ-5282") && note.contains("SOURCE"),
+            "{note}"
+        );
 
         // Case-insensitive on the key, and a lone `Base:` alias behaves the same.
         let lower = parse_workflow_command(
@@ -1064,7 +1159,8 @@ mod tests {
         // No ticket to match against ⇒ take the field at face value (the
         // resolve_base HEAD guard is the backstop there).
         let no_key =
-            parse_workflow_command("Action: Workflow\nName: X\nBranch: feature/PROJ-5282\n").unwrap();
+            parse_workflow_command("Action: Workflow\nName: X\nBranch: feature/PROJ-5282\n")
+                .unwrap();
         assert_eq!(no_key.branch.as_deref(), Some("feature/PROJ-5282"));
         assert_eq!(no_key.pr_branch, None);
         assert_eq!(no_key.branch_note, None);
@@ -1085,15 +1181,20 @@ mod tests {
         // A bare key, a bare URL, and a key with surrounding words all resolve.
         for (input, want) in [
             ("Jira ticket: GS-1", "GS-1"),
-            ("Jira ticket: https://acme.atlassian.net/browse/ABC-42", "ABC-42"),
+            (
+                "Jira ticket: https://acme.atlassian.net/browse/ABC-42",
+                "ABC-42",
+            ),
             ("Jira ticket: see PROJ-77 please", "PROJ-77"),
         ] {
-            let c = parse_workflow_command(&format!("Action: Workflow\nName: X\n{input}\n")).unwrap();
+            let c =
+                parse_workflow_command(&format!("Action: Workflow\nName: X\n{input}\n")).unwrap();
             assert_eq!(c.jira_ticket.as_deref(), Some(want), "{input}");
         }
 
         // Nothing key-shaped anywhere → passed through untouched, as before.
-        let free = parse_workflow_command("Action: Workflow\nName: X\nJira ticket: none yet\n").unwrap();
+        let free =
+            parse_workflow_command("Action: Workflow\nName: X\nJira ticket: none yet\n").unwrap();
         assert_eq!(free.jira_ticket.as_deref(), Some("none yet"));
     }
 
@@ -1122,7 +1223,14 @@ mod tests {
     #[test]
     fn parses_control_synonyms() {
         use WfControl::*;
-        for s in ["status", "STATUS", "progress", "?", "where are we", "status please"] {
+        for s in [
+            "status",
+            "STATUS",
+            "progress",
+            "?",
+            "where are we",
+            "status please",
+        ] {
             assert_eq!(parse_wf_control(s), Some(Status), "{s}");
         }
         for s in ["skip", "skip step", "next", "move on", "Skip It"] {
@@ -1160,11 +1268,17 @@ mod tests {
         for op in WF_OPS {
             assert!(h.contains(op.canonical), "help missing op {}", op.canonical);
         }
-        assert!(h.contains("Action: Workflow"), "help missing trigger template");
+        assert!(
+            h.contains("Action: Workflow"),
+            "help missing trigger template"
+        );
         assert!(h.contains("Branch:"), "help template missing Branch field");
         assert!(h.contains("PR:"), "help template missing PR field");
         // The two semantics users get wrong must be stated, not implied.
-        assert!(h.contains("merges INTO"), "help must define Branch as the destination");
+        assert!(
+            h.contains("merges INTO"),
+            "help must define Branch as the destination"
+        );
         assert!(
             h.contains("several open PRs"),
             "help must say why PR: exists"
@@ -1233,7 +1347,8 @@ mod tests {
 
     #[test]
     fn run_command_grammar() {
-        let (n, p, e) = parse_run_command("run Write tests: do the login story\nwith care").unwrap();
+        let (n, p, e) =
+            parse_run_command("run Write tests: do the login story\nwith care").unwrap();
         assert_eq!((n.as_str(), e), ("Write tests", false));
         assert_eq!(p, "do the login story\nwith care");
         let (n, _, e) = parse_run_command("Run Workflow UI flow: go").unwrap();
@@ -1282,7 +1397,9 @@ mod tests {
     /// rest of the reply looks like.
     #[test]
     fn own_ack_guard_matches_anything_built_from_the_shared_prefix() {
-        assert!(is_own_ack(&format!("{ACK_PREFIX} **Some Workflow** (run `xyz`). blah blah")));
+        assert!(is_own_ack(&format!(
+            "{ACK_PREFIX} **Some Workflow** (run `xyz`). blah blah"
+        )));
         assert!(is_own_ack(&format!("{ACK_PREFIX} anything at all")));
     }
 

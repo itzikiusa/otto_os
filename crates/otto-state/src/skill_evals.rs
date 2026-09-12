@@ -68,7 +68,8 @@ fn row_to_iteration(r: &sqlx::sqlite::SqliteRow) -> Result<EvalIteration> {
 fn row_to_eval(r: &sqlx::sqlite::SqliteRow, iterations: Vec<EvalIteration>) -> Result<SkillEval> {
     let best_iter: Option<i64> = r.get("best_iteration");
     let config_raw: String = r.try_get("config_json").unwrap_or_default();
-    let config: serde_json::Value = serde_json::from_str(&config_raw).unwrap_or(serde_json::Value::Null);
+    let config: serde_json::Value =
+        serde_json::from_str(&config_raw).unwrap_or(serde_json::Value::Null);
     Ok(SkillEval {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
@@ -91,7 +92,10 @@ fn row_to_eval(r: &sqlx::sqlite::SqliteRow, iterations: Vec<EvalIteration>) -> R
         dim_skill: r.try_get("dim_skill").ok().flatten(),
         dim_prompt: r.try_get("dim_prompt").ok().flatten(),
         composite_score: r.try_get("composite_score").ok().flatten(),
-        promoted: r.try_get::<i64, _>("promoted").map(|v| v != 0).unwrap_or(false),
+        promoted: r
+            .try_get::<i64, _>("promoted")
+            .map(|v| v != 0)
+            .unwrap_or(false),
         promoted_at: r.try_get("promoted_at").ok().flatten(),
         promoted_by: r.try_get("promoted_by").ok().flatten(),
         created_at: ts(&r.get::<String, _>("created_at"))?,
@@ -240,12 +244,13 @@ impl SkillEvalsRepo {
     /// background task dies with the process, so an orphaned row would poll
     /// forever in the UI. Returns the number of rows updated.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
-        let res =
-            sqlx::query("UPDATE skill_evals SET status = 'error', error = ? WHERE status = 'running'")
-                .bind(error)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("fail running skill evals"))?;
+        let res = sqlx::query(
+            "UPDATE skill_evals SET status = 'error', error = ? WHERE status = 'running'",
+        )
+        .bind(error)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("fail running skill evals"))?;
         Ok(res.rows_affected())
     }
 
@@ -463,13 +468,11 @@ impl SkillEvalsRepo {
 
     /// All cell runs of a matrix (by matrix_id), oldest first.
     pub async fn list_for_matrix(&self, matrix_id: &str) -> Result<Vec<SkillEval>> {
-        let rows = sqlx::query(
-            "SELECT * FROM skill_evals WHERE matrix_id = ? ORDER BY created_at",
-        )
-        .bind(matrix_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list matrix evals"))?;
+        let rows = sqlx::query("SELECT * FROM skill_evals WHERE matrix_id = ? ORDER BY created_at")
+            .bind(matrix_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list matrix evals"))?;
         let mut evals = Vec::with_capacity(rows.len());
         for r in &rows {
             let id: String = r.get("id");
@@ -522,13 +525,12 @@ impl SkillEvalsRepo {
     // -- private helpers ----------------------------------------------------
 
     async fn iterations_for_eval(&self, eval_id: &Id) -> Result<Vec<EvalIteration>> {
-        let rows = sqlx::query(
-            "SELECT * FROM skill_eval_iterations WHERE eval_id = ? ORDER BY iter",
-        )
-        .bind(eval_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("skill eval iterations"))?;
+        let rows =
+            sqlx::query("SELECT * FROM skill_eval_iterations WHERE eval_id = ? ORDER BY iter")
+                .bind(eval_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("skill eval iterations"))?;
         rows.iter().map(row_to_iteration).collect()
     }
 }
@@ -572,7 +574,14 @@ mod tests {
         let repo = SkillEvalsRepo::new(pool.clone());
 
         let eval = repo
-            .create_eval(&"ws1".into(), "golang-feature", "add X", "claude", 2, &serde_json::json!({}))
+            .create_eval(
+                &"ws1".into(),
+                "golang-feature",
+                "add X",
+                "claude",
+                2,
+                &serde_json::json!({}),
+            )
             .await
             .unwrap();
         assert_eq!(eval.status, SkillEvalStatus::Running);
@@ -613,7 +622,9 @@ mod tests {
         repo.set_iter_agent_at(&it.id, 0, &a0).await.unwrap();
 
         repo.set_iter_score(&it.id, 85.5).await.unwrap();
-        repo.set_iter_status(&it.id, "done", "scored 85.5").await.unwrap();
+        repo.set_iter_status(&it.id, "done", "scored 85.5")
+            .await
+            .unwrap();
         repo.set_summary(&eval.id, "best is iter 1", Some(1), Some(85.5))
             .await
             .unwrap();
@@ -625,7 +636,10 @@ mod tests {
         assert_eq!(it.agents[0].status, "done");
         assert_eq!(it.agents[0].session_id.as_deref(), Some("s0"));
         assert_eq!(it.agents[0].findings.len(), 1);
-        assert_eq!(it.agents[0].findings[0].suggestion, "use logger.InfoF(ctx, ...)");
+        assert_eq!(
+            it.agents[0].findings[0].suggestion,
+            "use logger.InfoF(ctx, ...)"
+        );
         assert_eq!(it.agents[1].status, "running");
         assert_eq!(it.score, 85.5);
         assert_eq!(loaded.best_iteration, Some(1));
@@ -670,8 +684,12 @@ mod tests {
         sc.composite = 92.5;
         sc.proof_status = "passed".into();
         sc.done_score = 88;
-        repo.set_iter_scoring(&it.id, &sc, Some("pp1")).await.unwrap();
-        repo.set_iter_human(&it.id, 4, "looks good", "root").await.unwrap();
+        repo.set_iter_scoring(&it.id, &sc, Some("pp1"))
+            .await
+            .unwrap();
+        repo.set_iter_human(&it.id, 4, "looks good", "root")
+            .await
+            .unwrap();
         repo.set_eval_composite(&eval.id, 92.5).await.unwrap();
         repo.set_promoted(&eval.id, "root").await.unwrap();
 

@@ -148,7 +148,14 @@ fn raise_nofile_limit() {
         _ => {}
     }
     let try_set = |cur: u64| {
-        setrlimit(Resource::Nofile, Rlimit { current: Some(cur), maximum: lim.maximum }).is_ok()
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(cur),
+                maximum: lim.maximum,
+            },
+        )
+        .is_ok()
     };
     // macOS rejects soft values above OPEN_MAX (10240) when the hard limit is
     // reported unlimited — retry at that ceiling.
@@ -187,7 +194,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     let pool = otto_state::open(&cfg.db_path())
         .await
         .map_err(|e| format!("open database: {e}"))?;
-    otto_state::database_changes::DatabaseChangesRepo::new(pool.clone()).recover_interrupted().await
+    otto_state::database_changes::DatabaseChangesRepo::new(pool.clone())
+        .recover_interrupted()
+        .await
         .map_err(|e| format!("recover interrupted database changes: {e}"))?;
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let (events, _) = broadcast::channel::<Event>(1024);
@@ -421,9 +430,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     let memory = match std::env::var("OTTO_MEMORY_VAULT_DIR") {
         Ok(dir) if !dir.trim().is_empty() && std::env::var("OTTO_MEMORY_REMOTE_URL").is_err() => {
             tracing::info!("memory: vault write-through at {dir}");
-            Arc::new(
-                otto_memory::MemoryService::with_defaults(pool.clone()).with_vault(dir),
-            )
+            Arc::new(otto_memory::MemoryService::with_defaults(pool.clone()).with_vault(dir))
         }
         _ => memory,
     };
@@ -605,7 +612,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         .fail_running("Interrupted by a daemon restart — re-run the evaluation.")
         .await
     {
-        Ok(n) if n > 0 => tracing::info!("skill-eval recovery: marked {n} orphaned run(s) as error"),
+        Ok(n) if n > 0 => {
+            tracing::info!("skill-eval recovery: marked {n} orphaned run(s) as error")
+        }
         Ok(_) => {}
         Err(e) => tracing::warn!("skill-eval recovery: {e}"),
     }
@@ -652,11 +661,15 @@ async fn run(cfg: Config) -> Result<(), String> {
     {
         Ok(loops) => {
             if !loops.is_empty() {
-                tracing::info!("goal-loop recovery: failed {} orphaned loop(s)", loops.len());
+                tracing::info!(
+                    "goal-loop recovery: failed {} orphaned loop(s)",
+                    loops.len()
+                );
             }
             for l in &loops {
                 otto_server::goal_loop_workspace::remove_worktree(&ctx, l).await;
-                otto_server::goal_loop::cleanup_executor_sessions(&ctx, &l.workspace_id, &l.id).await;
+                otto_server::goal_loop::cleanup_executor_sessions(&ctx, &l.workspace_id, &l.id)
+                    .await;
             }
         }
         Err(e) => tracing::warn!("goal-loop recovery: {e}"),
@@ -1146,8 +1159,7 @@ async fn run(cfg: Config) -> Result<(), String> {
                     let shutdown_handle = handle.clone();
                     tokio::spawn(async move {
                         let _ = rx.changed().await;
-                        shutdown_handle
-                            .graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
                     });
                     network_task = Some(tokio::spawn(async move {
                         // `into_make_service_with_connect_info::<SocketAddr>` makes
@@ -1155,7 +1167,10 @@ async fn run(cfg: Config) -> Result<(), String> {
                         // `ConnectInfo<SocketAddr>` (used by the login throttle, S5).
                         if let Err(e) = axum_server::bind_rustls(addr, tls)
                             .handle(handle)
-                            .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                            .serve(
+                                router
+                                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                            )
                             .await
                         {
                             tracing::error!("network listener: {e}");
@@ -1273,7 +1288,9 @@ fn prepend_path(dirs: &[String]) {
     let current = std::env::var("PATH").unwrap_or_default();
     let mut parts: Vec<String> = dirs
         .iter()
-        .filter(|p| !current.split(':').any(|c| c == p.as_str()) && std::path::Path::new(p).is_dir())
+        .filter(|p| {
+            !current.split(':').any(|c| c == p.as_str()) && std::path::Path::new(p).is_dir()
+        })
         .cloned()
         .collect();
     if parts.is_empty() {

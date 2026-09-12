@@ -31,7 +31,7 @@ async fn ensure_session_owner_or_admin<S: SessionsCtx>(
     user: &User,
     session: &Session,
 ) -> ApiResult<()> {
-    ctx.check_resource(user,session).await?;
+    ctx.check_resource(user, session).await?;
     if session_owner_or_admin(ctx.roles().as_ref(), user, session).await {
         Ok(())
     } else {
@@ -44,7 +44,11 @@ async fn ensure_session_owner_or_admin<S: SessionsCtx>(
 /// Server-side context required by the sessions routes.
 pub trait SessionsCtx: Clone + Send + Sync + 'static {
     /// Resource-bound sessions reauthorize on reads, control, and reconnect.
-    fn check_resource<'a>(&'a self, _user: &'a User, _session: &'a Session) -> otto_core::auth::BoxFuture<'a, Result<(), Error>> {
+    fn check_resource<'a>(
+        &'a self,
+        _user: &'a User,
+        _session: &'a Session,
+    ) -> otto_core::auth::BoxFuture<'a, Result<(), Error>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -207,7 +211,9 @@ async fn list_sessions<S: SessionsCtx>(
     };
     let mut visible = Vec::new();
     for session in sessions {
-        if ctx.check_resource(&user,&session).await.is_ok() { visible.push(session); }
+        if ctx.check_resource(&user, &session).await.is_ok() {
+            visible.push(session);
+        }
     }
     let sessions = visible
         .into_iter()
@@ -254,7 +260,9 @@ async fn create_session<S: SessionsCtx>(
     // fallback. We merge into the existing meta object so any caller-supplied
     // fields are preserved.
     {
-        let meta = req.meta.get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+        let meta = req
+            .meta
+            .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
         if let serde_json::Value::Object(m) = meta {
             // Only stamp if the caller hasn't already supplied a work ref.
             if !m.contains_key("work") {
@@ -297,15 +305,22 @@ async fn patch_session<S: SessionsCtx>(
     if let Some(meta) = &req.meta {
         // These fields bind a terminal to its originating protected resource.
         // Ordinary metadata edits must not detach or replace that binding.
-        if ["k8s","aws","connection_id","source","resource_node"].iter().any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key)) {
-            return Err(ApiErr(Error::Forbidden("resource session bindings cannot be edited".into())));
+        if ["k8s", "aws", "connection_id", "source", "resource_node"]
+            .iter()
+            .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
+        {
+            return Err(ApiErr(Error::Forbidden(
+                "resource session bindings cannot be edited".into(),
+            )));
         }
     }
     // The manager replaces nested objects via two writes. Do not pass even
     // unchanged binding objects through that path, which could detach them
     // transiently while a concurrent input request authorizes the session.
-    if let Some(object)=req.meta.as_mut().and_then(serde_json::Value::as_object_mut) {
-        for key in ["k8s","aws","connection_id","source","resource_node"] {object.remove(key);}
+    if let Some(object) = req.meta.as_mut().and_then(serde_json::Value::as_object_mut) {
+        for key in ["k8s", "aws", "connection_id", "source", "resource_node"] {
+            object.remove(key);
+        }
     }
     let session = match req.title {
         Some(title) => ctx.manager().update_title(&id, &title).await?,
@@ -422,7 +437,7 @@ async fn bulk_sessions<S: SessionsCtx>(
     for id in req.ids {
         let outcome = async {
             let session = ctx.manager().get(&id).await?;
-            ctx.check_resource(&user,&session).await?;
+            ctx.check_resource(&user, &session).await?;
             if !session_owner_or_admin(ctx.roles().as_ref(), &user, &session).await {
                 return Err(Error::Forbidden("forbidden".into()));
             }

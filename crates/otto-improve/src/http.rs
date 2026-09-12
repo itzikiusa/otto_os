@@ -44,7 +44,13 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(Problem { code: self.0.code().to_string(), message: self.0.to_string() }))
+        (
+            status,
+            Json(Problem {
+                code: self.0.code().to_string(),
+                message: self.0.to_string(),
+            }),
+        )
             .into_response()
     }
 }
@@ -74,7 +80,9 @@ async fn get_config<S: ImproveCtx>(
     Extension(user): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<SelfImprovementConfig>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     Ok(Json(effective_config(&ws.settings)))
 }
@@ -85,7 +93,9 @@ async fn put_config<S: ImproveCtx>(
     Path(ws_id): Path<Id>,
     Json(req): Json<UpdateSelfImprovementReq>,
 ) -> ApiResult<Json<SelfImprovementConfig>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Admin).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Admin)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     let mut cfg = effective_config(&ws.settings);
     cfg.enabled = req.enabled;
@@ -102,7 +112,9 @@ async fn put_config<S: ImproveCtx>(
     // Changing config recomputes the next run lazily (clear so it's due soon if
     // enabled; the scheduler will set next_run after the next pass).
     let merged = write_config(&ws.settings, &cfg);
-    s.workspaces().update(&ws_id, None, None, Some(&merged), None).await?;
+    s.workspaces()
+        .update(&ws_id, None, None, Some(&merged), None)
+        .await?;
     Ok(Json(cfg))
 }
 
@@ -111,9 +123,13 @@ async fn run_now<S: ImproveCtx>(
     Extension(user): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<RunNowResp>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Editor).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
     if s.engine().improvements.has_running(&ws_id).await? {
-        return Err(ApiErr(Error::Conflict("a run is already in progress".into())));
+        return Err(ApiErr(Error::Conflict(
+            "a run is already in progress".into(),
+        )));
     }
     // Mirror the PR-review pattern (modules.rs::start_review): create the run
     // row synchronously so we can return its id immediately, then run the heavy
@@ -129,7 +145,11 @@ async fn run_now<S: ImproveCtx>(
     let bg_run_id = run_id.clone();
     tokio::spawn(async move {
         if let Err(e) = engine
-            .execute_run(&bg_run_id, &ws, otto_core::domain::ImprovementTrigger::Manual)
+            .execute_run(
+                &bg_run_id,
+                &ws,
+                otto_core::domain::ImprovementTrigger::Manual,
+            )
             .await
         {
             tracing::warn!(workspace = %ws, "self-improvement manual run failed: {e}");
@@ -143,8 +163,15 @@ async fn list_runs<S: ImproveCtx>(
     Extension(user): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<Vec<ImprovementRun>>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(s.engine().improvements.list_runs(&ws_id, RUN_LIST_LIMIT).await?))
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
+    Ok(Json(
+        s.engine()
+            .improvements
+            .list_runs(&ws_id, RUN_LIST_LIMIT)
+            .await?,
+    ))
 }
 
 async fn get_run<S: ImproveCtx>(
@@ -153,7 +180,9 @@ async fn get_run<S: ImproveCtx>(
     Path(run_id): Path<Id>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let run = s.engine().improvements.get_run(&run_id).await?;
-    s.roles().check(&user.0, &run.workspace_id, WorkspaceRole::Viewer).await?;
+    s.roles()
+        .check(&user.0, &run.workspace_id, WorkspaceRole::Viewer)
+        .await?;
     let edits = s.engine().improvements.list_edits_by_run(&run_id).await?;
     Ok(Json(serde_json::json!({ "run": run, "edits": edits })))
 }
@@ -169,18 +198,27 @@ async fn list_edits<S: ImproveCtx>(
     Path(ws_id): Path<Id>,
     Query(q): Query<EditQuery>,
 ) -> ApiResult<Json<Vec<ImprovementEdit>>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
     let status = q
         .status
         .as_deref()
         .and_then(ImprovementEditStatus::parse)
         .unwrap_or(ImprovementEditStatus::Pending);
-    Ok(Json(s.engine().improvements.list_edits_by_status(&ws_id, status).await?))
+    Ok(Json(
+        s.engine()
+            .improvements
+            .list_edits_by_status(&ws_id, status)
+            .await?,
+    ))
 }
 
 async fn check_edit_ws<S: ImproveCtx>(s: &S, user: &AuthUser, edit_id: &Id) -> Result<(), ApiErr> {
     let edit = s.engine().improvements.get_edit(edit_id).await?;
-    s.roles().check(&user.0, &edit.workspace_id, WorkspaceRole::Editor).await?;
+    s.roles()
+        .check(&user.0, &edit.workspace_id, WorkspaceRole::Editor)
+        .await?;
     Ok(())
 }
 
@@ -231,7 +269,9 @@ async fn evolve_session<S: ImproveCtx>(
     // Resolve the session via the engine's sessions repo (avoids adding a new
     // field to ImproveCtx — ImprovementEngine already carries SessionsRepo).
     let session = s.engine().sessions.get(&session_id).await?;
-    s.roles().check(&user.0, &session.workspace_id, WorkspaceRole::Editor).await?;
+    s.roles()
+        .check(&user.0, &session.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // Reject sessions that are no longer live: evolving an archived transcript
     // produces low-quality edits and conflicts with the live-evolver's logic.
@@ -249,8 +289,14 @@ async fn evolve_session<S: ImproveCtx>(
 
     // Conflict guard: mirror `run_now`'s check so a queued workspace pass and a
     // per-session pass don't run concurrently.
-    if s.engine().improvements.has_running(&session.workspace_id).await? {
-        return Err(ApiErr(Error::Conflict("an improvement run is already in progress for this workspace".into())));
+    if s.engine()
+        .improvements
+        .has_running(&session.workspace_id)
+        .await?
+    {
+        return Err(ApiErr(Error::Conflict(
+            "an improvement run is already in progress for this workspace".into(),
+        )));
     }
 
     let engine = Arc::clone(s.engine());
@@ -261,13 +307,19 @@ async fn evolve_session<S: ImproveCtx>(
     let run = s
         .engine()
         .improvements
-        .create_run(&session.workspace_id, otto_core::domain::ImprovementTrigger::Live)
+        .create_run(
+            &session.workspace_id,
+            otto_core::domain::ImprovementTrigger::Live,
+        )
         .await?;
     let run_id = run.id.clone();
     let ws_id = session.workspace_id.clone();
     let bg_run_id = run_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = engine.execute_evolve_session(&bg_run_id, &ws_id, &sid).await {
+        if let Err(e) = engine
+            .execute_evolve_session(&bg_run_id, &ws_id, &sid)
+            .await
+        {
             tracing::warn!(session = %sid, "manual evolve-session failed: {e}");
         }
     });

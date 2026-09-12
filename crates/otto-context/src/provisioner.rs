@@ -22,7 +22,10 @@ pub struct Provisioner {
 impl Provisioner {
     /// Construct with the default bundle root (`~/.otto/context`).
     pub fn new(library: Library) -> Self {
-        Self { library, ctx_root: materialize::default_context_root() }
+        Self {
+            library,
+            ctx_root: materialize::default_context_root(),
+        }
     }
 
     /// Construct with an explicit bundle root (used by tests).

@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use otto_core::event::Event;
 use otto_core::proof::{
     compute_badges, compute_done_contract, compute_risk, derive_status_with_policy,
     preview as core_preview, CiSummary, DoneContractPolicy, ProofArtifact, ProofArtifactKind,
     ProofArtifactStatus, ProofBadge, ProofPack, ProofStatus, WorkItemKind, STORE_CAP,
 };
-use otto_core::event::Event;
 use otto_core::{redact, Error, Id, Result};
 use otto_git::local::{DiffTarget, LocalGit};
 use serde_json::{json, Value};
@@ -64,8 +64,20 @@ pub fn is_risky_file(path: &str) -> bool {
     // non-alphanumeric), so `auth.rs`/`policy.rs`/`oauth_config.ts` hit but
     // `author.rs`/`tokenizer.rs` do not.
     const RISKY_WORDS: &[&str] = &[
-        "auth", "rbac", "keychain", "netguard", "policy", "secret", "secrets", "password",
-        "passwords", "crypto", "token", "tokens", "credential", "credentials",
+        "auth",
+        "rbac",
+        "keychain",
+        "netguard",
+        "policy",
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "crypto",
+        "token",
+        "tokens",
+        "credential",
+        "credentials",
     ];
     let words: Vec<&str> = base
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -223,7 +235,10 @@ pub async fn add_content_artifact(
     created_by: &str,
 ) -> Result<ProofArtifact> {
     let (content_ref, meta) = if let Some(u) = url {
-        (Some(u.to_string()), merge_meta(extra_meta, json!({"ref_kind": "url"})))
+        (
+            Some(u.to_string()),
+            merge_meta(extra_meta, json!({"ref_kind": "url"})),
+        )
     } else if let Some(c) = content {
         let (stored, patch) = prepare_content(c);
         (Some(stored), merge_meta(extra_meta, patch))
@@ -251,7 +266,12 @@ pub async fn add_content_artifact(
 /// Assemble a `diff` artifact from `cwd` (vs `base`, or the working tree vs HEAD
 /// when `base` is None). Best-effort: returns Ok(()) without an artifact if the
 /// path isn't a git repo or the diff fails. Idempotent (upsert by title).
-pub async fn assemble_diff(ctx: &ServerCtx, pack: &ProofPack, cwd: &str, base: Option<&str>) -> Result<()> {
+pub async fn assemble_diff(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    cwd: &str,
+    base: Option<&str>,
+) -> Result<()> {
     let git = LocalGit::new(cwd);
     let (text, resp) = match base {
         Some(b) => {
@@ -327,7 +347,17 @@ pub async fn run_command_artifact(
         "exit_code": run.exit_code,
         "duration_ms": run.duration_ms,
     });
-    upsert_content_artifact(ctx, pack, ProofArtifactKind::Command, cmd, &run.output, status, meta, "otto").await?;
+    upsert_content_artifact(
+        ctx,
+        pack,
+        ProofArtifactKind::Command,
+        cmd,
+        &run.output,
+        status,
+        meta,
+        "otto",
+    )
+    .await?;
     Ok(status)
 }
 
@@ -415,7 +445,10 @@ pub async fn record_ci_artifact(ctx: &ServerCtx, pack: &ProofPack, ci: &CiSummar
         ci.total,
         ci.passed,
         ci.failed,
-        ci.url.as_deref().map(|u| format!("\nurl: {u}")).unwrap_or_default()
+        ci.url
+            .as_deref()
+            .map(|u| format!("\nurl: {u}"))
+            .unwrap_or_default()
     );
     let meta = json!({
         "evidence": "ci", "state": ci.state, "total": ci.total,
@@ -444,7 +477,12 @@ pub async fn attach_api_evidence(
     by: &str,
 ) -> Result<ProofArtifact> {
     let status = otto_core::proof::http_evidence_status(req.status);
-    let mut body = format!("{} {}\nstatus: {}", req.method.to_uppercase(), req.url, req.status);
+    let mut body = format!(
+        "{} {}\nstatus: {}",
+        req.method.to_uppercase(),
+        req.url,
+        req.status
+    );
     if let Some(d) = req.duration_ms {
         body.push_str(&format!("\nduration_ms: {d}"));
     }
@@ -647,7 +685,10 @@ pub async fn run_pr_check(
         // trap `assemble_diff` documents. Use the range so files_changed/LOC
         // describe the actual PR.
         let resp = match base {
-            Some(b) => git.diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None).await,
+            Some(b) => {
+                git.diff(DiffTarget::Range(b.to_string(), "HEAD".to_string()), None)
+                    .await
+            }
             None => git.diff(DiffTarget::Working, None).await,
         };
         if let Ok(r) = resp {
@@ -838,7 +879,11 @@ pub async fn resolve_repo_for_cwd(ctx: &ServerCtx, ws_id: &str, cwd: &str) -> Op
 }
 
 /// The done-contract for a pack, recomputed live (used by the detail route).
-pub async fn live_contract(ctx: &ServerCtx, pack: &ProofPack, arts: &[ProofArtifact]) -> otto_core::proof::DoneContract {
+pub async fn live_contract(
+    ctx: &ServerCtx,
+    pack: &ProofPack,
+    arts: &[ProofArtifact],
+) -> otto_core::proof::DoneContract {
     let policy = policy_for_pack(ctx, pack).await;
     compute_done_contract(pack, arts, &policy)
 }
@@ -931,8 +976,7 @@ pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session)
     // Rollup: link a goal-loop-spawned session's pack to the loop's pack (D21).
     if session.meta.get("source").and_then(|v| v.as_str()) == Some("goal_loop") {
         if let Some(loop_id) = session.meta.get("loop_id").and_then(|v| v.as_str()) {
-            if let Ok(Some(parent)) =
-                pack_for_work_item(ctx, WorkItemKind::GoalLoop, loop_id).await
+            if let Ok(Some(parent)) = pack_for_work_item(ctx, WorkItemKind::GoalLoop, loop_id).await
             {
                 let _ = ctx.proof_repo.set_parent(&pack.id, &parent.id).await;
             }
@@ -944,7 +988,10 @@ pub async fn gate_session(ctx: &ServerCtx, session: &otto_core::domain::Session)
     // configured test command.
     let repo_test_cmd = match resolve_repo_for_cwd(ctx, &session.workspace_id, &session.cwd).await {
         Some(repo_id) => {
-            let _ = ctx.proof_repo.set_repo_link(&pack.id, Some(&repo_id), None).await;
+            let _ = ctx
+                .proof_repo
+                .set_repo_link(&pack.id, Some(&repo_id), None)
+                .await;
             ctx.git_store
                 .get_proof_config(&repo_id)
                 .await
@@ -1029,7 +1076,9 @@ pub async fn gate_pr(
                 &pack,
                 ProofArtifactKind::Approval,
                 "PR opened over unproven proof",
-                Some("A pull request was opened despite an unproven proof pack (explicit override)."),
+                Some(
+                    "A pull request was opened despite an unproven proof pack (explicit override).",
+                ),
                 None,
                 ProofArtifactStatus::Passed,
                 serde_json::json!({ "override": true, "kind": "pr_override" }),

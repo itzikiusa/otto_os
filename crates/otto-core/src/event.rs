@@ -417,10 +417,7 @@ pub enum Event {
     /// A session's set of referenced Canvas scenes changed (attach/detach). The
     /// session's Canvas panel re-fetches `GET /sessions/{id}/canvas-refs` on a
     /// matching tick instead of polling.
-    CanvasRefsChanged {
-        workspace_id: Id,
-        session_id: Id,
-    },
+    CanvasRefsChanged { workspace_id: Id, session_id: Id },
     /// A browser tab was created, navigated, or had its mode changed. The open
     /// Browser page re-fetches (or applies in place) the matching tab. `tab` is
     /// the serialized `otto_state::browser::BrowserTab` (opaque here — otto-core

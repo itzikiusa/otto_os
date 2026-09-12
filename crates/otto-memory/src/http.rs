@@ -180,7 +180,11 @@ async fn list<C: MemoryCtx>(
         tag: q.tag,
         include_inactive: q.include_inactive,
         limit: q.limit,
-        viewer: if user.is_root { None } else { Some(user.id.clone()) },
+        viewer: if user.is_root {
+            None
+        } else {
+            Some(user.id.clone())
+        },
     };
     Ok(Json(c.memory().list(&ws, f).await?))
 }
@@ -238,7 +242,11 @@ async fn search<C: MemoryCtx>(
     Json(mut q): Json<MemoryQuery>,
 ) -> ApiResult<Json<Vec<MemoryHit>>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    q.viewer = if user.is_root { None } else { Some(user.id.clone()) };
+    q.viewer = if user.is_root {
+        None
+    } else {
+        Some(user.id.clone())
+    };
     Ok(Json(c.memory().search(&ws, q).await?))
 }
 
@@ -253,7 +261,11 @@ async fn recall<C: MemoryCtx>(
         focus: r.focus,
         token_budget: r.token_budget,
         kinds: vec![],
-        viewer: if user.is_root { None } else { Some(user.id.clone()) },
+        viewer: if user.is_root {
+            None
+        } else {
+            Some(user.id.clone())
+        },
     };
     Ok(Json(c.memory().recall_brief(&ws, &r.story_id, opts).await?))
 }
@@ -341,14 +353,22 @@ pub fn router<C: MemoryCtx>() -> Router<C> {
         )
         .route(
             "/workspaces/{ws}/memories/{id}",
-            get(get_one::<C>).patch(patch_one::<C>).delete(delete_one::<C>),
+            get(get_one::<C>)
+                .patch(patch_one::<C>)
+                .delete(delete_one::<C>),
         )
         .route("/workspaces/{ws}/memories/{id}/links", get(links::<C>))
         .route("/workspaces/{ws}/memory/search", post(search::<C>))
         .route("/workspaces/{ws}/memory/recall", post(recall::<C>))
         .route("/workspaces/{ws}/memory/graph", get(graph::<C>))
-        .route("/workspaces/{ws}/memory/ingest-text", post(ingest_text::<C>))
-        .route("/workspaces/{ws}/memory/import-graph", post(import_graph::<C>))
+        .route(
+            "/workspaces/{ws}/memory/ingest-text",
+            post(ingest_text::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/memory/import-graph",
+            post(import_graph::<C>),
+        )
         .route(
             "/workspaces/{ws}/memory/entities/{id}/graph",
             get(entity_graph::<C>),

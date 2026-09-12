@@ -224,10 +224,7 @@ impl AuthRepo {
             // session tokens. API tokens keep their long fixed lifetime and
             // impersonation tokens have a SHORT FIXED TTL — neither is ever slid
             // (impersonation must time out predictably).
-            let slide = !is_impersonation
-                && kind != "api"
-                && kind != "mcp"
-                && kind != "agent_mcp";
+            let slide = !is_impersonation && kind != "api" && kind != "mcp" && kind != "agent_mcp";
             if slide {
                 sqlx::query(
                     "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
@@ -905,14 +902,13 @@ impl AuthRepo {
             None
         };
 
-        let res = sqlx::query(
-            "DELETE FROM auth_sessions WHERE id = ? AND user_id = ? AND kind = 'api'",
-        )
-        .bind(id)
-        .bind(user_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
+        let res =
+            sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND user_id = ? AND kind = 'api'")
+                .bind(id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
 
         if res.rows_affected() > 0 {
             if let (Some(cache), Some(h)) = (&self.cache, cached_hash) {
@@ -1180,10 +1176,7 @@ impl AuthRepo {
     /// not `kind='share'` / no `recipient_email` / revoked) — the route maps
     /// `None` to a `400`. The raw OTP is returned exactly once; the DB only ever
     /// holds its hash.
-    pub async fn extend_share_otp(
-        &self,
-        token: &str,
-    ) -> Result<Option<(String, String, Id)>> {
+    pub async fn extend_share_otp(&self, token: &str) -> Result<Option<(String, String, Id)>> {
         let hash = token_hash(token);
         let row = sqlx::query(
             "SELECT user_id, recipient_email, revoked, created_at, expires_at
@@ -1213,7 +1206,8 @@ impl AuthRepo {
         let created_at = parse_ts(&row.get::<String, _>("created_at"))?;
         let prev_expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
         let original_window = (prev_expires_at - created_at).num_seconds();
-        let window_secs = original_window.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
+        let window_secs =
+            original_window.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
 
         let otp = generate_otp();
         let now = Utc::now();
@@ -1333,11 +1327,7 @@ impl AuthRepo {
     /// `share_id` and `owner_user_id`. Returns `None` when the share doesn't
     /// exist or isn't owned by this user. Used by the revoke-one handler to
     /// locate which session to evict.
-    pub async fn share_session_id(
-        &self,
-        owner_user_id: &Id,
-        share_id: &str,
-    ) -> Result<Option<Id>> {
+    pub async fn share_session_id(&self, owner_user_id: &Id, share_id: &str) -> Result<Option<Id>> {
         let row = sqlx::query(
             "SELECT session_scope FROM auth_sessions
              WHERE id = ? AND user_id = ? AND kind = 'share'",
@@ -1427,7 +1417,10 @@ mod tests {
         let (token, info) = repo.issue_api_token(&uid, Some("cli")).await.unwrap();
         assert_eq!(info.label.as_deref(), Some("cli"));
         // The prefix is the first 12 chars of the raw token, never the rest.
-        assert_eq!(info.token_prefix, token.chars().take(12).collect::<String>());
+        assert_eq!(
+            info.token_prefix,
+            token.chars().take(12).collect::<String>()
+        );
 
         // It shows up in the user's token list (metadata only, never the secret).
         let listed = repo.list_api_tokens(&uid).await.unwrap();
@@ -1472,7 +1465,10 @@ mod tests {
         assert_eq!(info.user_id, uid);
         assert_eq!(info.username, "carol");
         assert_eq!(info.scope, scope);
-        assert_eq!(info.token_prefix, token.chars().take(12).collect::<String>());
+        assert_eq!(
+            info.token_prefix,
+            token.chars().take(12).collect::<String>()
+        );
 
         // authenticate() resolves the per-token scope onto the AuthContext.
         let ctx = repo.authenticate(&token).await.unwrap();
@@ -1637,30 +1633,42 @@ mod tests {
         let workspace_id = Id::from("workspace-1");
 
         let (token, token_id) = repo
-            .issue_vault_reviewer_token(
-                &uid,
-                Some("vault-review"),
-                &session_id,
-                &workspace_id,
-            )
+            .issue_vault_reviewer_token(&uid, Some("vault-review"), &session_id, &workspace_id)
             .await
             .unwrap();
 
         let ctx = repo.authenticate(&token).await.unwrap();
-        assert!(ctx.mcp_only, "reviewer token must be denied on direct feature routes");
-        assert!(ctx.mcp_internal, "reviewer token must use the internal governed MCP path");
+        assert!(
+            ctx.mcp_only,
+            "reviewer token must be denied on direct feature routes"
+        );
+        assert!(
+            ctx.mcp_internal,
+            "reviewer token must use the internal governed MCP path"
+        );
         assert_eq!(ctx.mcp_session_id.as_ref(), Some(&session_id));
-        let scope = ctx.mcp_scope.expect("reviewer token carries an immutable scope");
+        let scope = ctx
+            .mcp_scope
+            .expect("reviewer token carries an immutable scope");
         assert_eq!(scope.workspace_id.as_ref(), Some(&workspace_id));
-        assert!(scope.deny_reason("vault_read", false, Some("workspace-1")).is_none());
-        assert!(scope.deny_reason("vault_write", true, Some("workspace-1")).is_some());
-        assert!(scope.deny_reason("vault_read", false, Some("workspace-2")).is_some());
+        assert!(scope
+            .deny_reason("vault_read", false, Some("workspace-1"))
+            .is_none());
+        assert!(scope
+            .deny_reason("vault_write", true, Some("workspace-1"))
+            .is_some());
+        assert!(scope
+            .deny_reason("vault_read", false, Some("workspace-2"))
+            .is_some());
 
         assert!(repo
             .revoke_vault_reviewer_token(&uid, &token_id)
             .await
             .unwrap());
-        assert!(matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)));
+        assert!(matches!(
+            repo.authenticate(&token).await,
+            Err(Error::Unauthorized)
+        ));
     }
 
     #[tokio::test]
@@ -1683,7 +1691,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)));
+        assert!(matches!(
+            repo.authenticate(&token).await,
+            Err(Error::Unauthorized)
+        ));
     }
 
     /// A legacy `issue_mcp_token` (no explicit scope) resolves to the unrestricted
@@ -1699,7 +1710,9 @@ mod tests {
         let scope = ctx.mcp_scope.expect("mcp token carries a scope");
         assert_eq!(scope, McpScope::unrestricted());
         // Unrestricted ⇒ even a mutating tool passes the scope gate.
-        assert!(scope.deny_reason("run_workflow", true, Some("any")).is_none());
+        assert!(scope
+            .deny_reason("run_workflow", true, Some("any"))
+            .is_none());
     }
 
     /// Multiple MCP tokens for DIFFERENT users coexist, each with its own access.
@@ -1963,7 +1976,13 @@ mod tests {
         let root_owner = seed_root_user(&pool, "root").await;
 
         let (raw, _info) = repo
-            .issue_share_token(&root_owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+            .issue_share_token(
+                &root_owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+            )
             .await
             .unwrap();
 
@@ -2055,7 +2074,13 @@ mod tests {
 
         // Ask for ~10 days; expect the 24h ceiling.
         let (_raw, info) = repo
-            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 864_000, None)
+            .issue_share_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                864_000,
+                None,
+            )
             .await
             .unwrap();
         let ttl = (info.expires_at - info.created_at).num_seconds();
@@ -2148,7 +2173,13 @@ mod tests {
         let owner = seed_user(&pool, "owner").await;
 
         let (_r1, live) = repo
-            .issue_share_token(&owner, &Id::from("S1"), WorkspaceRole::Viewer, 3600, Some("a".into()))
+            .issue_share_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                Some("a".into()),
+            )
             .await
             .unwrap();
         let (_r2, revoked) = repo
@@ -2177,7 +2208,10 @@ mod tests {
         for _ in 0..200 {
             let otp = generate_otp();
             assert_eq!(otp.len(), 6, "OTP must be 6 chars: {otp}");
-            assert!(otp.chars().all(|c| c.is_ascii_digit()), "OTP must be numeric: {otp}");
+            assert!(
+                otp.chars().all(|c| c.is_ascii_digit()),
+                "OTP must be numeric: {otp}"
+            );
         }
     }
 
@@ -2204,15 +2238,20 @@ mod tests {
         assert_eq!(info.session_id, Id::from("S1"));
 
         // The raw OTP is never stored — only its hash is in otp_hash.
-        let stored: String =
-            sqlx::query("SELECT otp_hash FROM auth_sessions WHERE token_hash = ?")
-                .bind(token_hash(&raw))
-                .fetch_one(&pool)
-                .await
-                .unwrap()
-                .get("otp_hash");
-        assert!(stored.starts_with("$argon2id$"), "otp_hash must be an argon2id PHC string, got {stored}");
-        assert!(crate::passwords::verify_password(&otp, &stored).unwrap(), "otp_hash must verify the raw OTP");
+        let stored: String = sqlx::query("SELECT otp_hash FROM auth_sessions WHERE token_hash = ?")
+            .bind(token_hash(&raw))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("otp_hash");
+        assert!(
+            stored.starts_with("$argon2id$"),
+            "otp_hash must be an argon2id PHC string, got {stored}"
+        );
+        assert!(
+            crate::passwords::verify_password(&otp, &stored).unwrap(),
+            "otp_hash must verify the raw OTP"
+        );
         assert_ne!(stored, otp, "raw OTP must not be stored");
 
         // It authenticates but is OTP-pending (gated).
@@ -2246,7 +2285,10 @@ mod tests {
         // Correct code → true, and the share becomes non-pending.
         assert!(repo.verify_share_otp(&raw, &otp).await.unwrap());
         let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
-        assert!(!scope.otp_pending, "after verify the share is no longer pending");
+        assert!(
+            !scope.otp_pending,
+            "after verify the share is no longer pending"
+        );
         assert_eq!(scope.role, WorkspaceRole::Editor);
 
         // Single-use: the same code cannot be redeemed again.
@@ -2289,7 +2331,14 @@ mod tests {
             "an expired OTP must be rejected"
         );
         // And the share stays pending.
-        assert!(repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending);
+        assert!(
+            repo.authenticate(&raw)
+                .await
+                .unwrap()
+                .scope
+                .unwrap()
+                .otp_pending
+        );
     }
 
     /// Once verified, the share re-pends after its `max_expires_at` window ends.
@@ -2311,7 +2360,15 @@ mod tests {
             .await
             .unwrap();
         assert!(repo.verify_share_otp(&raw, &otp).await.unwrap());
-        assert!(!repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending);
+        assert!(
+            !repo
+                .authenticate(&raw)
+                .await
+                .unwrap()
+                .scope
+                .unwrap()
+                .otp_pending
+        );
 
         // Move the session window (and the bearer expiry, to keep the token
         // alive for the test) — set max_expires_at to the past but keep
@@ -2324,7 +2381,12 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            repo.authenticate(&raw).await.unwrap().scope.unwrap().otp_pending,
+            repo.authenticate(&raw)
+                .await
+                .unwrap()
+                .scope
+                .unwrap()
+                .otp_pending,
             "after the window elapses the share must re-pend"
         );
     }
@@ -2348,7 +2410,10 @@ mod tests {
             .await
             .unwrap();
         let window = (info.expires_at - info.created_at).num_seconds();
-        assert_eq!(window, SHARE_OTP_WINDOW_MAX_SECS, "window must clamp to 12h");
+        assert_eq!(
+            window, SHARE_OTP_WINDOW_MAX_SECS,
+            "window must clamp to 12h"
+        );
     }
 
     /// A plain share (no recipient email) is NEVER OTP-pending (backward compat).

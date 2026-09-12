@@ -153,11 +153,11 @@ pub(crate) fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
             std::str::from_utf8(bytes).is_ok()
         }
         // JSON documents: UTF-8 and an object at the top.
-        "application/vnd.excalidraw+json" | "application/vnd.otto.scene3d+json" | "model/gltf+json" => {
-            std::str::from_utf8(bytes)
-                .map(|s| s.trim_start().starts_with('{'))
-                .unwrap_or(false)
-        }
+        "application/vnd.excalidraw+json"
+        | "application/vnd.otto.scene3d+json"
+        | "model/gltf+json" => std::str::from_utf8(bytes)
+            .map(|s| s.trim_start().starts_with('{'))
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -190,7 +190,10 @@ pub(crate) fn event_content(mime: &str, bytes: &[u8]) -> Option<String> {
         return None;
     }
     let text = crate::design_format::DesignFormat::from_mime(mime).is_some()
-        || matches!(mime, "text/plain" | "text/markdown" | "image/svg+xml" | "model/gltf+json");
+        || matches!(
+            mime,
+            "text/plain" | "text/markdown" | "image/svg+xml" | "model/gltf+json"
+        );
     if text {
         String::from_utf8(bytes.to_vec()).ok()
     } else {
@@ -374,8 +377,12 @@ pub async fn serve_attachment(
 
     let root = ctx.data_dir.join(ATTACH_ROOT);
     // Confine the stored path's join under the data dir (rust/path-injection)…
-    let full = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path)
-        .ok_or_else(|| ApiError(Error::Forbidden("attachment path escapes the data dir".into())))?;
+    let full =
+        otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
+            ApiError(Error::Forbidden(
+                "attachment path escapes the data dir".into(),
+            ))
+        })?;
     // …then path-sandbox: the resolved file MUST live under the attachments root.
     if !path_within(&root, &full) {
         return Err(ApiError(Error::Forbidden(
@@ -443,8 +450,12 @@ pub async fn put_attachment_content(
     let bytes = decode_content(&att.mime, &req.data_b64).map_err(ApiError)?;
 
     let root = ctx.data_dir.join(ATTACH_ROOT);
-    let full = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path)
-        .ok_or_else(|| ApiError(Error::Forbidden("attachment path escapes the data dir".into())))?;
+    let full =
+        otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
+            ApiError(Error::Forbidden(
+                "attachment path escapes the data dir".into(),
+            ))
+        })?;
     if !path_within(&root, &full) {
         return Err(ApiError(Error::Forbidden(
             "attachment path escapes the attachments root".into(),
@@ -507,7 +518,9 @@ pub(crate) fn check_base_updated_at(
 /// validate against its schema.
 pub(crate) fn decode_content(mime: &str, data_b64: &str) -> Result<Vec<u8>, Error> {
     if !allowed_mime(mime) {
-        return Err(Error::Invalid(format!("attachment type {mime} is not editable")));
+        return Err(Error::Invalid(format!(
+            "attachment type {mime} is not editable"
+        )));
     }
     let bytes = B64
         .decode(data_b64.trim())
@@ -728,7 +741,10 @@ mod tests {
         assert_eq!(ext_for_mime("application/pdf"), ".pdf");
         assert_eq!(ext_for_mime("text/html"), ".html");
         assert_eq!(ext_for_mime("text/markdown"), ".md");
-        assert_eq!(ext_for_mime("application/vnd.excalidraw+json"), ".excalidraw");
+        assert_eq!(
+            ext_for_mime("application/vnd.excalidraw+json"),
+            ".excalidraw"
+        );
         assert_eq!(ext_for_mime("application/vnd.otto.scene3d+json"), ".json");
         assert_eq!(ext_for_mime("model/gltf-binary"), ".glb");
         assert_eq!(ext_for_mime("model/gltf+json"), ".gltf");
@@ -757,7 +773,10 @@ mod tests {
         assert!(sniff_ok("model/gltf-binary", &glb));
         assert!(!sniff_ok("model/gltf-binary", b"{\"not\": \"glb\"}"));
         // JSON case: `{` after whitespace.
-        assert!(sniff_ok("application/vnd.excalidraw+json", b"  \n{\"type\":\"excalidraw\"}"));
+        assert!(sniff_ok(
+            "application/vnd.excalidraw+json",
+            b"  \n{\"type\":\"excalidraw\"}"
+        ));
         assert!(sniff_ok("model/gltf+json", b"{\"asset\":{}}"));
         assert!(!sniff_ok("application/vnd.otto.scene3d+json", b"[1,2]"));
         assert!(!sniff_ok("application/vnd.otto.scene3d+json", b"<html>"));
@@ -767,7 +786,10 @@ mod tests {
     fn content_put_guards() {
         let b64 = |b: &[u8]| B64.encode(b);
         // Happy path: html source.
-        assert_eq!(decode_content("text/html", &b64(b"<p>x</p>")).unwrap(), b"<p>x</p>");
+        assert_eq!(
+            decode_content("text/html", &b64(b"<p>x</p>")).unwrap(),
+            b"<p>x</p>"
+        );
         // Disallowed row type (an executable somehow) → Invalid.
         assert!(decode_content("application/x-sh", &b64(b"echo")).is_err());
         // Bad base64 / empty payload.
@@ -809,7 +831,10 @@ mod tests {
     #[test]
     fn event_content_is_source_for_text_and_null_for_binaries() {
         assert_eq!(event_content("text/html", b"<p>").as_deref(), Some("<p>"));
-        assert_eq!(event_content("application/vnd.otto.scene3d+json", b"{}").as_deref(), Some("{}"));
+        assert_eq!(
+            event_content("application/vnd.otto.scene3d+json", b"{}").as_deref(),
+            Some("{}")
+        );
         assert_eq!(event_content("model/gltf-binary", b"glTF...."), None);
         assert_eq!(event_content("image/png", b"\x89PNG"), None);
         let big = vec![b'x'; MAX_EVENT_CONTENT + 1];

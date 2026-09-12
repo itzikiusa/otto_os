@@ -411,10 +411,7 @@ mod tests {
 
     #[test]
     fn hash_comment_mysql_only() {
-        assert_eq!(
-            texts("SELECT 1 # x;y", SqlDialect::Mysql),
-            vec!["SELECT 1"]
-        );
+        assert_eq!(texts("SELECT 1 # x;y", SqlDialect::Mysql), vec!["SELECT 1"]);
         // Generic: `#` is an ordinary char, so the `;` splits.
         assert_eq!(texts("SELECT 1 # x;y", SqlDialect::Generic).len(), 2);
     }

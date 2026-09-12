@@ -139,8 +139,13 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         );
 
         crate::workflow_engine::spawn_run(
-            ctx.clone(), ws, wf, run.id.clone(), input,
-            otto_core::workflows::RunScope::default(), None,
+            ctx.clone(),
+            ws,
+            wf,
+            run.id.clone(),
+            input,
+            otto_core::workflows::RunScope::default(),
+            None,
         );
     }
     Ok(())
@@ -149,12 +154,18 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
 /// Copy a trigger spec's result-delivery destinations into a run input map.
 /// `deliver_run_result` reads these exact keys from the input; without them a
 /// scheduled/event/webhook run completes with no notification anywhere.
-pub(crate) fn copy_result_destinations(
-    spec: &Value,
-    input: &mut serde_json::Map<String, Value>,
-) {
-    for key in ["result_channel", "result_chat", "result_thread", "result_webhook"] {
-        if let Some(v) = spec.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+pub(crate) fn copy_result_destinations(spec: &Value, input: &mut serde_json::Map<String, Value>) {
+    for key in [
+        "result_channel",
+        "result_chat",
+        "result_thread",
+        "result_webhook",
+    ] {
+        if let Some(v) = spec
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
             input.insert(key.into(), json!(v));
         }
     }
@@ -201,12 +212,12 @@ pub fn is_due(spec: &Value, now: DateTime<Utc>) -> bool {
 /// automation triggers (session churn, low-level ticks, etc.).
 fn event_to_kind(event: &Event) -> Option<&'static str> {
     match event {
-        Event::ReviewChanged { .. }         => Some("review_changed"),
-        Event::BudgetExceeded { .. }        => Some("budget_exceeded"),
-        Event::ProductChanged { .. }        => Some("product_changed"),
-        Event::SwarmStatus { .. }           => Some("swarm_status"),
+        Event::ReviewChanged { .. } => Some("review_changed"),
+        Event::BudgetExceeded { .. } => Some("budget_exceeded"),
+        Event::ProductChanged { .. } => Some("product_changed"),
+        Event::SwarmStatus { .. } => Some("swarm_status"),
         Event::ImprovementRunFinished { .. } => Some("improvement_run_finished"),
-        Event::InsightReady { .. }          => Some("insight_ready"),
+        Event::InsightReady { .. } => Some("insight_ready"),
         // `WorkflowRunUpdated` is deliberately NOT triggerable: the engine
         // emits it on EVERY node transition of EVERY run, so a trigger on it
         // recursively spawns runs that emit more of it — an unbounded run
@@ -243,7 +254,8 @@ fn filter_matches(filter: Option<&Value>, event_payload: &Value) -> bool {
     let Some(Value::Object(map)) = filter else {
         return true;
     };
-    map.iter().all(|(k, expected)| event_payload.get(k) == Some(expected))
+    map.iter()
+        .all(|(k, expected)| event_payload.get(k) == Some(expected))
 }
 
 /// Start the event-trigger listener task. Returns a cancel flag; set to `true`
@@ -288,10 +300,7 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
             let matching: Vec<_> = triggers
                 .into_iter()
                 .filter(|t| {
-                    t.spec
-                        .get("event_kind")
-                        .and_then(Value::as_str)
-                        == Some(kind_str)
+                    t.spec.get("event_kind").and_then(Value::as_str) == Some(kind_str)
                         && filter_matches(t.spec.get("filter_json"), &event_payload)
                 })
                 .collect();
@@ -374,8 +383,13 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                 );
 
                 crate::workflow_engine::spawn_run(
-                    ctx.clone(), ws, wf, run.id.clone(), input,
-                    otto_core::workflows::RunScope::default(), None,
+                    ctx.clone(),
+                    ws,
+                    wf,
+                    run.id.clone(),
+                    input,
+                    otto_core::workflows::RunScope::default(),
+                    None,
                 );
             }
         }
@@ -411,8 +425,14 @@ mod tests {
         assert!(filter_matches(None, &payload));
         assert!(filter_matches(Some(&json!({})), &payload));
         assert!(filter_matches(Some(&json!({"status": "done"})), &payload));
-        assert!(filter_matches(Some(&json!({"status": "done", "n": 3})), &payload));
-        assert!(!filter_matches(Some(&json!({"status": "failed"})), &payload));
+        assert!(filter_matches(
+            Some(&json!({"status": "done", "n": 3})),
+            &payload
+        ));
+        assert!(!filter_matches(
+            Some(&json!({"status": "failed"})),
+            &payload
+        ));
         assert!(!filter_matches(Some(&json!({"missing": "x"})), &payload));
         // Non-object filters are treated as match-all (defensive).
         assert!(filter_matches(Some(&json!("garbage")), &payload));

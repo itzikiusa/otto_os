@@ -57,9 +57,11 @@ fn spawn_plan_reply(prompt: &str) -> Option<String> {
         .map(|(_, i)| i.to_lowercase())
         .unwrap_or_default();
     // First enum provider named in the instruction wins.
-    let picked = providers
-        .iter()
-        .find(|p| instruction.split(|c: char| !c.is_alphanumeric()).any(|w| w == p.as_str()))?;
+    let picked = providers.iter().find(|p| {
+        instruction
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == p.as_str())
+    })?;
     Some(format!(
         "[{{\"action\":\"spawn_sessions\",\"provider\":\"{picked}\",\"count\":1}}]"
     ))
@@ -112,7 +114,7 @@ flowchart TD\n\
   A([\"Open settings\"]) --> B[\"Edit profile\"]\n\
   B --> C([\"Saved\"])\n\
 ```"
-        .to_string()
+    .to_string()
 }
 
 fn discovery_chat_reply() -> String {
@@ -158,7 +160,7 @@ start -> valid\n\
 valid -> process: yes\n\
 valid -> reject: no\n\
 ```"
-            .to_string();
+        .to_string();
     }
     if prompt.contains("canvas.json") || prompt.contains("EXCALIDRAW canvas") {
         return "Drew the order flow as Excalidraw shapes with a validation decision.\n\n\
@@ -191,7 +193,7 @@ flowchart TD\n\
   class A,E start;\n\
   class D error;\n\
 ```"
-        .to_string()
+    .to_string()
 }
 
 #[cfg(test)]

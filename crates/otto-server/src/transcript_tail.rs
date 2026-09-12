@@ -130,9 +130,17 @@ fn should_continue(sid: &Id) -> bool {
 
 /// Refold the whole file from record 0 (initial start, replaced file, Codex
 /// era flip). Blocking IO — run via `spawn_blocking`.
-fn refold(ctx: &ServerCtx, provider: Provider, path: &Path, opts_subagents: bool) -> std::io::Result<Folder<'static>> {
+fn refold(
+    ctx: &ServerCtx,
+    provider: Provider,
+    path: &Path,
+    opts_subagents: bool,
+) -> std::io::Result<Folder<'static>> {
     let records = read_records(path)?;
-    let mut folder = Folder::new(provider, crate::routes::transcript::fold_opts(ctx, provider, path));
+    let mut folder = Folder::new(
+        provider,
+        crate::routes::transcript::fold_opts(ctx, provider, path),
+    );
     if opts_subagents {
         folder.set_subagents(otto_transcript::read_subagents(path));
     }
@@ -145,16 +153,18 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
     let wid = session.workspace_id.clone();
     let claude = provider == Provider::Claude;
     let (cx, p) = (ctx.clone(), path.clone());
-    let mut folder = match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude)).await {
-        Ok(Ok(f)) => f,
-        Ok(Err(e)) => {
-            tracing::debug!(session = %sid, "transcript tail: initial fold failed: {e}");
-            return;
-        }
-        Err(_) => return,
-    };
+    let mut folder =
+        match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude)).await {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => {
+                tracing::debug!(session = %sid, "transcript tail: initial fold failed: {e}");
+                return;
+            }
+            Err(_) => return,
+        };
     let mut folded = folder.snapshot();
-    let mut known_artifacts: HashSet<String> = folded.artifacts.iter().map(|a| a.id.clone()).collect();
+    let mut known_artifacts: HashSet<String> =
+        folded.artifacts.iter().map(|a| a.id.clone()).collect();
     let mut tailer = Tailer::at(&path, Tailer::current_len(&path));
     let mut exited_since: Option<Instant> = None;
     let mut last_live: Option<ScreenParts> = None;
@@ -211,7 +221,11 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
         if delta.records.is_empty() && !delta.restarted {
             continue;
         }
-        let prev_count = if delta.restarted { 0 } else { folder.record_count() };
+        let prev_count = if delta.restarted {
+            0
+        } else {
+            folder.record_count()
+        };
         let mut needs_refold = delta.restarted;
         if !needs_refold {
             for r in &delta.records {
@@ -223,7 +237,9 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
         }
         if needs_refold {
             let (cx, p) = (ctx.clone(), path.clone());
-            folder = match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude)).await {
+            folder = match tokio::task::spawn_blocking(move || refold(&cx, provider, &p, claude))
+                .await
+            {
                 Ok(Ok(f)) => f,
                 Ok(Err(e)) => {
                     tracing::debug!(session = %sid, "transcript tail: refold failed: {e}");
@@ -245,7 +261,9 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
             .collect();
         let cursor = folded.record_count.saturating_sub(1).to_string();
         // Size the frame ONCE; over the cap the client re-fetches.
-        let size = serde_json::to_vec(&turns).map(|v| v.len()).unwrap_or(usize::MAX);
+        let size = serde_json::to_vec(&turns)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
         let _ = ctx.events.send(Event::TranscriptAppended {
             workspace_id: wid.clone(),
             session_id: sid.clone(),
@@ -373,7 +391,11 @@ pub fn live_draft(rows: &[String]) -> String {
     }
     fn is_input(r: &str) -> bool {
         let t = r.trim_start();
-        t.starts_with('❯') || t.starts_with("│ >") || t.starts_with("│ ❯") || t.starts_with("╭─") || t.starts_with("╰─")
+        t.starts_with('❯')
+            || t.starts_with("│ >")
+            || t.starts_with("│ ❯")
+            || t.starts_with("╭─")
+            || t.starts_with("╰─")
     }
     fn is_echo(r: &str) -> bool {
         let t = r.trim_start();
@@ -407,7 +429,10 @@ pub fn live_draft(rows: &[String]) -> String {
             || t.starts_with("Tip:")
             || t.starts_with("※ Tip:")
             || (t.contains('…') && has_timer(t))
-            || t.chars().next().is_some_and(|c| "✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)) && t.contains('…')
+            || t.chars()
+                .next()
+                .is_some_and(|c| "✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c))
+                && t.contains('…')
     }
     // Input box: the LAST input row; content is everything above it (and
     // above the rule that frames it).
@@ -419,7 +444,11 @@ pub fn live_draft(rows: &[String]) -> String {
         }
     }
     let content = &rows[..end];
-    let start = content.iter().rposition(|r| is_echo(r)).map(|i| i + 1).unwrap_or(0);
+    let start = content
+        .iter()
+        .rposition(|r| is_echo(r))
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let mut out: Vec<&str> = Vec::new();
     let mut blank_run = 0usize;
     for r in &content[start..] {
@@ -466,7 +495,10 @@ mod tests {
             "⏺ earlier answer\n\n> option 2, other services still read GSS_games\n\n⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines\n\n✻ Cooking… (esc to interrupt)\n\n────────────────────────────\n❯ \n────────────────────────────\n  -- INSERT --",
         );
         let d = live_draft(&screen);
-        assert_eq!(d, "⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines");
+        assert_eq!(
+            d,
+            "⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines"
+        );
     }
 
     #[test]
@@ -480,7 +512,10 @@ mod tests {
     #[test]
     fn live_draft_is_empty_right_after_a_prompt_and_tolerates_no_box() {
         assert_eq!(live_draft(&rows("> hi\n\n❯ ")), "");
-        assert_eq!(live_draft(&rows("plain output\nmore")), "plain output\nmore");
+        assert_eq!(
+            live_draft(&rows("plain output\nmore")),
+            "plain output\nmore"
+        );
         assert_eq!(live_draft(&[]), "");
     }
 
@@ -492,7 +527,10 @@ mod tests {
         let p = screen_parts(&screen);
         assert_eq!(p.draft, "⏺ working");
         assert_eq!(p.input, "option 2, other services");
-        assert_eq!(p.status, "~ | Fable 5.1 | ▓▓░░ 11% · -- INSERT -- ▶▶ bypass permissions on");
+        assert_eq!(
+            p.status,
+            "~ | Fable 5.1 | ▓▓░░ 11% · -- INSERT -- ▶▶ bypass permissions on"
+        );
         // No input box → draft only.
         let p = screen_parts(&rows("just text"));
         assert_eq!(p.input, "");
@@ -521,7 +559,9 @@ mod tests {
 
     #[test]
     fn live_draft_caps_to_the_tail() {
-        let big: Vec<String> = (0..2000).map(|i| format!("line {i} {}", "x".repeat(20))).collect();
+        let big: Vec<String> = (0..2000)
+            .map(|i| format!("line {i} {}", "x".repeat(20)))
+            .collect();
         let d = live_draft(&big);
         assert!(d.len() <= LIVE_CAP + 4);
         assert!(d.starts_with('…'));

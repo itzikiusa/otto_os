@@ -47,7 +47,11 @@ pub fn read_records(path: &Path) -> std::io::Result<Vec<Value>> {
 /// the file is smaller than `head + tail` the tail is empty and the head holds
 /// everything. Tail parsing starts after the first newline in the chunk so a
 /// half-line at the seam is skipped.
-pub fn read_head_tail(path: &Path, head: u64, tail: u64) -> std::io::Result<(Vec<Value>, Vec<Value>)> {
+pub fn read_head_tail(
+    path: &Path,
+    head: u64,
+    tail: u64,
+) -> std::io::Result<(Vec<Value>, Vec<Value>)> {
     use std::io::{Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
@@ -93,7 +97,10 @@ mod tests {
         let p = dir.path().join("t.jsonl");
         let mut s = String::new();
         for i in 0..200 {
-            s.push_str(&format!("{{\"type\":\"r\",\"i\":{i},\"pad\":\"{}\"}}\n", "x".repeat(50)));
+            s.push_str(&format!(
+                "{{\"type\":\"r\",\"i\":{i},\"pad\":\"{}\"}}\n",
+                "x".repeat(50)
+            ));
         }
         std::fs::write(&p, &s).unwrap();
         let (head, tail) = read_head_tail(&p, 300, 300).unwrap();

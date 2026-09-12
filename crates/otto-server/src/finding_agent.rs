@@ -40,7 +40,12 @@ pub fn head_of(dir: &Path) -> Option<String> {
 /// The set of tracked test files in a worktree (paths whose name suggests a
 /// test, across common languages).
 pub fn list_test_files(dir: &Path) -> HashSet<String> {
-    let out = match Command::new("git").arg("-C").arg(dir).args(["ls-files"]).output() {
+    let out = match Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files"])
+        .output()
+    {
         Ok(o) if o.status.success() => o,
         _ => return HashSet::new(),
     };
@@ -88,7 +93,11 @@ pub fn judge_verify(finding: &Finding, repo_path: &Path) -> bool {
     if e2e_mode() {
         return true;
     }
-    if let Some(test) = finding.linked_test.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(test) = finding
+        .linked_test
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         return run_linked_test(repo_path, test);
     }
     true
@@ -125,7 +134,10 @@ pub async fn provision_worktree(
     finding_id: &str,
 ) -> otto_core::Result<(String, String)> {
     let git = otto_git::LocalGit::new(repo_path);
-    let base = git.rev_parse("HEAD").await.unwrap_or_else(|_| "HEAD".to_string());
+    let base = git
+        .rev_parse("HEAD")
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string());
     let branch = format!("otto/fix/{finding_id}");
     let wt = std::env::temp_dir()
         .join(format!("otto-fix-{finding_id}"))
@@ -168,7 +180,11 @@ pub async fn spawn_session(
         model: None,
         meta: Some(meta),
     };
-    let session = match ctx.manager.create(&ws, &user_id.to_string(), req, None).await {
+    let session = match ctx
+        .manager
+        .create(&ws, &user_id.to_string(), req, None)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("finding agent: create session ({action}): {e}");
@@ -240,7 +256,11 @@ mod tests {
         let before = list_test_files(repo.path());
         assert!(before.is_empty());
         std::fs::create_dir_all(repo.path().join("tests")).unwrap();
-        std::fs::write(repo.path().join("tests/regress_test.rs"), "#[test] fn t(){}").unwrap();
+        std::fs::write(
+            repo.path().join("tests/regress_test.rs"),
+            "#[test] fn t(){}",
+        )
+        .unwrap();
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-qm", "add test"]);
         let found = detect_new_test(&before, repo.path());

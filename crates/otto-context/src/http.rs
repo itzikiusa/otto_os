@@ -89,18 +89,25 @@ fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
 pub fn router<C: ContextCtx>() -> Router<C> {
     Router::new()
         // Library: skills
-        .route("/library/skills", get(list_skills::<C>).post(create_skill::<C>))
+        .route(
+            "/library/skills",
+            get(list_skills::<C>).post(create_skill::<C>),
+        )
         // Multi-file skill editing (Skills Lab). Static `import` segment is
         // registered before the `{name}` param so it is never shadowed.
         .route("/library/skills/import", post(import_skill::<C>))
         .route("/library/skills/{name}/files", get(list_skill_files::<C>))
         .route(
             "/library/skills/{name}/file",
-            get(get_skill_file::<C>).put(put_skill_file::<C>).delete(delete_skill_file::<C>),
+            get(get_skill_file::<C>)
+                .put(put_skill_file::<C>)
+                .delete(delete_skill_file::<C>),
         )
         .route(
             "/library/skills/{name}",
-            get(get_skill::<C>).put(put_skill::<C>).delete(delete_skill::<C>),
+            get(get_skill::<C>)
+                .put(put_skill::<C>)
+                .delete(delete_skill::<C>),
         )
         // Provider-global skills (~/.claude|.codex|.agy/skills) — read-only.
         .route("/library/provider-skills", get(list_provider_skills::<C>))
@@ -116,13 +123,17 @@ pub fn router<C: ContextCtx>() -> Router<C> {
         .route("/library/souls", get(list_souls::<C>))
         .route(
             "/library/souls/{name}",
-            get(get_soul::<C>).put(put_soul::<C>).delete(delete_soul::<C>),
+            get(get_soul::<C>)
+                .put(put_soul::<C>)
+                .delete(delete_soul::<C>),
         )
         // Library: context
         .route("/library/context", get(list_context::<C>))
         .route(
             "/library/context/{name}",
-            get(get_context::<C>).put(put_context::<C>).delete(delete_context::<C>),
+            get(get_context::<C>)
+                .put(put_context::<C>)
+                .delete(delete_context::<C>),
         )
         // Library: global default soul
         .route(
@@ -138,10 +149,7 @@ pub fn router<C: ContextCtx>() -> Router<C> {
             "/workspaces/{id}/context/materialize",
             post(materialize_ws::<C>),
         )
-        .route(
-            "/workspaces/{id}/context/preview",
-            post(preview_ws::<C>),
-        )
+        .route("/workspaces/{id}/context/preview", post(preview_ws::<C>))
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +253,11 @@ async fn get_skill_file<C: ContextCtx>(
         .library()
         .read_skill_file(&name, &q.path)
         .ok_or_else(|| Error::NotFound(format!("file '{}' in skill '{name}'", q.path)))?;
-    Ok(Json(SkillFileContentResp { path: q.path, content, binary }))
+    Ok(Json(SkillFileContentResp {
+        path: q.path,
+        content,
+        binary,
+    }))
 }
 
 async fn put_skill_file<C: ContextCtx>(
@@ -284,7 +296,12 @@ async fn create_skill<C: ContextCtx>(
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?;
     s.library()
-        .create_skill(&req.name, &req.category, &req.description, req.body.as_deref())
+        .create_skill(
+            &req.name,
+            &req.category,
+            &req.description,
+            req.body.as_deref(),
+        )
         .map_err(|e| map_io("create skill", e))?;
     s.library()
         .get_skill(&req.name)
@@ -343,7 +360,13 @@ async fn get_provider_skill_file<C: ContextCtx>(
 ) -> ApiResult<Json<SkillFileContentResp>> {
     crate::provider_skills::read_file(&provider, &name, &q.path)
         .map(Json)
-        .ok_or_else(|| Error::NotFound(format!("file '{}' in provider skill '{provider}/{name}'", q.path)).into())
+        .ok_or_else(|| {
+            Error::NotFound(format!(
+                "file '{}' in provider skill '{provider}/{name}'",
+                q.path
+            ))
+            .into()
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +505,9 @@ async fn get_ws_context<C: ContextCtx>(
     Extension(user): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<WorkspaceContextConfig>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     Ok(Json(config::from_settings(&ws.settings)))
 }
@@ -493,7 +518,9 @@ async fn update_ws_context<C: ContextCtx>(
     Path(ws_id): Path<Id>,
     Json(req): Json<UpdateWorkspaceContextReq>,
 ) -> ApiResult<Json<WorkspaceContextConfig>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Admin).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Admin)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     // PRESERVE the machine-managed `repo_rules_md` block — it is rendered from the
     // `repo_rules` table by the server, not edited via this user-facing PUT, and
@@ -528,7 +555,9 @@ async fn materialize_ws<C: ContextCtx>(
     Path(ws_id): Path<Id>,
     Query(q): Query<MaterializeQuery>,
 ) -> ApiResult<Json<MaterializeResp>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Editor).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
     let cfg = config::from_settings(&ws.settings);
 
@@ -557,7 +586,9 @@ async fn preview_ws<C: ContextCtx>(
     Path(ws_id): Path<Id>,
     Json(req): Json<ContextPreviewReq>,
 ) -> ApiResult<Json<ContextPreviewResp>> {
-    s.roles().check(&user.0, &ws_id, WorkspaceRole::Viewer).await?;
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Viewer)
+        .await?;
     let ws = s.workspaces().get(&ws_id).await?;
 
     // Start from the stored selection, then apply any per-field overrides from

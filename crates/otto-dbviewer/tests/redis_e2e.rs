@@ -185,7 +185,10 @@ async fn redis_run() {
     let cfg = cfg();
 
     // GET app:name -> single cell "Otto Shop".
-    let got = d.run(&cfg, &query("GET app:name")).await.expect("GET failed");
+    let got = d
+        .run(&cfg, &query("GET app:name"))
+        .await
+        .expect("GET failed");
     assert_eq!(got.rows.len(), 1, "GET should return a single row");
     assert_eq!(
         got.rows[0][0],
@@ -234,10 +237,7 @@ async fn redis_prefix_filter_and_cap() {
         .schema_children(&cfg, &ks, Some("bigns:"))
         .await
         .expect("filter bigns:");
-    let overview = d
-        .schema_children(&cfg, &ks, None)
-        .await
-        .expect("overview");
+    let overview = d.schema_children(&cfg, &ks, None).await.expect("overview");
 
     cleanup_prefix_keys(&d, &cfg).await;
 

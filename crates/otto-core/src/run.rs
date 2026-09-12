@@ -394,7 +394,10 @@ pub fn parse_source_ref(input: &str) -> Option<(SourceKind, String, Option<Strin
                 _ => None,
             };
             if let Some(kind) = kind {
-                let num: String = parts[3].chars().take_while(|c| c.is_ascii_digit()).collect();
+                let num: String = parts[3]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 if !owner.is_empty() && !repo.is_empty() && !num.is_empty() {
                     return Some((kind, format!("{owner}/{repo}#{num}"), Some(s.to_string())));
                 }

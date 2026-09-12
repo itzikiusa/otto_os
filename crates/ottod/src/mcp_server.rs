@@ -37,7 +37,10 @@ impl Ctx {
         let status = resp.status();
         let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
         if !status.is_success() {
-            return Err(format!("daemon returned {status}: {}", body.chars().take(300).collect::<String>()));
+            return Err(format!(
+                "daemon returned {status}: {}",
+                body.chars().take(300).collect::<String>()
+            ));
         }
         serde_json::from_str(&body).map_err(|e| format!("parse json: {e}"))
     }
@@ -55,7 +58,10 @@ impl Ctx {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
         if !status.is_success() {
-            return Err(format!("daemon returned {status}: {}", text.chars().take(300).collect::<String>()));
+            return Err(format!(
+                "daemon returned {status}: {}",
+                text.chars().take(300).collect::<String>()
+            ));
         }
         serde_json::from_str(&text).map_err(|e| format!("parse json: {e}"))
     }
@@ -63,11 +69,8 @@ impl Ctx {
     /// The MCP `tools/list`: the otto.* specs filtered to the enabled set.
     async fn tools_list(&self) -> Value {
         // The set of currently-enabled tools (best-effort; on error list all).
-        let enabled: Option<Vec<String>> = self
-            .get_json("/mcp/otto-server")
-            .await
-            .ok()
-            .and_then(|v| {
+        let enabled: Option<Vec<String>> =
+            self.get_json("/mcp/otto-server").await.ok().and_then(|v| {
                 v.get("tools").and_then(Value::as_array).map(|tools| {
                     tools
                         .iter()
@@ -81,7 +84,10 @@ impl Ctx {
             .into_iter()
             .filter(|s| {
                 let name = s.get("name").and_then(Value::as_str).unwrap_or("");
-                enabled.as_ref().map(|e| e.iter().any(|n| n == name)).unwrap_or(true)
+                enabled
+                    .as_ref()
+                    .map(|e| e.iter().any(|n| n == name))
+                    .unwrap_or(true)
             })
             .map(|s| {
                 json!({
@@ -106,7 +112,9 @@ impl Ctx {
             Ok(v) => {
                 let executed = v.get("executed").and_then(Value::as_bool).unwrap_or(false);
                 let decision = v.get("decision").and_then(Value::as_str).unwrap_or("");
-                let is_error = decision == "denied" || decision == "error" || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                let is_error = decision == "denied"
+                    || decision == "error"
+                    || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                 // Surface the whole governed envelope to the agent so it can see a
                 // denial reason / pending-approval id / the tool content.
                 let _ = executed;
@@ -148,12 +156,20 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
         "tools/call" => {
             let id = id.unwrap_or(Value::Null);
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             Some(rpc_ok(id, ctx.tools_call(&name, &args).await))
         }
         _ if is_notification => None,
-        _ => Some(rpc_err(id.unwrap_or(Value::Null), -32601, format!("method not found: {method}"))),
+        _ => Some(rpc_err(
+            id.unwrap_or(Value::Null),
+            -32601,
+            format!("method not found: {method}"),
+        )),
     }
 }
 
@@ -179,7 +195,10 @@ pub async fn run() -> Result<(), String> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await.map_err(|e| format!("read stdin: {e}"))?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read stdin: {e}"))?;
         if n == 0 {
             break;
         }
@@ -190,7 +209,11 @@ pub async fn run() -> Result<(), String> {
         let msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                write_line(&mut stdout, &rpc_err(Value::Null, -32700, format!("parse error: {e}"))).await?;
+                write_line(
+                    &mut stdout,
+                    &rpc_err(Value::Null, -32700, format!("parse error: {e}")),
+                )
+                .await?;
                 continue;
             }
         };
@@ -204,7 +227,10 @@ pub async fn run() -> Result<(), String> {
 async fn write_line(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<(), String> {
     let mut buf = serde_json::to_vec(value).map_err(|e| format!("encode: {e}"))?;
     buf.push(b'\n');
-    stdout.write_all(&buf).await.map_err(|e| format!("write: {e}"))?;
+    stdout
+        .write_all(&buf)
+        .await
+        .map_err(|e| format!("write: {e}"))?;
     stdout.flush().await.map_err(|e| format!("flush: {e}"))?;
     Ok(())
 }

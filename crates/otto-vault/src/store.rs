@@ -62,7 +62,9 @@ impl Store {
             .await
             .map_err(dberr("vault.create.dup"))?;
         if dup.is_some() {
-            return Err(Error::Conflict(format!("vault already registered at {root}")));
+            return Err(Error::Conflict(format!(
+                "vault already registered at {root}"
+            )));
         }
         let r = sqlx::query(
             "INSERT INTO vaults (ws_id, name, root_path, okf, created_at) VALUES (?,?,?,?,?)",
@@ -120,12 +122,15 @@ impl Store {
     }
 
     pub async fn get_vault(&self, id: i64) -> Result<VaultRec> {
-        let row = sqlx::query(&format!("SELECT {} FROM vaults v WHERE v.id = ?", Self::VAULT_COLS))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("vault.get"))?
-            .ok_or_else(|| Error::NotFound("vault".into()))?;
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM vaults v WHERE v.id = ?",
+            Self::VAULT_COLS
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("vault.get"))?
+        .ok_or_else(|| Error::NotFound("vault".into()))?;
         Ok(Self::vault_from_row(&row))
     }
 
@@ -159,7 +164,11 @@ impl Store {
             "DELETE FROM vault_notes WHERE vault_id = ?",
             "DELETE FROM vaults WHERE id = ?",
         ] {
-            sqlx::query(sql).bind(id).execute(&self.pool).await.map_err(dberr("vault.delete"))?;
+            sqlx::query(sql)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("vault.delete"))?;
         }
         let _ = sqlx::query("DELETE FROM vault_fts WHERE vault_id = ?")
             .bind(id)
@@ -233,7 +242,10 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("vault.note_sigs"))?;
-        Ok(rows.iter().map(|r| (r.get("path"), r.get("size"), r.get("mtime_ns"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("path"), r.get("size"), r.get("mtime_ns")))
+            .collect())
     }
 
     pub async fn file_sigs(&self, vault: i64) -> Result<Vec<(String, i64, i64)>> {
@@ -242,7 +254,10 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("vault.file_sigs"))?;
-        Ok(rows.iter().map(|r| (r.get("path"), r.get("size"), r.get("mtime_ns"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("path"), r.get("size"), r.get("mtime_ns")))
+            .collect())
     }
 
     pub async fn upsert_note(&self, vault: i64, n: &NoteRow) -> Result<()> {
@@ -298,7 +313,13 @@ impl Store {
         Ok(())
     }
 
-    pub async fn upsert_file(&self, vault: i64, path: &str, size: i64, mtime_ns: i64) -> Result<()> {
+    pub async fn upsert_file(
+        &self,
+        vault: i64,
+        path: &str,
+        size: i64,
+        mtime_ns: i64,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO vault_files (vault_id, path, size, mtime_ns) VALUES (?,?,?,?) \
              ON CONFLICT(vault_id, path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns",
@@ -324,15 +345,13 @@ impl Store {
     }
 
     pub async fn note_meta(&self, vault: i64, path: &str) -> Result<NoteMeta> {
-        let r = sqlx::query(
-            "SELECT * FROM vault_notes WHERE vault_id = ? AND path = ?",
-        )
-        .bind(vault)
-        .bind(path)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(dberr("vault.note_meta"))?
-        .ok_or_else(|| Error::NotFound(format!("note {path}")))?;
+        let r = sqlx::query("SELECT * FROM vault_notes WHERE vault_id = ? AND path = ?")
+            .bind(vault)
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("vault.note_meta"))?
+            .ok_or_else(|| Error::NotFound(format!("note {path}")))?;
         Ok(Self::meta_from_row(&r))
     }
 
@@ -347,7 +366,8 @@ impl Store {
             frontmatter: parse(r.get("frontmatter_json")),
             tags: strs(r.get("tags_json")),
             aliases: strs(r.get("aliases_json")),
-            headings: serde_json::from_str(&r.get::<String, _>("headings_json")).unwrap_or_default(),
+            headings: serde_json::from_str(&r.get::<String, _>("headings_json"))
+                .unwrap_or_default(),
             word_count: r.get("word_count"),
             size: r.get("size"),
             hash: r.get("hash"),
@@ -439,7 +459,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.backlinks"))?;
-        Ok(rows.iter().map(|r| (r.get("src_path"), r.get("title"), r.get("kind"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("src_path"), r.get("title"), r.get("kind")))
+            .collect())
     }
 
     /// Every src_path that has at least one link whose dst is `path`.
@@ -469,7 +492,10 @@ impl Store {
     }
 
     /// Every link row `(rowid, src, raw, dst)` — the global re-resolve pass.
-    pub async fn all_links_full(&self, vault: i64) -> Result<Vec<(i64, String, String, Option<String>)>> {
+    pub async fn all_links_full(
+        &self,
+        vault: i64,
+    ) -> Result<Vec<(i64, String, String, Option<String>)>> {
         let rows = sqlx::query(
             "SELECT rowid, src_path, raw_target, dst_path FROM vault_links WHERE vault_id = ?",
         )
@@ -479,7 +505,14 @@ impl Store {
         .map_err(dberr("vault.all_links_full"))?;
         Ok(rows
             .iter()
-            .map(|r| (r.get("rowid"), r.get("src_path"), r.get("raw_target"), r.get("dst_path")))
+            .map(|r| {
+                (
+                    r.get("rowid"),
+                    r.get("src_path"),
+                    r.get("raw_target"),
+                    r.get("dst_path"),
+                )
+            })
             .collect())
     }
 
@@ -502,13 +535,22 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.tags"))?;
-        Ok(rows.iter().map(|r| TagCount { tag: r.get("tag"), count: r.get("c") }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| TagCount {
+                tag: r.get("tag"),
+                count: r.get("c"),
+            })
+            .collect())
     }
 
     // -- listing / switcher / graph -------------------------------------------
 
     /// `(path, title, okf_type, reserved)` of every note (switcher + graph + tree).
-    pub async fn all_notes(&self, vault: i64) -> Result<Vec<(String, String, Option<String>, bool)>> {
+    pub async fn all_notes(
+        &self,
+        vault: i64,
+    ) -> Result<Vec<(String, String, Option<String>, bool)>> {
         let rows = sqlx::query(
             "SELECT path, title, okf_type, reserved FROM vault_notes WHERE vault_id = ? ORDER BY path",
         )
@@ -538,7 +580,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.aliases"))?;
-        Ok(rows.iter().map(|r| (r.get("path"), r.get("aliases_json"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("path"), r.get("aliases_json")))
+            .collect())
     }
 
     pub async fn all_file_paths(&self, vault: i64) -> Result<Vec<String>> {
@@ -560,7 +605,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.all_edges"))?;
-        Ok(rows.iter().map(|r| (r.get("src_path"), r.get("dst_path"), r.get("kind"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("src_path"), r.get("dst_path"), r.get("kind")))
+            .collect())
     }
 
     /// Unresolved raw targets grouped: `(src, raw_target)`.
@@ -573,7 +621,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.ghost_edges"))?;
-        Ok(rows.iter().map(|r| (r.get("src_path"), r.get("raw_target"))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("src_path"), r.get("raw_target")))
+            .collect())
     }
 
     /// `(path → [tags])` for the graph's tag nodes.
@@ -667,7 +718,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("vault.like_search"))?;
-        Ok(rows.iter().map(|r| (r.get("path"), r.get::<String, _>("title"), 0.1f32)).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("path"), r.get::<String, _>("title"), 0.1f32))
+            .collect())
     }
 
     /// Notes for OKF validation: everything the DB knows, one pass.
@@ -695,7 +749,11 @@ impl Store {
     }
 
     /// `(path, title, description)` for index.md generation, one directory.
-    pub async fn dir_notes(&self, vault: i64, dir: &str) -> Result<Vec<(String, String, Option<String>)>> {
+    pub async fn dir_notes(
+        &self,
+        vault: i64,
+        dir: &str,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
         let (pat, depth_from) = if dir.is_empty() {
             ("%".to_string(), 0usize)
         } else {
@@ -732,5 +790,7 @@ pub struct OkfNoteRow {
 }
 
 pub fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }

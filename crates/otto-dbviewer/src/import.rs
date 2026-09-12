@@ -464,7 +464,7 @@ mod tests {
         // A phone-like string with a leading zero is NOT a valid i64 with the
         // zero preserved — parse::<i64> drops it, so keep it as text.
         assert_eq!(coerce_scalar(&json!("007")), json!(7)); // documents the behavior
-        // NaN/inf are not coerced.
+                                                            // NaN/inf are not coerced.
         assert_eq!(coerce_scalar(&json!("NaN")), json!("NaN"));
     }
 
@@ -475,6 +475,6 @@ mod tests {
         assert_eq!(coerce_scalar(&json!(true)), json!(true));
         assert_eq!(coerce_scalar(&json!(null)), json!(null));
         assert_eq!(coerce_scalar(&json!({"a":1})), json!({"a":1}));
-        assert_eq!(coerce_scalar(&json!([1,2])), json!([1,2]));
+        assert_eq!(coerce_scalar(&json!([1, 2])), json!([1, 2]));
     }
 }

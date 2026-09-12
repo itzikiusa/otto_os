@@ -55,7 +55,10 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let problem = Problem { code: self.0.code().to_string(), message: self.0.to_string() };
+        let problem = Problem {
+            code: self.0.code().to_string(),
+            message: self.0.to_string(),
+        };
         (status, Json(problem)).into_response()
     }
 }
@@ -150,7 +153,11 @@ async fn create_vault<C: VaultCtx>(
     Json(req): Json<CreateVaultReq>,
 ) -> ApiResult<Json<VaultRec>> {
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
-    Ok(Json(c.vault().register(&ws, &req.name, req.root_path, req.okf).await?))
+    Ok(Json(
+        c.vault()
+            .register(&ws, &req.name, req.root_path, req.okf)
+            .await?,
+    ))
 }
 
 async fn patch_vault<C: VaultCtx>(
@@ -160,7 +167,11 @@ async fn patch_vault<C: VaultCtx>(
     Json(req): Json<PatchVaultReq>,
 ) -> ApiResult<Json<VaultRec>> {
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
-    Ok(Json(c.vault().patch(&ws, id, req.name.as_deref(), req.okf).await?))
+    Ok(Json(
+        c.vault()
+            .patch(&ws, id, req.name.as_deref(), req.okf)
+            .await?,
+    ))
 }
 
 async fn delete_vault<C: VaultCtx>(
@@ -339,7 +350,9 @@ async fn okf_indexes<C: VaultCtx>(
     Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
 ) -> ApiResult<Json<IndexesResp>> {
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
-    Ok(Json(IndexesResp { written: c.vault().okf_indexes(&ws, id).await? }))
+    Ok(Json(IndexesResp {
+        written: c.vault().okf_indexes(&ws, id).await?,
+    }))
 }
 
 /// Stream an attachment (image/pdf/…) with a best-effort content type.
@@ -368,13 +381,22 @@ async fn asset<C: VaultCtx>(
 /// Build the vault router. Paths are relative to the `/api/v1` mount point.
 pub fn router<C: VaultCtx>() -> Router<C> {
     Router::new()
-        .route("/workspaces/{ws}/vault/vaults", get(list_vaults::<C>).post(create_vault::<C>))
+        .route(
+            "/workspaces/{ws}/vault/vaults",
+            get(list_vaults::<C>).post(create_vault::<C>),
+        )
         .route(
             "/workspaces/{ws}/vault/vaults/{id}",
             axum::routing::patch(patch_vault::<C>).delete(delete_vault::<C>),
         )
-        .route("/workspaces/{ws}/vault/vaults/{id}/rescan", post(rescan::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/status", get(status::<C>))
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/rescan",
+            post(rescan::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/status",
+            get(status::<C>),
+        )
         .route("/workspaces/{ws}/vault/vaults/{id}/dir", get(dir::<C>))
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/note",
@@ -385,14 +407,35 @@ pub fn router<C: VaultCtx>() -> Router<C> {
             axum::routing::put(write_text_file::<C>)
                 .layer(DefaultBodyLimit::max(TEXT_FILE_JSON_BODY_LIMIT)),
         )
-        .route("/workspaces/{ws}/vault/vaults/{id}/rename", post(rename::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/folder", post(folder::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/backlinks", get(backlinks::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/search", post(search::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/switcher", get(switcher::<C>))
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/rename",
+            post(rename::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/folder",
+            post(folder::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/backlinks",
+            get(backlinks::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/search",
+            post(search::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/switcher",
+            get(switcher::<C>),
+        )
         .route("/workspaces/{ws}/vault/vaults/{id}/tags", get(tags::<C>))
         .route("/workspaces/{ws}/vault/vaults/{id}/graph", get(graph::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/okf/validate", post(okf_validate::<C>))
-        .route("/workspaces/{ws}/vault/vaults/{id}/okf/indexes", post(okf_indexes::<C>))
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/okf/validate",
+            post(okf_validate::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/okf/indexes",
+            post(okf_indexes::<C>),
+        )
         .route("/workspaces/{ws}/vault/vaults/{id}/asset", get(asset::<C>))
 }

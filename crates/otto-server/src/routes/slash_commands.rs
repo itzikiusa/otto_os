@@ -34,7 +34,10 @@ const CLAUDE_BUILTINS: &[(&str, &str)] = &[
     ("agents", "Manage subagent definitions"),
     ("bug", "Report a bug to Anthropic"),
     ("clear", "Clear the conversation history"),
-    ("compact", "Compact the conversation, optionally with focus instructions"),
+    (
+        "compact",
+        "Compact the conversation, optionally with focus instructions",
+    ),
     ("config", "Open settings"),
     ("context", "Show what is using the context window"),
     ("cost", "Show token usage and cost for this session"),
@@ -50,7 +53,10 @@ const CLAUDE_BUILTINS: &[(&str, &str)] = &[
     ("plan", "Switch to plan mode"),
     ("resume", "Resume a previous conversation"),
     ("review", "Review a pull request"),
-    ("rewind", "Rewind the conversation and files to a checkpoint"),
+    (
+        "rewind",
+        "Rewind the conversation and files to a checkpoint",
+    ),
     ("stats", "Show session statistics"),
     ("status", "Show account and system status"),
     ("terminal-setup", "Install Shift+Enter key binding"),
@@ -123,7 +129,13 @@ fn clip(s: String) -> String {
 
 /// `<dir>/**/<name>.md` → `/name` (subdirs namespaced as `dir:name`, the
 /// Claude convention). Depth-limited; symlinks are followed by `read_dir`.
-fn scan_commands(dir: &Path, prefix: &str, source: &'static str, depth: u8, out: &mut BTreeMap<String, SlashCommand>) {
+fn scan_commands(
+    dir: &Path,
+    prefix: &str,
+    source: &'static str,
+    depth: u8,
+    out: &mut BTreeMap<String, SlashCommand>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -142,7 +154,9 @@ fn scan_commands(dir: &Path, prefix: &str, source: &'static str, depth: u8, out:
             continue;
         }
         let body = std::fs::read_to_string(&p).unwrap_or_default();
-        let description = frontmatter_description(&body).or_else(|| first_line(&body)).unwrap_or_default();
+        let description = frontmatter_description(&body)
+            .or_else(|| first_line(&body))
+            .unwrap_or_default();
         let name = format!("{prefix}{stem}");
         out.entry(name.clone()).or_insert(SlashCommand {
             name,
@@ -169,7 +183,9 @@ fn scan_skills(dir: &Path, source: &'static str, out: &mut BTreeMap<String, Slas
         let Ok(body) = std::fs::read_to_string(&skill) else {
             continue;
         };
-        let description = frontmatter_description(&body).or_else(|| first_line(&body)).unwrap_or_default();
+        let description = frontmatter_description(&body)
+            .or_else(|| first_line(&body))
+            .unwrap_or_default();
         out.entry(name.to_string()).or_insert(SlashCommand {
             name: name.to_string(),
             description: clip(description),
@@ -185,7 +201,9 @@ fn codex_home() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// The list for `provider` at `cwd`. Pure over the filesystem — unit-testable
@@ -235,9 +253,10 @@ pub async fn slash_commands(
         .map(str::to_string)
         .unwrap_or_else(|| session.cwd.clone());
     let cwd = PathBuf::from(cwd);
-    let list = tokio::task::spawn_blocking(move || list(&provider, &cwd, &dirs_home(), &codex_home()))
-        .await
-        .unwrap_or_default();
+    let list =
+        tokio::task::spawn_blocking(move || list(&provider, &cwd, &dirs_home(), &codex_home()))
+            .await
+            .unwrap_or_default();
     Ok(Json(list))
 }
 
@@ -251,19 +270,38 @@ mod tests {
         let home = tmp.path().join("home");
         let cwd = tmp.path().join("proj");
         std::fs::create_dir_all(home.join(".claude/commands/frontend")).unwrap();
-        std::fs::write(home.join(".claude/commands/commit.md"), "---\ndescription: \"Write a commit\"\n---\nbody").unwrap();
-        std::fs::write(home.join(".claude/commands/frontend/component.md"), "# Make a Svelte component\n\nsteps").unwrap();
+        std::fs::write(
+            home.join(".claude/commands/commit.md"),
+            "---\ndescription: \"Write a commit\"\n---\nbody",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".claude/commands/frontend/component.md"),
+            "# Make a Svelte component\n\nsteps",
+        )
+        .unwrap();
         std::fs::create_dir_all(home.join(".claude/skills/pr")).unwrap();
-        std::fs::write(home.join(".claude/skills/pr/SKILL.md"), "---\nname: pr\ndescription: Open a PR\n---\n").unwrap();
+        std::fs::write(
+            home.join(".claude/skills/pr/SKILL.md"),
+            "---\nname: pr\ndescription: Open a PR\n---\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(cwd.join(".claude/commands")).unwrap();
         // Project shadows user for the same name.
-        std::fs::write(cwd.join(".claude/commands/commit.md"), "---\ndescription: Project commit\n---\n").unwrap();
+        std::fs::write(
+            cwd.join(".claude/commands/commit.md"),
+            "---\ndescription: Project commit\n---\n",
+        )
+        .unwrap();
         let out = list("claude", &cwd, &home, &tmp.path().join("codex"));
         let by = |n: &str| out.iter().find(|c| c.name == n).cloned();
         assert!(by("compact").is_some_and(|c| c.source == "builtin"));
         assert_eq!(by("commit").unwrap().description, "Project commit");
         assert_eq!(by("commit").unwrap().source, "project");
-        assert_eq!(by("frontend:component").unwrap().description, "Make a Svelte component");
+        assert_eq!(
+            by("frontend:component").unwrap().description,
+            "Make a Svelte component"
+        );
         assert_eq!(by("pr").unwrap().description, "Open a PR");
         // Codex: only its builtins + skills dirs.
         let codex = list("codex", &cwd, &home, &tmp.path().join("codex"));

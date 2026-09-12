@@ -146,17 +146,26 @@ impl ProgressSink {
     /// disabled or the file doesn't exist — attachments never fail a step).
     fn post_step_file(&self, files: &crate::workflow_context::RunContextFiles, base_name: &str) {
         let Some(tx) = &self.tx else { return };
-        let Some(path) = files.step_md_path(base_name) else { return };
-        let Ok(mut text) = std::fs::read_to_string(&path) else { return };
+        let Some(path) = files.step_md_path(base_name) else {
+            return;
+        };
+        let Ok(mut text) = std::fs::read_to_string(&path) else {
+            return;
+        };
         if text.len() > PROGRESS_FILE_CAP {
             let mut end = PROGRESS_FILE_CAP;
             while end > 0 && !text.is_char_boundary(end) {
                 end -= 1;
             }
             text.truncate(end);
-            text.push_str("\n… [truncated for chat — the full file is in the run's context directory]");
+            text.push_str(
+                "\n… [truncated for chat — the full file is in the run's context directory]",
+            );
         }
-        let _ = tx.send(ProgressItem::File { name: format!("{base_name}.md"), text });
+        let _ = tx.send(ProgressItem::File {
+            name: format!("{base_name}.md"),
+            text,
+        });
     }
     fn enabled(&self) -> bool {
         self.tx.is_some()
@@ -210,7 +219,10 @@ fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget>
 /// (redacted, best-effort). Returns the sink (held by `run_workflow`, threaded
 /// into nodes) and the task handle (awaited at run end to flush before the final
 /// summary is delivered). Drop the sink to close the channel and end the pump.
-fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tokio::task::JoinHandle<()>) {
+fn spawn_progress_pump(
+    ctx: ServerCtx,
+    target: ChatTarget,
+) -> (ProgressSink, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressItem>();
     let handle = tokio::spawn(async move {
         let integ = match otto_state::IntegrationsRepo::new(ctx.pool.clone())
@@ -246,7 +258,12 @@ fn spawn_progress_pump(ctx: ServerCtx, target: ChatTarget) -> (ProgressSink, tok
                     let text = otto_core::redact::redact_text(&text).value;
                     if let Some(adapter) = adapter.as_ref() {
                         if let Err(e) = adapter
-                            .upload(&target.chat, target.thread.as_deref(), &name, text.as_bytes())
+                            .upload(
+                                &target.chat,
+                                target.thread.as_deref(),
+                                &name,
+                                text.as_bytes(),
+                            )
                             .await
                         {
                             tracing::debug!("workflow progress: {name} upload failed: {e}");
@@ -445,13 +462,23 @@ fn is_restart_resumable_kind(kind: &str) -> bool {
 #[derive(Debug)]
 pub enum ResumeDecision {
     /// Re-enter the run: persist `nodes` + `scope` and [`spawn_run`] it.
-    Resume { scope: RunScope, nodes: Vec<NodeRunState> },
+    Resume {
+        scope: RunScope,
+        nodes: Vec<NodeRunState>,
+    },
     /// The run cannot be safely resumed — fail it with `error` (nodes carry
     /// any per-node annotation, e.g. the unknown-outcome step marked Error).
-    Fail { nodes: Vec<NodeRunState>, error: String },
+    Fail {
+        nodes: Vec<NodeRunState>,
+        error: String,
+    },
     /// Every node already settled (the daemon died between the last step and
     /// the finalize write) — just stamp the terminal status.
-    Finish { status: RunStatus, nodes: Vec<NodeRunState>, error: Option<String> },
+    Finish {
+        status: RunStatus,
+        nodes: Vec<NodeRunState>,
+        error: Option<String>,
+    },
 }
 
 /// Pure classification of one interrupted run: where to re-enter, or why not.
@@ -494,7 +521,9 @@ pub fn classify_resume(
     // recorded status — the pause is fully persisted and re-awaiting the
     // operator is free of side effects.
     let entry = if run.waiting_approval {
-        run.approval_node_id.clone().or_else(|| running_ids.first().cloned())
+        run.approval_node_id
+            .clone()
+            .or_else(|| running_ids.first().cloned())
     } else {
         running_ids.first().cloned()
     };
@@ -516,7 +545,8 @@ pub fn classify_resume(
                     n.error = Some(
                         "interrupted mid-step by a daemon restart — outcome unknown (this step has external side effects)".into(),
                     );
-                    n.logs.push("✗ interrupted mid-step by a daemon restart".into());
+                    n.logs
+                        .push("✗ interrupted mid-step by a daemon restart".into());
                 } else if matches!(n.status, NodeStatus::Pending | NodeStatus::Running) {
                     n.status = NodeStatus::Skipped;
                 }
@@ -540,7 +570,11 @@ pub fn classify_resume(
             .as_ref()
             .is_some_and(|s| s.only_node && s.start_node.as_deref() == Some(entry_id.as_str()));
         return ResumeDecision::Resume {
-            scope: RunScope { start_node: Some(entry_id), only_node, adopt_start: false },
+            scope: RunScope {
+                start_node: Some(entry_id),
+                only_node,
+                adopt_start: false,
+            },
             nodes,
         };
     }
@@ -566,14 +600,22 @@ pub fn classify_resume(
                 .any(|n| &&n.node_id == id && n.status == NodeStatus::Pending)
         }) {
             return ResumeDecision::Resume {
-                scope: RunScope { start_node: Some(next.clone()), only_node: false, adopt_start: false },
+                scope: RunScope {
+                    start_node: Some(next.clone()),
+                    only_node: false,
+                    adopt_start: false,
+                },
                 nodes,
             };
         }
     }
     let any_error = nodes.iter().any(|n| n.status == NodeStatus::Error);
     ResumeDecision::Finish {
-        status: if any_error { RunStatus::Error } else { RunStatus::Success },
+        status: if any_error {
+            RunStatus::Error
+        } else {
+            RunStatus::Success
+        },
         nodes,
         error: any_error.then(|| "one or more nodes failed".to_string()),
     }
@@ -599,8 +641,9 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
     };
     let (mut resumed, mut settled) = (0, 0);
     for (run, scope_json) in rows {
-        let prior_scope: Option<RunScope> =
-            scope_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
+        let prior_scope: Option<RunScope> = scope_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         // Workflow-level gates first: policy, retry cap, orphaned definition.
         let loaded = match repo.get(&run.workflow_id).await {
             Ok(wf) => match ctx.workspaces.get(&wf.workspace_id).await {
@@ -650,7 +693,14 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                             "workflow recovery: resuming interrupted run"
                         );
                         emit_run_updated(
-                            ctx, &run.workspace_id, &run.id, "pending", None, rev, None, &nodes,
+                            ctx,
+                            &run.workspace_id,
+                            &run.id,
+                            "pending",
+                            None,
+                            rev,
+                            None,
+                            &nodes,
                             false,
                         );
                         spawn_run(
@@ -685,17 +735,36 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     .await
                     .unwrap_or(0);
                 emit_run_updated(
-                    ctx, &run.workspace_id, &run.id, "error", None, rev, None, &nodes, false,
+                    ctx,
+                    &run.workspace_id,
+                    &run.id,
+                    "error",
+                    None,
+                    rev,
+                    None,
+                    &nodes,
+                    false,
                 );
                 settled += 1;
             }
-            ResumeDecision::Finish { status, nodes, error } => {
+            ResumeDecision::Finish {
+                status,
+                nodes,
+                error,
+            } => {
                 let rev = repo
                     .update_run(&run.id, status, &nodes, error.as_deref(), true)
                     .await
                     .unwrap_or(0);
                 emit_run_updated(
-                    ctx, &run.workspace_id, &run.id, status.as_str(), None, rev, None, &nodes,
+                    ctx,
+                    &run.workspace_id,
+                    &run.id,
+                    status.as_str(),
+                    None,
+                    rev,
+                    None,
+                    &nodes,
                     false,
                 );
                 settled += 1;
@@ -719,28 +788,42 @@ async fn apply_done_file_oracle(
     scope: &mut RunScope,
     nodes: &mut [NodeRunState],
 ) {
-    let Some(entry_id) = scope.start_node.clone() else { return };
-    let Some(node) = graph.nodes.iter().find(|n| n.id == entry_id) else { return };
+    let Some(entry_id) = scope.start_node.clone() else {
+        return;
+    };
+    let Some(node) = graph.nodes.iter().find(|n| n.id == entry_id) else {
+        return;
+    };
     if node.kind != "agent_prompt" {
         return;
     }
-    let Some(state) = nodes.iter_mut().find(|n| n.node_id == entry_id) else { return };
-    let Some(content) = find_step_handoff(ctx, &run.id, node, state.started_at) else { return };
+    let Some(state) = nodes.iter_mut().find(|n| n.node_id == entry_id) else {
+        return;
+    };
+    let Some(content) = find_step_handoff(ctx, &run.id, node, state.started_at) else {
+        return;
+    };
     // R1: the file alone is NOT proof. An agent may write its handoff while its
     // sub-agents are still running (or mid-turn) — adopting that marks the step
     // done with the work unfinished, which is the bug this batch fixes. Ask the
     // turn oracle about the interrupted session before believing the file.
     for sid in state.sessions.clone() {
-        let Ok(s) = ctx.manager.get(&sid).await else { continue };
+        let Ok(s) = ctx.manager.get(&sid).await else {
+            continue;
+        };
         if s.provider != "claude" {
             continue;
         }
-        let Some(psid) = s.provider_session_id.as_deref() else { continue };
+        let Some(psid) = s.provider_session_id.as_deref() else {
+            continue;
+        };
         let cwd = std::fs::canonicalize(&s.cwd)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| s.cwd.clone());
         let path = otto_orchestrator::claude_pty::session_jsonl_path(&cwd, psid);
-        let Ok(jsonl) = std::fs::read_to_string(&path) else { continue };
+        let Ok(jsonl) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let scan = turn_oracle::scan_claude(&jsonl);
         if !scan.pending.is_empty() || !scan.tail_is_assistant_end_turn {
             state.logs.push(format!(
@@ -778,10 +861,13 @@ fn find_step_handoff(
         let name = entry.file_name().to_string_lossy().to_string();
         // step{N}-{slug}.md exactly (no loop-iteration/inner suffixes — those
         // belong to inner steps the loop node itself re-drives).
-        let Some(rest) = name.strip_prefix("step") else { continue };
-        let Some(tail) = rest.split_once('-').and_then(|(n, tail)| {
-            n.chars().all(|c| c.is_ascii_digit()).then_some(tail)
-        }) else {
+        let Some(rest) = name.strip_prefix("step") else {
+            continue;
+        };
+        let Some(tail) = rest
+            .split_once('-')
+            .and_then(|(n, tail)| n.chars().all(|c| c.is_ascii_digit()).then_some(tail))
+        else {
             continue;
         };
         if tail != format!("{slug}.md") {
@@ -877,7 +963,15 @@ pub fn spawn_run(
                     "workflow run queued ({} already executing)", max_parallel_runs()
                 );
                 emit_run_updated(
-                    &ctx, &workflow.workspace_id, &run_id, "pending", None, 0, None, &[], false,
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "pending",
+                    None,
+                    0,
+                    None,
+                    &[],
+                    false,
                 );
                 match gate.acquire().await {
                     Ok(p) => p,
@@ -917,7 +1011,9 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
     };
     let mut resumed = 0;
     for id in ids {
-        let Ok(run) = repo.get_run(&id).await else { continue };
+        let Ok(run) = repo.get_run(&id).await else {
+            continue;
+        };
         // Workflow/workspace gone (deleted while queued) → the run can never
         // execute; settle it instead of leaving a forever-pending row.
         let loaded = match repo.get(&run.workflow_id).await {
@@ -929,7 +1025,15 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
         };
         match loaded {
             Ok((wf, ws)) => {
-                spawn_run(ctx.clone(), ws, wf, run.id.clone(), run.input.clone(), RunScope::default(), None);
+                spawn_run(
+                    ctx.clone(),
+                    ws,
+                    wf,
+                    run.id.clone(),
+                    run.input.clone(),
+                    RunScope::default(),
+                    None,
+                );
                 resumed += 1;
             }
             Err(e) => {
@@ -1073,12 +1177,24 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
         "prepare_context" => obj(&[("jira", "object")]),
         "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
-        "db_query" => obj(&[("columns", "array"), ("rows", "array"), ("rows_returned", "number")]),
-        "broker_peek" => obj(&[("topic", "string"), ("messages", "array"), ("count", "number")]),
+        "db_query" => obj(&[
+            ("columns", "array"),
+            ("rows", "array"),
+            ("rows_returned", "number"),
+        ]),
+        "broker_peek" => obj(&[
+            ("topic", "string"),
+            ("messages", "array"),
+            ("count", "number"),
+        ]),
         "budget_gate" => obj(&[("exceeded", "boolean"), ("blocked", "boolean")]),
         "human_approval" => obj(&[("approved", "boolean"), ("approved_by", "string")]),
         "condition" => obj(&[("result", "boolean"), ("value", "any")]),
-        "loop" => obj(&[("iterations", "number"), ("satisfied", "boolean"), ("last", "any")]),
+        "loop" => obj(&[
+            ("iterations", "number"),
+            ("satisfied", "boolean"),
+            ("last", "any"),
+        ]),
         "review_run" => obj(&[
             ("review_id", "string"),
             ("status", "string"),
@@ -1095,7 +1211,11 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "product_analyze" => obj(&[("story_id", "string"), ("analysis", "string")]),
         "product_rewrite" => obj(&[("story_id", "string"), ("body_md", "string")]),
         "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
-        "product_publish" => obj(&[("story_id", "string"), ("url", "string"), ("dry_run", "boolean")]),
+        "product_publish" => obj(&[
+            ("story_id", "string"),
+            ("url", "string"),
+            ("dry_run", "boolean"),
+        ]),
         "git_pr" => obj(&[
             ("prs", "array"),
             ("opened", "boolean"),
@@ -1182,7 +1302,17 @@ pub async fn run_workflow(
                 .update_run(&run_id, RunStatus::Error, &[], Some(&e), true)
                 .await
                 .unwrap_or(0);
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &[], false);
+            emit_run_updated(
+                &ctx,
+                &workflow.workspace_id,
+                &run_id,
+                "error",
+                None,
+                rev,
+                None,
+                &[],
+                false,
+            );
             return;
         }
     };
@@ -1193,12 +1323,15 @@ pub async fn run_workflow(
     // treats the entry itself as done — it drops OUT of the set so the
     // adoption pass below keeps its prior Success state/output while its
     // descendants run.
-    let RunScope { start_node, only_node, adopt_start } = scope;
+    let RunScope {
+        start_node,
+        only_node,
+        adopt_start,
+    } = scope;
     let run_set: Option<std::collections::HashSet<String>> = match &start_node {
         None => None,
         Some(s) if only_node => {
-            let mut set: std::collections::HashSet<String> =
-                std::iter::once(s.clone()).collect();
+            let mut set: std::collections::HashSet<String> = std::iter::once(s.clone()).collect();
             if adopt_start {
                 // Single-step scope whose step is already proven done —
                 // nothing executes; the run finalizes over adopted states.
@@ -1252,7 +1385,12 @@ pub async fn run_workflow(
     // the Start node the place to set the input for a manual run.
     let input = {
         let mut seeded = serde_json::Map::new();
-        if let Some(mt) = workflow.graph.nodes.iter().find(|n| n.kind == "manual_trigger") {
+        if let Some(mt) = workflow
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.kind == "manual_trigger")
+        {
             if let Some(o) = mt.params.as_object() {
                 for (k, v) in o {
                     if !v.is_null() {
@@ -1328,9 +1466,13 @@ pub async fn run_workflow(
                 }
             }
         }
-        let mut entries =
-            resolve_repo_entries(&ctx, &workflow.workspace_id, declared, run_base_hint.as_deref())
-                .await;
+        let mut entries = resolve_repo_entries(
+            &ctx,
+            &workflow.workspace_id,
+            declared,
+            run_base_hint.as_deref(),
+        )
+        .await;
         // Put the work on a clean, ISOLATED checkout of the BASE branch: for a repo
         // we'd otherwise operate on in the user's own working copy, cut a dedicated
         // linked worktree from `base` under the data dir and repoint the entry at
@@ -1375,7 +1517,11 @@ pub async fn run_workflow(
         .and_then(Value::as_str)
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    if let Some(p) = input.get("prompt").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+    if let Some(p) = input
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
         files.write_prompt_md(p);
     }
     // Run-level working directory: the `working_directory` from the run input
@@ -1433,7 +1579,11 @@ pub async fn run_workflow(
             .filter_map(|nid| workflow.graph.nodes.iter().find(|n| &n.id == nid))
             .map(|n| {
                 (
-                    if n.name.is_empty() { n.kind.clone() } else { n.name.clone() },
+                    if n.name.is_empty() {
+                        n.kind.clone()
+                    } else {
+                        n.name.clone()
+                    },
                     n.kind.clone(),
                 )
             })
@@ -1520,7 +1670,17 @@ pub async fn run_workflow(
         .update_run(&run_id, RunStatus::Running, &states, None, false)
         .await
         .unwrap_or(0);
-    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", None, rev, None, &states, false);
+    emit_run_updated(
+        &ctx,
+        &workflow.workspace_id,
+        &run_id,
+        "running",
+        None,
+        rev,
+        None,
+        &states,
+        false,
+    );
 
     // Live progress: if this run was triggered from a chat thread, stream brief
     // per-step updates back to it. A single pump task posts them in order; manual
@@ -1536,7 +1696,11 @@ pub async fn run_workflow(
         let goals: Vec<String> = input
             .get("goals")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let goals_line = if goals.is_empty() {
             String::new()
@@ -1596,7 +1760,17 @@ pub async fn run_workflow(
                 .update_run_progress(&run_id, &states)
                 .await
                 .unwrap_or(0);
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+            emit_run_updated(
+                &ctx,
+                &workflow.workspace_id,
+                &run_id,
+                "running",
+                Some(&node_id),
+                rev,
+                Some(&states[idx]),
+                &states,
+                false,
+            );
             continue;
         }
 
@@ -1624,7 +1798,17 @@ pub async fn run_workflow(
                     .update_run_progress(&run_id, &states)
                     .await
                     .unwrap_or(0);
-                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "running",
+                    Some(&node_id),
+                    rev,
+                    Some(&states[idx]),
+                    &states,
+                    false,
+                );
                 continue;
             }
             NodeDecision::BranchSkip => {
@@ -1635,7 +1819,17 @@ pub async fn run_workflow(
                     .update_run_progress(&run_id, &states)
                     .await
                     .unwrap_or(0);
-                emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "running",
+                    Some(&node_id),
+                    rev,
+                    Some(&states[idx]),
+                    &states,
+                    false,
+                );
                 continue;
             }
             NodeDecision::Run(satisfied) => assemble_input(&satisfied, &outputs, &input),
@@ -1653,7 +1847,17 @@ pub async fn run_workflow(
             .await
             .unwrap_or(0);
         // Signal node start so the UI can show live progress immediately.
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+        emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "running",
+            Some(&node_id),
+            rev,
+            Some(&states[idx]),
+            &states,
+            false,
+        );
         if progress.enabled() && is_reportable(&node.kind) {
             progress.post(format!("▶ *{}* started", node_label(node)));
         }
@@ -1661,7 +1865,11 @@ pub async fn run_workflow(
         let started = Instant::now();
         // This node executes — it owns the next step-file number.
         step_counter += 1;
-        let scope = StepScope { step_no: step_counter, iter: None, inner_idx: None };
+        let scope = StepScope {
+            step_no: step_counter,
+            iter: None,
+            inner_idx: None,
+        };
         let step_file_base = crate::workflow_context::step_base_name(
             step_counter,
             node_display_name(node),
@@ -1702,8 +1910,19 @@ pub async fn run_workflow(
         let result = loop {
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
-            let fut =
-                execute_node(&ctx, &ws, &user, node, node_input.clone(), &env, &scope, &sess_tx, &log_tx, &activity_tx, &progress);
+            let fut = execute_node(
+                &ctx,
+                &ws,
+                &user,
+                node,
+                node_input.clone(),
+                &env,
+                &scope,
+                &sess_tx,
+                &log_tx,
+                &activity_tx,
+                &progress,
+            );
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -1836,8 +2055,21 @@ pub async fn run_workflow(
                 node_id.clone(),
                 json!({ "skipped": true, "note": "skipped via chat command" }),
             );
-            let rev = repo.update_run_progress(&run_id, &states).await.unwrap_or(0);
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+            let rev = repo
+                .update_run_progress(&run_id, &states)
+                .await
+                .unwrap_or(0);
+            emit_run_updated(
+                &ctx,
+                &workflow.workspace_id,
+                &run_id,
+                "running",
+                Some(&node_id),
+                rev,
+                Some(&states[idx]),
+                &states,
+                false,
+            );
             continue;
         }
         // Canceled mid-node: bail straight to the finalize block, which marks the
@@ -1899,7 +2131,9 @@ pub async fn run_workflow(
                 if progress.enabled() && is_reportable(&node.kind) {
                     let dur = format!("{:.1}s", elapsed as f64 / 1000.0);
                     match brief_summary(&out) {
-                        Some(s) => progress.post(format!("✅ *{}* done ({dur})\n{s}", node_label(node))),
+                        Some(s) => {
+                            progress.post(format!("✅ *{}* done ({dur})\n{s}", node_label(node)))
+                        }
                         None => progress.post(format!("✅ *{}* done ({dur})", node_label(node))),
                     }
                 }
@@ -1934,7 +2168,11 @@ pub async fn run_workflow(
                 states[idx].attempts = Some(attempt);
                 states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
                 if progress.enabled() && is_reportable(&node.kind) {
-                    progress.post(format!("❌ *{}* failed — {}", node_label(node), truncate(&e.to_string(), 200)));
+                    progress.post(format!(
+                        "❌ *{}* failed — {}",
+                        node_label(node),
+                        truncate(&e.to_string(), 200)
+                    ));
                 }
                 // The failure trace file rides along too (what broke, logs).
                 if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
@@ -1948,7 +2186,17 @@ pub async fn run_workflow(
             .await
             .unwrap_or(0);
         // Signal node finish so the inspector can update without waiting for the next poll.
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
+        emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "running",
+            Some(&node_id),
+            rev,
+            Some(&states[idx]),
+            &states,
+            false,
+        );
     }
 
     // Flush all streamed progress lines (close the channel, await the pump) so the
@@ -1964,8 +2212,10 @@ pub async fn run_workflow(
         // and burning tokens), not just flip the run row. Includes agent steps AND
         // review reviewers/summarizer (their ids are harvested into `sessions`).
         // Best-effort: a failure on one session is logged and never blocks the rest.
-        let session_ids: Vec<Id> =
-            states.iter().flat_map(|s| s.sessions.iter().cloned()).collect();
+        let session_ids: Vec<Id> = states
+            .iter()
+            .flat_map(|s| s.sessions.iter().cloned())
+            .collect();
         for sid in session_ids {
             if let Err(e) = ctx.manager.kill_session(&sid).await {
                 tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
@@ -1977,11 +2227,36 @@ pub async fn run_workflow(
             }
         }
         let rev = repo
-            .update_run(&run_id, RunStatus::Canceled, &states, Some("canceled"), true)
+            .update_run(
+                &run_id,
+                RunStatus::Canceled,
+                &states,
+                Some("canceled"),
+                true,
+            )
             .await
             .unwrap_or(0);
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input, None).await;
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None, rev, None, &states, false);
+        deliver_run_result(
+            &ctx,
+            &workflow,
+            &states,
+            RunStatus::Canceled,
+            None,
+            &input,
+            None,
+        )
+        .await;
+        emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "canceled",
+            None,
+            rev,
+            None,
+            &states,
+            false,
+        );
         reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
@@ -2001,8 +2276,27 @@ pub async fn run_workflow(
             .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
             .await
             .unwrap_or(0);
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input, None).await;
-        emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &states, false);
+        deliver_run_result(
+            &ctx,
+            &workflow,
+            &states,
+            RunStatus::Error,
+            None,
+            &input,
+            None,
+        )
+        .await;
+        emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "error",
+            None,
+            rev,
+            None,
+            &states,
+            false,
+        );
         reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
@@ -2025,7 +2319,11 @@ pub async fn run_workflow(
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
-    let final_output = if final_status == RunStatus::Success { files.write_final_output() } else { None };
+    let final_output = if final_status == RunStatus::Success {
+        files.write_final_output()
+    } else {
+        None
+    };
     // Proof pack: package the run's node outputs, human approvals, and budget
     // gate into inspectable evidence; link the pack to the run. Best-effort.
     let pack_id = assemble_workflow_proof(&ctx, &workflow, &run_id, &states).await;
@@ -2035,9 +2333,28 @@ pub async fn run_workflow(
     // Report the result back to wherever the run was triggered from (Slack
     // thread / webhook): a brief status + the run's deliverable (final-output.md
     // when the run produced one, else the generated summary.md). Best-effort.
-    deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input, final_output.as_deref()).await;
+    deliver_run_result(
+        &ctx,
+        &workflow,
+        &states,
+        final_status,
+        pack_id.as_deref(),
+        &input,
+        final_output.as_deref(),
+    )
+    .await;
     // Final event: run complete.
-    emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None, rev, None, &states, false);
+    emit_run_updated(
+        &ctx,
+        &workflow.workspace_id,
+        &run_id,
+        final_status.as_str(),
+        None,
+        rev,
+        None,
+        &states,
+        false,
+    );
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
     reap_run_worktrees(&ctx, &run_id).await;
@@ -2075,12 +2392,14 @@ async fn assemble_workflow_proof(
 
     // Approval fields live on the `workflow_runs` row, not the `WorkflowRun`
     // struct (added by migration 0058).
-    let arow = sqlx::query("SELECT approved_by, approval_note, approved_at FROM workflow_runs WHERE id = ?")
-        .bind(run_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .ok()
-        .flatten();
+    let arow = sqlx::query(
+        "SELECT approved_by, approval_note, approved_at FROM workflow_runs WHERE id = ?",
+    )
+    .bind(run_id)
+    .fetch_optional(&ctx.pool)
+    .await
+    .ok()
+    .flatten();
     let approved_by: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_by").ok());
     let approval_note: Option<String> = arow.as_ref().and_then(|r| r.try_get("approval_note").ok());
     let approved_at: Option<String> = arow.as_ref().and_then(|r| r.try_get("approved_at").ok());
@@ -2111,7 +2430,17 @@ async fn assemble_workflow_proof(
                 "approved_by": approved_by, "approval_note": approval_note,
                 "approved_at": approved_at, "node_id": node.id,
             });
-            let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::Approval, &title, &body, astatus, meta, "otto").await;
+            let _ = crate::proof::upsert_content_artifact(
+                ctx,
+                &pack,
+                K::Approval,
+                &title,
+                &body,
+                astatus,
+                meta,
+                "otto",
+            )
+            .await;
         } else {
             let art_status = match node_status {
                 Some(NodeStatus::Success) => S::Passed,
@@ -2123,7 +2452,17 @@ async fn assemble_workflow_proof(
                 .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
                 .unwrap_or_else(|| "(no output)".to_string());
             let meta = json!({ "node_kind": node.kind, "node_id": node.id });
-            let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::Log, &title, &content, art_status, meta, "otto").await;
+            let _ = crate::proof::upsert_content_artifact(
+                ctx,
+                &pack,
+                K::Log,
+                &title,
+                &content,
+                art_status,
+                meta,
+                "otto",
+            )
+            .await;
         }
     }
 
@@ -2146,9 +2485,18 @@ fn build_run_summary(
         _ => "•",
     };
     let total = states.len();
-    let ok = states.iter().filter(|s| s.status == NodeStatus::Success).count();
-    let failed = states.iter().filter(|s| s.status == NodeStatus::Error).count();
-    let skipped = states.iter().filter(|s| s.status == NodeStatus::Skipped).count();
+    let ok = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Success)
+        .count();
+    let failed = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Error)
+        .count();
+    let skipped = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Skipped)
+        .count();
 
     // Pull a review score out of any node output that carries one.
     let score = states.iter().find_map(|s| {
@@ -2159,7 +2507,9 @@ fn build_run_summary(
     });
 
     let counts = format!("{ok}/{total} steps ok · {failed} failed · {skipped} skipped");
-    let score_line = score.map(|sc| format!("\n*Review score:* {sc}/100")).unwrap_or_default();
+    let score_line = score
+        .map(|sc| format!("\n*Review score:* {sc}/100"))
+        .unwrap_or_default();
     let proof_line = proof_pack_id
         .map(|p| format!("\n*Proof pack:* `{p}`"))
         .unwrap_or_default();
@@ -2196,7 +2546,10 @@ fn build_run_summary(
                 }
             })
             .unwrap_or_else(|| s.node_id.clone());
-        let dur = s.duration_ms.map(|d| format!(" · {d}ms")).unwrap_or_default();
+        let dur = s
+            .duration_ms
+            .map(|d| format!(" · {d}ms"))
+            .unwrap_or_default();
         let attempts = match s.attempts {
             Some(a) if a > 1 => format!(" · {a} attempts"),
             _ => String::new(),
@@ -2255,7 +2608,11 @@ async fn deliver_run_result(
         .map(|s| s.to_string())
         .unwrap_or_else(|| workflow.workspace_id.clone());
     let (channel, chat, thread) = match str_at("result_chat") {
-        Some(c) => (str_at("result_channel").or_else(|| str_at("channel")), Some(c), str_at("result_thread")),
+        Some(c) => (
+            str_at("result_channel").or_else(|| str_at("channel")),
+            Some(c),
+            str_at("result_thread"),
+        ),
         None => (str_at("channel"), str_at("chat"), str_at("thread")),
     };
     let webhook = str_at("result_webhook").or_else(|| str_at("callback_url"));
@@ -2274,9 +2631,14 @@ async fn deliver_run_result(
     let (attach_name, bytes): (&str, Vec<u8>) = match final_output {
         Some(raw) => (
             "final-output.md",
-            otto_core::redact::redact_text(&String::from_utf8_lossy(raw)).value.into_bytes(),
+            otto_core::redact::redact_text(&String::from_utf8_lossy(raw))
+                .value
+                .into_bytes(),
         ),
-        None => ("summary.md", otto_core::redact::redact_text(&full).value.into_bytes()),
+        None => (
+            "summary.md",
+            otto_core::redact::redact_text(&full).value.into_bytes(),
+        ),
     };
 
     // --- chat (Slack / Telegram) ---
@@ -2293,14 +2655,19 @@ async fn deliver_run_result(
             {
                 Ok(Some(integ)) => {
                     let sent = otto_channels::improve_notify::send_to(
-                        &ctx.secrets, &integ, chat, thread, &brief,
+                        &ctx.secrets,
+                        &integ,
+                        chat,
+                        thread,
+                        &brief,
                     )
                     .await;
                     if sent {
                         if let Some(adapter) =
                             otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ)
                         {
-                            if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await {
+                            if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await
+                            {
                                 tracing::debug!("workflow result: summary upload failed: {e}");
                             }
                         }
@@ -2327,7 +2694,9 @@ async fn deliver_run_result(
 fn descendants_inclusive(graph: &WorkflowGraph, start: &str) -> std::collections::HashSet<String> {
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for e in &graph.edges {
-        adj.entry(e.source.clone()).or_default().push(e.target.clone());
+        adj.entry(e.source.clone())
+            .or_default()
+            .push(e.target.clone());
     }
     let mut set = std::collections::HashSet::new();
     let mut stack = vec![start.to_string()];
@@ -2355,7 +2724,10 @@ fn assemble_input(
     outputs: &HashMap<String, Value>,
     run_input: &Value,
 ) -> Value {
-    let present: Vec<&String> = upstream.iter().filter(|p| outputs.contains_key(*p)).collect();
+    let present: Vec<&String> = upstream
+        .iter()
+        .filter(|p| outputs.contains_key(*p))
+        .collect();
     match present.len() {
         0 => run_input.clone(),
         1 => outputs.get(present[0]).cloned().unwrap_or(Value::Null),
@@ -2478,7 +2850,11 @@ async fn execute_node(
             }
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
-            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
+            let provider = p
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
             // File-based handoff (design 2026-07-02): point the agent at the
             // run's context dir (instruction, repos.json, prior step files)
@@ -2495,12 +2871,37 @@ async fn execute_node(
             let full = prepend_skills(
                 ctx,
                 p,
-                &format!("{preamble}{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
+                &format!(
+                    "{preamble}{prompt}\n\n[input data]\n{}",
+                    truncate(&input.to_string(), 4000)
+                ),
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
-            let (reply, sid) =
-                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, done, session_tx, log_tx, activity_tx).await?;
+            let done = env
+                .files
+                .step_md_path(&crate::workflow_context::step_base_name(
+                    scope.step_no,
+                    node_display_name(node),
+                    scope.iter,
+                    scope.inner_idx,
+                ));
+            let (reply, sid) = run_node_agent(
+                ctx,
+                ws,
+                user,
+                node,
+                &env.wf_name,
+                &env.run_id,
+                provider,
+                model,
+                &full,
+                &acwd,
+                done,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+            .await?;
             // Publish WHERE the implementer worked (+ thread the ambient repo/base)
             // so a downstream review/PR is aware of exactly this directory — even
             // when the agent ran in its own per-node cwd. This is what carries the
@@ -2532,22 +2933,36 @@ async fn execute_node(
                     jira.insert("found".into(), json!(true));
                     jira.insert("key".into(), json!(key));
                     let fetched = match crate::workflow_prepare::resolve_jira_account(
-                        ctx, &user.id, p.get("account_id").and_then(Value::as_str)).await
+                        ctx,
+                        &user.id,
+                        p.get("account_id").and_then(Value::as_str),
+                    )
+                    .await
                     {
                         Ok(account) => {
                             let token = ctx.secrets.get(&account.token_ref).ok().flatten();
                             match token {
-                                Some(t) => otto_issues::JiraClient::new(&account.base_url, &account.email, &t)
-                                    .get_issue_full(&key).await.map_err(|e| e.to_string()),
-                                None => Err(format!("missing token for issue account {}", account.id)),
+                                Some(t) => otto_issues::JiraClient::new(
+                                    &account.base_url,
+                                    &account.email,
+                                    &t,
+                                )
+                                .get_issue_full(&key)
+                                .await
+                                .map_err(|e| e.to_string()),
+                                None => {
+                                    Err(format!("missing token for issue account {}", account.id))
+                                }
                             }
                         }
                         Err(e) => Err(e),
                     };
                     match fetched {
                         Ok(issue) => {
-                            env.files.write_named(&format!("jira-{key}.md"),
-                                &crate::workflow_prepare::render_issue_md(&issue));
+                            env.files.write_named(
+                                &format!("jira-{key}.md"),
+                                &crate::workflow_prepare::render_issue_md(&issue),
+                            );
                             jira.insert("fetched".into(), json!(true));
                             jira.insert("summary".into(), json!(issue.summary));
                             jira.insert("status".into(), json!(issue.status));
@@ -2561,7 +2976,9 @@ async fn execute_node(
                             jira.insert("fetched".into(), json!(false));
                             jira.insert("error".into(), json!(e));
                             if p.get("require").and_then(Value::as_bool).unwrap_or(false) {
-                                return Err(otto_core::Error::Invalid(format!("prepare_context: required Jira fetch failed: {jira:?}")));
+                                return Err(otto_core::Error::Invalid(format!(
+                                    "prepare_context: required Jira fetch failed: {jira:?}"
+                                )));
                             }
                         }
                     }
@@ -2570,22 +2987,69 @@ async fn execute_node(
             let mut out = serde_json::Map::new();
             out.insert("jira".into(), Value::Object(jira));
             // Optional agent phase — mirrors agent_prompt exactly.
-            let agent_prompt_txt = p.get("prompt").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let agent_prompt_txt = p
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let mut logs = vec![format!("prepare_context: jira {}", out["jira"])];
             if !agent_prompt_txt.is_empty() {
-                let preamble = env.files.preamble_for(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx);
-                let full = prepend_skills(ctx, p,
-                    &format!("{preamble}{agent_prompt_txt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)));
-                let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
+                let preamble = env.files.preamble_for(
+                    scope.step_no,
+                    node_display_name(node),
+                    scope.iter,
+                    scope.inner_idx,
+                );
+                let full = prepend_skills(
+                    ctx,
+                    p,
+                    &format!(
+                        "{preamble}{agent_prompt_txt}\n\n[input data]\n{}",
+                        truncate(&input.to_string(), 4000)
+                    ),
+                );
+                let provider = p
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(env.default_provider.as_str());
                 let model = p.get("model").and_then(Value::as_str);
                 let acwd = node_cwd(node, &input, run_cwd);
-                let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
-                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, done, session_tx, log_tx, activity_tx).await?;
+                let done = env
+                    .files
+                    .step_md_path(&crate::workflow_context::step_base_name(
+                        scope.step_no,
+                        node_display_name(node),
+                        scope.iter,
+                        scope.inner_idx,
+                    ));
+                let (reply, sid) = run_node_agent(
+                    ctx,
+                    ws,
+                    user,
+                    node,
+                    &env.wf_name,
+                    &env.run_id,
+                    provider,
+                    model,
+                    &full,
+                    &acwd,
+                    done,
+                    session_tx,
+                    log_tx,
+                    activity_tx,
+                )
+                .await?;
                 out.insert("reply".into(), json!(reply));
                 out.insert("session_id".into(), json!(sid));
                 out.insert("working_directory".into(), json!(acwd));
                 for k in ["repo_id", "base", "repos", "worktree", "pr", "pr_branch"] {
-                    if let Some(v) = input.get(k) { if !v.is_null() { out.insert(k.into(), v.clone()); } }
+                    if let Some(v) = input.get(k) {
+                        if !v.is_null() {
+                            out.insert(k.into(), v.clone());
+                        }
+                    }
                 }
                 logs.push("agent phase complete".into());
             }
@@ -2593,7 +3057,11 @@ async fn execute_node(
         }
 
         "http_request" => {
-            let method = p.get("method").and_then(Value::as_str).unwrap_or("GET").to_uppercase();
+            let method = p
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("GET")
+                .to_uppercase();
             let url = p
                 .get("url")
                 .and_then(Value::as_str)
@@ -2609,10 +3077,7 @@ async fn execute_node(
                 .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
-            let mut rb = client.request(
-                method.parse().unwrap_or(reqwest::Method::GET),
-                url,
-            );
+            let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), url);
             if let Some(body) = p.get("body") {
                 if !body.is_null() {
                     rb = rb.json(body);
@@ -2625,7 +3090,10 @@ async fn execute_node(
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-            Ok((json!({ "status": status, "body": body }), vec![format!("HTTP {status}")]))
+            Ok((
+                json!({ "status": status, "body": body }),
+                vec![format!("HTTP {status}")],
+            ))
         }
 
         // --- Game pipeline scaffolds (need an external engine to be real) ----
@@ -2672,7 +3140,10 @@ async fn execute_node(
                 "assets": assets,
                 "note": "Scaffold build: wire a real game engine here.",
             });
-            Ok((json!({ "build": build }), vec![format!("assembled {kind} game (scaffold)")]))
+            Ok((
+                json!({ "build": build }),
+                vec![format!("assembled {kind} game (scaffold)")],
+            ))
         }
 
         "verifier" => {
@@ -2682,8 +3153,13 @@ async fn execute_node(
             if let Some(play_url) = input.get("play_url").and_then(Value::as_str) {
                 let game_path = input.get("game_path").and_then(Value::as_str).unwrap_or("");
                 let exists = !game_path.is_empty() && std::path::Path::new(game_path).is_file();
-                let big_enough = std::fs::metadata(game_path).map(|m| m.len() > 1500).unwrap_or(false);
-                let self_test = input.get("playable").and_then(Value::as_bool).unwrap_or(false);
+                let big_enough = std::fs::metadata(game_path)
+                    .map(|m| m.len() > 1500)
+                    .unwrap_or(false);
+                let self_test = input
+                    .get("playable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 // Structural integrity is the reliable in-pipeline gate; the
                 // agent's own self-test is reported but not required (the
                 // authoritative behavioral check is an external headless run).
@@ -2719,7 +3195,10 @@ async fn execute_node(
                 "passed": true,
                 "note": "Scaffold verifier: replace with the real certifier.",
             });
-            Ok((json!({ "verified": report, "build": build }), vec!["verification passed (scaffold)".into()]))
+            Ok((
+                json!({ "verified": report, "build": build }),
+                vec!["verification passed (scaffold)".into()],
+            ))
         }
 
         // --- DB Query -------------------------------------------------------
@@ -2740,10 +3219,7 @@ async fn execute_node(
                 .and_then(Value::as_str)
                 .ok_or_else(|| otto_core::Error::Invalid("db_query: missing statement".into()))?
                 .to_string();
-            let max_rows = p
-                .get("max_rows")
-                .and_then(Value::as_u64)
-                .unwrap_or(100) as usize;
+            let max_rows = p.get("max_rows").and_then(Value::as_u64).unwrap_or(100) as usize;
             let dummy_user: Id = "workflow-engine".to_string();
             let req = QueryRequest {
                 statement: stmt.clone(),
@@ -2766,7 +3242,10 @@ async fn execute_node(
                 "rows_returned": rows_returned,
                 "truncated": result.truncated,
             });
-            Ok((out, vec![format!("db_query: {rows_returned} rows returned")]))
+            Ok((
+                out,
+                vec![format!("db_query: {rows_returned} rows returned")],
+            ))
         }
 
         // --- Broker Peek ----------------------------------------------------
@@ -2786,11 +3265,7 @@ async fn execute_node(
                 .and_then(Value::as_str)
                 .ok_or_else(|| otto_core::Error::Invalid("broker_peek: missing topic".into()))?
                 .to_string();
-            let limit = p
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(20)
-                .min(50) as usize;
+            let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(20).min(50) as usize;
             let req = ConsumeReq {
                 partition: None,
                 start: otto_brokers::types::StartPosition::default(),
@@ -2921,7 +3396,9 @@ async fn execute_node(
                 .integrations_store
                 .list_all_enabled()
                 .await
-                .map_err(|e| otto_core::Error::Upstream(format!("channel_notify: load integrations: {e}")))?;
+                .map_err(|e| {
+                    otto_core::Error::Upstream(format!("channel_notify: load integrations: {e}"))
+                })?;
 
             // Filter to the workspace's enabled integrations, optionally by channel.
             // Webhooks are inbound-only (not a proactive-push target), so they're
@@ -2996,7 +3473,9 @@ async fn execute_node(
             }
 
             if sent == 0 {
-                return Err(otto_core::Error::Upstream("channel_notify: all sends failed".into()));
+                return Err(otto_core::Error::Upstream(
+                    "channel_notify: all sends failed".into(),
+                ));
             }
             Ok((
                 json!({ "sent": sent, "message": message }),
@@ -3038,7 +3517,10 @@ async fn execute_node(
                     "reason": verdict.reason,
                 }),
                 vec![if verdict.exceeded {
-                    format!("budget_gate: exceeded (warn-only) — {}", verdict.reason.as_deref().unwrap_or(""))
+                    format!(
+                        "budget_gate: exceeded (warn-only) — {}",
+                        verdict.reason.as_deref().unwrap_or("")
+                    )
                 } else {
                     "budget_gate: under budget".into()
                 }],
@@ -3075,7 +3557,17 @@ async fn execute_node(
             .fetch_one(pool)
             .await
             .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?;
-            emit_run_updated(ctx, &ws.id, run_id, "running", Some(&node.id), rev, None, &[], true);
+            emit_run_updated(
+                ctx,
+                &ws.id,
+                run_id,
+                "running",
+                Some(&node.id),
+                rev,
+                None,
+                &[],
+                true,
+            );
 
             // Poll for the operator's decision. Operators are HUMANS: the
             // deadline defaults to 24h and is node-tunable via
@@ -3092,13 +3584,14 @@ async fn execute_node(
                 if Instant::now() >= deadline {
                     // Clear the pause flag before erroring so the run doesn't
                     // appear stuck after it errors out.
-                    let _ = sqlx::query(
-                        "UPDATE workflow_runs SET waiting_approval = 0 WHERE id = ?",
-                    )
-                    .bind(run_id)
-                    .execute(pool)
-                    .await;
-                    return Err(otto_core::Error::Upstream("human_approval: timed out waiting for operator decision".into()));
+                    let _ =
+                        sqlx::query("UPDATE workflow_runs SET waiting_approval = 0 WHERE id = ?")
+                            .bind(run_id)
+                            .execute(pool)
+                            .await;
+                    return Err(otto_core::Error::Upstream(
+                        "human_approval: timed out waiting for operator decision".into(),
+                    ));
                 }
                 // Read the current state of the run row.
                 let row = sqlx::query(
@@ -3111,7 +3604,9 @@ async fn execute_node(
                 .map_err(|e| otto_core::Error::Internal(format!("human_approval poll: {e}")))?;
 
                 let Some(row) = row else {
-                    return Err(otto_core::Error::Internal("human_approval: run row disappeared".into()));
+                    return Err(otto_core::Error::Internal(
+                        "human_approval: run row disappeared".into(),
+                    ));
                 };
 
                 use sqlx::Row as _;
@@ -3193,12 +3688,17 @@ async fn execute_node(
             let title = sub(raw_title);
             let description = sub(raw_desc);
 
-            let project = ctx.swarm_repo.get_project(&project_id).await
+            let project = ctx
+                .swarm_repo
+                .get_project(&project_id)
+                .await
                 .map_err(|e| otto_core::Error::NotFound(format!("swarm_task: project: {e}")))?;
 
             // Validate the project belongs to the expected swarm.
             if project.swarm_id != swarm_id {
-                return Err(otto_core::Error::Invalid("swarm_task: project not in given swarm".into()));
+                return Err(otto_core::Error::Invalid(
+                    "swarm_task: project not in given swarm".into(),
+                ));
             }
 
             let task = ctx
@@ -3232,7 +3732,11 @@ async fn execute_node(
         // code-path as `POST /workspaces/{wid}/api-client/execute` but inline).
         // Params mirror ExecuteApiReq: method, url, headers, body, auth.
         "api_run" => {
-            let method = p.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
+            let method = p
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("GET")
+                .to_string();
             let url = p
                 .get("url")
                 .and_then(Value::as_str)
@@ -3301,18 +3805,38 @@ async fn execute_node(
             };
             out.insert("result".into(), json!(result));
             out.insert("value".into(), value);
-            Ok((Value::Object(out), vec![format!("condition `{expr}` → {result}")]))
+            Ok((
+                Value::Object(out),
+                vec![format!("condition `{expr}` → {result}")],
+            ))
         }
 
         // --- Loop (bounded iterate-until) -----------------------------------
         "loop" => {
-            let max_iter = p.get("max_iterations").and_then(Value::as_u64).unwrap_or(3).clamp(1, 10);
-            let until = p.get("until").and_then(Value::as_str).unwrap_or("").to_string();
-            let steps = p.get("steps").and_then(Value::as_array).cloned().unwrap_or_default();
+            let max_iter = p
+                .get("max_iterations")
+                .and_then(Value::as_u64)
+                .unwrap_or(3)
+                .clamp(1, 10);
+            let until = p
+                .get("until")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let steps = p
+                .get("steps")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if steps.is_empty() {
-                return Err(otto_core::Error::Invalid("loop: requires at least one step".into()));
+                return Err(otto_core::Error::Invalid(
+                    "loop: requires at least one step".into(),
+                ));
             }
-            let continue_on_error = p.get("continue_on_error").and_then(Value::as_bool).unwrap_or(false);
+            let continue_on_error = p
+                .get("continue_on_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             // Run-level keys (repo_id, base, goals, …) flow to every step as a
             // base; the threaded prev-step output overlays them.
             let loop_base = input.as_object().cloned().unwrap_or_default();
@@ -3324,11 +3848,14 @@ async fn execute_node(
                 .enumerate()
                 .map(|(k, s)| {
                     crate::workflow_context::slug(
-                        s.get("name").and_then(Value::as_str).unwrap_or(&format!("step{k}")),
+                        s.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&format!("step{k}")),
                     )
                 })
                 .collect();
-            let slug_dup = |k: usize| inner_slugs.iter().filter(|s| **s == inner_slugs[k]).count() > 1;
+            let slug_dup =
+                |k: usize| inner_slugs.iter().filter(|s| **s == inner_slugs[k]).count() > 1;
             let mut logs = vec![];
             let mut history = vec![];
             let mut satisfied = false;
@@ -3356,9 +3883,15 @@ async fn execute_node(
                 let mut thread = last.clone();
                 let mut step_outputs = serde_json::Map::new();
                 for (k, step) in steps.iter().enumerate() {
-                    let skind = step.get("kind").and_then(Value::as_str).unwrap_or("").to_string();
+                    let skind = step
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     if skind == "loop" {
-                        return Err(otto_core::Error::Invalid("loop: nested loops are not allowed".into()));
+                        return Err(otto_core::Error::Invalid(
+                            "loop: nested loops are not allowed".into(),
+                        ));
                     }
                     let sname = step
                         .get("name")
@@ -3384,7 +3917,9 @@ async fn execute_node(
                         x: 0.0,
                         y: 0.0,
                         params: step.get("params").cloned().unwrap_or(Value::Null),
-                        retry: step.get("retry").and_then(|r| serde_json::from_value(r.clone()).ok()),
+                        retry: step
+                            .get("retry")
+                            .and_then(|r| serde_json::from_value(r.clone()).ok()),
                     };
                     // Inner steps share the loop's step number and add
                     // `-iter{X}` (the user's convention): step3-review-iter2.md.
@@ -3401,7 +3936,17 @@ async fn execute_node(
                     );
                     let sub_attempt_started = std::time::SystemTime::now();
                     match Box::pin(execute_node(
-                        ctx, ws, user, &sub, step_input, env, &sub_scope, session_tx, log_tx, activity_tx, progress,
+                        ctx,
+                        ws,
+                        user,
+                        &sub,
+                        step_input,
+                        env,
+                        &sub_scope,
+                        session_tx,
+                        log_tx,
+                        activity_tx,
+                        progress,
                     ))
                     .await
                     {
@@ -3453,7 +3998,9 @@ async fn execute_node(
                                 }
                             }
                             // Attach the iteration's handoff file too.
-                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                            if progress.enabled()
+                                && (is_reportable(&skind) || skind == "review_run")
+                            {
                                 progress.post_step_file(&env.files, &sub_file_base);
                             }
                         }
@@ -3474,10 +4021,15 @@ async fn execute_node(
                                 Some(sub_attempt_started),
                             );
                             if progress.enabled() && is_reportable(&skind) {
-                                progress.post(format!("› ❌ {sname} failed — {}", truncate(&e.to_string(), 200)));
+                                progress.post(format!(
+                                    "› ❌ {sname} failed — {}",
+                                    truncate(&e.to_string(), 200)
+                                ));
                             }
                             // The failed iteration's trace file rides along.
-                            if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
+                            if progress.enabled()
+                                && (is_reportable(&skind) || skind == "review_run")
+                            {
                                 progress.post_step_file(&env.files, &sub_file_base);
                             }
                             if !continue_on_error {
@@ -3500,7 +4052,9 @@ async fn execute_node(
                 }
             }
             if !until.is_empty() && !satisfied {
-                logs.push(format!("loop: reached max_iterations ({max_iter}) without satisfying `{until}`"));
+                logs.push(format!(
+                    "loop: reached max_iterations ({max_iter}) without satisfying `{until}`"
+                ));
             }
             // Surface the loop's repo reference(s) at the top level so a
             // downstream git_pr inherits them: a single `repo_id`/`base`/`worktree`
@@ -3537,7 +4091,11 @@ async fn execute_node(
             // as a clean sweep. Default 5h, node-tunable, with a 60s FLOOR — the
             // same shape as the human_approval arm above. RUN_WALL_CLOCK_TIMEOUT
             // (10h) remains the real backstop.
-            let timeout_s = p.get("timeout_s").and_then(Value::as_u64).unwrap_or(18_000).max(60);
+            let timeout_s = p
+                .get("timeout_s")
+                .and_then(Value::as_u64)
+                .unwrap_or(18_000)
+                .max(60);
             // R2: which execution mode the reviewers run in. The RUN's own input
             // wins over the node's param (that is what makes the run dialog an
             // override); a node param wins over the repo's stored config. Read
@@ -3572,7 +4130,10 @@ async fn execute_node(
             };
             // When set, the step itself FAILS if the score is below threshold — so a
             // downstream "create PR" step is error-skipped unless the review passed.
-            let require_pass = p.get("require_pass").and_then(Value::as_bool).unwrap_or(false);
+            let require_pass = p
+                .get("require_pass")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             // Which repo(s)/worktree(s)/base(s) to review — (repo_id, worktree,
             // want_base, label), in priority order:
             //
@@ -3593,8 +4154,17 @@ async fn execute_node(
             // target by itself — run-start seeding puts those into the input
             // of every declared run, and counting them would permanently mask
             // the multi-entry paths.
-            let params_explicit = p.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
-                || p.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            let params_explicit = p
+                .get("repo_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some()
+                || p.get("worktree_path")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some();
             // Notes emitted while resolving targets, before the per-target log
             // buffer below exists; folded into it verbatim.
             let mut logs_pre: Vec<String> = Vec::new();
@@ -3604,16 +4174,39 @@ async fn execute_node(
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|t| {
-                            let rid = t.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
-                            let wt = t.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
-                            let base = t.get("base").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                            let rid = t
+                                .get("repo_id")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())?;
+                            let wt = t
+                                .get("worktree")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())?;
+                            let base = t
+                                .get("base")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
                             Some((rid.to_string(), expand_tilde(wt), base, String::new()))
                         })
                         .collect()
                 })
                 .unwrap_or_default();
-            let input_worktree_ref = input.get("worktree").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
-                || input.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            let input_worktree_ref = input
+                .get("worktree")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some()
+                || input
+                    .get("worktree_path")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some();
             let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
             if !params_explicit && !input_repo_targets.is_empty() {
                 // `repos[]` is threaded VERBATIM from node to node (every
@@ -3632,7 +4225,9 @@ async fn execute_node(
                             .iter()
                             .find(|e| e.repo_id.as_deref() == Some(rid.as_str()))
                             .or_else(|| {
-                                declared.iter().find(|e| e.worktree.as_deref() == Some(wt.as_str()))
+                                declared
+                                    .iter()
+                                    .find(|e| e.worktree.as_deref() == Some(wt.as_str()))
                             })
                             .and_then(|e| e.base.clone())
                             .filter(|b| !b.trim().is_empty());
@@ -3729,7 +4324,11 @@ async fn execute_node(
             // per-lens provider sets + optional per-reviewer instructions, with an
             // optional `summarizer`. Falls back to the flat providers/lenses form,
             // then to the stored/default PR-review config.
-            let reviewers = p.get("reviewers").and_then(Value::as_array).cloned().unwrap_or_default();
+            let reviewers = p
+                .get("reviewers")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             // User-defined reviewer CHECKS — commands (e.g. `go test -tags=component
             // ./...`) the reviewer agent RUNS and reports failures on, in addition
             // to goals. A safety net for what the implementer's skill may have
@@ -3746,7 +4345,11 @@ async fn execute_node(
                 None
             } else {
                 let default_provider = crate::modules::default_review_provider(ctx).await;
-                Some(crate::modules::workflow_review_config(&default_provider, &providers, &lenses))
+                Some(crate::modules::workflow_review_config(
+                    &default_provider,
+                    &providers,
+                    &lenses,
+                ))
             };
             // Append a dedicated "Required checks" reviewer that RUNS the commands
             // and reports any failure as a blocking (bug) finding — so it drops the
@@ -3754,9 +4357,11 @@ async fn execute_node(
             // the agent (it has the repo + the implementer's context), not run by us.
             if !check_specs.is_empty() {
                 let default_provider = crate::modules::default_review_provider(ctx).await;
-                let cfg = cfg_override
-                    .get_or_insert_with(|| crate::modules::workflow_review_config(&default_provider, &[], &[]));
-                cfg.agents.push(checks_review_agent(&default_provider, &check_specs));
+                let cfg = cfg_override.get_or_insert_with(|| {
+                    crate::modules::workflow_review_config(&default_provider, &[], &[])
+                });
+                cfg.agents
+                    .push(checks_review_agent(&default_provider, &check_specs));
             }
             // Progress-post label fragments (shared by every target).
             let lens_list: Vec<String> = if reviewers.is_empty() {
@@ -3786,7 +4391,10 @@ async fn execute_node(
             let chk_txt = if check_specs.is_empty() {
                 String::new()
             } else {
-                format!(" · {} check(s) delegated to the reviewer", check_specs.len())
+                format!(
+                    " · {} check(s) delegated to the reviewer",
+                    check_specs.len()
+                )
             };
             // Per-severity deductions (percent off 100) over the OPEN findings
             // — `scoring: { bug, warn, info }`. Defaults (20/5/5) preserve the
@@ -3802,7 +4410,11 @@ async fn execute_node(
                 .get("goals")
                 .and_then(Value::as_array)
                 .or_else(|| input.get("goals").and_then(Value::as_array))
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // What this run already established about the change, handed to the
@@ -3828,7 +4440,9 @@ async fn execute_node(
                 // also carries the whole diff, so this must not grow unbounded.
                 let mut brief = String::new();
                 for name in env.files.list_step_mds() {
-                    let Some(body) = env.files.read_named(&name) else { continue };
+                    let Some(body) = env.files.read_named(&name) else {
+                        continue;
+                    };
                     if brief.len() + body.len() > REVIEW_CONTEXT_CAP {
                         brief.push_str(
                             "\n\n[remaining step files omitted — context cap reached; \
@@ -3855,8 +4469,16 @@ async fn execute_node(
             if jira_context.is_some() || run_context.is_some() {
                 logs_pre.push(format!(
                     "review_run: reviewers given prior run context ({}{}{} chars)",
-                    if jira_context.is_some() { "ticket + " } else { "" },
-                    if run_context.is_some() { "step briefs, " } else { "" },
+                    if jira_context.is_some() {
+                        "ticket + "
+                    } else {
+                        ""
+                    },
+                    if run_context.is_some() {
+                        "step briefs, "
+                    } else {
+                        ""
+                    },
                     jira_context.as_ref().map_or(0, |s| s.len())
                         + run_context.as_ref().map_or(0, |s| s.len()),
                 ));
@@ -3894,31 +4516,35 @@ async fn execute_node(
                         "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
                     ));
                 }
-                let (review_id, resolved_base, no_changes) = match crate::modules::run_review_for_branch(
-                    ctx,
-                    repo_id,
-                    worktree,
-                    want_base.as_deref(),
-                    cfg_override.clone(),
-                    jira_context.clone(),
-                    run_context.clone(),
-                    Some(mode),
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let msg = format!("review_run{tag}: {e}");
-                        if multi {
-                            logs.push(msg);
-                            if progress.enabled() {
-                                progress.post(format!("🔍 *{iter_label}{tag}* skipped — {}", truncate(&e.to_string(), 200)));
+                let (review_id, resolved_base, no_changes) =
+                    match crate::modules::run_review_for_branch(
+                        ctx,
+                        repo_id,
+                        worktree,
+                        want_base.as_deref(),
+                        cfg_override.clone(),
+                        jira_context.clone(),
+                        run_context.clone(),
+                        Some(mode),
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let msg = format!("review_run{tag}: {e}");
+                            if multi {
+                                logs.push(msg);
+                                if progress.enabled() {
+                                    progress.post(format!(
+                                        "🔍 *{iter_label}{tag}* skipped — {}",
+                                        truncate(&e.to_string(), 200)
+                                    ));
+                                }
+                                continue;
                             }
-                            continue;
+                            return Err(e);
                         }
-                        return Err(e);
-                    }
-                };
+                    };
                 // Publish the RESOLVED branch from here on — the loop harvest,
                 // the repos registry and a downstream git_pr must target what
                 // was actually reviewed, not the pre-resolution wish.
@@ -4045,13 +4671,37 @@ async fn execute_node(
                          where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                         goals.join("\n- ")
                     );
-                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, &goals_provider, None, &gprompt, worktree, None, session_tx, log_tx, activity_tx).await {
+                    match run_node_agent(
+                        ctx,
+                        ws,
+                        user,
+                        node,
+                        &env.wf_name,
+                        &env.run_id,
+                        &goals_provider,
+                        None,
+                        &gprompt,
+                        worktree,
+                        None,
+                        session_tx,
+                        log_tx,
+                        activity_tx,
+                    )
+                    .await
+                    {
                         Ok((reply, _sid)) => match extract_json(&reply) {
                             Some(v) => {
-                                let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
+                                let gs = v
+                                    .get("score")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(review_score)
+                                    .clamp(0, 100);
                                 (Some(gs), v.get("goals").cloned().unwrap_or(json!([])))
                             }
-                            None => (Some(review_score), json!([{ "note": "goals eval reply not parseable" }])),
+                            None => (
+                                Some(review_score),
+                                json!([{ "note": "goals eval reply not parseable" }]),
+                            ),
                         },
                         Err(e) => {
                             logs.push(format!("review_run{tag}: goals eval failed: {e}"));
@@ -4082,10 +4732,13 @@ async fn execute_node(
                 };
                 logs.push(format!(
                     "review_run{tag}: score {score} (review {review_score}{}) — {reason}",
-                    goals_score.map(|g| format!(", goals {g}")).unwrap_or_default(),
+                    goals_score
+                        .map(|g| format!(", goals {g}"))
+                        .unwrap_or_default(),
                 ));
                 // Stream the verdict + top findings to the chat thread.
-                let finding_briefs = crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
+                let finding_briefs =
+                    crate::modules::review_finding_briefs(ctx, &review_id, 10).await;
                 if progress.enabled() {
                     let verdict = if passed {
                         "✅ passed".to_string()
@@ -4105,7 +4758,9 @@ async fn execute_node(
                         format!("🔍 *{iter_label}{tag}* — {verdict}")
                     };
                     if no_changes {
-                        msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
+                        msg.push_str(
+                            "\nNo reviewers ran. Check the base branch this run declared.",
+                        );
                     } else if finding_briefs.is_empty() {
                         msg.push_str("\nFindings: none 🎉");
                     } else {
@@ -4248,10 +4903,37 @@ async fn execute_node(
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
+            let provider = p
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
-            let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &prompt, &acwd, done, session_tx, log_tx, activity_tx).await?;
+            let done = env
+                .files
+                .step_md_path(&crate::workflow_context::step_base_name(
+                    scope.step_no,
+                    node_display_name(node),
+                    scope.iter,
+                    scope.inner_idx,
+                ));
+            let (reply, sid) = run_node_agent(
+                ctx,
+                ws,
+                user,
+                node,
+                &env.wf_name,
+                &env.run_id,
+                provider,
+                model,
+                &prompt,
+                &acwd,
+                done,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+            .await?;
             let mut out = serde_json::Map::new();
             out.insert("story_id".into(), json!(story_id));
             out.insert("session_id".into(), json!(sid));
@@ -4293,9 +4975,15 @@ async fn execute_node(
                 .get("story_id")
                 .and_then(Value::as_str)
                 .or_else(|| input.get("story_id").and_then(Value::as_str))
-                .ok_or_else(|| otto_core::Error::Invalid("product_publish: missing story_id".into()))?
+                .ok_or_else(|| {
+                    otto_core::Error::Invalid("product_publish: missing story_id".into())
+                })?
                 .to_string();
-            let kind = p.get("kind").and_then(Value::as_str).unwrap_or("rfc").to_string();
+            let kind = p
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("rfc")
+                .to_string();
             let dry_run = p.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
             if dry_run {
                 return Ok((
@@ -4307,14 +4995,23 @@ async fn execute_node(
             let account_id = p
                 .get("account_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| otto_core::Error::Invalid("product_publish: account_id required to publish".into()))?
+                .ok_or_else(|| {
+                    otto_core::Error::Invalid(
+                        "product_publish: account_id required to publish".into(),
+                    )
+                })?
                 .to_string();
             if kind == "jira" {
                 let project = p
                     .get("project_key")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| otto_core::Error::Invalid("product_publish: project_key required".into()))?;
-                let issue_type = p.get("issue_type").and_then(Value::as_str).unwrap_or("Story");
+                    .ok_or_else(|| {
+                        otto_core::Error::Invalid("product_publish: project_key required".into())
+                    })?;
+                let issue_type = p
+                    .get("issue_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Story");
                 let detail = ctx
                     .product
                     .publish_as_story(&story_id, &account_id, project, issue_type, &user.id)
@@ -4325,10 +5022,9 @@ async fn execute_node(
                     vec!["product_publish: published to Jira".into()],
                 ))
             } else {
-                let space = p
-                    .get("space_key")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| otto_core::Error::Invalid("product_publish: space_key required".into()))?;
+                let space = p.get("space_key").and_then(Value::as_str).ok_or_else(|| {
+                    otto_core::Error::Invalid("product_publish: space_key required".into())
+                })?;
                 let parent = p.get("parent_id").and_then(Value::as_str);
                 let title = p.get("title").and_then(Value::as_str);
                 let detail = ctx
@@ -4355,9 +5051,29 @@ async fn execute_node(
                 truncate(&input.to_string(), 4000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
+            let provider = p
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, None, session_tx, log_tx, activity_tx).await?;
+            let (reply, sid) = run_node_agent(
+                ctx,
+                ws,
+                user,
+                node,
+                &env.wf_name,
+                &env.run_id,
+                provider,
+                model,
+                &full,
+                &acwd,
+                None,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+            .await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
@@ -4427,7 +5143,10 @@ async fn execute_node(
                     .map(crate::workflow_context::entry_to_target)
                     .collect();
             }
-            if p.get("detect_changed").and_then(Value::as_bool).unwrap_or(false) {
+            if p.get("detect_changed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 if let Ok(repos) = ctx.git_store.list_repos(&ws.id).await {
                     for r in repos {
                         targets.push(json!({ "repo_id": r.id, "worktree": r.path }));
@@ -4439,13 +5158,15 @@ async fn execute_node(
             let mut notes: Vec<String> = Vec::new();
             if targets.is_empty() {
                 // One implicit target from the run context (the common case).
-                let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd).await.ok_or_else(|| {
-                    otto_core::Error::Invalid(
+                let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
+                    .await
+                    .ok_or_else(|| {
+                        otto_core::Error::Invalid(
                         "git_pr: no repo_id; pass repo_id or a working_directory/worktree_path \
                          under a registered repo"
                             .into(),
                     )
-                })?;
+                    })?;
                 let base = p
                     .get("base")
                     .and_then(Value::as_str)
@@ -4471,14 +5192,20 @@ async fn execute_node(
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .or_else(|| run_input_base.clone());
-                    let rid = match t.get("repo_id").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                    let rid = match t
+                        .get("repo_id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
                         Some(r) => Some(r.to_string()),
                         None => resolve_repo_id_for_path(ctx, &ws.id, &worktree).await,
                     };
                     match rid {
                         Some(r) if seen.insert(r.clone()) => resolved.push((r, worktree, base)),
                         Some(_) => {} // duplicate repo across targets — one PR each
-                        None => notes.push(format!("skipped a target (no registered repo for {worktree})")),
+                        None => notes.push(format!(
+                            "skipped a target (no registered repo for {worktree})"
+                        )),
                     }
                 }
                 if resolved.is_empty() {
@@ -4501,7 +5228,11 @@ async fn execute_node(
                         continue;
                     }
                 };
-                let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
+                let wt = if worktree.trim().is_empty() {
+                    repo.path.clone()
+                } else {
+                    worktree.clone()
+                };
                 // FIRST check before any PR: agents are told to commit, but a
                 // stalled/stuck one leaves its work uncommitted — the branch then
                 // has no commits ahead of base and the provider rejects the PR
@@ -4539,16 +5270,39 @@ async fn execute_node(
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or(env.default_provider.as_str());
                         let model = p.get("model").and_then(Value::as_str);
-                        match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &draft_prompt, &wt, None, session_tx, log_tx, activity_tx).await {
+                        match run_node_agent(
+                            ctx,
+                            ws,
+                            user,
+                            node,
+                            &env.wf_name,
+                            &env.run_id,
+                            provider,
+                            model,
+                            &draft_prompt,
+                            &wt,
+                            None,
+                            session_tx,
+                            log_tx,
+                            activity_tx,
+                        )
+                        .await
+                        {
                             Ok((reply, _sid)) => {
-                                let (mut title, description) = crate::modules::parse_pr_draft(&reply, &source);
+                                let (mut title, description) =
+                                    crate::modules::parse_pr_draft(&reply, &source);
                                 if let Some(key) = crate::modules::jira_key_from_branch(&source) {
                                     title = crate::modules::ensure_jira_in_subject(&title, &key);
                                 }
-                                otto_core::api::DraftPrResp { title, description, source_branch: source, target_branch: base_branch,
-                                // The workflow node runs the turn itself (honoring the node's
-                                // provider/model), so there is no drafting session to link to.
-                                session_id: None }
+                                otto_core::api::DraftPrResp {
+                                    title,
+                                    description,
+                                    source_branch: source,
+                                    target_branch: base_branch,
+                                    // The workflow node runs the turn itself (honoring the node's
+                                    // provider/model), so there is no drafting session to link to.
+                                    session_id: None,
+                                }
                             }
                             Err(e) => {
                                 notes.push(format!("{}: PR draft agent failed ({e})", repo.name));
@@ -4618,7 +5372,11 @@ async fn execute_node(
                         }));
                         logs.push(format!(
                             "git_pr: opened PR #{} '{}' on {} ({} → {})",
-                            summary.number, draft.title, repo.name, draft.source_branch, draft.target_branch
+                            summary.number,
+                            draft.title,
+                            repo.name,
+                            draft.source_branch,
+                            draft.target_branch
                         ));
                     }
                     Err(e) => {
@@ -4665,7 +5423,13 @@ async fn execute_node(
             outm.insert("prs".into(), Value::Array(prs.clone()));
             outm.insert("opened".into(), json!(open && opened_n > 0));
             outm.insert("opened_count".into(), json!(opened_n));
-            outm.insert("repos".into(), json!(resolved.iter().map(|(r, _, _)| r.clone()).collect::<Vec<_>>()));
+            outm.insert(
+                "repos".into(),
+                json!(resolved
+                    .iter()
+                    .map(|(r, _, _)| r.clone())
+                    .collect::<Vec<_>>()),
+            );
             if !notes.is_empty() {
                 outm.insert("notes".into(), json!(notes));
             }
@@ -4702,7 +5466,9 @@ async fn execute_node(
                 .improvements
                 .create_run(&ws.id, ImprovementTrigger::Manual)
                 .await
-                .map_err(|e| otto_core::Error::Internal(format!("self_improve: create run: {e}")))?;
+                .map_err(|e| {
+                    otto_core::Error::Internal(format!("self_improve: create run: {e}"))
+                })?;
             eng.execute_run_with_autonomy_providers(
                 &run.id,
                 &ws.id,
@@ -4713,8 +5479,15 @@ async fn execute_node(
             .await
             .map_err(|e| otto_core::Error::Upstream(format!("self_improve: {e}")))?;
             let final_run = eng.improvements.get_run(&run.id).await.ok();
-            let edits = eng.improvements.list_edits_by_run(&run.id).await.unwrap_or_default();
-            let summary = final_run.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
+            let edits = eng
+                .improvements
+                .list_edits_by_run(&run.id)
+                .await
+                .unwrap_or_default();
+            let summary = final_run
+                .as_ref()
+                .map(|r| r.summary.clone())
+                .unwrap_or_default();
             let offered: Vec<Value> = edits
                 .iter()
                 .map(|e| {
@@ -4734,7 +5507,12 @@ async fn execute_node(
                 run.id
             )];
             for e in &edits {
-                logs.push(format!("  offer: [{}] {} — {}", e.risk.as_str(), e.target_ref, truncate(&e.rationale, 160)));
+                logs.push(format!(
+                    "  offer: [{}] {} — {}",
+                    e.risk.as_str(),
+                    e.target_ref,
+                    truncate(&e.rationale, 160)
+                ));
             }
             if progress.enabled() {
                 let mut msg = format!(
@@ -4765,23 +5543,29 @@ async fn execute_node(
             ))
         }
 
-        other => Err(otto_core::Error::Invalid(format!("unknown node kind '{other}'"))),
+        other => Err(otto_core::Error::Invalid(format!(
+            "unknown node kind '{other}'"
+        ))),
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Graph helpers
 // ---------------------------------------------------------------------------
 
 /// Edges entering `node_id` (in graph order).
-fn incoming_edges<'a>(graph: &'a WorkflowGraph, node_id: &str) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
+fn incoming_edges<'a>(
+    graph: &'a WorkflowGraph,
+    node_id: &str,
+) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
     graph.edges.iter().filter(|e| e.target == node_id).collect()
 }
 
 /// Edges leaving `node_id` (in graph order).
-fn outgoing_edges<'a>(graph: &'a WorkflowGraph, node_id: &str) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
+fn outgoing_edges<'a>(
+    graph: &'a WorkflowGraph,
+    node_id: &str,
+) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
     graph.edges.iter().filter(|e| e.source == node_id).collect()
 }
 
@@ -4902,10 +5686,19 @@ fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     // `prepare_context` only reaches an agent turn when it has a non-empty
     // `params.prompt` — treat it like `agent_prompt` exactly in that case.
     let has_agent_phase = node.kind == "prepare_context"
-        && node.params.get("prompt").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
+        && node
+            .params
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
     if node.kind == "agent_prompt" || has_agent_phase {
-        return otto_core::workflows::RetryPolicy { max_attempts: 2, backoff_ms: 2000, factor: 2.0 }
-            .clamped();
+        return otto_core::workflows::RetryPolicy {
+            max_attempts: 2,
+            backoff_ms: 2000,
+            factor: 2.0,
+        }
+        .clamped();
     }
     otto_core::workflows::RetryPolicy::default()
 }
@@ -5122,7 +5915,11 @@ async fn run_node_agent(
     // Title carries the workflow name, the step, and a short run id so two
     // concurrent runs of the same workflow are distinguishable in the Agents
     // list (they'd otherwise both read "Workflow: Write tests").
-    let label = if node.name.is_empty() { node.kind.as_str() } else { node.name.as_str() };
+    let label = if node.name.is_empty() {
+        node.kind.as_str()
+    } else {
+        node.name.as_str()
+    };
     let title = format!("WF {wf_name} · {label} · run {}", short_id(run_id));
     // Stamp the FULL run id (+ workflow name) into meta so every workflow-spawned
     // session is provably attributable to its specific run — the UI/global Agents
@@ -5240,7 +6037,8 @@ async fn run_node_agent(
     };
     while let Ok(p) = phase_rx.try_recv() {
         let sid = live_sid.lock().ok().and_then(|g| g.clone());
-        feed.on_phase(ctx, sid.as_ref(), p, log_tx, activity_tx).await;
+        feed.on_phase(ctx, sid.as_ref(), p, log_tx, activity_tx)
+            .await;
     }
     let out = result.map_err(|e| e.0)?;
     // How the oracle accepted the turn — `Err` means the sender was dropped
@@ -5310,7 +6108,9 @@ impl PhaseFeed {
         // snapshot it is annotated with — and the rows the run view shows —
         // would otherwise describe the PREVIOUS count.
         if matches!(p, Phase::Subagents { .. })
-            || self.last_probe.is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+            || self
+                .last_probe
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
         {
             self.last_probe = Some(Instant::now());
             if let Some((subs, stamp)) = step_activity_probe(ctx, sid).await {
@@ -5347,13 +6147,18 @@ impl PhaseFeed {
                 | Phase::BashLinger { .. }
         );
         self.pending = match &p {
-            Phase::HandoffWrittenWaiting { pending } | Phase::BashLinger { pending, .. } => *pending,
+            Phase::HandoffWrittenWaiting { pending } | Phase::BashLinger { pending, .. } => {
+                *pending
+            }
             Phase::Subagents { running, .. } => *running,
             _ => 0,
         };
         // The handoff file is on disk the moment either of these phases holds.
         if !self.handoff_logged
-            && matches!(p, Phase::IdleConfirming { .. } | Phase::HandoffWrittenWaiting { .. })
+            && matches!(
+                p,
+                Phase::IdleConfirming { .. } | Phase::HandoffWrittenWaiting { .. }
+            )
         {
             self.handoff_logged = true;
             let _ = log_tx.send("📄 handoff file written".to_string());
@@ -5450,7 +6255,10 @@ fn bound_activity(mut a: NodeActivity) -> NodeActivity {
 async fn step_activity_probe(
     ctx: &ServerCtx,
     sid: Option<&Id>,
-) -> Option<(Vec<turn_oracle::SubagentInfo>, Option<std::time::SystemTime>)> {
+) -> Option<(
+    Vec<turn_oracle::SubagentInfo>,
+    Option<std::time::SystemTime>,
+)> {
     let s = ctx.manager.get(sid?).await.ok()?;
     if s.provider != "claude" {
         return None;
@@ -5550,7 +6358,9 @@ async fn e2e_subagent_sequence(
 /// Expand a leading `~`/`~/` to the user's home directory.
 fn expand_tilde(p: &str) -> String {
     if p == "~" {
-        return dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string());
+        return dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string());
     }
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -5602,7 +6412,10 @@ fn collect_pr_targets(p: &Value, input: &Value) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let has_ref = |v: &Value| {
         ["repo_id", "worktree", "worktree_path"].iter().any(|k| {
-            v.get(*k).and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false)
+            v.get(*k)
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
         })
     };
     if let Some(arr) = p.get("repos").and_then(Value::as_array) {
@@ -5666,10 +6479,19 @@ fn parse_checks(v: Option<&Value>) -> Vec<(String, String)> {
 /// and the implementer's context) rather than executed by the engine — so it
 /// fans out through the same multi-agent review pipeline and its failures drop
 /// the score, keeping a fix→review loop iterating until the checks pass.
-fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> otto_core::domain::ReviewAgentCfg {
+fn checks_review_agent(
+    default_provider: &str,
+    checks: &[(String, String)],
+) -> otto_core::domain::ReviewAgentCfg {
     let list = checks
         .iter()
-        .map(|(n, c)| if n == c { format!("- {c}") } else { format!("- {n}: {c}") })
+        .map(|(n, c)| {
+            if n == c {
+                format!("- {c}")
+            } else {
+                format!("- {n}: {c}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!(
@@ -5730,10 +6552,7 @@ fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &
 /// input keys always win — and expose the normalized entries as
 /// `repos: [{repo_id, worktree, base}]`, the shape `collect_pr_targets` and
 /// the loop's ref harvest already consume. Pure; unit-tested below.
-fn seed_input_from_entries(
-    input: Value,
-    entries: &[crate::workflow_context::RepoEntry],
-) -> Value {
+fn seed_input_from_entries(input: Value, entries: &[crate::workflow_context::RepoEntry]) -> Value {
     let valid: Vec<&crate::workflow_context::RepoEntry> =
         entries.iter().filter(|e| e.error.is_none()).collect();
     if valid.is_empty() {
@@ -5773,7 +6592,12 @@ fn seed_input_from_entries(
     // user shape stays visible in repos.json.
     m.insert(
         "repos".into(),
-        Value::Array(valid.iter().map(|e| crate::workflow_context::entry_to_target(e)).collect()),
+        Value::Array(
+            valid
+                .iter()
+                .map(|e| crate::workflow_context::entry_to_target(e))
+                .collect(),
+        ),
     );
     Value::Object(m)
 }
@@ -5785,10 +6609,19 @@ fn seed_input_from_entries(
 /// non-object input (or one already without either field) passes through
 /// unchanged.
 fn normalize_prompt(input: Value) -> Value {
-    let Value::Object(mut m) = input else { return input };
-    let has_prompt = m.get("prompt").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
+    let Value::Object(mut m) = input else {
+        return input;
+    };
+    let has_prompt = m
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
     if !has_prompt {
-        if let Some(msg) = m.get("msg").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        if let Some(msg) = m
+            .get("msg")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
             m.insert("prompt".into(), Value::String(msg.to_string()));
         }
     }
@@ -5820,8 +6653,7 @@ async fn provision_wf_worktrees(
     entries: &mut [crate::workflow_context::RepoEntry],
 ) -> Option<String> {
     let mut primary: Option<String> = None;
-    let canon =
-        |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
     for e in entries.iter_mut() {
         if e.error.is_some() {
             continue;
@@ -5862,7 +6694,10 @@ async fn provision_wf_worktrees(
             .join(crate::workflow_context::slug(&repo.name));
         let wt_str = wt_path.to_string_lossy().to_string();
         let branch = format!("otto-wf/{run_id}");
-        match git.worktree_add_if_absent(&wt_str, &branch, &base_commit).await {
+        match git
+            .worktree_add_if_absent(&wt_str, &branch, &base_commit)
+            .await
+        {
             Ok(_) => {
                 tracing::info!("wf worktree: {} @ {base} → {wt_str}", repo.name);
                 e.worktree = Some(wt_str.clone());
@@ -5913,7 +6748,10 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         let wt_str = wt.to_string_lossy().to_string();
         // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
         let wt_git = otto_git::LocalGit::new(&wt_str);
-        let Ok(common) = wt_git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).await else {
+        let Ok(common) = wt_git
+            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .await
+        else {
             continue;
         };
         let common = common.trim();
@@ -5921,7 +6759,9 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             continue;
         };
         match wt_git
-            .commit_all_if_dirty(&format!("chore: preserve workflow leftovers (run {run_id})"))
+            .commit_all_if_dirty(&format!(
+                "chore: preserve workflow leftovers (run {run_id})"
+            ))
             .await
         {
             Ok(Some(sha)) => tracing::info!(
@@ -5930,7 +6770,9 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             ),
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("wf reap: could not commit leftovers in {wt_str}: {e} — keeping the worktree");
+                tracing::warn!(
+                    "wf reap: could not commit leftovers in {wt_str}: {e} — keeping the worktree"
+                );
                 kept_any = true;
                 continue;
             }
@@ -5944,7 +6786,11 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             .map(|out| !out.trim().is_empty())
             .unwrap_or(false);
         let pushed = repo_git
-            .run(&["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")])
+            .run(&[
+                "rev-parse",
+                "--verify",
+                &format!("refs/remotes/origin/{branch}"),
+            ])
             .await
             .is_ok();
         if merged || pushed {
@@ -6073,8 +6919,9 @@ async fn resolve_repo_entries(
                 }
             }
             other => {
-                e.error =
-                    Some(format!("unknown repos entry type '{other}' (want branch|worktree)"));
+                e.error = Some(format!(
+                    "unknown repos entry type '{other}' (want branch|worktree)"
+                ));
                 continue;
             }
         }
@@ -6117,8 +6964,7 @@ async fn resolve_repo_id_for_path(
     // ~/proj/app → the app repo, not a containing parent-dir repo.
     let expanded = expand_tilde(path);
     let all = ctx.git_store.list_all_repos().await.ok()?;
-    let pairs: Vec<(String, String)> =
-        all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let pairs: Vec<(String, String)> = all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
     if let Some(id) = match_repo_path(&expanded, &pairs) {
         return Some(id);
     }
@@ -6142,8 +6988,7 @@ async fn resolve_repo_id_for_path(
 /// the deepest (most specific) registered repo wins. Component-wise so a sibling
 /// like `…/foo_wt` does NOT match a repo at `…/foo`.
 fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
-    let canon =
-        |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
     let t = canon(target);
     let mut best: Option<(usize, String)> = None;
     for (id, rp) in repos {
@@ -6217,7 +7062,9 @@ fn topo_order(graph: &WorkflowGraph) -> std::result::Result<Vec<String>, String>
             continue; // dangling edge — ignore
         }
         *indeg.entry(e.target.clone()).or_insert(0) += 1;
-        adj.entry(e.source.clone()).or_default().push(e.target.clone());
+        adj.entry(e.source.clone())
+            .or_default()
+            .push(e.target.clone());
     }
     // Stable start order: graph node order among in-degree-0 nodes.
     let mut queue: Vec<String> = graph
@@ -6324,9 +7171,15 @@ mod tests {
     #[test]
     fn run_acts_as_its_starter_else_workflow_creator() {
         let wf_owner: Id = "root".into();
-        assert_eq!(super::acting_user_id(Some("editor-b".into()), &wf_owner), "editor-b");
+        assert_eq!(
+            super::acting_user_id(Some("editor-b".into()), &wf_owner),
+            "editor-b"
+        );
         assert_eq!(super::acting_user_id(None, &wf_owner), "root");
-        assert_eq!(super::acting_user_id(Some(String::new()), &wf_owner), "root");
+        assert_eq!(
+            super::acting_user_id(Some(String::new()), &wf_owner),
+            "root"
+        );
     }
 
     use super::*;
@@ -6344,7 +7197,12 @@ mod tests {
         }
     }
     fn edge(s: &str, t: &str) -> WorkflowEdge {
-        WorkflowEdge { id: format!("{s}-{t}"), source: s.into(), target: t.into(), condition: None }
+        WorkflowEdge {
+            id: format!("{s}-{t}"),
+            source: s.into(),
+            target: t.into(),
+            condition: None,
+        }
     }
 
     /// The daemon-wide run gate: at most `max_parallel_runs()` (default 2)
@@ -6363,7 +7221,9 @@ mod tests {
         let b = gate.try_acquire().expect("second run starts");
         assert!(gate.try_acquire().is_err(), "third run must queue");
         drop(a);
-        let c = gate.try_acquire().expect("a slot frees when a run finishes");
+        let c = gate
+            .try_acquire()
+            .expect("a slot frees when a run finishes");
         drop(b);
         drop(c);
     }
@@ -6371,7 +7231,11 @@ mod tests {
     #[test]
     fn topo_orders_a_chain() {
         let g = WorkflowGraph {
-            nodes: vec![node("c", "log"), node("a", "manual_trigger"), node("b", "log")],
+            nodes: vec![
+                node("c", "log"),
+                node("a", "manual_trigger"),
+                node("b", "log"),
+            ],
             edges: vec![edge("a", "b"), edge("b", "c")],
         };
         assert_eq!(topo_order(&g).unwrap(), vec!["a", "b", "c"]);
@@ -6431,7 +7295,11 @@ mod tests {
     #[test]
     fn classify_resume_reenters_at_interrupted_idempotent_step() {
         let g = WorkflowGraph {
-            nodes: vec![node("a", "manual_trigger"), node("b", "agent_prompt"), node("c", "git_pr")],
+            nodes: vec![
+                node("a", "manual_trigger"),
+                node("b", "agent_prompt"),
+                node("c", "git_pr"),
+            ],
             edges: vec![edge("a", "b"), edge("b", "c")],
         };
         let run = mk_run(
@@ -6446,8 +7314,16 @@ mod tests {
             ResumeDecision::Resume { scope, nodes } => {
                 assert_eq!(scope.start_node.as_deref(), Some("b"));
                 assert!(!scope.only_node && !scope.adopt_start);
-                assert_eq!(nodes[1].status, NodeStatus::Pending, "interrupted step re-runs");
-                assert_eq!(nodes[0].status, NodeStatus::Success, "finished step adopted");
+                assert_eq!(
+                    nodes[1].status,
+                    NodeStatus::Pending,
+                    "interrupted step re-runs"
+                );
+                assert_eq!(
+                    nodes[0].status,
+                    NodeStatus::Success,
+                    "finished step adopted"
+                );
             }
             other => panic!("expected Resume, got {other:?}"),
         }
@@ -6458,7 +7334,11 @@ mod tests {
     #[test]
     fn classify_resume_fails_on_interrupted_side_effect_step() {
         let g = WorkflowGraph {
-            nodes: vec![node("a", "agent_prompt"), node("b", "git_pr"), node("c", "log")],
+            nodes: vec![
+                node("a", "agent_prompt"),
+                node("b", "git_pr"),
+                node("c", "log"),
+            ],
             edges: vec![edge("a", "b"), edge("b", "c")],
         };
         let run = mk_run(
@@ -6484,7 +7364,11 @@ mod tests {
     #[test]
     fn classify_resume_reenters_at_waiting_approval_node() {
         let g = WorkflowGraph {
-            nodes: vec![node("a", "log"), node("gate", "human_approval"), node("b", "channel_notify")],
+            nodes: vec![
+                node("a", "log"),
+                node("gate", "human_approval"),
+                node("b", "channel_notify"),
+            ],
             edges: vec![edge("a", "gate"), edge("gate", "b")],
         };
         let mut run = mk_run(
@@ -6515,10 +7399,16 @@ mod tests {
         };
         let run = mk_run(
             RunStatus::Pending,
-            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Error)],
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Error),
+            ],
         );
-        let scope =
-            RunScope { start_node: Some("b".into()), only_node: true, adopt_start: false };
+        let scope = RunScope {
+            start_node: Some("b".into()),
+            only_node: true,
+            adopt_start: false,
+        };
         match classify_resume(&g, &run, Some(scope.clone())) {
             ResumeDecision::Resume { scope: got, .. } => assert_eq!(got, scope),
             other => panic!("expected Resume, got {other:?}"),
@@ -6539,7 +7429,10 @@ mod tests {
         };
         let run = mk_run(
             RunStatus::Running,
-            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Success)],
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Success),
+            ],
         );
         match classify_resume(&g, &run, None) {
             ResumeDecision::Finish { status, error, .. } => {
@@ -6551,7 +7444,10 @@ mod tests {
         // …and Error when a settled node failed.
         let run = mk_run(
             RunStatus::Running,
-            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Error)],
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Error),
+            ],
         );
         match classify_resume(&g, &run, None) {
             ResumeDecision::Finish { status, .. } => assert_eq!(status, RunStatus::Error),
@@ -6585,12 +7481,30 @@ mod tests {
 
     #[test]
     fn side_effect_kinds_are_not_restart_resumable() {
-        for k in ["git_pr", "channel_notify", "swarm_task", "product_publish", "api_run",
-                  "http_request", "self_improve", "product_rewrite", "product_plan"] {
+        for k in [
+            "git_pr",
+            "channel_notify",
+            "swarm_task",
+            "product_publish",
+            "api_run",
+            "http_request",
+            "self_improve",
+            "product_rewrite",
+            "product_plan",
+        ] {
             assert!(!is_restart_resumable_kind(k), "{k} must not auto-replay");
         }
-        for k in ["agent_prompt", "transform", "condition", "delay", "log", "loop",
-                  "human_approval", "review_run", "prepare_context"] {
+        for k in [
+            "agent_prompt",
+            "transform",
+            "condition",
+            "delay",
+            "log",
+            "loop",
+            "human_approval",
+            "review_run",
+            "prepare_context",
+        ] {
             assert!(is_restart_resumable_kind(k), "{k} should be restart-safe");
         }
     }
@@ -6607,7 +7521,10 @@ mod tests {
     fn prepare_context_output_schema_declares_jira() {
         let schema = output_schema_for("prepare_context").expect("schema present");
         assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
-        let fields = schema.get("fields").and_then(|v| v.as_object()).expect("fields present");
+        let fields = schema
+            .get("fields")
+            .and_then(|v| v.as_object())
+            .expect("fields present");
         assert_eq!(fields.get("jira").and_then(|v| v.as_str()), Some("object"));
     }
 
@@ -6616,22 +7533,39 @@ mod tests {
         assert_eq!(canvas_node_ext("excalidraw"), "json");
         assert_eq!(canvas_node_ext("d2"), "d2");
         assert_eq!(canvas_node_ext("mermaid"), "mmd");
-        assert_eq!(canvas_node_ext("sequence"), "mmd", "unrecognized modes default to mermaid");
+        assert_eq!(
+            canvas_node_ext("sequence"),
+            "mmd",
+            "unrecognized modes default to mermaid"
+        );
     }
 
     #[test]
     fn descendants_scope_is_self_plus_downstream() {
         let g = WorkflowGraph {
-            nodes: vec![node("a", "log"), node("b", "log"), node("c", "log"), node("d", "log")],
+            nodes: vec![
+                node("a", "log"),
+                node("b", "log"),
+                node("c", "log"),
+                node("d", "log"),
+            ],
             edges: vec![edge("a", "b"), edge("b", "c"), edge("a", "d")],
         };
         let set = descendants_inclusive(&g, "b");
         assert!(set.contains("b") && set.contains("c"), "self + downstream");
-        assert!(!set.contains("a") && !set.contains("d"), "not upstream/siblings");
+        assert!(
+            !set.contains("a") && !set.contains("d"),
+            "not upstream/siblings"
+        );
     }
 
     fn view(source: &str, errored: bool, has_output: bool, edge_active: bool) -> EdgeView {
-        EdgeView { source: source.into(), errored, has_output, edge_active }
+        EdgeView {
+            source: source.into(),
+            errored,
+            has_output,
+            edge_active,
+        }
     }
 
     #[test]
@@ -6679,8 +7613,18 @@ mod tests {
         let mut g = WorkflowGraph {
             nodes: vec![node("c", "condition"), node("t", "log"), node("f", "log")],
             edges: vec![
-                WorkflowEdge { id: "c-t".into(), source: "c".into(), target: "t".into(), condition: Some("output.result == true".into()) },
-                WorkflowEdge { id: "c-f".into(), source: "c".into(), target: "f".into(), condition: Some("output.result == false".into()) },
+                WorkflowEdge {
+                    id: "c-t".into(),
+                    source: "c".into(),
+                    target: "t".into(),
+                    condition: Some("output.result == true".into()),
+                },
+                WorkflowEdge {
+                    id: "c-f".into(),
+                    source: "c".into(),
+                    target: "f".into(),
+                    condition: Some("output.result == false".into()),
+                },
             ],
         };
         let cnode = g.nodes[0].clone();
@@ -6701,9 +7645,17 @@ mod tests {
         let mut n = node("a", "agent_prompt");
         // R5: agent steps default to a small retry budget (2 retries = 3 attempts)
         // so a stuck no-op spawn is re-attempted with a fresh session.
-        assert_eq!(resolve_retry(&n).max_attempts, 2, "agent_prompt default 2 retries");
+        assert_eq!(
+            resolve_retry(&n).max_attempts,
+            2,
+            "agent_prompt default 2 retries"
+        );
         // Non-agent kinds keep the no-retry default.
-        assert_eq!(resolve_retry(&node("b", "log")).max_attempts, 0, "non-agent no retry");
+        assert_eq!(
+            resolve_retry(&node("b", "log")).max_attempts,
+            0,
+            "non-agent no retry"
+        );
         n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
         let p = resolve_retry(&n);
         assert_eq!(p.max_attempts, 5, "clamped to 5");
@@ -6717,7 +7669,11 @@ mod tests {
     fn prepare_context_gets_agent_retry_budget_only_with_a_prompt() {
         // No prompt (pure Jira-fetch step) → default no-retry, like any other kind.
         let no_prompt = node("p", "prepare_context");
-        assert_eq!(resolve_retry(&no_prompt).max_attempts, 0, "no agent phase → no retry");
+        assert_eq!(
+            resolve_retry(&no_prompt).max_attempts,
+            0,
+            "no agent phase → no retry"
+        );
         // A blank/whitespace prompt doesn't count as an agent phase either.
         let mut blank_prompt = node("p", "prepare_context");
         blank_prompt.params = json!({ "prompt": "   " });
@@ -6725,7 +7681,11 @@ mod tests {
         // Non-empty prompt → same retry budget as agent_prompt.
         let mut with_prompt = node("p", "prepare_context");
         with_prompt.params = json!({ "prompt": "analyze the ticket" });
-        assert_eq!(resolve_retry(&with_prompt).max_attempts, 2, "agent phase → agent_prompt budget");
+        assert_eq!(
+            resolve_retry(&with_prompt).max_attempts,
+            2,
+            "agent phase → agent_prompt budget"
+        );
         assert!(is_retryable("prepare_context"));
     }
 
@@ -6760,8 +7720,16 @@ mod tests {
             activity: None,
         };
         let states = vec![
-            mk("a", NodeStatus::Success, json!({ "reply": "implemented the tests" })),
-            mk("b", NodeStatus::Success, json!({ "score": 92, "passed": true })),
+            mk(
+                "a",
+                NodeStatus::Success,
+                json!({ "reply": "implemented the tests" }),
+            ),
+            mk(
+                "b",
+                NodeStatus::Success,
+                json!({ "score": 92, "passed": true }),
+            ),
         ];
         let (brief, full) = build_run_summary(&wf, &states, RunStatus::Success, Some("pack1"));
         assert!(brief.contains("Write tests"));
@@ -6779,11 +7747,18 @@ mod tests {
                         "skills": ["correctness-review", " test-review ", "correctness-review"] });
         assert_eq!(
             node_skill_names(&p),
-            vec!["golang-feature-implementation", "correctness-review", "test-review"]
+            vec![
+                "golang-feature-implementation",
+                "correctness-review",
+                "test-review"
+            ]
         );
         assert!(node_skill_names(&json!({})).is_empty());
         // `lenses` is also folded in (review nodes carry lenses).
-        assert_eq!(node_skill_names(&json!({ "lenses": ["security-review"] })), vec!["security-review"]);
+        assert_eq!(
+            node_skill_names(&json!({ "lenses": ["security-review"] })),
+            vec!["security-review"]
+        );
     }
 
     #[test]
@@ -6834,7 +7809,10 @@ mod tests {
             name: "x".into(),
             description: String::new(),
             instructions: String::new(),
-            graph: WorkflowGraph { nodes: vec![], edges: vec![] },
+            graph: WorkflowGraph {
+                nodes: vec![],
+                edges: vec![],
+            },
             created_by: "u".into(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -6851,7 +7829,10 @@ mod tests {
         assert!(matches!(t.channel, Channel::Slack));
         assert_eq!(t.chat, "C123");
         assert_eq!(t.thread.as_deref(), Some("169.1"));
-        assert_eq!(t.ws, "trigger-ws", "reports via the integration's workspace");
+        assert_eq!(
+            t.ws, "trigger-ws",
+            "reports via the integration's workspace"
+        );
         // Explicit override wins.
         let t = resolve_chat_target(
             &wf,
@@ -6889,9 +7870,15 @@ mod tests {
             Some("R")
         );
         // A sibling whose name shares a prefix must NOT match (component-wise).
-        assert_eq!(match_repo_path(sibling.to_string_lossy().as_ref(), &pairs), None);
+        assert_eq!(
+            match_repo_path(sibling.to_string_lossy().as_ref(), &pairs),
+            None
+        );
         // An unrelated ancestor must not match.
-        assert_eq!(match_repo_path(root.path().to_string_lossy().as_ref(), &pairs), None);
+        assert_eq!(
+            match_repo_path(root.path().to_string_lossy().as_ref(), &pairs),
+            None
+        );
     }
 
     #[test]
@@ -6947,7 +7934,11 @@ mod tests {
             .arg(&wt)
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let main = git_main_worktree(wt.to_string_lossy().as_ref())
             .await
@@ -6968,7 +7959,8 @@ mod tests {
     #[test]
     fn collect_pr_targets_single_review_reference() {
         // A direct review→git_pr: the review output carries one reference.
-        let input = json!({ "repo_id": "R1", "base": "develop", "worktree": "/w/r1", "passed": true });
+        let input =
+            json!({ "repo_id": "R1", "base": "develop", "worktree": "/w/r1", "passed": true });
         let got = collect_pr_targets(&json!({}), &input);
         assert_eq!(repo_ids(&got), vec!["R1"]);
         assert_eq!(got[0].get("base").and_then(Value::as_str), Some("develop"));
@@ -7033,7 +8025,10 @@ mod tests {
             entry("R2", Some("/w/r2"), Some("master"), None),
         ];
         let out = seed_input_from_entries(json!({ "msg": "do it" }), &entries);
-        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/w/r1"));
+        assert_eq!(
+            out.get("working_directory").and_then(Value::as_str),
+            Some("/w/r1")
+        );
         assert_eq!(out.get("base").and_then(Value::as_str), Some("develop"));
         assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("R1"));
         // Normalized targets exclude the errored entry and feed straight into
@@ -7041,8 +8036,10 @@ mod tests {
         // repo_id ALSO matches as a single reference — dedup by repo_id is the
         // caller's job (git_pr's `seen` set), so assert the SET here.
         let targets = collect_pr_targets(&json!({}), &out);
-        let ids: std::collections::BTreeSet<&str> =
-            targets.iter().filter_map(|t| t.get("repo_id").and_then(Value::as_str)).collect();
+        let ids: std::collections::BTreeSet<&str> = targets
+            .iter()
+            .filter_map(|t| t.get("repo_id").and_then(Value::as_str))
+            .collect();
         assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec!["R1", "R2"]);
     }
 
@@ -7053,7 +8050,10 @@ mod tests {
             json!({ "working_directory": "/explicit", "base": "release", "repo_id": "X" }),
             &entries,
         );
-        assert_eq!(out.get("working_directory").and_then(Value::as_str), Some("/explicit"));
+        assert_eq!(
+            out.get("working_directory").and_then(Value::as_str),
+            Some("/explicit")
+        );
         assert_eq!(out.get("base").and_then(Value::as_str), Some("release"));
         assert_eq!(out.get("repo_id").and_then(Value::as_str), Some("X"));
     }
@@ -7092,7 +8092,13 @@ mod tests {
         let got = parse_checks(Some(&v));
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].1, "go test -tags=component ./...");
-        assert_eq!(got[1], ("integration".to_string(), "go test -tags=integration ./...".to_string()));
+        assert_eq!(
+            got[1],
+            (
+                "integration".to_string(),
+                "go test -tags=integration ./...".to_string()
+            )
+        );
         assert!(parse_checks(None).is_empty());
         assert!(parse_checks(Some(&json!("not an array"))).is_empty());
     }
@@ -7100,8 +8106,14 @@ mod tests {
     #[test]
     fn checks_review_agent_runs_and_flags_failures_as_bugs() {
         let checks = vec![
-            ("component".to_string(), "go test -tags=component ./...".to_string()),
-            ("integration".to_string(), "go test -tags=integration ./...".to_string()),
+            (
+                "component".to_string(),
+                "go test -tags=component ./...".to_string(),
+            ),
+            (
+                "integration".to_string(),
+                "go test -tags=integration ./...".to_string(),
+            ),
         ];
         let a = checks_review_agent("claude", &checks);
         assert_eq!(a.providers, vec!["claude"]);
@@ -7146,10 +8158,19 @@ mod tests {
     #[test]
     fn keep_session_param_defaults_false() {
         assert!(stop_step_sessions_wanted("agent_prompt", &json!({})));
-        assert!(stop_step_sessions_wanted("agent_prompt", &json!({ "keep_session": false })));
-        assert!(!stop_step_sessions_wanted("agent_prompt", &json!({ "keep_session": true })));
+        assert!(stop_step_sessions_wanted(
+            "agent_prompt",
+            &json!({ "keep_session": false })
+        ));
+        assert!(!stop_step_sessions_wanted(
+            "agent_prompt",
+            &json!({ "keep_session": true })
+        ));
         // A non-bool value is not an opt-out.
-        assert!(stop_step_sessions_wanted("agent_prompt", &json!({ "keep_session": "yes" })));
+        assert!(stop_step_sessions_wanted(
+            "agent_prompt",
+            &json!({ "keep_session": "yes" })
+        ));
     }
 
     #[test]
@@ -7166,10 +8187,17 @@ mod tests {
 
     #[test]
     fn retry_backoff_by_error_class() {
-        let policy = otto_core::workflows::RetryPolicy { max_attempts: 2, backoff_ms: 2000, factor: 2.0 };
+        let policy = otto_core::workflows::RetryPolicy {
+            max_attempts: 2,
+            backoff_ms: 2000,
+            factor: 2.0,
+        };
         // 529 / overload / fd exhaustion: ≥ 20s and a 4-attempt floor.
         for (err, label) in [
-            ("agent error: API Error 529 Overloaded", "provider overloaded: 529"),
+            (
+                "agent error: API Error 529 Overloaded",
+                "provider overloaded: 529",
+            ),
             ("upstream overloaded, try later", "provider overloaded"),
             ("Rate limit reached for model", "rate limit"),
             ("os error 24: Too many open files", "fd exhaustion"),
@@ -7202,7 +8230,10 @@ mod tests {
     fn success_path_keeps_phase_lines_in_order_and_caps_at_200() {
         // The success path's assembled vector: the live phase lines (kept now)
         // followed by the returned/persist/edge lines.
-        let mut logs: Vec<String> = vec!["▶ agent_prompt started".into(), "⏳ starting claude session".into()];
+        let mut logs: Vec<String> = vec![
+            "▶ agent_prompt started".into(),
+            "⏳ starting claude session".into(),
+        ];
         for i in 0..300 {
             logs.push(format!("🧩 sub-agents: {i} running · 0 done"));
         }
@@ -7229,8 +8260,12 @@ mod tests {
             assert!(logs.iter().any(|l| l == keep), "evicted: {keep}");
         }
         // The oldest phase lines went first.
-        assert!(!logs.iter().any(|l| l == "🧩 sub-agents: 0 running · 0 done"));
-        assert!(logs.iter().any(|l| l == "🧩 sub-agents: 299 running · 0 done"));
+        assert!(!logs
+            .iter()
+            .any(|l| l == "🧩 sub-agents: 0 running · 0 done"));
+        assert!(logs
+            .iter()
+            .any(|l| l == "🧩 sub-agents: 299 running · 0 done"));
     }
 
     #[test]
@@ -7255,7 +8290,10 @@ mod tests {
         });
         assert_eq!(a.subagents.len(), 40);
         assert!(a.subagents.iter().all(|s| s.id.chars().count() <= 64));
-        assert!(a.subagents.iter().all(|s| s.description.chars().count() <= 80));
+        assert!(a
+            .subagents
+            .iter()
+            .all(|s| s.description.chars().count() <= 80));
         // The snapshot's OWN contribution is what this batch adds to the row —
         // a 40-agent sweep costs under 12 KiB, so `activity` can never be the
         // thing that blows the frame.
@@ -7285,9 +8323,18 @@ mod tests {
 
     #[test]
     fn phase_text_strips_the_glyph() {
-        assert_eq!(phase_text("🧩 sub-agents: 2 running · 1 done"), "sub-agents: 2 running · 1 done");
-        assert_eq!(phase_text("⏸ agent idle — confirming completion (20s)"), "agent idle — confirming completion (20s)");
-        assert_eq!(phase_text("📄 handoff file written"), "handoff file written");
+        assert_eq!(
+            phase_text("🧩 sub-agents: 2 running · 1 done"),
+            "sub-agents: 2 running · 1 done"
+        );
+        assert_eq!(
+            phase_text("⏸ agent idle — confirming completion (20s)"),
+            "agent idle — confirming completion (20s)"
+        );
+        assert_eq!(
+            phase_text("📄 handoff file written"),
+            "handoff file written"
+        );
     }
 
     #[test]
@@ -7353,7 +8400,10 @@ mod tests {
             resolve_review_mode_source(&json!({ "review_mode": "nope" }), &json!({})),
             None
         );
-        assert_eq!(resolve_review_mode_source(&json!({}), &json!({ "mode": 7 })), None);
+        assert_eq!(
+            resolve_review_mode_source(&json!({}), &json!({ "mode": 7 })),
+            None
+        );
         // …and garbage in the run input still lets the node's value win.
         assert_eq!(
             resolve_review_mode_source(

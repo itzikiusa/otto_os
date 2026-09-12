@@ -772,15 +772,13 @@ impl ProductRepo {
 
     pub async fn set_watch_cursor(&self, id: &Id, cursor: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE product_stories SET watch_cursor = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(cursor)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("set watch cursor"))?;
+        sqlx::query("UPDATE product_stories SET watch_cursor = ?, updated_at = ? WHERE id = ?")
+            .bind(cursor)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set watch cursor"))?;
         Ok(())
     }
 
@@ -846,10 +844,7 @@ impl ProductRepo {
         row_to_version(&row)
     }
 
-    pub async fn latest_source_version(
-        &self,
-        story: &Id,
-    ) -> Result<Option<ProductStoryVersion>> {
+    pub async fn latest_source_version(&self, story: &Id) -> Result<Option<ProductStoryVersion>> {
         let row = sqlx::query(
             "SELECT * FROM product_story_versions
              WHERE story_id = ? AND kind = 'source'
@@ -864,10 +859,7 @@ impl ProductRepo {
 
     /// Newest `kind='plan'` version for a story (full row, including `body_md`),
     /// or `None` when the story has no plan yet.
-    pub async fn latest_plan_version(
-        &self,
-        story: &Id,
-    ) -> Result<Option<ProductStoryVersion>> {
+    pub async fn latest_plan_version(&self, story: &Id) -> Result<Option<ProductStoryVersion>> {
         let row = sqlx::query(
             "SELECT * FROM product_story_versions
              WHERE story_id = ? AND kind = 'plan'
@@ -1072,10 +1064,7 @@ impl ProductRepo {
         Ok(())
     }
 
-    pub async fn list_analysis_agents(
-        &self,
-        analysis: &Id,
-    ) -> Result<Vec<ProductAnalysisAgent>> {
+    pub async fn list_analysis_agents(&self, analysis: &Id) -> Result<Vec<ProductAnalysisAgent>> {
         let rows = sqlx::query(
             "SELECT * FROM product_analysis_agents WHERE analysis_id = ? ORDER BY rowid",
         )
@@ -1140,13 +1129,12 @@ impl ProductRepo {
     }
 
     pub async fn list_questions(&self, story: &Id) -> Result<Vec<ProductQuestion>> {
-        let rows = sqlx::query(
-            "SELECT * FROM product_questions WHERE story_id = ? ORDER BY created_at",
-        )
-        .bind(story)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list questions"))?;
+        let rows =
+            sqlx::query("SELECT * FROM product_questions WHERE story_id = ? ORDER BY created_at")
+                .bind(story)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list questions"))?;
         rows.iter().map(row_to_question).collect()
     }
 
@@ -1228,13 +1216,12 @@ impl ProductRepo {
     }
 
     pub async fn list_notes(&self, story: &Id) -> Result<Vec<ProductNote>> {
-        let rows = sqlx::query(
-            "SELECT * FROM product_notes WHERE story_id = ? ORDER BY created_at",
-        )
-        .bind(story)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list notes"))?;
+        let rows =
+            sqlx::query("SELECT * FROM product_notes WHERE story_id = ? ORDER BY created_at")
+                .bind(story)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list notes"))?;
         rows.iter().map(row_to_note).collect()
     }
 
@@ -1249,15 +1236,13 @@ impl ProductRepo {
 
     pub async fn update_note(&self, id: &Id, body: &str) -> Result<ProductNote> {
         let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE product_notes SET body = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(body)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("update note"))?;
+        sqlx::query("UPDATE product_notes SET body = ?, updated_at = ? WHERE id = ?")
+            .bind(body)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update note"))?;
         self.get_note(id).await
     }
 
@@ -1317,13 +1302,11 @@ impl ProductRepo {
             .await
             .map_err(dberr("list events by section"))?
         } else {
-            sqlx::query(
-                "SELECT * FROM product_events WHERE story_id = ? ORDER BY created_at",
-            )
-            .bind(story)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list events"))?
+            sqlx::query("SELECT * FROM product_events WHERE story_id = ? ORDER BY created_at")
+                .bind(story)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list events"))?
         };
         rows.iter().map(row_to_event).collect()
     }
@@ -1332,11 +1315,7 @@ impl ProductRepo {
     // Testcase Runs
     // -----------------------------------------------------------------------
 
-    pub async fn create_testcase_run(
-        &self,
-        story: &Id,
-        by: &Id,
-    ) -> Result<ProductTestcaseRun> {
+    pub async fn create_testcase_run(&self, story: &Id, by: &Id) -> Result<ProductTestcaseRun> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -1445,13 +1424,11 @@ impl ProductRepo {
     /// `COUNT(*)` across all testcases for a story — O(1) instead of fetching
     /// every row. Used by `get_story` to fill `StoryCounts.testcases`.
     pub async fn count_testcases_for_story(&self, story: &Id) -> Result<i64> {
-        let row = sqlx::query(
-            "SELECT COUNT(*) AS cnt FROM product_testcases WHERE story_id = ?",
-        )
-        .bind(story)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(dberr("count testcases for story"))?;
+        let row = sqlx::query("SELECT COUNT(*) AS cnt FROM product_testcases WHERE story_id = ?")
+            .bind(story)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("count testcases for story"))?;
         Ok(row.get::<i64, _>("cnt"))
     }
 
@@ -1522,7 +1499,11 @@ impl ProductRepo {
         let now = fmt(Utc::now());
         let mut total: u64 = 0;
         // SQLite has no array binding; issue per-id updates in a transaction.
-        let mut tx = self.pool.begin().await.map_err(dberr("bulk approve begin"))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("bulk approve begin"))?;
         for id in ids {
             let r = sqlx::query(
                 "UPDATE product_testcases SET status = 'approved', updated_at = ?
@@ -1610,12 +1591,10 @@ impl ProductRepo {
     /// learnings knowledge base is shared across every workspace.
     pub async fn list_learnings(&self, active_only: bool) -> Result<Vec<ProductLearning>> {
         let rows = if active_only {
-            sqlx::query(
-                "SELECT * FROM product_learnings WHERE active = 1 ORDER BY created_at DESC",
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list learnings active"))?
+            sqlx::query("SELECT * FROM product_learnings WHERE active = 1 ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list learnings active"))?
         } else {
             sqlx::query("SELECT * FROM product_learnings ORDER BY created_at DESC")
                 .fetch_all(&self.pool)
@@ -1736,15 +1715,13 @@ impl ProductRepo {
         title: &str,
         body_md: &str,
     ) -> Result<ProductStoryVersion> {
-        sqlx::query(
-            "UPDATE product_story_versions SET title = ?, body_md = ? WHERE id = ?",
-        )
-        .bind(title)
-        .bind(body_md)
-        .bind(version_id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("update version body"))?;
+        sqlx::query("UPDATE product_story_versions SET title = ?, body_md = ? WHERE id = ?")
+            .bind(title)
+            .bind(body_md)
+            .bind(version_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update version body"))?;
         self.get_version(version_id).await
     }
 }
@@ -1836,7 +1813,10 @@ mod tests {
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
 
-        let s = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let s = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         assert_eq!(s.workspace_id, ws);
         assert_eq!(s.source_kind, "jira");
@@ -1864,9 +1844,15 @@ mod tests {
         let ws1 = seed_workspace(&pool, &user).await;
         let ws2 = seed_workspace(&pool, &user).await;
 
-        repo.create_story(new_story_input(&ws1, &user)).await.unwrap();
-        repo.create_story(new_story_input(&ws1, &user)).await.unwrap();
-        repo.create_story(new_story_input(&ws2, &user)).await.unwrap();
+        repo.create_story(new_story_input(&ws1, &user))
+            .await
+            .unwrap();
+        repo.create_story(new_story_input(&ws1, &user))
+            .await
+            .unwrap();
+        repo.create_story(new_story_input(&ws2, &user))
+            .await
+            .unwrap();
 
         let all = repo.list_stories().await.unwrap();
         assert_eq!(all.len(), 3);
@@ -1882,7 +1868,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let v1 = repo
             .add_version(NewVersion {
@@ -1924,7 +1913,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let q = repo
             .create_question(NewQuestion {
@@ -1971,7 +1963,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let run_a = repo.create_testcase_run(&story.id, &user).await.unwrap();
         let run_b = repo.create_testcase_run(&story.id, &user).await.unwrap();
@@ -2088,7 +2083,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let analysis = repo
             .create_analysis(NewAnalysis {
@@ -2150,7 +2148,10 @@ mod tests {
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
 
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
         let _v = repo
             .add_version(NewVersion {
                 story_id: story.id.clone(),
@@ -2191,7 +2192,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let t = repo
             .create_transcript(NewTranscript {
@@ -2229,7 +2233,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let t1 = repo
             .create_transcript(NewTranscript {
@@ -2272,7 +2279,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let v = repo
             .add_version(NewVersion {
@@ -2311,7 +2321,10 @@ mod tests {
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
 
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
         // New story starts with empty tags.
         assert_eq!(story.tags, "");
 
@@ -2370,7 +2383,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let story = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
 
         let t = repo
             .create_transcript(NewTranscript {
@@ -2404,7 +2420,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let s = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let s = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
         assert_eq!(s.parent_id, None);
         assert_eq!(s.tree_kind, "story");
         assert_eq!(s.folder, "");
@@ -2466,7 +2485,10 @@ mod tests {
         let repo = ProductRepo::new(pool.clone());
         let user = seed_user(&pool).await;
         let ws = seed_workspace(&pool, &user).await;
-        let epic = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let epic = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
         let mut child_in = new_story_input(&ws, &user);
         child_in.parent_id = Some(epic.id.clone());
         let child = repo.create_story(child_in).await.unwrap();

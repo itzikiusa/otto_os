@@ -35,9 +35,18 @@ impl SecretStore for MemSecrets {
 }
 
 async fn pool() -> SqlitePool {
-    let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
-    let p = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
-    sqlx::migrate!("../otto-state/migrations").run(&p).await.unwrap();
+    let opts = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
+    let p = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .unwrap();
+    sqlx::migrate!("../otto-state/migrations")
+        .run(&p)
+        .await
+        .unwrap();
     p
 }
 
@@ -47,10 +56,29 @@ async fn seed_ws(pool: &SqlitePool) -> (String, String) {
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, 'u', 'x', 'U', 0, ?)")
         .bind(&user).bind(&now).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)")
-        .bind(&ws).bind(&now).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?, 'mcp', 'edit')").bind(&user).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES (?, ?, 'editor')").bind(&ws).bind(&user).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)",
+    )
+    .bind(&ws)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?, 'mcp', 'edit')",
+    )
+    .bind(&user)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id,user_id,role) VALUES (?, ?, 'editor')",
+    )
+    .bind(&ws)
+    .bind(&user)
+    .execute(pool)
+    .await
+    .unwrap();
     (ws, user)
 }
 
@@ -66,8 +94,14 @@ while IFS= read -r line; do
 done
 "#;
 
-async fn register_mock(svc: &McpService, pool: &SqlitePool, ws: &str, user: &str) -> otto_state::McpServerDetail {
-    let server = svc.registry()
+async fn register_mock(
+    svc: &McpService,
+    pool: &SqlitePool,
+    ws: &str,
+    user: &str,
+) -> otto_state::McpServerDetail {
+    let server = svc
+        .registry()
         .create(NewServerRow {
             workspace_id: ws.into(),
             name: "mock".into(),
@@ -89,9 +123,22 @@ async fn register_mock(svc: &McpService, pool: &SqlitePool, ws: &str, user: &str
         .await
         .unwrap();
     let repo = otto_state::ResourceAccessRepo::new(pool.clone());
-    let old = repo.get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await.unwrap();
-    let mut legacy = old.clone(); legacy.mode = otto_core::access::AccessMode::Legacy;
-    repo.put_policy(&legacy,old.revision,&otto_core::access::AccessActor {real_user_id:user.into(),effective_user_id:None}).await.unwrap();
+    let old = repo
+        .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+        .await
+        .unwrap();
+    let mut legacy = old.clone();
+    legacy.mode = otto_core::access::AccessMode::Legacy;
+    repo.put_policy(
+        &legacy,
+        old.revision,
+        &otto_core::access::AccessActor {
+            real_user_id: user.into(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
     server
 }
 
@@ -117,7 +164,10 @@ async fn discover_labels_risk_and_health_probes() {
     assert_eq!(tools.len(), 2);
     let del = tools.iter().find(|t| t.name == "delete_thing").unwrap();
     assert_eq!(del.risk_label, "dangerous");
-    assert!(del.require_approval, "dangerous tools default to require_approval");
+    assert!(
+        del.require_approval,
+        "dangerous tools default to require_approval"
+    );
     let list = tools.iter().find(|t| t.name == "list_items").unwrap();
     assert_eq!(list.risk_label, "read");
 
@@ -136,42 +186,114 @@ async fn full_governance_flow() {
     svc.discover(&server.id).await.unwrap();
 
     // 1. A read tool runs straight through (req 12 stats source is populated).
-    let out = svc.invoke(&server.id, "list_items", &serde_json::json!({}), &ctx(&ws, false)).await.unwrap();
-    assert!(matches!(out, InvokeOutcome::Executed { is_error: false, .. }));
+    let out = svc
+        .invoke(
+            &server.id,
+            "list_items",
+            &serde_json::json!({}),
+            &ctx(&ws, false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        out,
+        InvokeOutcome::Executed {
+            is_error: false,
+            ..
+        }
+    ));
 
     // 2. The dangerous tool is approval-gated (req 9): first call → pending.
     let args = serde_json::json!({"id": 7});
-    let out = svc.invoke(&server.id, "delete_thing", &args, &ctx(&ws, false)).await.unwrap();
+    let out = svc
+        .invoke(&server.id, "delete_thing", &args, &ctx(&ws, false))
+        .await
+        .unwrap();
     let approval_id = match out {
         InvokeOutcome::Pending { approval_id, .. } => approval_id,
         other => panic!("expected pending approval, got {other:?}"),
     };
 
     // Approve it (a different principal), then the SAME args execute.
-    svc.approvals().decide(&approval_id, true, "approver", None).await.unwrap();
-    let out = svc.invoke(&server.id, "delete_thing", &args, &ctx(&ws, false)).await.unwrap();
-    assert!(matches!(out, InvokeOutcome::Executed { is_error: false, .. }), "approved call should execute");
+    svc.approvals()
+        .decide(&approval_id, true, "approver", None)
+        .await
+        .unwrap();
+    let out = svc
+        .invoke(&server.id, "delete_thing", &args, &ctx(&ws, false))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            out,
+            InvokeOutcome::Executed {
+                is_error: false,
+                ..
+            }
+        ),
+        "approved call should execute"
+    );
 
     // 3. Single-use (req 9 / F2): the approval is consumed — a replay re-gates.
-    let out = svc.invoke(&server.id, "delete_thing", &args, &ctx(&ws, false)).await.unwrap();
-    assert!(matches!(out, InvokeOutcome::Pending { .. }), "consumed approval must not be reusable");
+    let out = svc
+        .invoke(&server.id, "delete_thing", &args, &ctx(&ws, false))
+        .await
+        .unwrap();
+    assert!(
+        matches!(out, InvokeOutcome::Pending { .. }),
+        "consumed approval must not be reusable"
+    );
 
     // 4. Dry-run (req 10): pure preview, never executes, regardless of risk.
-    let out = svc.invoke(&server.id, "delete_thing", &args, &ctx(&ws, true)).await.unwrap();
+    let out = svc
+        .invoke(&server.id, "delete_thing", &args, &ctx(&ws, true))
+        .await
+        .unwrap();
     match out {
-        InvokeOutcome::DryRun { preview } => assert_eq!(preview["executed"], serde_json::json!(false)),
+        InvokeOutcome::DryRun { preview } => {
+            assert_eq!(preview["executed"], serde_json::json!(false))
+        }
         other => panic!("expected dry-run, got {other:?}"),
     }
 
     // 5. Per-tool permission (req 4): disabling list_items denies it.
-    let lt = svc.tools().get_by_name(&server.id, "list_items").await.unwrap();
-    svc.tools().patch(&lt.id, Some(false), None, None, None).await.unwrap();
-    let out = svc.invoke(&server.id, "list_items", &serde_json::json!({}), &ctx(&ws, false)).await.unwrap();
-    assert!(matches!(out, InvokeOutcome::Denied { .. }), "disabled tool must be denied");
+    let lt = svc
+        .tools()
+        .get_by_name(&server.id, "list_items")
+        .await
+        .unwrap();
+    svc.tools()
+        .patch(&lt.id, Some(false), None, None, None)
+        .await
+        .unwrap();
+    let out = svc
+        .invoke(
+            &server.id,
+            "list_items",
+            &serde_json::json!({}),
+            &ctx(&ws, false),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(out, InvokeOutcome::Denied { .. }),
+        "disabled tool must be denied"
+    );
 
     // 6. Audit (req 8): every terminal path wrote a row; deny + pending are present.
-    let log = svc.call_log().list(&otto_state::CallLogQuery { limit: 100, ..Default::default() }).await.unwrap();
-    assert!(log.len() >= 6, "expected an audit row per terminal decision, got {}", log.len());
+    let log = svc
+        .call_log()
+        .list(&otto_state::CallLogQuery {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        log.len() >= 6,
+        "expected an audit row per terminal decision, got {}",
+        log.len()
+    );
     assert!(log.iter().any(|r| r.decision == "denied"));
     assert!(log.iter().any(|r| r.decision == "pending_approval"));
     assert!(log.iter().any(|r| r.decision == "approved"));
@@ -194,17 +316,35 @@ async fn allowlist_and_policy_deny() {
     McpAllowlistRepo::new(pool.clone())
         .replace_for_ws(
             &ws,
-            &[NewAllowlistEntry { server_id: server.id.clone(), tool_name: Some("list_items".into()), mode: "deny".into() }],
+            &[NewAllowlistEntry {
+                server_id: server.id.clone(),
+                tool_name: Some("list_items".into()),
+                mode: "deny".into(),
+            }],
             &user,
         )
         .await
         .unwrap();
-    let out = svc.invoke(&server.id, "list_items", &serde_json::json!({}), &ctx(&ws, false)).await.unwrap();
-    assert!(matches!(out, InvokeOutcome::Denied { .. }), "allowlist deny must block");
+    let out = svc
+        .invoke(
+            &server.id,
+            "list_items",
+            &serde_json::json!({}),
+            &ctx(&ws, false),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(out, InvokeOutcome::Denied { .. }),
+        "allowlist deny must block"
+    );
 
     // Policy-as-code (req 11): a global deny rule on injection-high tools etc.
     // Here: deny anything on this server by name via a most-restrictive rule.
-    SettingsRepo::new(pool.clone()).put("mcp_require_approval_dangerous", &serde_json::json!(false)).await.unwrap();
+    SettingsRepo::new(pool.clone())
+        .put("mcp_require_approval_dangerous", &serde_json::json!(false))
+        .await
+        .unwrap();
     svc.policies()
         .create(NewPolicy {
             workspace_id: None,
@@ -218,7 +358,15 @@ async fn allowlist_and_policy_deny() {
         })
         .await
         .unwrap();
-    let out = svc.invoke(&server.id, "delete_thing", &serde_json::json!({}), &ctx(&ws, false)).await.unwrap();
+    let out = svc
+        .invoke(
+            &server.id,
+            "delete_thing",
+            &serde_json::json!({}),
+            &ctx(&ws, false),
+        )
+        .await
+        .unwrap();
     match out {
         InvokeOutcome::Denied { reason } => assert!(reason.contains("policy"), "got: {reason}"),
         other => panic!("expected policy deny, got {other:?}"),
@@ -227,7 +375,9 @@ async fn allowlist_and_policy_deny() {
 
 #[tokio::test]
 async fn resource_denial_blocks_even_readonly_tool_and_dry_run() {
-    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    use otto_core::access::{
+        AccessActor, AccessMode, AccessPolicy, AccessRule, ResourceKind, RuleEffect, SubjectKind,
+    };
     use otto_state::resource_access::ResourceAccessRepo;
     let pool = pool().await;
     let (ws, uid) = seed_ws(&pool).await;
@@ -235,66 +385,172 @@ async fn resource_denial_blocks_even_readonly_tool_and_dry_run() {
     let server = register_mock(&svc, &pool, &ws, &uid).await;
     svc.discover(&server.id).await.unwrap();
     let repo = ResourceAccessRepo::new(pool.clone());
-    let old = repo.get_policy(ResourceKind::McpServer,&server.id).await.unwrap();
-    let policy = AccessPolicy { kind:ResourceKind::McpServer,resource_id:server.id.clone(),mode:AccessMode::Enforced,revision:old.revision,
-        rules:vec![AccessRule { id:"navigation-only".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,
-            operations:vec!["discover".into()],children:None,grantable_operations:vec![],credential_connection_id:None }] };
-    repo.put_policy(&policy,old.revision,&AccessActor { real_user_id:uid.clone(),effective_user_id:None }).await.unwrap();
-    for dry_run in [false,true] {
-        let mut context = ctx(&ws,dry_run);context.caller_user_id=Some(uid.clone());
-        let out=svc.invoke(&server.id,"list_items",&serde_json::json!({}),&context).await.unwrap();
-        assert!(matches!(out,InvokeOutcome::Denied{..}),"navigation access must not authorize invocation: {out:?}");
+    let old = repo
+        .get_policy(ResourceKind::McpServer, &server.id)
+        .await
+        .unwrap();
+    let policy = AccessPolicy {
+        kind: ResourceKind::McpServer,
+        resource_id: server.id.clone(),
+        mode: AccessMode::Enforced,
+        revision: old.revision,
+        rules: vec![AccessRule {
+            id: "navigation-only".into(),
+            subject_kind: SubjectKind::User,
+            subject_id: uid.clone(),
+            effect: RuleEffect::Allow,
+            operations: vec!["discover".into()],
+            children: None,
+            grantable_operations: vec![],
+            credential_connection_id: None,
+        }],
+    };
+    repo.put_policy(
+        &policy,
+        old.revision,
+        &AccessActor {
+            real_user_id: uid.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    for dry_run in [false, true] {
+        let mut context = ctx(&ws, dry_run);
+        context.caller_user_id = Some(uid.clone());
+        let out = svc
+            .invoke(&server.id, "list_items", &serde_json::json!({}), &context)
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, InvokeOutcome::Denied { .. }),
+            "navigation access must not authorize invocation: {out:?}"
+        );
     }
 }
 
 #[derive(Clone)]
 struct HttpCtx {
-    service: Arc<McpService>, pool:SqlitePool, secrets:Arc<dyn SecretStore>, roles:Arc<dyn otto_core::auth::RoleChecker>,
+    service: Arc<McpService>,
+    pool: SqlitePool,
+    secrets: Arc<dyn SecretStore>,
+    roles: Arc<dyn otto_core::auth::RoleChecker>,
 }
 impl otto_mcp::McpCtx for HttpCtx {
-    fn mcp(&self)->&Arc<McpService> {&self.service}
-    fn mcp_pool(&self)->&SqlitePool {&self.pool}
-    fn mcp_secrets(&self)->&Arc<dyn SecretStore> {&self.secrets}
-    fn roles(&self)->&Arc<dyn otto_core::auth::RoleChecker> {&self.roles}
+    fn mcp(&self) -> &Arc<McpService> {
+        &self.service
+    }
+    fn mcp_pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+    fn mcp_secrets(&self) -> &Arc<dyn SecretStore> {
+        &self.secrets
+    }
+    fn roles(&self) -> &Arc<dyn otto_core::auth::RoleChecker> {
+        &self.roles
+    }
 }
 #[tokio::test]
 async fn http_filters_servers_tools_configuration_and_guessed_actions() {
     use otto_core::access::*;
     use tower::ServiceExt;
-    let pool=pool().await;
-    let (ws,uid)=seed_ws(&pool).await;
-    let secrets:Arc<dyn SecretStore>=Arc::new(MemSecrets::default());
-    let svc=Arc::new(McpService::new(pool.clone(),secrets.clone()));
-    let visible=register_mock(&svc,&pool,&ws,&uid).await;
+    let pool = pool().await;
+    let (ws, uid) = seed_ws(&pool).await;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let svc = Arc::new(McpService::new(pool.clone(), secrets.clone()));
+    let visible = register_mock(&svc, &pool, &ws, &uid).await;
     svc.discover(&visible.id).await.unwrap();
-    sqlx::query("UPDATE mcp_servers SET name='visible' WHERE id=?").bind(&visible.id).execute(&pool).await.unwrap();
-    let hidden=register_mock(&svc,&pool,&ws,&uid).await;
-    let repo=otto_state::ResourceAccessRepo::new(pool.clone());
-    for id in [&visible.id,&hidden.id] {
-        let mut p=repo.get_policy(ResourceKind::McpServer,id).await.unwrap();
-        p.mode=AccessMode::Enforced;
-        if id==&visible.id { p.rules.push(AccessRule {id:"reader".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into(),"invoke".into()],children:Some(vec!["list_items".into()]),grantable_operations:vec![],credential_connection_id:None}); }
-        repo.put_policy(&p,p.revision,&AccessActor {real_user_id:uid.clone(),effective_user_id:None}).await.unwrap();
+    sqlx::query("UPDATE mcp_servers SET name='visible' WHERE id=?")
+        .bind(&visible.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hidden = register_mock(&svc, &pool, &ws, &uid).await;
+    let repo = otto_state::ResourceAccessRepo::new(pool.clone());
+    for id in [&visible.id, &hidden.id] {
+        let mut p = repo.get_policy(ResourceKind::McpServer, id).await.unwrap();
+        p.mode = AccessMode::Enforced;
+        if id == &visible.id {
+            p.rules.push(AccessRule {
+                id: "reader".into(),
+                subject_kind: SubjectKind::User,
+                subject_id: uid.clone(),
+                effect: RuleEffect::Allow,
+                operations: vec!["discover".into(), "invoke".into()],
+                children: Some(vec!["list_items".into()]),
+                grantable_operations: vec![],
+                credential_connection_id: None,
+            });
+        }
+        repo.put_policy(
+            &p,
+            p.revision,
+            &AccessActor {
+                real_user_id: uid.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
     }
-    sqlx::query("UPDATE mcp_servers SET managed=0 WHERE id=?").bind(&visible.id).execute(&pool).await.unwrap();
-    let mut invoke_ctx=ctx(&ws,false); invoke_ctx.caller_user_id=Some(uid.clone());
+    sqlx::query("UPDATE mcp_servers SET managed=0 WHERE id=?")
+        .bind(&visible.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut invoke_ctx = ctx(&ws, false);
+    invoke_ctx.caller_user_id = Some(uid.clone());
     assert!(matches!(svc.invoke(&visible.id,"list_items",&serde_json::json!({}),&invoke_ctx).await.unwrap(),InvokeOutcome::Executed {..}),"an enforced raw registration must use the gateway even if its legacy managed flag is false");
-    let user=otto_state::UsersRepo::new(pool.clone()).get(&uid).await.unwrap();
-    let ctx=HttpCtx {service:svc,pool:pool.clone(),secrets,roles:Arc::new(otto_rbac::RbacRoleChecker::new(pool))};
-    let app=otto_mcp::api_router::<HttpCtx>().layer(axum::Extension(otto_core::auth::AuthUser(user))).with_state(ctx);
-    for (method,path,expected) in [
-        ("GET",format!("/workspaces/{ws}/mcp/servers"),200),
-        ("GET",format!("/mcp/servers/{}",visible.id),200),
-        ("GET",format!("/mcp/servers/{}",hidden.id),404),
-        ("POST",format!("/mcp/servers/{}/tools/delete_thing/invoke",visible.id),404),
-        ("DELETE",format!("/mcp/servers/{}",visible.id),403),
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(&uid)
+        .await
+        .unwrap();
+    let ctx = HttpCtx {
+        service: svc,
+        pool: pool.clone(),
+        secrets,
+        roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool)),
+    };
+    let app = otto_mcp::api_router::<HttpCtx>()
+        .layer(axum::Extension(otto_core::auth::AuthUser(user)))
+        .with_state(ctx);
+    for (method, path, expected) in [
+        ("GET", format!("/workspaces/{ws}/mcp/servers"), 200),
+        ("GET", format!("/mcp/servers/{}", visible.id), 200),
+        ("GET", format!("/mcp/servers/{}", hidden.id), 404),
+        (
+            "POST",
+            format!("/mcp/servers/{}/tools/delete_thing/invoke", visible.id),
+            404,
+        ),
+        ("DELETE", format!("/mcp/servers/{}", visible.id), 403),
     ] {
-        let response=app.clone().oneshot(axum::http::Request::builder().method(method).uri(&path).header("content-type","application/json").body(axum::body::Body::from("{} ")).unwrap()).await.unwrap();
-        assert_eq!(response.status().as_u16(),expected,"{method} {path}");
-        let data=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
-        let value:serde_json::Value=serde_json::from_slice(&data).unwrap();
-        if expected==200 && path.ends_with("/servers") { assert_eq!(value.as_array().unwrap().len(),1); assert_eq!(value[0]["command"],""); }
-        if expected==200 && path.ends_with(&visible.id) { assert_eq!(value["tools"].as_array().unwrap().len(),1); assert_eq!(value["tools"][0]["name"],"list_items"); assert_eq!(value["server"]["command"],""); }
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{} "))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected, "{method} {path}");
+        let data = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        if expected == 200 && path.ends_with("/servers") {
+            assert_eq!(value.as_array().unwrap().len(), 1);
+            assert_eq!(value[0]["command"], "");
+        }
+        if expected == 200 && path.ends_with(&visible.id) {
+            assert_eq!(value["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(value["tools"][0]["name"], "list_items");
+            assert_eq!(value["server"]["command"], "");
+        }
     }
 }
 
@@ -302,29 +558,74 @@ async fn http_filters_servers_tools_configuration_and_guessed_actions() {
 async fn delegated_configure_cannot_attach_or_repoint_native_mcp_credentials() {
     use otto_core::access::*;
     use tower::ServiceExt;
-    let pool=pool().await;
-    let (ws,uid)=seed_ws(&pool).await;
-    let secrets:Arc<dyn SecretStore>=Arc::new(MemSecrets::default());
-    let svc=Arc::new(McpService::new(pool.clone(),secrets.clone()));
-    let server=register_mock(&svc,&pool,&ws,&uid).await;
-    let repo=otto_state::ResourceAccessRepo::new(pool.clone());
-    let mut p=repo.get_policy(ResourceKind::McpServer,&server.id).await.unwrap();
-    p.mode=AccessMode::Enforced;
-    p.rules=vec![AccessRule{id:"configure".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into(),"configure".into()],children:None,grantable_operations:vec![],credential_connection_id:None}];
-    repo.put_policy(&p,p.revision,&AccessActor{real_user_id:uid.clone(),effective_user_id:None}).await.unwrap();
-    let user=otto_state::UsersRepo::new(pool.clone()).get(&uid).await.unwrap();
-    let ctx=HttpCtx{service:svc,pool:pool.clone(),secrets,roles:Arc::new(otto_rbac::RbacRoleChecker::new(pool))};
-    let app=otto_mcp::api_router::<HttpCtx>().layer(axum::Extension(otto_core::auth::AuthUser(user))).with_state(ctx);
-    for (body,expected) in [
-        (serde_json::json!({"command":"hidden-command"}),403),
-        (serde_json::json!({"env":{"AWS_PROFILE":"hidden"}}),403),
-        (serde_json::json!({"url":"https://example.com/hidden"}),403),
-        (serde_json::json!({"secret_env":{"TOKEN":"replacement"}}),403),
-        (serde_json::json!({"description":"cosmetic change"}),200),
+    let pool = pool().await;
+    let (ws, uid) = seed_ws(&pool).await;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let svc = Arc::new(McpService::new(pool.clone(), secrets.clone()));
+    let server = register_mock(&svc, &pool, &ws, &uid).await;
+    let repo = otto_state::ResourceAccessRepo::new(pool.clone());
+    let mut p = repo
+        .get_policy(ResourceKind::McpServer, &server.id)
+        .await
+        .unwrap();
+    p.mode = AccessMode::Enforced;
+    p.rules = vec![AccessRule {
+        id: "configure".into(),
+        subject_kind: SubjectKind::User,
+        subject_id: uid.clone(),
+        effect: RuleEffect::Allow,
+        operations: vec!["discover".into(), "configure".into()],
+        children: None,
+        grantable_operations: vec![],
+        credential_connection_id: None,
+    }];
+    repo.put_policy(
+        &p,
+        p.revision,
+        &AccessActor {
+            real_user_id: uid.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(&uid)
+        .await
+        .unwrap();
+    let ctx = HttpCtx {
+        service: svc,
+        pool: pool.clone(),
+        secrets,
+        roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool)),
+    };
+    let app = otto_mcp::api_router::<HttpCtx>()
+        .layer(axum::Extension(otto_core::auth::AuthUser(user)))
+        .with_state(ctx);
+    for (body, expected) in [
+        (serde_json::json!({"command":"hidden-command"}), 403),
+        (serde_json::json!({"env":{"AWS_PROFILE":"hidden"}}), 403),
+        (serde_json::json!({"url":"https://example.com/hidden"}), 403),
+        (
+            serde_json::json!({"secret_env":{"TOKEN":"replacement"}}),
+            403,
+        ),
+        (serde_json::json!({"description":"cosmetic change"}), 200),
     ] {
-        let response=app.clone().oneshot(axum::http::Request::builder().method("PATCH").uri(format!("/mcp/servers/{}",server.id)).header("content-type","application/json").body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
-        assert_eq!(response.status().as_u16(),expected,"{body}");
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/mcp/servers/{}", server.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected, "{body}");
     }
     let response=app.oneshot(axum::http::Request::builder().method("POST").uri(format!("/workspaces/{ws}/mcp/servers")).header("content-type","application/json").body(axum::body::Body::from(serde_json::json!({"name":"alias","transport":"stdio","command":"hidden-command"}).to_string())).unwrap()).await.unwrap();
-    assert_eq!(response.status().as_u16(),403);
+    assert_eq!(response.status().as_u16(), 403);
 }

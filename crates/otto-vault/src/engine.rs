@@ -145,7 +145,13 @@ impl VaultEngine {
         self.store.get_vault(id).await
     }
 
-    pub async fn patch(&self, ws: &str, id: i64, name: Option<&str>, okf: Option<bool>) -> Result<VaultRec> {
+    pub async fn patch(
+        &self,
+        ws: &str,
+        id: i64,
+        name: Option<&str>,
+        okf: Option<bool>,
+    ) -> Result<VaultRec> {
         self.get_scoped(ws, id).await?;
         self.store.patch_vault(id, name, okf).await?;
         self.store.get_vault(id).await
@@ -164,7 +170,12 @@ impl VaultEngine {
     }
 
     fn last_scan_cell(&self, id: i64) -> Arc<AtomicI64> {
-        self.last_scan.lock().unwrap().entry(id).or_default().clone()
+        self.last_scan
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_default()
+            .clone()
     }
 
     fn write_lock(&self, id: i64, path: &str) -> VaultWriteLock {
@@ -209,19 +220,30 @@ impl VaultEngine {
         let root = PathBuf::from(&v.root_path);
         if !root.is_dir() {
             self.store
-                .set_scan_state(id, &format!("error: vault root missing: {}", v.root_path), false)
+                .set_scan_state(
+                    id,
+                    &format!("error: vault root missing: {}", v.root_path),
+                    false,
+                )
                 .await?;
-            return Err(Error::Conflict(format!("vault root missing: {}", v.root_path)));
+            return Err(Error::Conflict(format!(
+                "vault root missing: {}",
+                v.root_path
+            )));
         }
         self.store.set_scan_state(id, "scanning", false).await?;
         let res = self.scan_inner(id, &root).await;
         match &res {
             Ok(()) => {
                 self.store.set_scan_state(id, "idle", true).await?;
-                self.last_scan_cell(id).store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+                self.last_scan_cell(id)
+                    .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
             }
             Err(e) => {
-                let _ = self.store.set_scan_state(id, &format!("error: {e}"), false).await;
+                let _ = self
+                    .store
+                    .set_scan_state(id, &format!("error: {e}"), false)
+                    .await;
             }
         }
         res
@@ -244,8 +266,11 @@ impl VaultEngine {
             || !removed_files.is_empty();
 
         let fts = self.fts_ready().await;
-        let sizes: HashMap<&str, (i64, i64)> =
-            walk.notes.iter().map(|e| (e.rel.as_str(), (e.size, e.mtime_ns))).collect();
+        let sizes: HashMap<&str, (i64, i64)> = walk
+            .notes
+            .iter()
+            .map(|e| (e.rel.as_str(), (e.size, e.mtime_ns)))
+            .collect();
 
         // Parse + upsert changed notes; collect their links for resolution.
         let mut pending_links: Vec<(String, Vec<OutgoingLink>)> = Vec::new();
@@ -259,7 +284,10 @@ impl VaultEngine {
             let text = String::from_utf8_lossy(&content).into_owned();
             let parsed = parse_note(&text);
             let base = rel.rsplit('/').next().unwrap_or(rel);
-            let stem = base.strip_suffix(".md").or_else(|| base.strip_suffix(".MD")).unwrap_or(base);
+            let stem = base
+                .strip_suffix(".md")
+                .or_else(|| base.strip_suffix(".MD"))
+                .unwrap_or(base);
             let reserved = matches!(stem.to_ascii_lowercase().as_str(), "index" | "log")
                 && base.to_ascii_lowercase().ends_with(".md");
             let title = parse::derive_title(&parsed, rel);
@@ -269,10 +297,13 @@ impl VaultEngine {
                 title: title.clone(),
                 okf_type: parsed.okf_type.clone(),
                 description: parsed.description.clone(),
-                frontmatter_json: serde_json::to_string(&parsed.frontmatter).unwrap_or_else(|_| "null".into()),
+                frontmatter_json: serde_json::to_string(&parsed.frontmatter)
+                    .unwrap_or_else(|_| "null".into()),
                 tags_json: serde_json::to_string(&parsed.tags).unwrap_or_else(|_| "[]".into()),
-                aliases_json: serde_json::to_string(&parsed.aliases).unwrap_or_else(|_| "[]".into()),
-                headings_json: serde_json::to_string(&parsed.headings).unwrap_or_else(|_| "[]".into()),
+                aliases_json: serde_json::to_string(&parsed.aliases)
+                    .unwrap_or_else(|_| "[]".into()),
+                headings_json: serde_json::to_string(&parsed.headings)
+                    .unwrap_or_else(|_| "[]".into()),
                 word_count: parsed.word_count as i64,
                 size,
                 mtime_ns,
@@ -284,7 +315,11 @@ impl VaultEngine {
             self.store.upsert_note(id, &row).await?;
             self.store.replace_tags(id, rel, &parsed.tags).await?;
             if fts {
-                let body = if size as u64 <= MAX_FTS_BYTES { text.as_str() } else { "" };
+                let body = if size as u64 <= MAX_FTS_BYTES {
+                    text.as_str()
+                } else {
+                    ""
+                };
                 self.store.fts_index(id, rel, &title, body).await;
             }
             pending_links.push((rel.clone(), parsed.links));
@@ -292,8 +327,11 @@ impl VaultEngine {
         for rel in &removed_notes {
             self.store.remove_note(id, rel).await?;
         }
-        let file_sizes: HashMap<&str, (i64, i64)> =
-            walk.files.iter().map(|e| (e.rel.as_str(), (e.size, e.mtime_ns))).collect();
+        let file_sizes: HashMap<&str, (i64, i64)> = walk
+            .files
+            .iter()
+            .map(|e| (e.rel.as_str(), (e.size, e.mtime_ns)))
+            .collect();
         for rel in &changed_files {
             let (size, mtime) = file_sizes.get(rel.as_str()).copied().unwrap_or((0, 0));
             self.store.upsert_file(id, rel, size, mtime).await?;
@@ -326,7 +364,9 @@ impl VaultEngine {
             for (rowid, src, raw, dst) in self.store.all_links_full(id).await? {
                 let new_dst = ix.resolve(&src, &raw);
                 if new_dst != dst {
-                    self.store.update_link_dst(rowid, new_dst.as_deref()).await?;
+                    self.store
+                        .update_link_dst(rowid, new_dst.as_deref())
+                        .await?;
                 }
             }
         }
@@ -348,7 +388,10 @@ impl VaultEngine {
                 (p, t, al)
             })
             .collect();
-        self.switcher.write().unwrap().insert(id, Arc::new(SwitcherIx { rows }));
+        self.switcher
+            .write()
+            .unwrap()
+            .insert(id, Arc::new(SwitcherIx { rows }));
         Ok(())
     }
 
@@ -375,7 +418,9 @@ impl VaultEngine {
                 return Err(Error::Invalid(format!("invalid path: {path}")));
             }
             if seg.starts_with('.') {
-                return Err(Error::Invalid(format!("hidden segments are not allowed: {path}")));
+                return Err(Error::Invalid(format!(
+                    "hidden segments are not allowed: {path}"
+                )));
             }
         }
         Ok(p.to_string())
@@ -478,11 +523,7 @@ impl VaultEngine {
                     "text artifact target must not be a symlink".into(),
                 ))
             }
-            Err(e) => {
-                return Err(Error::Internal(format!(
-                    "open text artifact {name}: {e}"
-                )))
-            }
+            Err(e) => return Err(Error::Internal(format!("open text artifact {name}: {e}"))),
         };
         let mut file = tokio::fs::File::from_std(std::fs::File::from(fd));
         let mut bytes = Vec::new();
@@ -530,10 +571,18 @@ impl VaultEngine {
     pub async fn dir(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<DirListing> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        let rel = if path.trim().is_empty() { String::new() } else { Self::check_rel(path)? };
+        let rel = if path.trim().is_empty() {
+            String::new()
+        } else {
+            Self::check_rel(path)?
+        };
         let notes = self.store.all_notes(id).await?;
         let files = self.store.all_file_paths(id).await?;
-        let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
+        let prefix = if rel.is_empty() {
+            String::new()
+        } else {
+            format!("{rel}/")
+        };
         let mut dirs: HashMap<String, i64> = HashMap::new();
         let mut entries: Vec<DirEntry> = Vec::new();
         let mut seen_dirs: HashSet<String> = HashSet::new();
@@ -541,8 +590,14 @@ impl VaultEngine {
             .iter()
             .map(|(p, t, ty, r)| (p.as_str(), (t.as_str(), ty.as_deref(), *r)))
             .collect();
-        for p in notes.iter().map(|(p, ..)| p.as_str()).chain(files.iter().map(|s| s.as_str())) {
-            let Some(rest) = p.strip_prefix(&prefix) else { continue };
+        for p in notes
+            .iter()
+            .map(|(p, ..)| p.as_str())
+            .chain(files.iter().map(|s| s.as_str()))
+        {
+            let Some(rest) = p.strip_prefix(&prefix) else {
+                continue;
+            };
             if rest.is_empty() {
                 continue;
             }
@@ -573,7 +628,11 @@ impl VaultEngine {
             .into_iter()
             .map(|(d, n)| DirEntry {
                 name: d.clone(),
-                path: if prefix.is_empty() { d.clone() } else { format!("{prefix}{d}") },
+                path: if prefix.is_empty() {
+                    d.clone()
+                } else {
+                    format!("{prefix}{d}")
+                },
                 kind: "dir".to_string(),
                 children: n,
                 title: None,
@@ -586,7 +645,10 @@ impl VaultEngine {
         // entry point a reader wants first, not an alphabetical mid-list row.
         entries.sort_by_key(|e| (!e.reserved, e.name.to_lowercase()));
         out.extend(entries);
-        Ok(DirListing { path: rel, entries: out })
+        Ok(DirListing {
+            path: rel,
+            entries: out,
+        })
     }
 
     pub async fn note(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<NoteFull> {
@@ -607,7 +669,11 @@ impl VaultEngine {
             }
         };
         let outgoing = self.store.outgoing(id, &rel).await?;
-        Ok(NoteFull { meta, raw, outgoing })
+        Ok(NoteFull {
+            meta,
+            raw,
+            outgoing,
+        })
     }
 
     pub async fn write_note(
@@ -630,7 +696,9 @@ impl VaultEngine {
                 Err(_) => String::new(), // creating — expected must be "" too
             };
             if current != expected {
-                return Err(Error::Conflict(format!("note changed on disk (hash {current})")));
+                return Err(Error::Conflict(format!(
+                    "note changed on disk (hash {current})"
+                )));
             }
         }
         if let Some(parent) = abs.parent() {
@@ -663,7 +731,10 @@ impl VaultEngine {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !matches!(ext.as_str(), "yaml" | "yml" | "json" | "d2" | "mmd" | "txt" | "csv") {
+        if !matches!(
+            ext.as_str(),
+            "yaml" | "yml" | "json" | "d2" | "mmd" | "txt" | "csv"
+        ) {
             return Err(Error::UnsupportedMedia(format!(
                 "text artifacts must end in .yaml, .yml, .json, .d2, .mmd, .txt, or .csv (got {path})"
             )));
@@ -839,7 +910,9 @@ impl VaultEngine {
         for src in &affected {
             let src_now = src.clone();
             let abs = Self::abs_guarded(&root, &src_now)?;
-            let Ok(content) = tokio::fs::read_to_string(&abs).await else { continue };
+            let Ok(content) = tokio::fs::read_to_string(&abs).await else {
+                continue;
+            };
             // The source itself may have moved: resolve raw targets from its OLD
             // location (that is how they were written).
             let src_before = moved_new_to_old
@@ -882,15 +955,28 @@ impl VaultEngine {
         // One scan picks up the moved files, rewritten sources, and re-resolves
         // everything (including newly-ambiguous basenames).
         self.scan(id).await?;
-        Ok(RenameResult { from: from_rel, to: to_rel, links_updated })
+        Ok(RenameResult {
+            from: from_rel,
+            to: to_rel,
+            links_updated,
+        })
     }
 
     // -- search / switcher / tags / backlinks ---------------------------------------
 
-    pub async fn search(self: &Arc<Self>, ws: &str, id: i64, req: &SearchReq) -> Result<Vec<SearchHit>> {
+    pub async fn search(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        req: &SearchReq,
+    ) -> Result<Vec<SearchHit>> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        let limit = if req.limit == 0 || req.limit > 200 { 50 } else { req.limit } as i64;
+        let limit = if req.limit == 0 || req.limit > 200 {
+            50
+        } else {
+            req.limit
+        } as i64;
         // Operator syntax inside the query string: tag:x path:y type:z.
         let mut tag = req.tag.clone();
         let mut path_prefix = req.path_prefix.clone();
@@ -909,25 +995,30 @@ impl VaultEngine {
         }
         let text = terms.join(" ");
 
-        let mut hits: Vec<(String, String, f32)> = if !text.trim().is_empty() && self.fts_ready().await {
-            let expr = fts_expr(&text);
-            let got = self.store.fts_search(id, &expr, limit * 4).await.unwrap_or_default();
-            if got.is_empty() {
+        let mut hits: Vec<(String, String, f32)> =
+            if !text.trim().is_empty() && self.fts_ready().await {
+                let expr = fts_expr(&text);
+                let got = self
+                    .store
+                    .fts_search(id, &expr, limit * 4)
+                    .await
+                    .unwrap_or_default();
+                if got.is_empty() {
+                    self.store.like_search(id, &text, limit * 4).await?
+                } else {
+                    got
+                }
+            } else if !text.trim().is_empty() {
                 self.store.like_search(id, &text, limit * 4).await?
             } else {
-                got
-            }
-        } else if !text.trim().is_empty() {
-            self.store.like_search(id, &text, limit * 4).await?
-        } else {
-            // Pure filter query (tag:/path:/type: only).
-            self.store
-                .all_notes(id)
-                .await?
-                .into_iter()
-                .map(|(p, t, _, _)| (p, t, 0.0f32))
-                .collect()
-        };
+                // Pure filter query (tag:/path:/type: only).
+                self.store
+                    .all_notes(id)
+                    .await?
+                    .into_iter()
+                    .map(|(p, t, _, _)| (p, t, 0.0f32))
+                    .collect()
+            };
 
         // Filters.
         if let Some(t) = &tag {
@@ -965,8 +1056,17 @@ impl VaultEngine {
             .into_iter()
             .map(|(p, snip, score)| {
                 let (title, _, reserved) =
-                    notes_meta.get(&p).cloned().unwrap_or((p.clone(), None, false));
-                SearchHit { path: p, title, snippet: snip, score, reserved }
+                    notes_meta
+                        .get(&p)
+                        .cloned()
+                        .unwrap_or((p.clone(), None, false));
+                SearchHit {
+                    path: p,
+                    title,
+                    snippet: snip,
+                    score,
+                    reserved,
+                }
             })
             .collect())
     }
@@ -991,7 +1091,12 @@ impl VaultEngine {
         let mut out: Vec<SwitchHit> = Vec::new();
         for (path, title, aliases) in &ix.rows {
             if ql.is_empty() {
-                out.push(SwitchHit { path: path.clone(), title: title.clone(), alias: None, score: 0.0 });
+                out.push(SwitchHit {
+                    path: path.clone(),
+                    title: title.clone(),
+                    alias: None,
+                    score: 0.0,
+                });
                 if out.len() >= 50 {
                     break;
                 }
@@ -1009,11 +1114,20 @@ impl VaultEngine {
                 }
             }
             if let Some((score, alias)) = best {
-                out.push(SwitchHit { path: path.clone(), title: title.clone(), alias, score });
+                out.push(SwitchHit {
+                    path: path.clone(),
+                    title: title.clone(),
+                    alias,
+                    score,
+                });
             }
         }
         if !ql.is_empty() {
-            out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            out.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             out.truncate(50);
         }
         Ok(out)
@@ -1025,7 +1139,12 @@ impl VaultEngine {
         self.store.tag_counts(id).await
     }
 
-    pub async fn backlinks(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<Vec<Backlink>> {
+    pub async fn backlinks(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        path: &str,
+    ) -> Result<Vec<Backlink>> {
         let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let rel = Self::check_rel(path)?;
@@ -1054,7 +1173,12 @@ impl VaultEngine {
                         })
                 })
                 .unwrap_or_default();
-            out.push(Backlink { path: src, title, context, kind });
+            out.push(Backlink {
+                path: src,
+                title,
+                context,
+                kind,
+            });
         }
         Ok(out)
     }
@@ -1095,8 +1219,10 @@ impl VaultEngine {
             if *reserved && !include_reserved {
                 continue;
             }
-            let service =
-                p.split_once('/').map(|(d, _)| d.to_string()).unwrap_or_else(|| SERVICE_ROOT.into());
+            let service = p
+                .split_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_else(|| SERVICE_ROOT.into());
             let i = nodes.push(
                 p.clone(),
                 t.clone(),
@@ -1110,7 +1236,9 @@ impl VaultEngine {
 
         let mut edge_list: Vec<(u32, u32)> = Vec::new();
         for (s, d, _kind) in &edges_raw {
-            let (Some(&si), Some(&di)) = (index.get(s), index.get(d)) else { continue };
+            let (Some(&si), Some(&di)) = (index.get(s), index.get(d)) else {
+                continue;
+            };
             if si == di {
                 continue;
             }
@@ -1195,7 +1323,11 @@ impl VaultEngine {
         }
 
         // Full mode: edge budget (degree-prioritized, deterministic).
-        let budget = if o.edge_budget == 0 { DEFAULT_EDGE_BUDGET } else { o.edge_budget };
+        let budget = if o.edge_budget == 0 {
+            DEFAULT_EDGE_BUDGET
+        } else {
+            o.edge_budget
+        };
         let mut truncated = false;
         if edge_list.len() > budget {
             truncated = true;
@@ -1204,9 +1336,7 @@ impl VaultEngine {
                 deg[*a as usize] += 1;
                 deg[*b as usize] += 1;
             }
-            edge_list.sort_by_key(|(a, b)| {
-                std::cmp::Reverse(deg[*a as usize] + deg[*b as usize])
-            });
+            edge_list.sort_by_key(|(a, b)| std::cmp::Reverse(deg[*a as usize] + deg[*b as usize]));
             edge_list.truncate(budget);
         }
         let edges: Vec<u32> = edge_list.iter().flat_map(|(a, b)| [*a, *b]).collect();
@@ -1307,7 +1437,11 @@ fn intern_types(values: &[String]) -> (Vec<u16>, Vec<String>) {
     let mut casings: Vec<HashMap<String, usize>> = Vec::new();
     let mut out = Vec::with_capacity(values.len());
     for v in values {
-        let display = if v.trim().is_empty() { TYPE_UNTYPED } else { v.trim() };
+        let display = if v.trim().is_empty() {
+            TYPE_UNTYPED
+        } else {
+            v.trim()
+        };
         let id = *ids.entry(display.to_lowercase()).or_insert_with(|| {
             casings.push(HashMap::new());
             (casings.len() - 1) as u16
@@ -1415,7 +1549,11 @@ fn new_raw_for(old_raw: &str, kind: &str, src_dir_now: &str, new_dst: &str) -> S
 
 /// Relative path from `from_dir` (vault-relative dir, "" = root) to `to`.
 fn relative_path(from_dir: &str, to: &str) -> String {
-    let from_parts: Vec<&str> = if from_dir.is_empty() { vec![] } else { from_dir.split('/').collect() };
+    let from_parts: Vec<&str> = if from_dir.is_empty() {
+        vec![]
+    } else {
+        from_dir.split('/').collect()
+    };
     let to_parts: Vec<&str> = to.split('/').collect();
     let common = from_parts
         .iter()
@@ -1444,7 +1582,11 @@ fn fuzzy_score(query: &str, cand: &str) -> Option<f32> {
             let boundary = i == 0 || matches!(c[i - 1], ' ' | '/' | '-' | '_' | '.');
             score += 1.0
                 + if boundary { 1.5 } else { 0.0 }
-                + if last_hit == Some(i.wrapping_sub(1)) { 1.0 } else { 0.0 };
+                + if last_hit == Some(i.wrapping_sub(1)) {
+                    1.0
+                } else {
+                    0.0
+                };
             last_hit = Some(i);
             qi += 1;
         }

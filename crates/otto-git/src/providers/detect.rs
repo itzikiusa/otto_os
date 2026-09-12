@@ -165,7 +165,10 @@ mod tests {
             forge("https://bitbucket-server.corp.example.com/scm/proj/repo.git"),
             "unrecognized"
         );
-        assert_eq!(forge("ssh://git@git.corp.example.com/team/app.git"), "unrecognized");
+        assert_eq!(
+            forge("ssh://git@git.corp.example.com/team/app.git"),
+            "unrecognized"
+        );
         assert_eq!(forge("not a url"), "unrecognized");
     }
 

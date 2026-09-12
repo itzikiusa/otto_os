@@ -68,7 +68,10 @@ mod tests {
 
     #[test]
     fn enabled_without_next_run_is_due() {
-        let cfg = SelfImprovementConfig { enabled: true, ..Default::default() };
+        let cfg = SelfImprovementConfig {
+            enabled: true,
+            ..Default::default()
+        };
         assert!(is_due(&cfg, t(12)));
     }
 
@@ -86,9 +89,18 @@ mod tests {
     #[test]
     fn write_config_preserves_other_keys() {
         let settings = json!({"keep": "me"});
-        let cfg = SelfImprovementConfig { enabled: true, ..Default::default() };
+        let cfg = SelfImprovementConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let out = write_config(&settings, &cfg);
         assert_eq!(out.get("keep").unwrap(), "me");
-        assert!(out.get("self_improvement").unwrap().get("enabled").unwrap().as_bool().unwrap());
+        assert!(out
+            .get("self_improvement")
+            .unwrap()
+            .get("enabled")
+            .unwrap()
+            .as_bool()
+            .unwrap());
     }
 }

@@ -25,8 +25,8 @@ use otto_core::api::{
     SkillSourceReq, SkillSourcesResp, StartSkillEvalReq,
 };
 use otto_core::domain::{
-    EvalFinding, EvalScore, EvalValidationState, GoldenTask, NoticeKind, NoticeSeverity, PromoteGate,
-    SessionKind, SkillEval, SkillEvalStatus, User, Workspace, WorkspaceRole,
+    EvalFinding, EvalScore, EvalValidationState, GoldenTask, NoticeKind, NoticeSeverity,
+    PromoteGate, SessionKind, SkillEval, SkillEvalStatus, User, Workspace, WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
@@ -122,14 +122,21 @@ fn is_safe_name(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Coerce an arbitrary string into a safe skill-name segment.
 fn sanitize_name(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_matches('-').to_string();
     if trimmed.is_empty() {
@@ -163,8 +170,7 @@ fn find_skill_file(dir: &Path) -> Option<PathBuf> {
                 stack.push(p);
             } else if p.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
                 return Some(p);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("md")
-                && md_fallback.is_none()
+            } else if p.extension().and_then(|x| x.to_str()) == Some("md") && md_fallback.is_none()
             {
                 md_fallback = Some(p);
             }
@@ -217,15 +223,17 @@ fn resolve_skill_source(
             let s = library
                 .get_skill(&src.reference)
                 .ok_or_else(|| Error::NotFound(format!("library skill '{}'", src.reference)))?;
-            Ok(ResolvedSkill { name: s.name, body: s.body })
+            Ok(ResolvedSkill {
+                name: s.name,
+                body: s.body,
+            })
         }
         "provider" => {
             let provider = src.provider.as_deref().unwrap_or("claude");
             if !is_safe_name(&src.reference) {
                 return Err(Error::Invalid("unsafe skill name".into()));
             }
-            let home = dirs::home_dir()
-                .ok_or_else(|| Error::Internal("no home dir".into()))?;
+            let home = dirs::home_dir().ok_or_else(|| Error::Internal("no home dir".into()))?;
             let path = home
                 .join(format!(".{provider}"))
                 .join("skills")
@@ -234,7 +242,10 @@ fn resolve_skill_source(
             let body = std::fs::read_to_string(&path).map_err(|e| {
                 Error::NotFound(format!("{provider} skill '{}': {e}", src.reference))
             })?;
-            Ok(ResolvedSkill { name: src.reference.clone(), body })
+            Ok(ResolvedSkill {
+                name: src.reference.clone(),
+                body,
+            })
         }
         "path" => {
             let p = PathBuf::from(&src.reference);
@@ -247,12 +258,13 @@ fn resolve_skill_source(
                 || lower.ends_with(".tgz")
                 || lower.ends_with(".tar.gz");
             let (skill_file, derived_name): (PathBuf, String) = if is_archive {
-                let tmp = std::env::temp_dir()
-                    .join(format!("otto-skill-extract-{}", short_id(&otto_core::new_id())));
+                let tmp = std::env::temp_dir().join(format!(
+                    "otto-skill-extract-{}",
+                    short_id(&otto_core::new_id())
+                ));
                 extract_archive(&p, &tmp)?;
-                let file = find_skill_file(&tmp).ok_or_else(|| {
-                    Error::NotFound("no SKILL.md / .md inside archive".into())
-                })?;
+                let file = find_skill_file(&tmp)
+                    .ok_or_else(|| Error::NotFound("no SKILL.md / .md inside archive".into()))?;
                 // Name from the archive file stem (minus any .tar).
                 let stem = p
                     .file_stem()
@@ -279,15 +291,23 @@ fn resolve_skill_source(
                         .unwrap_or("skill")
                         .to_string()
                 } else {
-                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("skill").to_string()
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("skill")
+                        .to_string()
                 };
                 (p.clone(), name)
             };
             let body = std::fs::read_to_string(&skill_file)
                 .map_err(|e| Error::Internal(format!("read skill file: {e}")))?;
-            Ok(ResolvedSkill { name: sanitize_name(&derived_name), body })
+            Ok(ResolvedSkill {
+                name: sanitize_name(&derived_name),
+                body,
+            })
         }
-        other => Err(Error::Invalid(format!("unknown skill source kind '{other}'"))),
+        other => Err(Error::Invalid(format!(
+            "unknown skill source kind '{other}'"
+        ))),
     }
 }
 
@@ -353,7 +373,11 @@ async fn ensure_scratch_repo() -> Result<String> {
         if !out.status.success() {
             return Err(Error::Upstream(format!(
                 "git init failed in {path}: {}",
-                String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim()
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
             )));
         }
     }
@@ -389,7 +413,11 @@ async fn ensure_scratch_repo() -> Result<String> {
         if !out.status.success() {
             return Err(Error::Upstream(format!(
                 "could not create initial commit in scratch repo: {}",
-                String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim()
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
             )));
         }
     }
@@ -526,7 +554,10 @@ fn parse_improvement(text: &str) -> Option<RawImprovement> {
 
 /// True for a "fail"-class severity (a real violation of the dimension).
 fn is_fail(severity: &str) -> bool {
-    matches!(severity.to_lowercase().as_str(), "fail" | "error" | "critical")
+    matches!(
+        severity.to_lowercase().as_str(),
+        "fail" | "error" | "critical"
+    )
 }
 
 /// Severity rank for dedup (higher = more severe).
@@ -708,15 +739,13 @@ fn unified_diff(old: &str, new: &str, context_lines: usize) -> String {
         };
         let new_start = match slice.first() {
             Some(Op::Keep(_, bi)) | Some(Op::Insert(bi)) => bi + 1,
-            Some(Op::Delete(_)) => {
-                slice
-                    .iter()
-                    .find_map(|o| match o {
-                        Op::Keep(_, bi) | Op::Insert(bi) => Some(bi + 1),
-                        _ => None,
-                    })
-                    .unwrap_or(1)
-            }
+            Some(Op::Delete(_)) => slice
+                .iter()
+                .find_map(|o| match o {
+                    Op::Keep(_, bi) | Op::Insert(bi) => Some(bi + 1),
+                    _ => None,
+                })
+                .unwrap_or(1),
             None => 1,
         };
         out.push_str(&format!(
@@ -777,7 +806,12 @@ enum LiveSlot<'a> {
 impl LiveSlot<'_> {
     async fn set(&mut self, status: &str, session_id: Option<&str>, note: &str) {
         match self {
-            LiveSlot::Validation { repo, iter_id, index, base } => {
+            LiveSlot::Validation {
+                repo,
+                iter_id,
+                index,
+                base,
+            } => {
                 base.status = status.to_string();
                 if let Some(sid) = session_id {
                     base.session_id = Some(sid.to_string());
@@ -785,7 +819,11 @@ impl LiveSlot<'_> {
                 base.note = note.chars().take(160).collect();
                 let _ = repo.set_iter_agent_at(iter_id, *index, base).await;
             }
-            LiveSlot::Implementation { repo, iter_id, worktree } => {
+            LiveSlot::Implementation {
+                repo,
+                iter_id,
+                worktree,
+            } => {
                 let _ = repo
                     .set_iter_impl(iter_id, session_id, note, Some(worktree.as_str()))
                     .await;
@@ -820,7 +858,11 @@ async fn run_agent_capture(
 ) -> AgentOutcome {
     let _ = std::fs::remove_file(output_path);
     if is_cancelled(cancel) {
-        return AgentOutcome { session_id: None, text: String::new(), errored: true };
+        return AgentOutcome {
+            session_id: None,
+            text: String::new(),
+            errored: true,
+        };
     }
 
     let meta = serde_json::json!({ "source": "skilleval" });
@@ -836,8 +878,13 @@ async fn run_agent_capture(
     let session = match manager.create(ws, &user.id, req, None).await {
         Ok(s) => s,
         Err(e) => {
-            slot.set("error", None, &format!("could not start: {e}")).await;
-            return AgentOutcome { session_id: None, text: String::new(), errored: true };
+            slot.set("error", None, &format!("could not start: {e}"))
+                .await;
+            return AgentOutcome {
+                session_id: None,
+                text: String::new(),
+                errored: true,
+            };
         }
     };
     let sid = session.id.clone();
@@ -853,13 +900,21 @@ async fn run_agent_capture(
         // 0. Cancelled — kill the session and bail.
         if is_cancelled(cancel) {
             let _ = manager.archive(&sid).await;
-            return AgentOutcome { session_id: Some(sid), text: String::new(), errored: true };
+            return AgentOutcome {
+                session_id: Some(sid),
+                text: String::new(),
+                errored: true,
+            };
         }
 
         // 1. The agent wrote its output file (the reliable, provider-agnostic path).
         if let Ok(text) = std::fs::read_to_string(output_path) {
             let _ = std::fs::remove_file(output_path);
-            return AgentOutcome { session_id: Some(sid), text, errored: false };
+            return AgentOutcome {
+                session_id: Some(sid),
+                text,
+                errored: false,
+            };
         }
 
         // 2. claude transcript fallback.
@@ -869,7 +924,11 @@ async fn run_agent_capture(
                 if let Ok(raw) = std::fs::read_to_string(&jsonl) {
                     if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
                         if findings_mode && !parse_findings(&turn).is_empty() {
-                            return AgentOutcome { session_id: Some(sid), text: turn, errored: false };
+                            return AgentOutcome {
+                                session_id: Some(sid),
+                                text: turn,
+                                errored: false,
+                            };
                         }
                         last_turn = Some(turn);
                     }
@@ -883,42 +942,71 @@ async fn run_agent_capture(
                     // Final read of the file, then fall back to the last turn.
                     if let Ok(text) = std::fs::read_to_string(output_path) {
                         let _ = std::fs::remove_file(output_path);
-                        return AgentOutcome { session_id: Some(sid), text, errored: false };
+                        return AgentOutcome {
+                            session_id: Some(sid),
+                            text,
+                            errored: false,
+                        };
                     }
                     if let Some(turn) = last_turn {
-                        return AgentOutcome { session_id: Some(sid), text: turn, errored: false };
+                        return AgentOutcome {
+                            session_id: Some(sid),
+                            text: turn,
+                            errored: false,
+                        };
                     }
-                    slot.set("error", Some(&sid), "session exited before writing output").await;
-                    return AgentOutcome { session_id: Some(sid), text: String::new(), errored: true };
+                    slot.set("error", Some(&sid), "session exited before writing output")
+                        .await;
+                    return AgentOutcome {
+                        session_id: Some(sid),
+                        text: String::new(),
+                        errored: true,
+                    };
                 }
                 let idle = handle.last_output_at().elapsed();
                 if idle >= WAITING_IDLE && !flagged_waiting {
                     flagged_waiting = true;
-                    slot.set("waiting", Some(&sid), "looks blocked on input — Open it to respond").await;
+                    slot.set(
+                        "waiting",
+                        Some(&sid),
+                        "looks blocked on input — Open it to respond",
+                    )
+                    .await;
                 } else if idle < WAITING_IDLE && flagged_waiting {
                     flagged_waiting = false;
                     slot.set("running", Some(&sid), "").await;
                 }
             }
             None => {
-                slot.set("error", Some(&sid), "session is no longer live").await;
-                return AgentOutcome { session_id: Some(sid), text: String::new(), errored: true };
+                slot.set("error", Some(&sid), "session is no longer live")
+                    .await;
+                return AgentOutcome {
+                    session_id: Some(sid),
+                    text: String::new(),
+                    errored: true,
+                };
             }
         }
 
         if Instant::now() >= deadline {
             if let Some(turn) = last_turn {
-                return AgentOutcome { session_id: Some(sid), text: turn, errored: false };
+                return AgentOutcome {
+                    session_id: Some(sid),
+                    text: turn,
+                    errored: false,
+                };
             }
-            slot.set("error", Some(&sid), "timed out (grace period elapsed)").await;
-            return AgentOutcome { session_id: Some(sid), text: String::new(), errored: true };
+            slot.set("error", Some(&sid), "timed out (grace period elapsed)")
+                .await;
+            return AgentOutcome {
+                session_id: Some(sid),
+                text: String::new(),
+                errored: true,
+            };
         }
         tokio::time::sleep(OUTPUT_POLL).await;
     }
 }
-
-
-
 
 /// Output-file path for one agent within an iteration.
 fn output_path(eval_id: &Id, iter: u32, slot: &str) -> PathBuf {
@@ -955,7 +1043,10 @@ async fn run_skill_eval(
 
     let cancelled = is_cancelled(&cancel);
     let (status, error): (SkillEvalStatus, Option<String>) = if cancelled {
-        (SkillEvalStatus::Cancelled, Some("Cancelled by user".to_string()))
+        (
+            SkillEvalStatus::Cancelled,
+            Some("Cancelled by user".to_string()),
+        )
     } else {
         match &result {
             Ok(()) => (SkillEvalStatus::Done, None),
@@ -1000,8 +1091,14 @@ async fn notify_complete(ctx: &ServerCtx, eval_id: &Id, skill: &str, status: Ski
                 .unwrap_or_else(|| "finished".to_string());
             (NoticeSeverity::Info, format!("Skill '{skill}' — {detail}"))
         }
-        SkillEvalStatus::Cancelled => (NoticeSeverity::Warn, format!("Skill '{skill}' evaluation cancelled")),
-        _ => (NoticeSeverity::Error, format!("Skill '{skill}' evaluation failed")),
+        SkillEvalStatus::Cancelled => (
+            NoticeSeverity::Warn,
+            format!("Skill '{skill}' evaluation cancelled"),
+        ),
+        _ => (
+            NoticeSeverity::Error,
+            format!("Skill '{skill}' evaluation failed"),
+        ),
     };
     let _ = ctx
         .notifications()
@@ -1045,7 +1142,10 @@ async fn run_skill_eval_core(
     let improver = req
         .improver
         .clone()
-        .unwrap_or_else(|| SkillEvalImproverCfg { provider: req.impl_cli.clone(), model: String::new() });
+        .unwrap_or_else(|| SkillEvalImproverCfg {
+            provider: req.impl_cli.clone(),
+            model: String::new(),
+        });
     let iterations = req.iterations.max(1);
     let passes = req.validator_passes.clamp(1, 3);
     let run_tag = short_id(eval_id);
@@ -1189,7 +1289,11 @@ async fn run_skill_eval_core(
             IMPL_TIMEOUT,
             false,
             cancel,
-            LiveSlot::Implementation { repo: &ctx.skill_evals_store, iter_id: &iter_id, worktree: dest_str.clone() },
+            LiveSlot::Implementation {
+                repo: &ctx.skill_evals_store,
+                iter_id: &iter_id,
+                worktree: dest_str.clone(),
+            },
         )
         .await;
         let impl_summary = summarize_impl(&impl_outcome.text);
@@ -1274,7 +1378,12 @@ async fn run_skill_eval_core(
                         VALIDATION_TIMEOUT,
                         true,
                         &cancel_c,
-                        LiveSlot::Validation { repo: &repo, iter_id: &iter_id_c, index, base: base.clone() },
+                        LiveSlot::Validation {
+                            repo: &repo,
+                            iter_id: &iter_id_c,
+                            index,
+                            base: base.clone(),
+                        },
                     )
                     .await;
                     last_sid = outcome.session_id.clone().or(last_sid);
@@ -1308,11 +1417,17 @@ async fn run_skill_eval_core(
                         if passed { "passed" } else { "failed" },
                         n,
                         if n == 1 { "" } else { "s" },
-                        if passes > 1 { format!(" · {} passes", pass_scores.len()) } else { String::new() }
+                        if passes > 1 {
+                            format!(" · {} passes", pass_scores.len())
+                        } else {
+                            String::new()
+                        }
                     );
                     final_state.findings = union;
                 }
-                let _ = repo.set_iter_agent_at(&iter_id_c, index, &final_state).await;
+                let _ = repo
+                    .set_iter_agent_at(&iter_id_c, index, &final_state)
+                    .await;
                 (final_state.score, final_state.findings)
             });
         }
@@ -1337,7 +1452,9 @@ async fn run_skill_eval_core(
         } else {
             scores.iter().sum::<f64>() / scores.len() as f64
         };
-        ctx.skill_evals_store.set_iter_score(&iter_id, iter_score).await?;
+        ctx.skill_evals_store
+            .set_iter_score(&iter_id, iter_score)
+            .await?;
         history.push((iter, skill_body.clone(), iter_score));
 
         // --- 2b. Multi-signal scoring (tests/lint/diff/review → proof) -------
@@ -1369,7 +1486,11 @@ async fn run_skill_eval_core(
 
         if is_cancelled(cancel) {
             ctx.skill_evals_store
-                .set_iter_status(&iter_id, "done", &format!("score {iter_score:.0} · cancelled"))
+                .set_iter_status(
+                    &iter_id,
+                    "done",
+                    &format!("score {iter_score:.0} · cancelled"),
+                )
                 .await?;
             return Ok(());
         }
@@ -1397,7 +1518,9 @@ async fn run_skill_eval_core(
             )
             .await;
 
-            if let Some(imp) = parse_improvement(&outcome.text).filter(|i| !i.skill.trim().is_empty()) {
+            if let Some(imp) =
+                parse_improvement(&outcome.text).filter(|i| !i.skill.trim().is_empty())
+            {
                 // The base the improver chose to edit (defaults to the best so far).
                 let chosen = imp
                     .base_iter
@@ -1434,7 +1557,9 @@ async fn run_skill_eval_core(
         } else {
             format!("score {iter_score:.0}")
         };
-        ctx.skill_evals_store.set_iter_status(&iter_id, "done", &note).await?;
+        ctx.skill_evals_store
+            .set_iter_status(&iter_id, "done", &note)
+            .await?;
 
         // Stop early if a perfect score is reached.
         if perfect {
@@ -1462,7 +1587,10 @@ async fn run_skill_eval_core(
         .set_summary(eval_id, &summary, Some(best_i), Some(best_s))
         .await?;
     if !iter_composites.is_empty() {
-        let _ = ctx.skill_evals_store.set_eval_composite(eval_id, best_s).await;
+        let _ = ctx
+            .skill_evals_store
+            .set_eval_composite(eval_id, best_s)
+            .await;
     }
     Ok(())
 }
@@ -1524,7 +1652,9 @@ async fn run_score_only_core(
                 .git_ref
                 .clone()
                 .filter(|r| !r.trim().is_empty())
-                .ok_or_else(|| Error::Invalid("target.git_ref is required for kind=branch".into()))?;
+                .ok_or_else(|| {
+                    Error::Invalid("target.git_ref is required for kind=branch".into())
+                })?;
             let (repo_path, _scratch) = resolve_base_repo(&ws.root_path).await?;
             let dest = std::env::temp_dir()
                 .join("otto-skilleval")
@@ -1563,15 +1693,22 @@ async fn run_score_only_core(
     ctx.skill_evals_store
         .set_iter_scoring(&it.id, &score, Some(&pack_id))
         .await?;
-    ctx.skill_evals_store.set_iter_score(&it.id, score.composite).await?;
+    ctx.skill_evals_store
+        .set_iter_score(&it.id, score.composite)
+        .await?;
     ctx.skill_evals_store
         .set_iter_status(
             &it.id,
             "done",
-            &format!("composite {:.0} · proof {}", score.composite, score.proof_status),
+            &format!(
+                "composite {:.0} · proof {}",
+                score.composite, score.proof_status
+            ),
         )
         .await?;
-    ctx.skill_evals_store.set_eval_composite(eval_id, score.composite).await?;
+    ctx.skill_evals_store
+        .set_eval_composite(eval_id, score.composite)
+        .await?;
     let summary = format!(
         "score-only: composite {:.0}, proof {}",
         score.composite, score.proof_status
@@ -1700,7 +1837,11 @@ fn build_improver_prompt(
             dim,
             f.severity,
             f.issue,
-            if f.suggestion.trim().is_empty() { "(none given)" } else { &f.suggestion }
+            if f.suggestion.trim().is_empty() {
+                "(none given)"
+            } else {
+                &f.suggestion
+            }
         ));
     }
     if found.is_empty() {
@@ -1737,9 +1878,7 @@ fn build_summary(skill: &str, history: &[(u32, String, f64)], best_i: u32, best_
         .map(|(i, _, sc)| format!("iter {i}: {sc:.0}"))
         .collect();
     s.push_str(&trail.join(", "));
-    s.push_str(&format!(
-        ". Best: iteration {best_i} (score {best_s:.0})."
-    ));
+    s.push_str(&format!(". Best: iteration {best_i} (score {best_s:.0})."));
     if history.len() > 1 {
         let first = history.first().map(|(_, _, sc)| *sc).unwrap_or(0.0);
         let delta = best_s - first;
@@ -1793,7 +1932,10 @@ fn default_skill_eval_config(default_provider: &str) -> SkillEvalConfig {
                  conventions and accurately describe their responsibility.",
             ),
         ],
-        improver: SkillEvalImproverCfg { provider: default_provider.to_string(), model: String::new() },
+        improver: SkillEvalImproverCfg {
+            provider: default_provider.to_string(),
+            model: String::new(),
+        },
         iterations: 2,
         validator_passes: 1,
         weights: otto_core::domain::ScoreWeights::default(),
@@ -1807,9 +1949,10 @@ fn default_skill_eval_config(default_provider: &str) -> SkillEvalConfig {
 pub(crate) async fn load_skill_eval_config(ctx: &ServerCtx) -> SkillEvalConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let global_default = repo.get("default_provider").await.ok().flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+    let default_provider =
+        otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
+            global_default.as_ref(),
+        )]);
     match repo.get("skill_eval").await {
         Ok(Some(v)) => serde_json::from_value(v)
             .unwrap_or_else(|_| default_skill_eval_config(&default_provider)),
@@ -1828,7 +1971,9 @@ async fn start_eval(
     Json(req): Json<StartSkillEvalReq>,
 ) -> ApiResult<Json<SkillEval>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    let eval = launch_eval(&ctx, &ws_id, req, None).await.map_err(ApiError)?;
+    let eval = launch_eval(&ctx, &ws_id, req, None)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(eval))
 }
 
@@ -1857,7 +2002,10 @@ pub(crate) async fn launch_eval(
     };
     let (source_name, task) = if mode == "score_only" {
         let task = if req.task.trim().is_empty() {
-            golden.as_ref().map(|g| g.prompt.clone()).unwrap_or_default()
+            golden
+                .as_ref()
+                .map(|g| g.prompt.clone())
+                .unwrap_or_default()
         } else {
             req.task.trim().to_string()
         };
@@ -1870,7 +2018,9 @@ pub(crate) async fn launch_eval(
         (name, task)
     } else {
         if req.impl_cli.trim().is_empty() {
-            return Err(Error::Invalid("impl_cli is required for generate mode".into()));
+            return Err(Error::Invalid(
+                "impl_cli is required for generate mode".into(),
+            ));
         }
         if req.task.trim().is_empty() {
             return Err(Error::Invalid("task is required".into()));
@@ -1936,7 +2086,11 @@ async fn get_eval(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<SkillEval>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
     Ok(Json(eval))
 }
@@ -2102,7 +2256,11 @@ pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) {
     }
     let _ = ctx
         .skill_evals_store
-        .set_status(eval_id, SkillEvalStatus::Cancelled, Some("Cancelled by user"))
+        .set_status(
+            eval_id,
+            SkillEvalStatus::Cancelled,
+            Some("Cancelled by user"),
+        )
         .await;
 }
 
@@ -2111,7 +2269,11 @@ async fn cancel_eval(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<SkillEval>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
     signal_cancel(&ctx.skill_eval_cancels, &eval_id);
@@ -2119,9 +2281,17 @@ async fn cancel_eval(
     // Reflect immediately; the background task also finalizes (idempotent).
     let _ = ctx
         .skill_evals_store
-        .set_status(&eval_id, SkillEvalStatus::Cancelled, Some("Cancelled by user"))
+        .set_status(
+            &eval_id,
+            SkillEvalStatus::Cancelled,
+            Some("Cancelled by user"),
+        )
         .await;
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(eval))
 }
 
@@ -2130,7 +2300,11 @@ async fn delete_eval(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<axum::http::StatusCode> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
     // Stop any in-flight work, kill sessions, remove worktrees, then delete rows.
@@ -2139,13 +2313,20 @@ async fn delete_eval(
     if let Ok(ws) = ctx.workspaces.get(&eval.workspace_id).await {
         remove_eval_worktrees(&ws.root_path, &eval).await;
     }
-    ctx.skill_evals_store.delete(&eval_id).await.map_err(ApiError)?;
+    ctx.skill_evals_store
+        .delete(&eval_id)
+        .await
+        .map_err(ApiError)?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// The promote gate for one iteration: composite ≥ threshold AND (proof passes OR
 /// proof not required). Reads the run's config thresholds.
-async fn iteration_gate(ctx: &ServerCtx, _eval: &SkillEval, it: &otto_core::domain::EvalIteration) -> PromoteGate {
+async fn iteration_gate(
+    ctx: &ServerCtx,
+    _eval: &SkillEval,
+    it: &otto_core::domain::EvalIteration,
+) -> PromoteGate {
     let cfg = load_skill_eval_config(ctx).await;
     let composite = it.scoring.as_ref().map(|s| s.composite);
     let proof_status = it
@@ -2169,7 +2350,11 @@ async fn get_promote_gate(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<PromoteGate>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
     let it = pick_iteration(&eval, q.get("iteration_id").map(|s| s.as_str()))
         .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
@@ -2203,7 +2388,11 @@ async fn promote_skill(
     Json(req): Json<PromoteSkillReq>,
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?; // writes to the shared Otto library (like PUT /library/skills)
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     let it = eval
         .iterations
         .iter()
@@ -2221,10 +2410,11 @@ async fn promote_skill(
     }
 
     let body = match req.source.as_str() {
-        "improved" => it
-            .skill_after
-            .clone()
-            .ok_or_else(|| ApiError(Error::Invalid("this iteration has no improved skill".into())))?,
+        "improved" => it.skill_after.clone().ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "this iteration has no improved skill".into(),
+            ))
+        })?,
         _ => it.skill_before.clone(),
     };
     let name = req.name.trim();
@@ -2278,7 +2468,11 @@ async fn get_iter_score(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<EvalScore>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
     let it = eval
         .iterations
@@ -2295,7 +2489,11 @@ async fn get_iter_proof_pack(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
     let it = eval
         .iterations
@@ -2306,13 +2504,18 @@ async fn get_iter_proof_pack(
         return Ok(Json(serde_json::json!({ "exists": false })));
     };
     let pack = ctx.proof_repo.get_pack(&pack_id).await.map_err(ApiError)?;
-    let arts = ctx.proof_repo.list_artifacts(&pack_id).await.unwrap_or_default();
+    let arts = ctx
+        .proof_repo
+        .list_artifacts(&pack_id)
+        .await
+        .unwrap_or_default();
     let badges = crate::proof::badge_strings(&pack, &arts);
     let contract = crate::proof::live_contract(&ctx, &pack, &arts).await;
     let artifacts: Vec<serde_json::Value> = arts
         .iter()
         .map(|a| {
-            let (preview, truncated) = crate::proof::preview(a.content_ref.as_deref().unwrap_or(""));
+            let (preview, truncated) =
+                crate::proof::preview(a.content_ref.as_deref().unwrap_or(""));
             serde_json::json!({
                 "kind": a.kind.as_str(),
                 "title": a.title,
@@ -2343,7 +2546,11 @@ async fn rate_iteration(
     CurrentUser(user): CurrentUser,
     Json(req): Json<RateIterationReq>,
 ) -> ApiResult<Json<SkillEval>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
     let it = eval
         .iterations
@@ -2357,7 +2564,11 @@ async fn rate_iteration(
         .await
         .map_err(ApiError)?;
     // Re-read so the rescore sees the persisted rating + prior signals.
-    let it = ctx.skill_evals_store.get_iteration(&iter_id).await.unwrap_or(it);
+    let it = ctx
+        .skill_evals_store
+        .get_iteration(&iter_id)
+        .await
+        .unwrap_or(it);
     if let Ok((score, pack_id)) =
         crate::eval_score::rescore_with_human(&ctx, &eval, &it, rating, &req.note, &user.id).await
     {
@@ -2367,10 +2578,17 @@ async fn rate_iteration(
             .await;
         // Refresh the run's headline composite if this is the best iteration.
         if eval.best_iteration == Some(it.iter) {
-            let _ = ctx.skill_evals_store.set_eval_composite(&eval_id, score.composite).await;
+            let _ = ctx
+                .skill_evals_store
+                .set_eval_composite(&eval_id, score.composite)
+                .await;
         }
     }
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(eval))
 }
 
@@ -2383,7 +2601,11 @@ async fn iteration_regression(
     CurrentUser(user): CurrentUser,
     Json(req): Json<RegressionReq>,
 ) -> ApiResult<Json<GoldenTask>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
     let it = eval
         .iterations
@@ -2399,7 +2621,11 @@ async fn iteration_regression(
     // Recover the run's commands from its config so the regression re-runs the same.
     let cfg: StartSkillEvalReq =
         serde_json::from_value(eval.config.clone()).unwrap_or(StartSkillEvalReq {
-            source: SkillSourceReq { kind: String::new(), reference: String::new(), provider: None },
+            source: SkillSourceReq {
+                kind: String::new(),
+                reference: String::new(),
+                provider: None,
+            },
             task: eval.task.clone(),
             impl_cli: eval.impl_cli.clone(),
             validations: Vec::new(),
@@ -2437,7 +2663,11 @@ async fn iteration_regression(
             .unwrap_or_else(|| eval.workspace_id.clone()),
         None => eval.workspace_id.clone(),
     };
-    let proof_status = it.scoring.as_ref().map(|s| s.proof_status.clone()).unwrap_or_default();
+    let proof_status = it
+        .scoring
+        .as_ref()
+        .map(|s| s.proof_status.clone())
+        .unwrap_or_default();
     let name = req
         .name
         .clone()
@@ -2474,13 +2704,16 @@ async fn iteration_regression(
     Ok(Json(task))
 }
 
-
 async fn impl_diff(
     AxPath((eval_id, iter_id)): AxPath<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<ImplDiffResp>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Viewer).await?;
     let it = eval
         .iterations
@@ -2488,7 +2721,10 @@ async fn impl_diff(
         .find(|i| i.id == iter_id)
         .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
     let Some(wt) = it.worktree_path.clone() else {
-        return Ok(Json(ImplDiffResp { diff: String::new(), truncated: false }));
+        return Ok(Json(ImplDiffResp {
+            diff: String::new(),
+            truncated: false,
+        }));
     };
     if tokio::fs::metadata(&wt).await.is_err() {
         return Ok(Json(ImplDiffResp {
@@ -2498,7 +2734,12 @@ async fn impl_diff(
     }
     // Stage everything (incl. new files, honoring .gitignore) in the disposable
     // worktree, then show the full staged diff against its base.
-    let _ = tokio::process::Command::new("git").arg("-C").arg(&wt).args(["add", "-A"]).output().await;
+    let _ = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["add", "-A"])
+        .output()
+        .await;
     let out = tokio::process::Command::new("git")
         .arg("-C")
         .arg(&wt)
@@ -2521,7 +2762,11 @@ async fn retry_validation(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<SkillEval>> {
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
     let it = eval
         .iterations
@@ -2560,13 +2805,20 @@ async fn retry_validation(
         .ok()
         .and_then(|us| us.into_iter().find(|u| u.is_root))
         .ok_or_else(|| ApiError(Error::Internal("no root user to run eval agents".into())))?;
-    let ws = ctx.workspaces.get(&eval.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&eval.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Mark pending immediately so the UI shows it re-running.
     let mut pending = agent.clone();
     pending.status = "pending".into();
     pending.note = "retrying…".into();
-    let _ = ctx.skill_evals_store.set_iter_agent_at(&iter_id, index, &pending).await;
+    let _ = ctx
+        .skill_evals_store
+        .set_iter_agent_at(&iter_id, index, &pending)
+        .await;
 
     // Pre-compute git diff for the retry case as well.
     let retry_diff: Option<String> = {
@@ -2604,8 +2856,12 @@ async fn retry_validation(
         let mut any_ok = false;
         for pass in 0..passes {
             let out_path = output_path(&eval_id_bg, iter_num, &format!("val{index}-retry{pass}"));
-            let prompt =
-                build_validation_prompt(&base.validation, &criteria, &out_path, retry_diff.as_deref());
+            let prompt = build_validation_prompt(
+                &base.validation,
+                &criteria,
+                &out_path,
+                retry_diff.as_deref(),
+            );
             let outcome = run_agent_capture(
                 &ctx_bg.manager,
                 &ws,
@@ -2674,12 +2930,19 @@ async fn retry_validation(
                 .collect();
             if !scores.is_empty() {
                 let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-                let _ = ctx_bg.skill_evals_store.set_iter_score(&iter_id_bg, mean).await;
+                let _ = ctx_bg
+                    .skill_evals_store
+                    .set_iter_score(&iter_id_bg, mean)
+                    .await;
             }
         }
     });
 
-    let eval = ctx.skill_evals_store.get_eval(&eval_id).await.map_err(ApiError)?;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(eval))
 }
 
@@ -2691,13 +2954,13 @@ pub fn routes() -> Router<ServerCtx> {
             post(start_eval).get(list_evals),
         )
         .route("/workspaces/{id}/skill-sources", get(list_sources))
-        .route(
-            "/skill-evaluations/{id}",
-            get(get_eval).delete(delete_eval),
-        )
+        .route("/skill-evaluations/{id}", get(get_eval).delete(delete_eval))
         .route("/skill-evaluations/{id}/cancel", post(cancel_eval))
         .route("/skill-evaluations/{id}/promote", post(promote_skill))
-        .route("/skill-evaluations/{id}/promote-gate", get(get_promote_gate))
+        .route(
+            "/skill-evaluations/{id}/promote-gate",
+            get(get_promote_gate),
+        )
         .route(
             "/skill-evaluations/{id}/iterations/{iter_id}/diff",
             get(impl_diff),
@@ -2731,7 +2994,10 @@ mod tests {
 
     #[test]
     fn sanitize_makes_safe_names() {
-        assert_eq!(sanitize_name("golang-feature-implementation"), "golang-feature-implementation");
+        assert_eq!(
+            sanitize_name("golang-feature-implementation"),
+            "golang-feature-implementation"
+        );
         assert_eq!(sanitize_name("a/b c.d"), "a-b-c-d");
         assert_eq!(sanitize_name("///"), "skill");
     }
@@ -2741,8 +3007,18 @@ mod tests {
         let none: Vec<EvalFinding> = vec![];
         assert_eq!(score_findings(&none), (true, 100.0));
         let f = vec![
-            EvalFinding { severity: "fail".into(), issue: "x".into(), suggestion: "y".into(), location: None },
-            EvalFinding { severity: "warn".into(), issue: "x".into(), suggestion: "y".into(), location: None },
+            EvalFinding {
+                severity: "fail".into(),
+                issue: "x".into(),
+                suggestion: "y".into(),
+                location: None,
+            },
+            EvalFinding {
+                severity: "warn".into(),
+                issue: "x".into(),
+                suggestion: "y".into(),
+                location: None,
+            },
         ];
         let (passed, score) = score_findings(&f);
         assert!(!passed);
@@ -2785,7 +3061,11 @@ mod tests {
 
     #[test]
     fn best_iter_prefers_high_score_then_latest() {
-        let h = vec![(1, "x".into(), 80.0), (2, "y".into(), 80.0), (3, "z".into(), 70.0)];
+        let h = vec![
+            (1, "x".into(), 80.0),
+            (2, "y".into(), 80.0),
+            (3, "z".into(), 70.0),
+        ];
         assert_eq!(best_iter(&h), 2);
     }
 }

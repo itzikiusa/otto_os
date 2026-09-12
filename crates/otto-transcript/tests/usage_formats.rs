@@ -32,8 +32,10 @@ fn cursor_store_loads_the_frozen_format() {
     let mut copy = CursorStore::load(dir.path().join("usage_tailer.json"));
     copy.set(Path::new("/a.jsonl"), 7);
     copy.save().unwrap();
-    let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("usage_tailer.json")).unwrap()).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("usage_tailer.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(raw, serde_json::json!({ "/a.jsonl": 7 }));
 }
 
@@ -48,7 +50,8 @@ fn seen_keys_loads_the_frozen_format() {
     copy.insert("a:b");
     copy.save().unwrap();
     let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("seen.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("seen.json")).unwrap())
+            .unwrap();
     assert_eq!(raw, serde_json::json!(["a:b"]));
 }
 
@@ -68,13 +71,18 @@ fn codex_counter_store_loads_the_frozen_format() {
         cache_read: 6709120,
         cache_write: 0,
     };
-    assert_eq!(store.apply("01a06d82-5bea-7761-9449-919b19eb5da5", &same), None);
+    assert_eq!(
+        store.apply("01a06d82-5bea-7761-9449-919b19eb5da5", &same),
+        None
+    );
     let more = ParsedUsage {
         input: 388627,
         ..same.clone()
     };
     assert_eq!(
-        store.apply("01a06d82-5bea-7761-9449-919b19eb5da5", &more).map(|d| d.input),
+        store
+            .apply("01a06d82-5bea-7761-9449-919b19eb5da5", &more)
+            .map(|d| d.input),
         Some(1)
     );
     let dir = tempfile::tempdir().unwrap();
@@ -82,7 +90,8 @@ fn codex_counter_store_loads_the_frozen_format() {
     copy.seed("s", &same);
     copy.save().unwrap();
     let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("codex.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("codex.json")).unwrap())
+            .unwrap();
     assert_eq!(raw["order"], serde_json::json!(["s"]));
     assert_eq!(raw["counters"]["s"]["cache_read"], 6709120);
 }

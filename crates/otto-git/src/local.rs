@@ -243,10 +243,14 @@ impl LocalGit {
     pub(crate) fn guard_ref(value: &str) -> Result<()> {
         let v = value.trim_start();
         if v.starts_with('-') {
-            return Err(Error::Invalid(format!("refusing option-like git argument '{value}'")));
+            return Err(Error::Invalid(format!(
+                "refusing option-like git argument '{value}'"
+            )));
         }
         if value.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
-            return Err(Error::Invalid("git argument contains a control character".into()));
+            return Err(Error::Invalid(
+                "git argument contains a control character".into(),
+            ));
         }
         Ok(())
     }
@@ -452,7 +456,12 @@ impl LocalGit {
         // 80+ files) into a single entry — so the Changes view can show/stage
         // them per-file. Gitignored paths are still excluded.
         let out = self
-            .run_read(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"])
+            .run_read(&[
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=all",
+            ])
             .await?;
         let mut st = crate::parse::parse_status(&out);
         st.op_in_progress = self.op_in_progress().await.map(str::to_string);
@@ -523,7 +532,9 @@ impl LocalGit {
     }
 
     pub async fn current_branch(&self) -> Result<String> {
-        let out = self.run_read(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let out = self
+            .run_read(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .await?;
         Ok(out.trim().to_string())
     }
 
@@ -574,7 +585,13 @@ impl LocalGit {
         let spec = format!("{r}^{{commit}}");
         match self
             .run_raw(
-                &["rev-parse", "--verify", "--quiet", "--end-of-options", &spec],
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &spec,
+                ],
                 &[],
             )
             .await
@@ -589,7 +606,10 @@ impl LocalGit {
     /// `origin/main`/`origin/master`. `None` on a repo with no branches at all.
     /// Mirrors the fallback chain the bundled skill scripts already use.
     pub async fn default_branch(&self) -> Option<String> {
-        if let Ok(out) = self.run(&["symbolic-ref", "refs/remotes/origin/HEAD"]).await {
+        if let Ok(out) = self
+            .run(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .await
+        {
             if let Some(b) = out.trim().strip_prefix("refs/remotes/origin/") {
                 if !b.is_empty() {
                     return Some(b.to_string());
@@ -703,7 +723,8 @@ impl LocalGit {
     pub async fn worktree_attach(&self, path: &str, branch: &str) -> Result<()> {
         Self::guard_ref(path)?;
         Self::guard_ref(branch)?;
-        self.run(&["worktree", "add", "--force", path, branch]).await?;
+        self.run(&["worktree", "add", "--force", path, branch])
+            .await?;
         Ok(())
     }
 
@@ -796,9 +817,7 @@ impl LocalGit {
     /// Best-effort: a missing worktree is not an error.
     pub async fn worktree_remove(&self, path: &str) -> Result<()> {
         Self::guard_ref(path)?;
-        let _ = self
-            .run(&["worktree", "remove", "--force", path])
-            .await;
+        let _ = self.run(&["worktree", "remove", "--force", path]).await;
         Ok(())
     }
 
@@ -850,7 +869,9 @@ impl LocalGit {
     /// `git worktree prune` — drop stale registrations whose directory is gone.
     /// Returns git's verbose report ("" when there was nothing to prune).
     pub async fn worktree_prune(&self) -> Result<String> {
-        let (out, err) = self.run_env(&["worktree", "prune", "--verbose"], &[]).await?;
+        let (out, err) = self
+            .run_env(&["worktree", "prune", "--verbose"], &[])
+            .await?;
         // --verbose reports on stderr in some git versions; prefer whichever spoke.
         let msg = if out.trim().is_empty() { err } else { out };
         Ok(msg.trim().to_string())
@@ -945,8 +966,8 @@ impl LocalGit {
                 let upstream_raw = cols.next().unwrap_or("").trim().to_string();
                 let head = cols.next().unwrap_or("").trim();
                 let sha = cols.next().unwrap_or("").trim().to_string();
-                let merged = base.as_deref() != Some(name.as_str())
-                    && merged_local.contains(name.as_str());
+                let merged =
+                    base.as_deref() != Some(name.as_str()) && merged_local.contains(name.as_str());
                 RefBranch {
                     name,
                     is_current: head == "*",
@@ -1068,7 +1089,13 @@ impl LocalGit {
             .map(parse)
             .unwrap_or_default();
         let remote = self
-            .run_read(&["branch", "-r", "--merged", base, "--format=%(refname:short)"])
+            .run_read(&[
+                "branch",
+                "-r",
+                "--merged",
+                base,
+                "--format=%(refname:short)",
+            ])
             .await
             .map(parse)
             .unwrap_or_default();
@@ -1138,8 +1165,15 @@ impl LocalGit {
                     let (_, stdout, _, _) = self
                         .run_raw_class(
                             &[
-                                "-c", "core.quotePath=false", "diff", "--no-color", "-U3",
-                                "--no-index", "--", "/dev/null", f,
+                                "-c",
+                                "core.quotePath=false",
+                                "diff",
+                                "--no-color",
+                                "-U3",
+                                "--no-index",
+                                "--",
+                                "/dev/null",
+                                f,
                             ],
                             &[],
                             SpawnClass::LocalRead,
@@ -1238,7 +1272,10 @@ impl LocalGit {
             // an upstream, so the first `pull` dies with "no tracking
             // information". Start it at the remote tip and track it instead.
             let remote = format!("origin/{branch}");
-            if self.verify_commit_ref(&format!("refs/remotes/{remote}")).await {
+            if self
+                .verify_commit_ref(&format!("refs/remotes/{remote}"))
+                .await
+            {
                 self.run(&["checkout", "-b", branch, "--track", &remote])
                     .await?;
             } else {
@@ -1262,7 +1299,11 @@ impl LocalGit {
     /// `git stash pop`.
     pub async fn checkout_autostash(&self, branch: &str, create: bool) -> Result<CheckoutOutcome> {
         Self::guard_ref(branch)?;
-        let mut dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+        let mut dirty = !self
+            .run(&["status", "--porcelain"])
+            .await?
+            .trim()
+            .is_empty();
         if dirty {
             // `--include-untracked`: without it a new file survives the stash and
             // the checkout still dies with "untracked working tree files would be
@@ -1292,10 +1333,12 @@ impl LocalGit {
                 // The pop rides the same `index.lock` retry as everything else
                 // here: a concurrent agent's lock must not be the reason the
                 // user's changes are left behind in the stash.
-                let (ok, out, _, _) = self
-                    .run_raw_retry_lock(&["stash", "pop"])
-                    .await
-                    .unwrap_or((false, String::new(), String::new(), None));
+                let (ok, out, _, _) = self.run_raw_retry_lock(&["stash", "pop"]).await.unwrap_or((
+                    false,
+                    String::new(),
+                    String::new(),
+                    None,
+                ));
                 if !ok && !out.contains("CONFLICT") {
                     return Err(match e {
                         Error::Conflict(m) => Error::Conflict(format!(
@@ -1476,15 +1519,20 @@ impl LocalGit {
                     None => None,
                 };
                 let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-                let (ok, stdout, stderr, code) =
-                    self.run_raw_class(&["push", "origin", b], &envs, SpawnClass::Remote).await?;
+                let (ok, stdout, stderr, code) = self
+                    .run_raw_class(&["push", "origin", b], &envs, SpawnClass::Remote)
+                    .await?;
                 if ok {
                     return Ok(combine_push_output(&stdout, &stderr));
                 }
                 // First push of a fresh branch: set the upstream explicitly.
                 if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
                     let (ok2, stdout2, stderr2, code2) = self
-                        .run_raw_class(&["push", "--set-upstream", "origin", b], &envs, SpawnClass::Remote)
+                        .run_raw_class(
+                            &["push", "--set-upstream", "origin", b],
+                            &envs,
+                            SpawnClass::Remote,
+                        )
                         .await?;
                     if ok2 {
                         return Ok(combine_push_output(&stdout2, &stderr2));
@@ -1512,7 +1560,11 @@ impl LocalGit {
         if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
             let branch = self.current_branch().await?;
             let (ok2, stdout2, stderr2, code2) = self
-                .run_raw_class(&["push", "--set-upstream", "origin", &branch], &envs, SpawnClass::Remote)
+                .run_raw_class(
+                    &["push", "--set-upstream", "origin", &branch],
+                    &envs,
+                    SpawnClass::Remote,
+                )
                 .await?;
             if ok2 {
                 return Ok(combine_push_output(&stdout2, &stderr2));
@@ -1589,8 +1641,15 @@ impl LocalGit {
     /// with CONFLICTS leaves the changes STASHED (popping onto a half-merged
     /// tree would bury them) and says so; a failed pull pops the stash back so
     /// the tree is exactly as it was.
-    pub async fn pull_autostash(&self, token: Option<String>) -> Result<(PullOutcome, Option<String>)> {
-        let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+    pub async fn pull_autostash(
+        &self,
+        token: Option<String>,
+    ) -> Result<(PullOutcome, Option<String>)> {
+        let dirty = !self
+            .run(&["status", "--porcelain"])
+            .await?
+            .trim()
+            .is_empty();
         if !dirty {
             return Ok((self.pull_outcome(token).await?, None));
         }
@@ -1711,7 +1770,9 @@ impl LocalGit {
         // possibly-stale HEAD with no upstream (see `checkout`).
         let remote = format!("origin/{name}");
         if sp.is_none()
-            && self.verify_commit_ref(&format!("refs/remotes/{remote}")).await
+            && self
+                .verify_commit_ref(&format!("refs/remotes/{remote}"))
+                .await
         {
             let args: &[&str] = if checkout {
                 &["checkout", "-b", name, "--track", &remote]
@@ -1736,8 +1797,13 @@ impl LocalGit {
     /// Delete a local branch. `force=true` → `-D` (drops unmerged work), else
     /// `-d` (refuses to delete an unmerged branch).
     pub async fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
-        self.run(&["branch", if force { "-D" } else { "-d" }, "--end-of-options", name])
-            .await?;
+        self.run(&[
+            "branch",
+            if force { "-D" } else { "-d" },
+            "--end-of-options",
+            name,
+        ])
+        .await?;
         Ok(())
     }
 
@@ -1790,7 +1856,8 @@ impl LocalGit {
 
     /// Rename local branch `from` → `to` (`git branch -m`).
     pub async fn rename_branch(&self, from: &str, to: &str) -> Result<()> {
-        self.run(&["branch", "-m", "--end-of-options", from, to]).await?;
+        self.run(&["branch", "-m", "--end-of-options", from, to])
+            .await?;
         Ok(())
     }
 
@@ -2108,13 +2175,34 @@ impl LocalGit {
                 source,
             ],
             LocalMergeStrategy::Ff => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--no-edit", "--end-of-options", source]
+                vec![
+                    "-c",
+                    "merge.conflictStyle=diff3",
+                    "merge",
+                    "--no-edit",
+                    "--end-of-options",
+                    source,
+                ]
             }
             LocalMergeStrategy::FfOnly => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--ff-only", "--end-of-options", source]
+                vec![
+                    "-c",
+                    "merge.conflictStyle=diff3",
+                    "merge",
+                    "--ff-only",
+                    "--end-of-options",
+                    source,
+                ]
             }
             LocalMergeStrategy::Squash => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--squash", "--end-of-options", source]
+                vec![
+                    "-c",
+                    "merge.conflictStyle=diff3",
+                    "merge",
+                    "--squash",
+                    "--end-of-options",
+                    source,
+                ]
             }
         };
         let envs = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())];
@@ -2135,11 +2223,22 @@ impl LocalGit {
             if up_to_date && matches!(strategy, LocalMergeStrategy::MergeCommit) {
                 let target_head = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
                 let source_head = self.run(&["rev-parse", source]).await?.trim().to_string();
-                let tree = self.run(&["rev-parse", "HEAD^{tree}"]).await?.trim().to_string();
+                let tree = self
+                    .run(&["rev-parse", "HEAD^{tree}"])
+                    .await?
+                    .trim()
+                    .to_string();
                 let msg = format!("Merge branch '{source}' into {target}");
                 let new_commit = self
                     .run(&[
-                        "commit-tree", &tree, "-p", &target_head, "-p", &source_head, "-m", &msg,
+                        "commit-tree",
+                        &tree,
+                        "-p",
+                        &target_head,
+                        "-p",
+                        &source_head,
+                        "-m",
+                        &msg,
                     ])
                     .await?
                     .trim()
@@ -2147,7 +2246,11 @@ impl LocalGit {
                 // Advance the checked-out target branch onto the new merge commit
                 // (it descends from target_head, so this is a clean fast-forward).
                 self.run(&["merge", "--ff-only", &new_commit]).await?;
-                let note = if stashed { self.pop_after_merge().await } else { None };
+                let note = if stashed {
+                    self.pop_after_merge().await
+                } else {
+                    None
+                };
                 return Ok(MergeResult {
                     status: "merged".into(),
                     commit: Some(new_commit),
@@ -2359,7 +2462,8 @@ impl LocalGit {
                 self.run_env(&["rebase", "--continue"], &noedit).await?;
             }
             Some("cherry_pick") => {
-                self.run_env(&["cherry-pick", "--continue"], &noedit).await?;
+                self.run_env(&["cherry-pick", "--continue"], &noedit)
+                    .await?;
             }
             Some("revert") => {
                 self.run_env(&["revert", "--continue"], &noedit).await?;
@@ -2516,7 +2620,12 @@ pub fn strip_url_userinfo(url: &str) -> String {
     let path_start = rest.find('/').unwrap_or(rest.len());
     let authority = &rest[..path_start];
     match authority.rfind('@') {
-        Some(at) => format!("{}{}{}", &url[..after], &authority[at + 1..], &rest[path_start..]),
+        Some(at) => format!(
+            "{}{}{}",
+            &url[..after],
+            &authority[at + 1..],
+            &rest[path_start..]
+        ),
         None => url.to_string(),
     }
 }
@@ -2705,7 +2814,10 @@ impl AskPass {
             // authoritative: reset the helper list via config-env (the
             // equivalent of `git -c credential.helper=`).
             ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
-            ("GIT_CONFIG_KEY_0".to_string(), "credential.helper".to_string()),
+            (
+                "GIT_CONFIG_KEY_0".to_string(),
+                "credential.helper".to_string(),
+            ),
             ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
         ];
         // Atlassian API tokens (the app-password replacement, prefix ATATT)
@@ -2931,12 +3043,18 @@ mod tests {
 
         // Pop restores it.
         git.stash_pop().await.expect("pop");
-        assert!(dir.join("new.txt").exists(), "pop must restore the untracked file");
+        assert!(
+            dir.join("new.txt").exists(),
+            "pop must restore the untracked file"
+        );
 
         // Clean tree → explicit error, not a silent no-op "success".
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-m", "absorb"]);
-        let err = git.stash_save().await.expect_err("clean tree must not 'stash'");
+        let err = git
+            .stash_save()
+            .await
+            .expect_err("clean tree must not 'stash'");
         assert!(
             err.to_string().contains("nothing to stash"),
             "unexpected error: {err}"
@@ -3002,7 +3120,10 @@ mod tests {
 
         // commit diff of HEAD (the a.txt change)
         let head = git.log(1, 0, false).await.unwrap()[0].sha.clone();
-        let cd = git.diff(DiffTarget::Commit(head.clone()), None).await.unwrap();
+        let cd = git
+            .diff(DiffTarget::Commit(head.clone()), None)
+            .await
+            .unwrap();
         assert_eq!(cd.files.len(), 1);
         assert_eq!(cd.files[0].path, "a.txt");
 
@@ -3186,7 +3307,11 @@ mod tests {
         let git = LocalGit::new(&dir);
         // The fixture starts dirty (staged rename/new, unstaged, untracked) —
         // the sweep commits all of it.
-        assert!(git.commit_all_if_dirty("sweep fixture").await.unwrap().is_some());
+        assert!(git
+            .commit_all_if_dirty("sweep fixture")
+            .await
+            .unwrap()
+            .is_some());
         // Now-clean tree → no commit.
         assert!(git.commit_all_if_dirty("noop").await.unwrap().is_none());
         // Leftover agent work + runtime artifacts that must stay out.
@@ -3208,9 +3333,10 @@ mod tests {
         // Atlassian API tokens must authenticate under the magic username;
         // everything else keeps the x-token-auth script default (no env).
         let api = AskPass::new("ATATT3xFfGF0abc").unwrap();
-        assert!(api.envs().iter().any(|(k, v)| {
-            k == "OTTO_GIT_USERNAME" && v == "x-bitbucket-api-token-auth"
-        }));
+        assert!(api
+            .envs()
+            .iter()
+            .any(|(k, v)| { k == "OTTO_GIT_USERNAME" && v == "x-bitbucket-api-token-auth" }));
         let pat = AskPass::new("ghp_abc123").unwrap();
         assert!(!pat.envs().iter().any(|(k, _)| k == "OTTO_GIT_USERNAME"));
         // Otto's credential must be authoritative: helpers reset for every
@@ -3289,7 +3415,10 @@ mod tests {
         let head = wt_git.log(1, 0, false).await.unwrap();
         assert_eq!(head[0].sha, sha, "prior commit preserved");
         assert_eq!(head[0].subject, "agent turn 1");
-        assert!(wt.join("agent_work.txt").exists(), "committed file preserved");
+        assert!(
+            wt.join("agent_work.txt").exists(),
+            "committed file preserved"
+        );
     }
 
     /// D2 regression: if the worktree was REMOVED between turns (the branch is
@@ -3311,7 +3440,9 @@ mod tests {
         let base = git.log(1, 1, false).await.unwrap()[0].sha.clone();
 
         // Turn 1: create on the branch from HEAD, then commit agent work.
-        git.worktree_add_if_absent(&wt_str, branch, "HEAD").await.unwrap();
+        git.worktree_add_if_absent(&wt_str, branch, "HEAD")
+            .await
+            .unwrap();
         let wt_git = LocalGit::new(&wt);
         write(&wt, "agent_work.txt", "turn 1 output\n");
         wt_git.stage(&["agent_work.txt".into()]).await.unwrap();
@@ -3320,12 +3451,21 @@ mod tests {
         // The worktree is pruned, but the branch + its commit must live on.
         git.worktree_remove(&wt_str).await.unwrap();
         assert!(!git.worktree_exists(&wt_str).await);
-        assert!(git.branch_exists(branch).await, "branch survives worktree removal");
+        assert!(
+            git.branch_exists(branch).await,
+            "branch survives worktree removal"
+        );
 
         // Turn 2: re-provision with a DIFFERENT base. It must RE-ATTACH the
         // existing branch (preserving the agent commit), not reset to base.
-        let created = git.worktree_add_if_absent(&wt_str, branch, &base).await.unwrap();
-        assert!(created, "re-provisioning a pruned worktree counts as created");
+        let created = git
+            .worktree_add_if_absent(&wt_str, branch, &base)
+            .await
+            .unwrap();
+        assert!(
+            created,
+            "re-provisioning a pruned worktree counts as created"
+        );
         let head = wt_git.log(1, 0, false).await.unwrap();
         assert_eq!(
             head[0].sha, sha,
@@ -3346,7 +3486,9 @@ mod tests {
         let git = LocalGit::new(&dir);
         let wt = dir.parent().unwrap().join("cf-wt");
         let wt_str = wt.to_str().unwrap().to_string();
-        git.worktree_add_if_absent(&wt_str, "swarm/s1/a1", "main").await.unwrap();
+        git.worktree_add_if_absent(&wt_str, "swarm/s1/a1", "main")
+            .await
+            .unwrap();
 
         let wt_git = LocalGit::new(&wt);
         // No commits on the branch yet → no changes vs base.
@@ -3355,7 +3497,10 @@ mod tests {
         // Commit a new file + modify an existing one.
         write(&wt, "shared.txt", "agent A\n");
         write(&wt, "a.txt", "alpha line 1\nalpha line 2\nalpha A\n");
-        wt_git.stage(&["shared.txt".into(), "a.txt".into()]).await.unwrap();
+        wt_git
+            .stage(&["shared.txt".into(), "a.txt".into()])
+            .await
+            .unwrap();
         wt_git.commit("agent A work", false).await.unwrap();
 
         let mut files = wt_git.changed_files("main").await.unwrap();
@@ -3373,10 +3518,15 @@ mod tests {
         let wt_str = wt.to_str().unwrap().to_string();
 
         assert!(!git.worktree_exists(&wt_str).await);
-        git.worktree_add(&wt_str, "swarm/s/b", "HEAD").await.unwrap();
+        git.worktree_add(&wt_str, "swarm/s/b", "HEAD")
+            .await
+            .unwrap();
         assert!(git.worktree_exists(&wt_str).await);
         // An unrelated path is not a worktree.
-        assert!(!git.worktree_exists("/tmp/definitely-not-a-worktree-xyz").await);
+        assert!(
+            !git.worktree_exists("/tmp/definitely-not-a-worktree-xyz")
+                .await
+        );
     }
 
     /// Local-only graph context-menu ops: branch create/rename/delete, tag
@@ -3394,9 +3544,17 @@ mod tests {
         let head = git.log(1, 0, false).await.unwrap()[0].sha.clone();
 
         // create_branch in place (no checkout) from a start_point.
-        git.create_branch("feat/a", Some(&head), false).await.unwrap();
+        git.create_branch("feat/a", Some(&head), false)
+            .await
+            .unwrap();
         assert_eq!(git.current_branch().await.unwrap(), "main");
-        assert!(git.refs().await.unwrap().local.iter().any(|b| b.name == "feat/a"));
+        assert!(git
+            .refs()
+            .await
+            .unwrap()
+            .local
+            .iter()
+            .any(|b| b.name == "feat/a"));
 
         // create_branch + checkout from HEAD.
         git.create_branch("feat/b", None, true).await.unwrap();
@@ -3411,16 +3569,26 @@ mod tests {
         git.delete_branch("feat/a", false).await.unwrap();
         git.delete_branch("feat/b2", true).await.unwrap();
         let locals = git.refs().await.unwrap().local;
-        assert!(!locals.iter().any(|b| b.name == "feat/a" || b.name == "feat/b2"));
+        assert!(!locals
+            .iter()
+            .any(|b| b.name == "feat/a" || b.name == "feat/b2"));
 
         // lightweight + annotated tags, then list + delete.
         git.create_tag("v1", &head, None).await.unwrap();
-        git.create_tag("v2", &head, Some("release two")).await.unwrap();
+        git.create_tag("v2", &head, Some("release two"))
+            .await
+            .unwrap();
         let tags = git.refs().await.unwrap().tags;
         assert!(tags.iter().any(|t| t.name == "v1"));
         assert!(tags.iter().any(|t| t.name == "v2"));
         git.delete_tag("v1").await.unwrap();
-        assert!(!git.refs().await.unwrap().tags.iter().any(|t| t.name == "v1"));
+        assert!(!git
+            .refs()
+            .await
+            .unwrap()
+            .tags
+            .iter()
+            .any(|t| t.name == "v1"));
 
         // cherry-pick: make a commit on a side branch, pick it onto main.
         git.create_branch("side", Some(&head), true).await.unwrap();
@@ -3430,7 +3598,10 @@ mod tests {
         git.checkout("main", false).await.unwrap();
         git.cherry_pick(&side_sha).await.unwrap();
         assert!(dir.join("picked.txt").exists());
-        assert_eq!(git.log(1, 0, false).await.unwrap()[0].subject, "side change");
+        assert_eq!(
+            git.log(1, 0, false).await.unwrap()[0].subject,
+            "side change"
+        );
 
         // revert the cherry-picked commit → file removed again.
         let picked = git.log(1, 0, false).await.unwrap()[0].sha.clone();
@@ -3468,10 +3639,20 @@ mod tests {
         // Commit the fixture's dirty state so the working tree is clean to merge.
         sh_git(&dir, &["add", "-A"]);
         sh_git(&dir, &["commit", "-m", "tidy"]);
-        let main_head = git.run(&["rev-parse", "HEAD"]).await.unwrap().trim().to_string();
+        let main_head = git
+            .run(&["rev-parse", "HEAD"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string();
         // `rel` points at an ANCESTOR of main's tip → already contained, so a
         // plain merge would be "Already up to date" with no commit.
-        let ancestor = git.run(&["rev-parse", "HEAD~1"]).await.unwrap().trim().to_string();
+        let ancestor = git
+            .run(&["rev-parse", "HEAD~1"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string();
         sh_git(&dir, &["branch", "rel", &ancestor]);
 
         let res = git
@@ -3479,9 +3660,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(res.status, "merged", "forced a merge even though up to date");
+        assert_eq!(
+            res.status, "merged",
+            "forced a merge even though up to date"
+        );
         let new_head = res.commit.expect("a merge commit sha");
-        assert_ne!(new_head, main_head, "main advanced onto the new merge commit");
+        assert_ne!(
+            new_head, main_head,
+            "main advanced onto the new merge commit"
+        );
         // …a real 2-parent merge (target tip + the source).
         let parents = git
             .run(&["rev-list", "--parents", "-n", "1", "HEAD"])
@@ -3563,7 +3750,10 @@ mod tests {
         assert_eq!(git.current_branch().await.unwrap(), "dev");
         let head = git.run(&["rev-parse", "HEAD"]).await.unwrap();
         let remote_tip = git.run(&["rev-parse", "origin/dev"]).await.unwrap();
-        assert_eq!(head, remote_tip, "branch starts at the remote tip, not stale HEAD");
+        assert_eq!(
+            head, remote_tip,
+            "branch starts at the remote tip, not stale HEAD"
+        );
         let upstream = git
             .run(&["rev-parse", "--abbrev-ref", "dev@{upstream}"])
             .await
@@ -3585,7 +3775,9 @@ mod tests {
         assert_eq!(git.current_branch().await.unwrap(), "feature/fresh");
         // An explicit start_point is respected verbatim (no remote override).
         let base = git.run(&["rev-parse", "main~1"]).await.unwrap();
-        git.create_branch("dev2", Some(base.trim()), false).await.unwrap();
+        git.create_branch("dev2", Some(base.trim()), false)
+            .await
+            .unwrap();
         let dev2 = git.run(&["rev-parse", "dev2"]).await.unwrap();
         assert_eq!(dev2, base, "explicit start point wins");
     }
@@ -3633,8 +3825,7 @@ mod tests {
 
         // …and the stale tracking ref is pruned, clearing the UI.
         assert!(
-            !git
-                .refs()
+            !git.refs()
                 .await
                 .unwrap()
                 .remote
@@ -3745,7 +3936,10 @@ mod tests {
         let git = LocalGit::new(&dir);
         // Explicit existing ref wins as-is.
         let r = git.resolve_base(Some("master")).await.unwrap();
-        assert_eq!((r.diff_ref.as_str(), r.branch.as_str()), ("master", "master"));
+        assert_eq!(
+            (r.diff_ref.as_str(), r.branch.as_str()),
+            ("master", "master")
+        );
         // A missing explicit ref falls back to the detected default — the exact
         // production failure ("main" on a master-only repo) becomes a success.
         let r = git.resolve_base(Some("main")).await.unwrap();
@@ -3802,7 +3996,11 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         sh_git(&dir, &["init", "-b", "main"]);
         let git = LocalGit::new(&dir);
-        let err = git.resolve_base(Some("develop")).await.unwrap_err().to_string();
+        let err = git
+            .resolve_base(Some("develop"))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("develop"), "error names what was tried: {err}");
     }
 
@@ -3822,7 +4020,10 @@ mod tests {
         let (tmp, dir) = fixture_on_branch("master");
         let git = LocalGit::new(&dir);
         let wt = tmp.path().join("wt-feature");
-        sh_git(&dir, &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()]);
+        sh_git(
+            &dir,
+            &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()],
+        );
         let found = git.worktree_for_branch("feature/x").await.unwrap();
         assert_eq!(
             std::fs::canonicalize(&found).unwrap(),
@@ -3856,7 +4057,9 @@ mod tests {
         assert!(!dir.join("d.txt").exists(), "new name gone after discard");
         let st = git.status().await.unwrap();
         assert!(
-            !st.changes.iter().any(|c| c.path == "c.txt" || c.path == "d.txt"),
+            !st.changes
+                .iter()
+                .any(|c| c.path == "c.txt" || c.path == "d.txt"),
             "rename fully undone — no residual staged entries: {:?}",
             st.changes
         );
@@ -3897,7 +4100,10 @@ mod tests {
         let git = LocalGit::new(&dir);
         let head = git.log(1, 0, false).await.unwrap()[0].clone();
         assert_eq!(head.parents.len(), 2, "fixture produced a merge commit");
-        let diff = git.diff(DiffTarget::Commit(head.sha.clone()), None).await.unwrap();
+        let diff = git
+            .diff(DiffTarget::Commit(head.sha.clone()), None)
+            .await
+            .unwrap();
         assert!(
             diff.files.iter().any(|f| f.path == "merged.txt"),
             "merge diff lists the merged file: {:?}",
@@ -4061,7 +4267,10 @@ mod tests {
         sh_git(&seed, &["add", "."]);
         sh_git(&seed, &["commit", "-m", "init"]);
         sh_git(&seed, &["branch", "develop"]);
-        sh_git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        sh_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         sh_git(&seed, &["push", "-u", "origin", "main", "develop"]);
 
         let dir = tmp.path().join("work");
@@ -4106,7 +4315,10 @@ mod tests {
             .args(["rev-list", "--count", range])
             .output()
             .expect("spawn git rev-list");
-        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
     }
 
     #[tokio::test]
@@ -4153,7 +4365,14 @@ mod tests {
     async fn checkout_autostash_creates_tracking_branch_when_remote_only() {
         let (_tmp, dir) = diverged_fixture();
         // A branch that exists ONLY on origin.
-        sh_git(&dir, &["update-ref", "refs/remotes/origin/feature", "origin/develop"]);
+        sh_git(
+            &dir,
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature",
+                "origin/develop",
+            ],
+        );
         write(&dir, "shared.txt", "line1\nDIRTY\nline3\n");
 
         let git = LocalGit::new(&dir);
@@ -4165,7 +4384,11 @@ mod tests {
             .run(&["rev-parse", "--abbrev-ref", "feature@{u}"])
             .await
             .unwrap();
-        assert_eq!(upstream.trim(), "origin/feature", "created branch tracks origin");
+        assert_eq!(
+            upstream.trim(),
+            "origin/feature",
+            "created branch tracks origin"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
             "line1\nDIRTY\nline3\n"
@@ -4182,9 +4405,16 @@ mod tests {
             .checkout_autostash("no-such-branch", false)
             .await
             .unwrap_err();
-        assert!(!matches!(err, Error::Invalid(_)), "git's own refusal: {err:?}");
+        assert!(
+            !matches!(err, Error::Invalid(_)),
+            "git's own refusal: {err:?}"
+        );
 
-        assert_eq!(git.current_branch().await.unwrap(), "main", "tree untouched");
+        assert_eq!(
+            git.current_branch().await.unwrap(),
+            "main",
+            "tree untouched"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
             "line1\nDIRTY\nline3\n",
@@ -4209,7 +4439,9 @@ mod tests {
 
         let st = git.status().await.unwrap();
         assert!(
-            st.changes.iter().any(|c| c.path == "shared.txt" && c.kind == "conflicted"),
+            st.changes
+                .iter()
+                .any(|c| c.path == "shared.txt" && c.kind == "conflicted"),
             "the conflicted pop is visible in the status: {:?}",
             st.changes
         );
@@ -4362,10 +4594,7 @@ mod tests {
             "git@h:",
             "git@h:-x",
         ] {
-            assert!(
-                validate_remote_url(bad).is_err(),
-                "should refuse {bad:?}"
-            );
+            assert!(validate_remote_url(bad).is_err(), "should refuse {bad:?}");
         }
     }
 
@@ -4472,7 +4701,10 @@ mod tests {
 
         let started = std::time::Instant::now();
         let err = git.run(&["status"]).await.unwrap_err();
-        assert!(matches!(&err, Error::Upstream(m) if m.contains("timed out")), "{err:?}");
+        assert!(
+            matches!(&err, Error::Upstream(m) if m.contains("timed out")),
+            "{err:?}"
+        );
         assert!(
             started.elapsed() < SHIM_BUDGET + std::time::Duration::from_secs(6),
             "elapsed {:?}",
@@ -4507,7 +4739,10 @@ mod tests {
             git.commit("survives the drop", false),
         )
         .await;
-        assert!(dropped.is_err(), "the caller future must be dropped mid-commit");
+        assert!(
+            dropped.is_err(),
+            "the caller future must be dropped mid-commit"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let subject = LocalGit::new(&dir)
@@ -4537,12 +4772,12 @@ mod tests {
 
         let sh = shim(tmp.path(), "slow-fetch-git", "sleep 0.4\nexec git \"$@\"");
         let git = LocalGit::new(&dir).with_git_bin(&sh);
-        let dropped = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            git.fetch(None),
-        )
-        .await;
-        assert!(dropped.is_err(), "the caller future must be dropped mid-fetch");
+        let dropped =
+            tokio::time::timeout(std::time::Duration::from_millis(10), git.fetch(None)).await;
+        assert!(
+            dropped.is_err(),
+            "the caller future must be dropped mid-fetch"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         assert_eq!(
@@ -4570,7 +4805,9 @@ mod tests {
         let git = LocalGit::new(&dir);
         git.stage(&["staged.txt".to_string()]).await.unwrap();
         let st = git.status().await.unwrap();
-        assert!(st.changes.iter().any(|c| c.path == "staged.txt" && c.staged));
+        assert!(st
+            .changes
+            .iter()
+            .any(|c| c.path == "staged.txt" && c.staged));
     }
-
 }

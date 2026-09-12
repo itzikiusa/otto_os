@@ -192,25 +192,45 @@ pub async fn assist(
         .or_else(|| req.workspace_id.clone())
         .ok_or_else(|| ApiError(Error::Invalid("a workspace_id is required".into())))?;
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Agents,otto_core::domain::Capability::Edit,"DB Assistant requires permission to run host agents").await?;
+    otto_state::GrantsRepo::new(ctx.pool.clone())
+        .check_global(
+            &user,
+            otto_core::domain::Feature::Agents,
+            otto_core::domain::Capability::Edit,
+            "DB Assistant requires permission to run host agents",
+        )
+        .await?;
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let engine = Engine::from_kind(conn.kind)
-        .ok_or_else(|| ApiError(Error::Invalid(format!("{} is not a browsable database", conn.name))))?;
+    let engine = Engine::from_kind(conn.kind).ok_or_else(|| {
+        ApiError(Error::Invalid(format!(
+            "{} is not a browsable database",
+            conn.name
+        )))
+    })?;
 
     // Resume an existing assist (same dir / key / session / provider / node) or
     // mint a fresh one.
     let resumed = req.assist_id.as_ref().and_then(|aid| lookup(&ctx, aid));
-    if let Some(entry)=&resumed {
-        if entry.user_id != user.id || entry.connection_id != conn_id || entry.workspace_id != ws_id
-            || req.node.as_ref().is_some_and(|node| Some(node) != entry.node.as_ref()) {
+    if let Some(entry) = &resumed {
+        if entry.user_id != user.id
+            || entry.connection_id != conn_id
+            || entry.workspace_id != ws_id
+            || req
+                .node
+                .as_ref()
+                .is_some_and(|node| Some(node) != entry.node.as_ref())
+        {
             return Err(ApiError(Error::NotFound("DB assistant".into())));
         }
-        let session=ctx.manager.get(&entry.session_id).await?;
-        crate::auth::require_session_owner_or_admin(&ctx,&user,&session).await?;
+        let session = ctx.manager.get(&entry.session_id).await?;
+        crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
     }
 
     let assist_id = match &resumed {
-        Some(_) => req.assist_id.clone().expect("resumed implies assist_id present"),
+        Some(_) => req
+            .assist_id
+            .clone()
+            .expect("resumed implies assist_id present"),
         None => otto_core::new_id(),
     };
     // A resumed dir comes from the registry (daemon-built); a fresh one embeds
@@ -229,8 +249,13 @@ pub async fn assist(
         Some(r) => r.provider.clone(),
         None => resolve_provider(&ctx, &ws, req.provider.as_deref()).await,
     };
-    let node = req.node.clone().or_else(|| resumed.as_ref().and_then(|r| r.node.clone()));
-    ctx.db_explorer.authorize(&conn_id,&user.id,node.as_deref(),"db_query").await?;
+    let node = req
+        .node
+        .clone()
+        .or_else(|| resumed.as_ref().and_then(|r| r.node.clone()));
+    ctx.db_explorer
+        .authorize(&conn_id, &user.id, node.as_deref(), "db_query")
+        .await?;
     let mode = normalize_mode(req.mode.as_deref());
 
     // Seed the working dir: SCHEMA.md (RC2 — the full schema), CONTEXT.md, the `q`
@@ -372,11 +397,24 @@ pub async fn summary(
         .filter(|e| e.connection_id == conn_id && e.user_id == user.id)
         .ok_or_else(|| ApiError(Error::NotFound(format!("db assist {aid}"))))?;
     crate::auth::require_ws_role(&ctx, &user, &entry.workspace_id, WorkspaceRole::Editor).await?;
-    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Agents,otto_core::domain::Capability::Edit,"DB Assistant requires permission to run host agents").await?;
-    ctx.db_explorer.authorize(&conn_id,&user.id,entry.node.as_deref(),"db_query").await?;
-    let session=ctx.manager.get(&entry.session_id).await?;
-    crate::auth::require_session_owner_or_admin(&ctx,&user,&session).await?;
-    let ws = ctx.workspaces.get(&entry.workspace_id).await.map_err(ApiError)?;
+    otto_state::GrantsRepo::new(ctx.pool.clone())
+        .check_global(
+            &user,
+            otto_core::domain::Feature::Agents,
+            otto_core::domain::Capability::Edit,
+            "DB Assistant requires permission to run host agents",
+        )
+        .await?;
+    ctx.db_explorer
+        .authorize(&conn_id, &user.id, entry.node.as_deref(), "db_query")
+        .await?;
+    let session = ctx.manager.get(&entry.session_id).await?;
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
+    let ws = ctx
+        .workspaces
+        .get(&entry.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     let dir_str = entry.dir.to_string_lossy().to_string();
     let summary_path = entry.dir.join("SUMMARY.md");
@@ -448,8 +486,8 @@ pub async fn query_tool(
     headers: HeaderMap,
     Json(req): Json<QueryToolReq>,
 ) -> ApiResult<Json<QueryToolResp>> {
-    let entry = lookup(&ctx, &aid)
-        .ok_or_else(|| ApiError(Error::NotFound(format!("db assist {aid}"))))?;
+    let entry =
+        lookup(&ctx, &aid).ok_or_else(|| ApiError(Error::NotFound(format!("db assist {aid}"))))?;
     let presented = headers
         .get("x-assist-key")
         .and_then(|v| v.to_str().ok())
@@ -512,7 +550,11 @@ pub async fn query_tool(
 /// default, else the global default, else `claude` (mirrors `db_explain_with_agent`).
 /// `pub(crate)` — reused by `routes::browser`'s summarize handler, which needs
 /// the identical resolution order but has no per-call provider override field.
-pub(crate) async fn resolve_provider(ctx: &ServerCtx, ws: &otto_core::domain::Workspace, body: Option<&str>) -> String {
+pub(crate) async fn resolve_provider(
+    ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    body: Option<&str>,
+) -> String {
     if let Some(p) = body.map(str::trim).filter(|p| !p.is_empty()) {
         return p.to_string();
     }
@@ -548,7 +590,10 @@ async fn make_executable(path: &std::path::Path) {
 }
 
 async fn read_trimmed(path: &std::path::Path) -> Option<String> {
-    tokio::fs::read_to_string(path).await.ok().map(|s| s.trim().to_string())
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -627,20 +672,32 @@ fn node_label(node: Option<&str>) -> String {
 /// The mode-specific task line in the prompt + CONTEXT.md.
 fn mode_task(mode: &str) -> &'static str {
     match mode {
-        "ask" => "Answer the user's free-form question about the data or schema. \
-                  If a SQL query best answers it, also write that query to ANSWER.sql.",
-        "investigate" => "Examine the statement and result described in RESULT.md. Explain what it \
+        "ask" => {
+            "Answer the user's free-form question about the data or schema. \
+                  If a SQL query best answers it, also write that query to ANSWER.sql."
+        }
+        "investigate" => {
+            "Examine the statement and result described in RESULT.md. Explain what it \
                           shows, spot anything notable, and write a refined or follow-up query to \
-                          ANSWER.sql.",
+                          ANSWER.sql."
+        }
         // nl
-        _ => "Produce ONE runnable SQL query that answers the question. Validate it with ./q \
-              before finalizing, then write it to ANSWER.sql.",
+        _ => {
+            "Produce ONE runnable SQL query that answers the question. Validate it with ./q \
+              before finalizing, then write it to ANSWER.sql."
+        }
     }
 }
 
 /// Build the file-edit prompt. The `OTTO_TASK: db_assist` sentinel routes the
 /// offline E2E stub; the rest tells the agent how to use the seeded files + tool.
-fn build_assist_prompt(conn_name: &str, engine: &str, active_db: &str, question: &str, mode: &str) -> String {
+fn build_assist_prompt(
+    conn_name: &str,
+    engine: &str,
+    active_db: &str,
+    question: &str,
+    mode: &str,
+) -> String {
     let result_line = if mode == "investigate" {
         "- RESULT.md — the statement + result sample you are asked to examine.\n"
     } else {
@@ -679,7 +736,13 @@ fn build_assist_prompt(conn_name: &str, engine: &str, active_db: &str, question:
 }
 
 /// The `CONTEXT.md` seed file.
-fn build_context_md(conn_name: &str, engine: &str, active_db: &str, question: &str, mode: &str) -> String {
+fn build_context_md(
+    conn_name: &str,
+    engine: &str,
+    active_db: &str,
+    question: &str,
+    mode: &str,
+) -> String {
     format!(
         "# DB Assistant context\n\n\
          - Connection: {conn_name}\n\
@@ -852,7 +915,10 @@ mod tests {
     #[test]
     fn extract_fenced_sql_block() {
         let raw = "Here is the query.\n\n```sql\nSELECT * FROM t\n```";
-        assert_eq!(extract_fenced(raw, "sql").as_deref(), Some("SELECT * FROM t"));
+        assert_eq!(
+            extract_fenced(raw, "sql").as_deref(),
+            Some("SELECT * FROM t")
+        );
         assert!(extract_fenced("no fence here", "sql").is_none());
     }
 

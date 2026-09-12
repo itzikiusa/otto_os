@@ -56,7 +56,9 @@ pub fn digest_from_jsonl(session_id: &str, title: &str, body: &str) -> SessionDi
         {
             tool_errors += 1;
         }
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         let Some(content) = msg.get("content").and_then(|c| c.as_array()) else {
             continue;
@@ -140,7 +142,11 @@ fn push_capped(buf: &mut String, role: &str, t: &str) {
     }
     let remaining = PER_SESSION_TEXT_CAP - buf.len();
     let snippet: String = t.chars().take(remaining).collect();
-    buf.push_str(if role == "user" { "\nUSER: " } else { "\nASSISTANT: " });
+    buf.push_str(if role == "user" {
+        "\nUSER: "
+    } else {
+        "\nASSISTANT: "
+    });
     buf.push_str(snippet.trim());
 }
 
@@ -160,10 +166,14 @@ mod tests {
     // `input.skill`, and a failed tool surfaces `is_error: true` on the
     // `tool_result` content block of a user message.
     const JSONL: &str = concat!(
-        r#"{"message":{"role":"user","content":[{"type":"text","text":"refund please"}]}}"#, "\n",
-        r#"{"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Skill","input":{"skill":"support-triage-router"}}]}}"#, "\n",
-        r#"{"message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"#, "\n",
-        r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"routed to billing"}]}}"#, "\n"
+        r#"{"message":{"role":"user","content":[{"type":"text","text":"refund please"}]}}"#,
+        "\n",
+        r#"{"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Skill","input":{"skill":"support-triage-router"}}]}}"#,
+        "\n",
+        r#"{"message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":"boom"}]}}"#,
+        "\n",
+        r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"routed to billing"}]}}"#,
+        "\n"
     );
 
     #[test]

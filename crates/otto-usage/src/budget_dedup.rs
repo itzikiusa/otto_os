@@ -101,9 +101,9 @@ mod tests {
     #[test]
     fn re_crossing_after_recovery_emits_again() {
         let mut dd = BudgetDedup::new();
-        dd.apply("provider", "codex", true);      // exceeded
-        dd.apply("provider", "codex", false);     // recovered
-        // Re-cross — should emit Exceeded again (set was cleared on recovery).
+        dd.apply("provider", "codex", true); // exceeded
+        dd.apply("provider", "codex", false); // recovered
+                                              // Re-cross — should emit Exceeded again (set was cleared on recovery).
         assert_eq!(dd.apply("provider", "codex", true), BudgetSignal::Exceeded);
     }
 
@@ -123,7 +123,10 @@ mod tests {
     fn no_crossing_never_emits() {
         let mut dd = BudgetDedup::new();
         for _ in 0..5 {
-            assert_eq!(dd.apply("provider", "claude", false), BudgetSignal::NoChange);
+            assert_eq!(
+                dd.apply("provider", "claude", false),
+                BudgetSignal::NoChange
+            );
         }
     }
 

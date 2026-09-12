@@ -190,7 +190,12 @@ pub fn resume_injection(ctx_root: &Path, cwd: &str, provider: &str) -> SpawnInje
 /// doesn't stack copies. Currently unused: its one caller was the Vault v2
 /// "Repo Brain" spawn injection, removed in Vault v3 (the docs home); the
 /// legacy `OTTO:VAULT-BRAIN` markers are kept so old bundles still de-dup.
-pub fn append_context_block(ctx_root: &Path, cwd: &str, provider: &str, block: &str) -> SpawnInjection {
+pub fn append_context_block(
+    ctx_root: &Path,
+    cwd: &str,
+    provider: &str,
+    block: &str,
+) -> SpawnInjection {
     let dir = bundle_dir(ctx_root, provider, cwd);
     if !dir.is_dir() {
         return SpawnInjection::default();
@@ -237,9 +242,15 @@ fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
             if settings.is_file() {
                 args.push(format!("--settings={}", settings.display()));
             }
-            SpawnInjection { args, env: Vec::new() }
+            SpawnInjection {
+                args,
+                env: Vec::new(),
+            }
         }
-        "agy" => SpawnInjection { args: vec![format!("--add-dir={d}")], env: Vec::new() },
+        "agy" => SpawnInjection {
+            args: vec![format!("--add-dir={d}")],
+            env: Vec::new(),
+        },
         "codex" => {
             sync_codex_shadow_home(dir);
             let mut args = vec![format!("--add-dir={d}")];
@@ -343,9 +354,7 @@ fn plan(
     ctx_root: &Path,
 ) -> ProviderPlan {
     match provider {
-        "claude" | "codex" | "agy" | "grok" => {
-            plan_provider(library, cfg, cwd, provider, ctx_root)
-        }
+        "claude" | "codex" | "agy" | "grok" => plan_provider(library, cfg, cwd, provider, ctx_root),
         other => ProviderPlan {
             provider: other.to_string(),
             skipped: true,
@@ -481,7 +490,9 @@ fn build_block(
         if let Some(map) = crate::repomap::repo_map_cached(std::path::Path::new(cwd), &opts) {
             let map = map.trim();
             if !map.is_empty() {
-                sections.push(format!("## Repo Map (most-referenced symbols)\n\n```\n{map}\n```"));
+                sections.push(format!(
+                    "## Repo Map (most-referenced symbols)\n\n```\n{map}\n```"
+                ));
             }
         }
     }
@@ -559,7 +570,10 @@ fn build_skill_artifacts(
         if let Some(lib_dir) = lib_skill_dir {
             skill_artifacts.push(SkillArtifact::CopyDir { lib_dir, dest_dir });
         } else {
-            skill_artifacts.push(SkillArtifact::Body { dest_dir, body: skill.body.clone() });
+            skill_artifacts.push(SkillArtifact::Body {
+                dest_dir,
+                body: skill.body.clone(),
+            });
         }
     }
     skill_artifacts
@@ -592,7 +606,9 @@ fn plan_provider(
 
     // Codex and Grok receive a compact index; Claude/Agy auto-load their skills.
     let index = if matches!(provider, "codex" | "grok") {
-        SkillIndex::Indexed { skills_dir: &skills_dir }
+        SkillIndex::Indexed {
+            skills_dir: &skills_dir,
+        }
     } else {
         SkillIndex::None
     };
@@ -604,7 +620,11 @@ fn plan_provider(
 
     // Only claude wires activity hooks (trail/task ingest), delivered out-of-tree
     // via `--settings <bundle>/settings.json`.
-    let hooks = if provider == "claude" { plan_claude_hooks(&bundle) } else { None };
+    let hooks = if provider == "claude" {
+        plan_claude_hooks(&bundle)
+    } else {
+        None
+    };
 
     ProviderPlan {
         provider: provider.to_string(),
@@ -682,8 +702,12 @@ fn execute(plan: ProviderPlan) -> MaterializeProviderResult {
         if let Err(e) = merge::write_manifest(skills_dir, &active_names) {
             tracing::warn!(error = %e, "write skill manifest failed");
         } else {
-            files_written
-                .push(skills_dir.join(".otto-managed.json").to_string_lossy().into_owned());
+            files_written.push(
+                skills_dir
+                    .join(".otto-managed.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
 
@@ -827,8 +851,17 @@ fn describe_copy_dir(root: &Path, src: &Path, dest: &Path, out: &mut Vec<Context
             let body = fs::read_to_string(&path).unwrap_or_default();
             // A SKILL.md at the skill root is the skill itself; everything else
             // is a supporting asset.
-            let kind = if rel.as_os_str() == "SKILL.md" { "skill" } else { "skill_asset" };
-            out.push(plan_file(dest_path, kind, ContextEnforcement::Advisory, &body));
+            let kind = if rel.as_os_str() == "SKILL.md" {
+                "skill"
+            } else {
+                "skill_asset"
+            };
+            out.push(plan_file(
+                dest_path,
+                kind,
+                ContextEnforcement::Advisory,
+                &body,
+            ));
         }
     }
 }
@@ -993,7 +1026,14 @@ mod tests {
 
     /// Assert the working tree was never written: no Otto context files in `cwd`.
     fn assert_clean_cwd(cwd: &Path) {
-        for p in ["CLAUDE.md", "AGENTS.md", "CONTEXT.md", ".claude", ".agents", "settings.json"] {
+        for p in [
+            "CLAUDE.md",
+            "AGENTS.md",
+            "CONTEXT.md",
+            ".claude",
+            ".agents",
+            "settings.json",
+        ] {
             assert!(!cwd.join(p).exists(), "working tree polluted with {p}");
         }
     }
@@ -1009,8 +1049,12 @@ mod tests {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Persona.").unwrap();
-        lib.put_skill("triage", "---\ndescription: d\n---\nBODY").unwrap();
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        lib.put_skill("triage", "---\ndescription: d\n---\nBODY")
+            .unwrap();
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
 
         for provider in ["claude", "codex", "agy"] {
             let (res, inj) = provision(&lib, &cfg, &cwd_path, provider, root.path());
@@ -1021,7 +1065,9 @@ mod tests {
             let bundle = bundle_of(&root, provider, &cwd_path);
             assert!(bundle.is_dir(), "{provider} bundle missing");
             assert!(
-                inj.args.iter().any(|a| a == &format!("--add-dir={}", bundle.display())),
+                inj.args
+                    .iter()
+                    .any(|a| a == &format!("--add-dir={}", bundle.display())),
                 "{provider} injection missing --add-dir: {:?}",
                 inj.args
             );
@@ -1033,8 +1079,12 @@ mod tests {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Be terse.").unwrap();
-        lib.put_skill("triage", "---\ndescription: d\n---\nskill body A").unwrap();
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        lib.put_skill("triage", "---\ndescription: d\n---\nskill body A")
+            .unwrap();
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
 
         let (_res, inj) = provision(&lib, &cfg, &cwd_path, "claude", root.path());
         let bundle = bundle_of(&root, "claude", &cwd_path);
@@ -1049,10 +1099,18 @@ mod tests {
         assert!(bundle.join("settings.json").is_file());
 
         // Launch flags: --add-dir + --append-system-prompt-file + --settings.
-        assert!(inj.args.iter().any(|a| a == &format!("--add-dir={}", bundle.display())));
-        assert!(inj.args.iter().any(|a| a.starts_with("--append-system-prompt-file=")
-            && a.ends_with("CONTEXT.md")));
-        assert!(inj.args.iter().any(|a| a.starts_with("--settings=") && a.ends_with("settings.json")));
+        assert!(inj
+            .args
+            .iter()
+            .any(|a| a == &format!("--add-dir={}", bundle.display())));
+        assert!(inj
+            .args
+            .iter()
+            .any(|a| a.starts_with("--append-system-prompt-file=") && a.ends_with("CONTEXT.md")));
+        assert!(inj
+            .args
+            .iter()
+            .any(|a| a.starts_with("--settings=") && a.ends_with("settings.json")));
     }
 
     #[test]
@@ -1060,15 +1118,21 @@ mod tests {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Gemini persona.").unwrap();
-        lib.put_skill("triage", "---\ndescription: d\n---\nbody").unwrap();
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        lib.put_skill("triage", "---\ndescription: d\n---\nbody")
+            .unwrap();
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
 
         let (_res, inj) = provision(&lib, &cfg, &cwd_path, "agy", root.path());
         let bundle = bundle_of(&root, "agy", &cwd_path);
 
         // agy auto-loads AGENTS.md from --add-dir and scans .agents/skills.
         assert!(bundle.join("AGENTS.md").is_file());
-        assert!(fs::read_to_string(bundle.join("AGENTS.md")).unwrap().contains("Gemini persona."));
+        assert!(fs::read_to_string(bundle.join("AGENTS.md"))
+            .unwrap()
+            .contains("Gemini persona."));
         assert!(bundle.join(".agents/skills/triage/SKILL.md").is_file());
         // Only --add-dir is needed (no system-prompt flag).
         assert_eq!(inj.args, vec![format!("--add-dir={}", bundle.display())]);
@@ -1085,7 +1149,10 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
         let (res, inj) = provision(&lib, &cfg, &cwd_path, "codex", root.path());
         assert!(!res.skipped);
         let bundle = bundle_of(&root, "codex", &cwd_path);
@@ -1098,7 +1165,10 @@ mod tests {
         assert!(ctx.contains("### triage"));
         assert!(ctx.contains("Triage incoming tickets"));
         let skill_md = bundle.join("codex-home/skills/triage/SKILL.md");
-        assert!(ctx.contains(&skill_md.display().to_string()), "index points at the skill file");
+        assert!(
+            ctx.contains(&skill_md.display().to_string()),
+            "index points at the skill file"
+        );
         assert!(!ctx.contains("SKILL BODY ALPHA"));
 
         // The full body is materialized as a file the agent reads on demand.
@@ -1113,7 +1183,10 @@ mod tests {
 
         // Injection: a shadow CODEX_HOME makes bundle skills native, while
         // --add-dir grants access and developer_instructions carries context.
-        assert!(inj.args.iter().any(|a| a == &format!("--add-dir={}", bundle.display())));
+        assert!(inj
+            .args
+            .iter()
+            .any(|a| a == &format!("--add-dir={}", bundle.display())));
         assert_eq!(
             inj.env,
             vec![(
@@ -1189,12 +1262,25 @@ mod tests {
         let cwd_path = cwd.path().to_string_lossy().into_owned();
 
         // Provision twice — the second run must not duplicate Otto's groups.
-        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
-        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
+        provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
+        provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
 
         let bundle = bundle_of(&root, "claude", &cwd_path);
         let doc: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(bundle.join("settings.json")).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(bundle.join("settings.json")).unwrap())
+                .unwrap();
 
         let post = doc["hooks"]["PostToolUse"].as_array().unwrap();
         let otto_groups = post
@@ -1219,7 +1305,13 @@ mod tests {
         let skills_dir = bundle_of(&root, "claude", &cwd_path).join(".claude/skills");
 
         // First run: both active.
-        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
+        provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
         assert!(skills_dir.join("triage/SKILL.md").exists());
         assert!(skills_dir.join("router/SKILL.md").exists());
 
@@ -1231,7 +1323,10 @@ mod tests {
         provision(&lib, &cfg_one, &cwd_path, "claude", root.path());
         assert!(skills_dir.join("triage/SKILL.md").exists());
         assert!(!skills_dir.join("router").exists());
-        assert_eq!(merge::read_manifest(&skills_dir), vec!["triage".to_string()]);
+        assert_eq!(
+            merge::read_manifest(&skills_dir),
+            vec!["triage".to_string()]
+        );
     }
 
     #[test]
@@ -1245,15 +1340,30 @@ mod tests {
         fs::create_dir_all(&foreign).unwrap();
         fs::write(foreign.join("SKILL.md"), "mine").unwrap();
 
-        provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
-        assert!(foreign.join("SKILL.md").exists(), "unmanaged skill survives reconcile");
+        provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
+        assert!(
+            foreign.join("SKILL.md").exists(),
+            "unmanaged skill survives reconcile"
+        );
     }
 
     #[test]
     fn unknown_provider_is_skipped() {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
-        let (res, inj) = provision(&lib, &WorkspaceContextConfig::default(), &cwd_path, "shell", root.path());
+        let (res, inj) = provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "shell",
+            root.path(),
+        );
         assert!(res.skipped);
         assert!(res.files_written.is_empty());
         assert_eq!(res.provider, "shell");
@@ -1267,9 +1377,13 @@ mod tests {
         lib.put_soul("global", "Default persona.").unwrap();
         lib.set_default_soul("global").unwrap();
 
-        let cfg = WorkspaceContextConfig { soul: None, ..Default::default() };
+        let cfg = WorkspaceContextConfig {
+            soul: None,
+            ..Default::default()
+        };
         provision(&lib, &cfg, &cwd_path, "codex", root.path());
-        let ctx = fs::read_to_string(bundle_of(&root, "codex", &cwd_path).join("CONTEXT.md")).unwrap();
+        let ctx =
+            fs::read_to_string(bundle_of(&root, "codex", &cwd_path).join("CONTEXT.md")).unwrap();
         assert!(ctx.contains("Default persona."));
     }
 
@@ -1277,10 +1391,16 @@ mod tests {
     fn enforce_line_budget_caps_oversized_blocks() {
         // A pure check of the enforcer: any oversized block is cut to the cap
         // with a visible marker, and the head (highest-priority content) survives.
-        let big = (0..5000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..5000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let capped = enforce_line_budget(big);
         let n = capped.lines().count();
-        assert!(n <= MAX_CONTEXT_LINES, "block has {n} lines, over the {MAX_CONTEXT_LINES} cap");
+        assert!(
+            n <= MAX_CONTEXT_LINES,
+            "block has {n} lines, over the {MAX_CONTEXT_LINES} cap"
+        );
         assert!(capped.contains("line 0"), "head is preserved");
         assert!(!capped.contains("line 4999"), "the tail is dropped");
         assert!(capped.contains("Otto trimmed"), "truncation marker present");
@@ -1300,7 +1420,10 @@ mod tests {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Persona.").unwrap();
-        let huge = (0..4000).map(|i| format!("rule {i}")).collect::<Vec<_>>().join("\n");
+        let huge = (0..4000)
+            .map(|i| format!("rule {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let cfg = WorkspaceContextConfig {
             soul: Some("otto".into()),
             extra_context_md: huge,
@@ -1312,9 +1435,18 @@ mod tests {
             let bundle = bundle_of(&root, provider, &cwd_path);
             let ctx = fs::read_to_string(bundle.join(context_file_name(provider))).unwrap();
             let n = ctx.lines().count();
-            assert!(n <= MAX_CONTEXT_LINES, "{provider} injected {n} lines, over the cap");
-            assert!(ctx.contains("## Soul"), "{provider} keeps the soul at the head");
-            assert!(ctx.contains("Otto trimmed"), "{provider} carries the truncation marker");
+            assert!(
+                n <= MAX_CONTEXT_LINES,
+                "{provider} injected {n} lines, over the cap"
+            );
+            assert!(
+                ctx.contains("## Soul"),
+                "{provider} keeps the soul at the head"
+            );
+            assert!(
+                ctx.contains("Otto trimmed"),
+                "{provider} carries the truncation marker"
+            );
         }
     }
 
@@ -1329,7 +1461,10 @@ mod tests {
         fs::write(cwd.path().join("b.rs"), "fn b() { shared(); }\n").unwrap();
 
         // Disabled (default) → no repo map.
-        let off = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        let off = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
         provision(&lib, &off, &cwd_path, "claude", root.path());
         let ctx_off = fs::read_to_string(
             bundle_of(&root, "claude", &cwd_path).join(context_file_name("claude")),
@@ -1348,8 +1483,14 @@ mod tests {
             bundle_of(&root, "claude", &cwd_path).join(context_file_name("claude")),
         )
         .unwrap();
-        assert!(ctx_on.contains("## Repo Map"), "repo map section present:\n{ctx_on}");
-        assert!(ctx_on.contains("shared"), "repo map names the referenced symbol");
+        assert!(
+            ctx_on.contains("## Repo Map"),
+            "repo map section present:\n{ctx_on}"
+        );
+        assert!(
+            ctx_on.contains("shared"),
+            "repo map names the referenced symbol"
+        );
         assert!(ctx_on.lines().count() <= MAX_CONTEXT_LINES);
     }
 
@@ -1358,10 +1499,15 @@ mod tests {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Persona.").unwrap();
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
 
         // Before any provision there is no bundle → empty injection.
-        assert!(resume_injection(root.path(), &cwd_path, "claude").args.is_empty());
+        assert!(resume_injection(root.path(), &cwd_path, "claude")
+            .args
+            .is_empty());
 
         // After provision, resume reconstructs the same launch flags from disk.
         let (_res, fresh) = provision(&lib, &cfg, &cwd_path, "claude", root.path());
@@ -1377,7 +1523,13 @@ mod tests {
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_skill("triage", "A").unwrap();
 
-        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
+        let p = preview(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
         assert!(!p.skipped);
         // Nothing on disk — not in the cwd, not in the bundle root.
         assert_clean_cwd(cwd.path());
@@ -1394,13 +1546,17 @@ mod tests {
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_soul("otto", "Persona.").unwrap();
         lib.put_skill("triage", "BODY").unwrap();
-        let cfg = WorkspaceContextConfig { soul: Some("otto".into()), ..Default::default() };
+        let cfg = WorkspaceContextConfig {
+            soul: Some("otto".into()),
+            ..Default::default()
+        };
 
         let p = preview(&lib, &cfg, &cwd_path, "claude", root.path());
         let (res, _inj) = provision(&lib, &cfg, &cwd_path, "claude", root.path());
 
         // The preview's instruction content equals the bytes written to the bundle.
-        let ctx = fs::read_to_string(bundle_of(&root, "claude", &cwd_path).join("CONTEXT.md")).unwrap();
+        let ctx =
+            fs::read_to_string(bundle_of(&root, "claude", &cwd_path).join("CONTEXT.md")).unwrap();
         assert_eq!(p.generated_instructions, ctx);
         assert_eq!(p.instructions_file_name.as_deref(), Some("CONTEXT.md"));
 
@@ -1423,7 +1579,13 @@ mod tests {
         let cwd_path = cwd.path().to_string_lossy().into_owned();
         lib.put_skill("triage", "A").unwrap();
 
-        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
+        let p = preview(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
         for f in &p.files {
             match f.kind.as_str() {
                 "hooks" => assert_eq!(f.enforcement, ContextEnforcement::Enforced),
@@ -1437,7 +1599,13 @@ mod tests {
     fn preview_skips_shell() {
         let (_l, cwd, root, lib) = setup();
         let cwd_path = cwd.path().to_string_lossy().into_owned();
-        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "shell", root.path());
+        let p = preview(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "shell",
+            root.path(),
+        );
         assert!(p.skipped);
         assert!(p.files.is_empty());
     }
@@ -1452,7 +1620,13 @@ mod tests {
         fs::write(skill_dir.join("SKILL.md"), "skill md").unwrap();
         fs::write(skill_dir.join("references").join("ref.md"), "ref body").unwrap();
 
-        let p = preview(&lib, &WorkspaceContextConfig::default(), &cwd_path, "claude", root.path());
+        let p = preview(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "claude",
+            root.path(),
+        );
         let kinds: Vec<&str> = p.files.iter().map(|f| f.kind.as_str()).collect();
         assert!(kinds.contains(&"skill"), "SKILL.md described");
         assert!(kinds.contains(&"skill_asset"), "asset described");

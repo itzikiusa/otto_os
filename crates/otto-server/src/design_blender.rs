@@ -663,12 +663,18 @@ mod tests {
         job_upsert(&reg, mk("j1", "a1", None));
         job_upsert(&reg, mk("j2", "a2", Some(Utc::now())));
         assert!(job_in_flight_for(&reg, &"a1".to_string()));
-        assert!(!job_in_flight_for(&reg, &"a2".to_string()), "finished job is not in flight");
+        assert!(
+            !job_in_flight_for(&reg, &"a2".to_string()),
+            "finished job is not in flight"
+        );
         assert!(!job_in_flight_for(&reg, &"a3".to_string()));
         // Permits: exactly MAX_CONCURRENT_RENDERS, released on drop.
         let p1 = reg.render_permits.clone().try_acquire_owned().unwrap();
         let p2 = reg.render_permits.clone().try_acquire_owned().unwrap();
-        assert!(reg.render_permits.clone().try_acquire_owned().is_err(), "third render rejected");
+        assert!(
+            reg.render_permits.clone().try_acquire_owned().is_err(),
+            "third render rejected"
+        );
         drop(p1);
         assert!(reg.render_permits.clone().try_acquire_owned().is_ok());
         drop(p2);

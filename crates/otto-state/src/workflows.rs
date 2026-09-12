@@ -58,8 +58,8 @@ fn row_to_version(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowVersion> {
 fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     let nodes: Vec<NodeRunState> = serde_json::from_str(&r.get::<String, _>("nodes_json"))
         .map_err(|e| Error::Internal(format!("bad run nodes: {e}")))?;
-    let input: serde_json::Value = serde_json::from_str(&r.get::<String, _>("input_json"))
-        .unwrap_or(serde_json::Value::Null);
+    let input: serde_json::Value =
+        serde_json::from_str(&r.get::<String, _>("input_json")).unwrap_or(serde_json::Value::Null);
     let finished: Option<String> = r.get("finished_at");
     let approved_at: Option<String> = r.try_get("approved_at").ok().flatten();
     let waiting: i64 = r.try_get("waiting_approval").unwrap_or(0);
@@ -174,11 +174,12 @@ impl WorkflowsRepo {
     }
 
     pub async fn list(&self, ws: &Id) -> Result<Vec<Workflow>> {
-        let rows = sqlx::query("SELECT * FROM workflows WHERE workspace_id = ? ORDER BY updated_at DESC")
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("workflows"))?;
+        let rows =
+            sqlx::query("SELECT * FROM workflows WHERE workspace_id = ? ORDER BY updated_at DESC")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("workflows"))?;
         rows.iter().map(row_to_workflow).collect()
     }
 
@@ -603,14 +604,13 @@ impl WorkflowsRepo {
         workflow_id: &Id,
         version: i64,
     ) -> Result<Option<WorkflowVersion>> {
-        let row = sqlx::query(
-            "SELECT * FROM workflow_versions WHERE workflow_id = ? AND version = ?",
-        )
-        .bind(workflow_id)
-        .bind(version)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(dberr("get version"))?;
+        let row =
+            sqlx::query("SELECT * FROM workflow_versions WHERE workflow_id = ? AND version = ?")
+                .bind(workflow_id)
+                .bind(version)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("get version"))?;
         row.map(|r| row_to_version(&r)).transpose()
     }
 
@@ -669,7 +669,11 @@ impl WorkflowsRepo {
     ) -> Result<i64> {
         let nodes_json =
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
-        let finished_at = if finished { Some(fmt(Utc::now())) } else { None };
+        let finished_at = if finished {
+            Some(fmt(Utc::now()))
+        } else {
+            None
+        };
         let rev: i64 = sqlx::query_scalar(
             // A terminal write (finished) also clears the persisted re-entry
             // scope — it only ever describes an IN-FLIGHT (re-)entry.
@@ -784,9 +788,19 @@ mod tests {
         .unwrap();
         let v = repo.bump_version(&wf.id).await.unwrap();
         assert_eq!(v, 2);
-        repo.snapshot_version(&wf.id, v, "WF", "desc", "", &g2, "edited graph", "resume", &"u1".into())
-            .await
-            .unwrap();
+        repo.snapshot_version(
+            &wf.id,
+            v,
+            "WF",
+            "desc",
+            "",
+            &g2,
+            "edited graph",
+            "resume",
+            &"u1".into(),
+        )
+        .await
+        .unwrap();
         assert_eq!(repo.current_version(&wf.id).await.unwrap(), 2);
 
         let versions = repo.list_versions(&wf.id).await.unwrap();
@@ -803,18 +817,25 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &g, &"u1".into())
+            .await
+            .unwrap();
         let run = repo
             .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
             .await
             .unwrap();
 
         // Live run → Conflict (the engine loop owns it).
-        repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
         assert!(repo.reopen_run(&run.id).await.is_err());
 
         // Finished (error) run → reopens to pending with error/finished_at cleared.
-        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true).await.unwrap();
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true)
+            .await
+            .unwrap();
         repo.reopen_run(&run.id).await.unwrap();
         let r = repo.get_run(&run.id).await.unwrap();
         assert_eq!(r.status, RunStatus::Pending);
@@ -827,12 +848,17 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &g, &"u1".into())
+            .await
+            .unwrap();
         let mk = || repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None);
 
         // r1: EXECUTING when the daemon died → must fail.
         let r1 = mk().await.unwrap();
-        repo.update_run(&r1.id, RunStatus::Running, &[], None, false).await.unwrap();
+        repo.update_run(&r1.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
         // r2: fresh pending (queued behind the run gate) → must SURVIVE.
         let r2 = mk().await.unwrap();
         // r3: a reopened retry-a-step (pending but carrying node progress) —
@@ -850,14 +876,19 @@ mod tests {
             sessions: vec![],
             activity: None,
         };
-        repo.update_run(&r3.id, RunStatus::Error, &[node], Some("boom"), true).await.unwrap();
+        repo.update_run(&r3.id, RunStatus::Error, &[node], Some("boom"), true)
+            .await
+            .unwrap();
         repo.reopen_run(&r3.id).await.unwrap();
 
         assert_eq!(repo.fail_interrupted_runs("interrupted").await.unwrap(), 2);
         assert_eq!(repo.get_run(&r1.id).await.unwrap().status, RunStatus::Error);
         assert_eq!(repo.get_run(&r3.id).await.unwrap().status, RunStatus::Error);
         // The queued run is untouched and is exactly what re-enqueues.
-        assert_eq!(repo.get_run(&r2.id).await.unwrap().status, RunStatus::Pending);
+        assert_eq!(
+            repo.get_run(&r2.id).await.unwrap().status,
+            RunStatus::Pending
+        );
         assert_eq!(repo.queued_run_ids().await.unwrap(), vec![r2.id.clone()]);
     }
 
@@ -866,12 +897,29 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &g, &"u1".into())
+            .await
+            .unwrap();
         let by = "user-b".to_string();
-        let r = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, Some(&by)).await.unwrap();
+        let r = repo
+            .create_run(
+                &wf.id,
+                &wf.workspace_id,
+                &serde_json::Value::Null,
+                Some(&by),
+            )
+            .await
+            .unwrap();
         assert_eq!(r.created_by.as_deref(), Some("user-b"));
-        assert_eq!(repo.get_run(&r.id).await.unwrap().created_by.as_deref(), Some("user-b"));
-        let t = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
+        assert_eq!(
+            repo.get_run(&r.id).await.unwrap().created_by.as_deref(),
+            Some("user-b")
+        );
+        let t = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
         assert!(t.created_by.is_none(), "trigger runs carry no starter");
     }
 
@@ -880,15 +928,32 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
-        let a = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
-        let b = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
-        let c = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
+        let wf = repo
+            .create(&"ws1".into(), "WF", "", "", &g, &"u1".into())
+            .await
+            .unwrap();
+        let a = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        let b = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        let c = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
         // A run that already started is not queued.
-        repo.update_run(&b.id, RunStatus::Running, &[], None, false).await.unwrap();
+        repo.update_run(&b.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
         // Same-timestamp rows tiebreak on id; ULIDs are creation-ordered, so
         // FIFO order holds either way.
-        assert_eq!(repo.queued_run_ids().await.unwrap(), vec![a.id.clone(), c.id.clone()]);
+        assert_eq!(
+            repo.queued_run_ids().await.unwrap(),
+            vec![a.id.clone(), c.id.clone()]
+        );
     }
 
     #[tokio::test]
@@ -896,17 +961,44 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
-        let a = repo.create(&"wsA".into(), "Write tests", "", "", &g, &"u".into()).await.unwrap();
-        let b = repo.create(&"wsB".into(), "Write tests", "", "", &g, &"u".into()).await.unwrap();
+        let a = repo
+            .create(&"wsA".into(), "Write tests", "", "", &g, &"u".into())
+            .await
+            .unwrap();
+        let b = repo
+            .create(&"wsB".into(), "Write tests", "", "", &g, &"u".into())
+            .await
+            .unwrap();
 
         // Global resolution finds it from a third workspace; case-insensitive.
-        let any = repo.find_by_name("write TESTS", &"wsC".into()).await.unwrap();
+        let any = repo
+            .find_by_name("write TESTS", &"wsC".into())
+            .await
+            .unwrap();
         assert!(any.is_some(), "resolves across all workspaces");
 
         // Ties prefer the requested workspace.
-        assert_eq!(repo.find_by_name("Write tests", &"wsA".into()).await.unwrap().unwrap().id, a.id);
-        assert_eq!(repo.find_by_name("Write tests", &"wsB".into()).await.unwrap().unwrap().id, b.id);
-        assert!(repo.find_by_name("nope", &"wsA".into()).await.unwrap().is_none());
+        assert_eq!(
+            repo.find_by_name("Write tests", &"wsA".into())
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            a.id
+        );
+        assert_eq!(
+            repo.find_by_name("Write tests", &"wsB".into())
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            b.id
+        );
+        assert!(repo
+            .find_by_name("nope", &"wsA".into())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -915,11 +1007,24 @@ mod tests {
         let repo = WorkflowsRepo::new(pool);
         let ws: Id = "ws1".into();
         let wf = repo
-            .create(&ws, "generic", "d", "FOLLOW THE RULES", &WorkflowGraph { nodes: vec![], edges: vec![] }, &"u1".into())
+            .create(
+                &ws,
+                "generic",
+                "d",
+                "FOLLOW THE RULES",
+                &WorkflowGraph {
+                    nodes: vec![],
+                    edges: vec![],
+                },
+                &"u1".into(),
+            )
             .await
             .unwrap();
         assert_eq!(wf.instructions, "FOLLOW THE RULES");
-        let up = repo.update(&wf.id, None, None, Some("v2 rules"), None, None).await.unwrap();
+        let up = repo
+            .update(&wf.id, None, None, Some("v2 rules"), None, None)
+            .await
+            .unwrap();
         assert_eq!(up.instructions, "v2 rules");
         let versions = repo.list_versions(&wf.id).await.unwrap();
         assert_eq!(versions.last().unwrap().instructions, "FOLLOW THE RULES"); // v1 snapshot
@@ -930,7 +1035,14 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let wf = repo
-            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
             .await
             .unwrap();
 
@@ -954,7 +1066,14 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let wf = repo
-            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
             .await
             .unwrap();
         let run = repo
@@ -964,8 +1083,14 @@ mod tests {
         assert_eq!(run.rev, 0, "fresh run starts at rev 0");
 
         // Every progress write returns the next rev, and get_run round-trips it.
-        let r1 = repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
-        let r2 = repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        let r1 = repo
+            .update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
+        let r2 = repo
+            .update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
         let r3 = repo
             .update_run(&run.id, RunStatus::Success, &[], None, true)
             .await
@@ -981,7 +1106,14 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let wf = repo
-            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
             .await
             .unwrap();
         let run = repo
@@ -990,7 +1122,9 @@ mod tests {
             .unwrap();
 
         // Engine marks the run Running, then the API cancels it (terminal write).
-        repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
         repo.update_run(&run.id, RunStatus::Canceled, &[], Some("canceled"), true)
             .await
             .unwrap();
@@ -1000,7 +1134,15 @@ mod tests {
         // would have clobbered it back to Running (the bug this fixes).
         let rev = repo.update_run_progress(&run.id, &[]).await.unwrap();
         let got = repo.get_run(&run.id).await.unwrap();
-        assert_eq!(got.status, RunStatus::Canceled, "progress write must not resurrect a canceled run");
-        assert_eq!((rev, got.rev), (3, 3), "progress write still bumps + round-trips the monotonic rev");
+        assert_eq!(
+            got.status,
+            RunStatus::Canceled,
+            "progress write must not resurrect a canceled run"
+        );
+        assert_eq!(
+            (rev, got.rev),
+            (3, 3),
+            "progress write still bumps + round-trips the monotonic rev"
+        );
     }
 }

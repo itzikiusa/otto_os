@@ -165,8 +165,14 @@ mod tests {
         // Cache-read and cache-write must contribute non-zero cost.
         let read_only = estimate_cost("claude-opus-4-8", 0, 0, 1_000_000, 0);
         let write_only = estimate_cost("claude-opus-4-8", 0, 0, 0, 1_000_000);
-        assert!((read_only - 0.5).abs() < 1e-9, "cache read unpriced: {read_only}");
-        assert!((write_only - 6.25).abs() < 1e-9, "cache write unpriced: {write_only}");
+        assert!(
+            (read_only - 0.5).abs() < 1e-9,
+            "cache read unpriced: {read_only}"
+        );
+        assert!(
+            (write_only - 6.25).abs() < 1e-9,
+            "cache write unpriced: {write_only}"
+        );
         // Cache write is the dearer of the two (1.25× vs 0.1× input).
         assert!(write_only > read_only);
     }

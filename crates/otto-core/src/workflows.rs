@@ -35,7 +35,11 @@ fn default_retry_factor() -> f64 {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { max_attempts: 0, backoff_ms: 0, factor: 2.0 }
+        Self {
+            max_attempts: 0,
+            backoff_ms: 0,
+            factor: 2.0,
+        }
     }
 }
 

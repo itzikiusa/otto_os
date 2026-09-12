@@ -362,7 +362,12 @@ async fn test_account<S: AwsCtx>(
     let mut result = AwsService::from_ctx(&ctx).test(&id).await?;
     if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
         result.identity = None;
-        result.message = if result.ok { "Connection succeeded" } else { "Connection failed" }.into();
+        result.message = if result.ok {
+            "Connection succeeded"
+        } else {
+            "Connection failed"
+        }
+        .into();
     }
     Ok(Json(result))
 }

@@ -37,8 +37,16 @@ pub const MAX_ROWS: u16 = 200;
 pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
     let c = cols.unwrap_or(DEFAULT_COLS);
     let r = rows.unwrap_or(DEFAULT_ROWS);
-    let c = if (MIN_COLS..=MAX_COLS).contains(&c) { c } else { DEFAULT_COLS };
-    let r = if (MIN_ROWS..=MAX_ROWS).contains(&r) { r } else { DEFAULT_ROWS };
+    let c = if (MIN_COLS..=MAX_COLS).contains(&c) {
+        c
+    } else {
+        DEFAULT_COLS
+    };
+    let r = if (MIN_ROWS..=MAX_ROWS).contains(&r) {
+        r
+    } else {
+        DEFAULT_ROWS
+    };
     (c, r)
 }
 /// Capacity of the output broadcast channel (chunks).
@@ -167,7 +175,11 @@ impl PtyHandle {
         // requested grid size so the emulator agrees with the PTY from the
         // very first byte — avoids a spurious SIGWINCH on reconnect when the
         // client echoes back the same dimensions we already reported.
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            rows,
+            cols,
+            EMULATOR_SCROLLBACK_LINES,
+        )));
         let epoch = Instant::now();
         static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
         let spawn_seq = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -519,7 +531,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(gone, "child pid {pid} still alive after dropping the handle");
+        assert!(
+            gone,
+            "child pid {pid} still alive after dropping the handle"
+        );
     }
 
     #[tokio::test]
@@ -757,7 +772,10 @@ mod tests {
             copies, 1,
             "3J must wipe the previous transcript from scrollback; snapshot holds {copies} copies"
         );
-        assert!(snap.contains("TSCPT_0040"), "latest transcript tail missing");
+        assert!(
+            snap.contains("TSCPT_0040"),
+            "latest transcript tail missing"
+        );
     }
 
     /// Drive a PTY to completion and return the history-inclusive snapshot
@@ -818,8 +836,8 @@ mod tests {
         p.process(&[b"A".repeat(200), b"\r\n$ ".to_vec()].concat());
         p.screen_mut().set_size(10, 40);
         let mut text = String::new();
-        for line in String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100))
-            .split("\r\n")
+        for line in
+            String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100)).split("\r\n")
         {
             text.push_str(line.trim_end_matches(['\u{1b}', '[', '0', 'm']));
         }
@@ -827,7 +845,10 @@ mod tests {
         let count = text.chars().filter(|&c| c == 'A').count();
         assert_eq!(count, 200, "narrowing resize lost soft-wrapped content");
         // prompt survives at the cursor line
-        assert!(p.screen().contents().contains("$ "), "prompt lost on narrow");
+        assert!(
+            p.screen().contents().contains("$ "),
+            "prompt lost on narrow"
+        );
     }
 
     #[test]
@@ -909,7 +930,10 @@ mod tests {
         );
         // pushed-off top rows live in scrollback, not the void
         let hist = String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100)).into_owned();
-        assert!(hist.contains("line0"), "shrunk-off rows must enter scrollback");
+        assert!(
+            hist.contains("line0"),
+            "shrunk-off rows must enter scrollback"
+        );
     }
 
     #[test]

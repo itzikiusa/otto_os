@@ -17,7 +17,10 @@ fn run_sandboxed(pol: &SandboxPolicy, script: &str) -> (bool, String) {
         .args(args)
         .output()
         .expect("spawn sandbox-exec");
-    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -39,7 +42,10 @@ fn seatbelt_confines_writes_but_allows_reads_and_exec() {
 
     // 1. The profile must be accepted and a process must run + read at all.
     let (ok, err) = run_sandboxed(&pol, "echo alive");
-    assert!(ok, "process failed to run under the profile (profile rejected?): {err}");
+    assert!(
+        ok,
+        "process failed to run under the profile (profile rejected?): {err}"
+    );
 
     // 2. A write INSIDE a writable root succeeds.
     let inside_file = inside_real.join("ok.txt");
@@ -51,7 +57,10 @@ fn seatbelt_confines_writes_but_allows_reads_and_exec() {
     let outside_file = outside_real.join("nope.txt");
     let (ok, _) = run_sandboxed(&pol, &format!("echo no > {}", shell_quote(&outside_file)));
     assert!(!ok, "write outside the writable roots was NOT denied");
-    assert!(!outside_file.exists(), "file outside roots was created — sandbox leaked");
+    assert!(
+        !outside_file.exists(),
+        "file outside roots was created — sandbox leaked"
+    );
 
     // 4. Reading an arbitrary file outside the roots still works (read is global).
     let readable = outside_real.join("readme.txt");
@@ -91,8 +100,14 @@ fn seatbelt_allows_git_commit_in_the_workspace() {
         git = shell_quote(Path::new(&git)),
     );
     let (ok, err) = run_sandboxed(&pol, &script);
-    assert!(ok, "git commit inside the sandboxed workspace failed: {err}");
-    assert!(repo_real.join(".git").join("HEAD").exists(), "no .git created");
+    assert!(
+        ok,
+        "git commit inside the sandboxed workspace failed: {err}"
+    );
+    assert!(
+        repo_real.join(".git").join("HEAD").exists(),
+        "no .git created"
+    );
 }
 
 /// Minimal shell-quote for a path inside a `/bin/sh -c` script.
@@ -101,7 +116,11 @@ fn shell_quote(p: &Path) -> String {
 }
 
 fn which_git() -> Option<String> {
-    for cand in ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"] {
+    for cand in [
+        "/usr/bin/git",
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+    ] {
         if Path::new(cand).exists() {
             return Some(cand.to_string());
         }

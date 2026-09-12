@@ -29,9 +29,7 @@ use axum::Router;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
-use otto_core::domain::{
-    Capability, Feature, SessionKind, SessionStatus, User, Workspace,
-};
+use otto_core::domain::{Capability, Feature, SessionKind, SessionStatus, User, Workspace};
 use otto_server::feature_guard::feature_guard;
 use otto_server::routes::admin_sessions::{list_sessions, terminate, AdminSessionsCtx};
 use otto_sessions::{ProviderRegistry, SessionManager};
@@ -68,7 +66,10 @@ impl AdminSessionsCtx for TestCtx {
     }
     async fn audit_entry(&self, entry: NewAuditEntry) {
         let action = entry.action.clone();
-        if let Err(e) = otto_state::AuditRepo::new(self.pool.clone()).insert(entry).await {
+        if let Err(e) = otto_state::AuditRepo::new(self.pool.clone())
+            .insert(entry)
+            .await
+        {
             tracing::warn!(%action, "test: audit insert failed: {e}");
         }
     }
@@ -180,15 +181,10 @@ fn make_manager(pool: SqlitePool) -> Arc<SessionManager> {
 fn build_app(ctx: TestCtx, actor: User) -> Router {
     let protected = Router::new()
         .route("/admin/sessions", get(list_sessions::<TestCtx>))
-        .route(
-            "/admin/sessions/{id}/terminate",
-            post(terminate::<TestCtx>),
-        );
+        .route("/admin/sessions/{id}/terminate", post(terminate::<TestCtx>));
 
-    let protected = protected.route_layer(from_fn_with_state(
-        ctx.clone(),
-        feature_guard::<TestCtx>,
-    ));
+    let protected =
+        protected.route_layer(from_fn_with_state(ctx.clone(), feature_guard::<TestCtx>));
 
     let injected = Arc::new(actor);
     let protected = protected.layer(from_fn(move |mut req: Request, next: Next| {
@@ -202,11 +198,7 @@ fn build_app(ctx: TestCtx, actor: User) -> Router {
     Router::new().nest("/api/v1", protected).with_state(ctx)
 }
 
-async fn do_req(
-    app: &Router,
-    method: Method,
-    path: &str,
-) -> (StatusCode, serde_json::Value) {
+async fn do_req(app: &Router, method: Method, path: &str) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(method)
         .uri(path)
@@ -244,7 +236,11 @@ async fn users_admin_sees_other_users_sessions() {
     let app = build_app(ctx, admin);
 
     let (st, body) = do_req(&app, Method::GET, "/api/v1/admin/sessions").await;
-    assert_eq!(st, StatusCode::OK, "Users:Admin must read the overview: {body}");
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "Users:Admin must read the overview: {body}"
+    );
 
     let sessions = body["sessions"].as_array().expect("sessions array");
     let row = sessions
@@ -392,7 +388,10 @@ async fn terminate_kills_session_and_evicts_viewers() {
     );
 
     // The session is now exited (kill_session marks it; the row is kept).
-    let after = repo.get(&sid).await.expect("session row kept after terminate");
+    let after = repo
+        .get(&sid)
+        .await
+        .expect("session row kept after terminate");
     assert_eq!(
         after.status,
         SessionStatus::Exited,
@@ -413,10 +412,21 @@ async fn terminate_kills_session_and_evicts_viewers() {
         })
         .await
         .expect("list audit");
-    assert!(!entries.is_empty(), "session.terminated audit entry written");
+    assert!(
+        !entries.is_empty(),
+        "session.terminated audit entry written"
+    );
     let e = &entries[0];
-    assert_eq!(e.user_id.as_deref(), Some(admin.id.as_str()), "actor = admin");
-    assert_eq!(e.target.as_deref(), Some(sid.as_str()), "target = session id");
+    assert_eq!(
+        e.user_id.as_deref(),
+        Some(admin.id.as_str()),
+        "actor = admin"
+    );
+    assert_eq!(
+        e.target.as_deref(),
+        Some(sid.as_str()),
+        "target = session id"
+    );
     let detail = e.detail.as_ref().expect("audit detail");
     assert_eq!(
         detail.get("owner_id").and_then(|v| v.as_str()),

@@ -158,15 +158,13 @@ impl TriggersRepo {
         let new_enabled = enabled.unwrap_or(current.enabled);
         let spec_json = serde_json::to_string(&new_spec)
             .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
-        sqlx::query(
-            "UPDATE workflow_triggers SET spec_json = ?, enabled = ? WHERE id = ?",
-        )
-        .bind(&spec_json)
-        .bind(new_enabled as i64)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("update trigger"))?;
+        sqlx::query("UPDATE workflow_triggers SET spec_json = ?, enabled = ? WHERE id = ?")
+            .bind(&spec_json)
+            .bind(new_enabled as i64)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update trigger"))?;
 
         self.get(id).await
     }

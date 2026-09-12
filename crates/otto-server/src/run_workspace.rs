@@ -24,11 +24,7 @@ pub(crate) async fn provision_worktree(
     let git = LocalGit::new(&repo.path);
     let base_commit = git.rev_parse("HEAD").await?;
     let branch = format!("otto-run/{}", run.id);
-    let path = ctx
-        .data_dir
-        .join("otto-runs")
-        .join(&run.id)
-        .join("work");
+    let path = ctx.data_dir.join("otto-runs").join(&run.id).join("work");
     let path_str = path.to_string_lossy().to_string();
     git.worktree_add_if_absent(&path_str, &branch, &base_commit)
         .await?;

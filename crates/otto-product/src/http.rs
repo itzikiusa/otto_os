@@ -26,10 +26,10 @@ use serde::Deserialize;
 
 use crate::service::ProductService;
 use crate::types::{
-    BulkApproveTestcasesReq, CreateChildReq, NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq,
-    NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq, PublishTestsReq,
-    ReorderTestcasesReq, StorySwarmLink, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq,
-    UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
+    BulkApproveTestcasesReq, CreateChildReq, NewDraftReq, NewLearningReq, NewNoteReq,
+    NewQuestionReq, NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq,
+    PublishTestsReq, ReorderTestcasesReq, StorySwarmLink, UpdateDraftReq, UpdateLearningReq,
+    UpdateNoteReq, UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
 };
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,10 @@ pub fn router<S: ProductCtx>() -> Router<S> {
         // Versions (under-story collection + flat version item)
         .route("/product/stories/{sid}/versions", get(list_versions::<S>))
         .route("/product/versions/{vid}", get(get_version::<S>))
-        .route("/product/versions/{vid}/publish", post(publish_version::<S>))
+        .route(
+            "/product/versions/{vid}/publish",
+            post(publish_version::<S>),
+        )
         // Analyses (under-story collection + flat analysis item)
         .route("/product/stories/{sid}/analyses", get(list_analyses::<S>))
         .route("/product/analyses/{aid}", get(get_analysis::<S>))
@@ -217,7 +220,10 @@ pub fn router<S: ProductCtx>() -> Router<S> {
             "/product/stories/{sid}/questions",
             get(list_questions::<S>).post(create_question::<S>),
         )
-        .route("/product/stories/{sid}/questions/post", post(post_questions::<S>))
+        .route(
+            "/product/stories/{sid}/questions/post",
+            post(post_questions::<S>),
+        )
         .route(
             "/product/questions/{qid}",
             patch(update_question::<S>).delete(delete_question::<S>),
@@ -234,12 +240,18 @@ pub fn router<S: ProductCtx>() -> Router<S> {
         // Events
         .route("/product/stories/{sid}/events", get(list_events::<S>))
         // Testcases
-        .route("/product/stories/{sid}/testcases", get(list_testcase_runs::<S>))
+        .route(
+            "/product/stories/{sid}/testcases",
+            get(list_testcase_runs::<S>),
+        )
         .route("/product/testcases/{tid}", patch(update_testcase::<S>))
         // NOTE: /product/testcase-runs/{rid}/approve is registered in otto-server
         // (modules.rs) so it can trigger skill self-improvement. Registering it
         // here too would cause an axum duplicate-route panic at startup.
-        .route("/product/testcase-runs/{rid}/publish", post(publish_tests::<S>))
+        .route(
+            "/product/testcase-runs/{rid}/publish",
+            post(publish_tests::<S>),
+        )
         // Bulk-approve a selected subset of draft test cases within a run.
         .route(
             "/product/testcase-runs/{rid}/testcases/bulk-approve",
@@ -257,12 +269,12 @@ pub fn router<S: ProductCtx>() -> Router<S> {
             "/product/learnings/{lid}",
             patch(update_learning::<S>).delete(delete_learning::<S>),
         )
-        .route("/product/learnings/{lid}/accept", post(accept_learning::<S>))
-        // Drafts
         .route(
-            "/workspaces/{ws}/product/drafts",
-            post(create_draft::<S>),
+            "/product/learnings/{lid}/accept",
+            post(accept_learning::<S>),
         )
+        // Drafts
+        .route("/workspaces/{ws}/product/drafts", post(create_draft::<S>))
         // Draft body update
         .route(
             "/product/stories/{sid}/draft",
@@ -287,10 +299,7 @@ pub fn router<S: ProductCtx>() -> Router<S> {
             post(publish_as_story::<S>),
         )
         // Product↔Swarm closure: full swarm project view linked to a story.
-        .route(
-            "/product/stories/{sid}/swarm",
-            get(story_swarm_link::<S>),
-        )
+        .route("/product/stories/{sid}/swarm", get(story_swarm_link::<S>))
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +484,10 @@ async fn create_child<S: ProductCtx>(
         .create_child(
             &sid,
             &user.id,
-            req.title.as_deref().map(str::trim).filter(|t| !t.is_empty()),
+            req.title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty()),
             req.tree_kind.as_deref().unwrap_or("doc"),
             req.folder.as_deref().unwrap_or(""),
         )
@@ -1154,7 +1166,13 @@ async fn publish_as_story<S: ProductCtx>(
         .await?;
     let detail = ctx
         .product()
-        .publish_as_story(&sid, &req.account_id, &req.project_key, &req.issue_type, &user.id)
+        .publish_as_story(
+            &sid,
+            &req.account_id,
+            &req.project_key,
+            &req.issue_type,
+            &user.id,
+        )
         .await?;
     Ok(Json(detail).into_response())
 }

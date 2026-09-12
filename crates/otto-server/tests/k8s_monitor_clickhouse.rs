@@ -26,7 +26,11 @@ impl MonitorSink for EngineSink {
     fn exec<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<()>> {
         Box::pin(async move { self.0.exec_sql(sql).await })
     }
-    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> BoxFut<'a, otto_core::Result<()>> {
+    fn insert_ndjson<'a>(
+        &'a self,
+        table: &'a str,
+        ndjson: &'a str,
+    ) -> BoxFut<'a, otto_core::Result<()>> {
         Box::pin(async move { self.0.insert_ndjson(table, ndjson).await })
     }
     fn query_rows<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<Vec<Value>>> {
@@ -62,7 +66,10 @@ fn pod(name: &str, version: &str) -> PodSnap {
 fn s(metric: &str, labels: &[(&str, &str)], value: f64) -> Sample {
     Sample {
         metric: metric.into(),
-        labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        labels: labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         value,
     }
 }
@@ -84,7 +91,10 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
         tmp.path().to_path_buf(),
     )
     .await;
-    assert!(engine.wait_ready(Duration::from_secs(45)).await, "clickhouse did not come up");
+    assert!(
+        engine.wait_ready(Duration::from_secs(45)).await,
+        "clickhouse did not come up"
+    );
     let sink = EngineSink(engine.clone());
 
     // DDL (idempotent) + TTL alter + purge statements.
@@ -107,8 +117,22 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
     version_b.insert("version".to_string(), "1.0.1".to_string());
     let mut nd = String::new();
     for (p, labels) in [(&p1, &version_a), (&p2, &version_b)] {
-        nd.push_str(&samples_ndjson(cid, now, p, "app", &status_samples(p, now), &BTreeMap::new()));
-        nd.push_str(&samples_ndjson(cid, now, p, "app", &[s("mem_sys_bytes", &[], 200.0)], labels));
+        nd.push_str(&samples_ndjson(
+            cid,
+            now,
+            p,
+            "app",
+            &status_samples(p, now),
+            &BTreeMap::new(),
+        ));
+        nd.push_str(&samples_ndjson(
+            cid,
+            now,
+            p,
+            "app",
+            &[s("mem_sys_bytes", &[], 200.0)],
+            labels,
+        ));
         nd.push_str(&samples_ndjson(
             cid,
             now - chrono::Duration::minutes(5),
@@ -117,8 +141,16 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
             &[
                 s("http_requests_total", &[("code", "200")], 100.0),
                 s("http_requests_total", &[("code", "500")], 1.0),
-                s("http_request_duration_seconds_bucket", &[("le", "0.1")], 50.0),
-                s("http_request_duration_seconds_bucket", &[("le", "+Inf")], 60.0),
+                s(
+                    "http_request_duration_seconds_bucket",
+                    &[("le", "0.1")],
+                    50.0,
+                ),
+                s(
+                    "http_request_duration_seconds_bucket",
+                    &[("le", "+Inf")],
+                    60.0,
+                ),
             ],
             labels,
         ));
@@ -130,8 +162,16 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
             &[
                 s("http_requests_total", &[("code", "200")], 400.0),
                 s("http_requests_total", &[("code", "500")], 4.0),
-                s("http_request_duration_seconds_bucket", &[("le", "0.1")], 300.0),
-                s("http_request_duration_seconds_bucket", &[("le", "+Inf")], 360.0),
+                s(
+                    "http_request_duration_seconds_bucket",
+                    &[("le", "0.1")],
+                    300.0,
+                ),
+                s(
+                    "http_request_duration_seconds_bucket",
+                    &[("le", "+Inf")],
+                    360.0,
+                ),
             ],
             labels,
         ));
@@ -170,58 +210,131 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
             at: now.to_rfc3339(),
         },
     ];
-    sink.insert_ndjson("k8s_events", &events_ndjson(cid, now, &ev, &[], &Snapshot::new()))
-        .await
-        .unwrap();
+    sink.insert_ndjson(
+        "k8s_events",
+        &events_ndjson(cid, now, &ev, &[], &Snapshot::new()),
+    )
+    .await
+    .unwrap();
 
     let cids = vec![cid.to_string()];
     let win = chrono::Duration::hours(1);
     let secs = win.num_seconds();
 
-    let mem = sink.query_rows(&queries::latest_memory_sql(&cids, None, 900)).await.unwrap();
+    let mem = sink
+        .query_rows(&queries::latest_memory_sql(&cids, None, 900))
+        .await
+        .unwrap();
     assert_eq!(mem.len(), 2, "{mem:?}");
-    sink.query_rows(&queries::memory_between_sql(&cids, Some("shop"), secs + 900, secs - 900)).await.unwrap();
+    sink.query_rows(&queries::memory_between_sql(
+        &cids,
+        Some("shop"),
+        secs + 900,
+        secs - 900,
+    ))
+    .await
+    .unwrap();
 
-    let counts = sink.query_rows(&queries::restart_counts_sql(&cids, None, win)).await.unwrap();
-    assert!(counts.iter().any(|r| r["class"] == "oom" && r["n"].as_u64() == Some(1)), "{counts:?}");
+    let counts = sink
+        .query_rows(&queries::restart_counts_sql(&cids, None, win))
+        .await
+        .unwrap();
+    assert!(
+        counts
+            .iter()
+            .any(|r| r["class"] == "oom" && r["n"].as_u64() == Some(1)),
+        "{counts:?}"
+    );
 
-    let rates = sink.query_rows(&queries::request_rates_sql(&cids, None, secs, 0)).await.unwrap();
+    let rates = sink
+        .query_rows(&queries::request_rates_sql(&cids, None, secs, 0))
+        .await
+        .unwrap();
     assert_eq!(rates.len(), 1, "{rates:?}");
     let rps = rates[0]["rps"].as_f64().unwrap();
     assert!(rps > 0.0);
     assert!(rates[0]["err_rps"].as_f64().unwrap() > 0.0);
-    sink.query_rows(&queries::request_rates_sql(&cids, None, secs + 86_400, secs)).await.unwrap();
+    sink.query_rows(&queries::request_rates_sql(
+        &cids,
+        None,
+        secs + 86_400,
+        secs,
+    ))
+    .await
+    .unwrap();
 
-    let buckets = sink.query_rows(&queries::latency_buckets_sql(&cids, None, secs, 0)).await.unwrap();
+    let buckets = sink
+        .query_rows(&queries::latency_buckets_sql(&cids, None, secs, 0))
+        .await
+        .unwrap();
     let pairs: Vec<(String, f64)> = buckets
         .iter()
-        .map(|r| (r["le"].as_str().unwrap().to_string(), r["delta"].as_f64().unwrap()))
+        .map(|r| {
+            (
+                r["le"].as_str().unwrap().to_string(),
+                r["delta"].as_f64().unwrap(),
+            )
+        })
         .collect();
     assert!(queries::p95_from_buckets(&pairs).is_some(), "{buckets:?}");
-    sink.query_rows(&queries::latency_avg_sql(&cids, None, secs, 0)).await.unwrap();
+    sink.query_rows(&queries::latency_avg_sql(&cids, None, secs, 0))
+        .await
+        .unwrap();
 
-    let versions = sink.query_rows(&queries::versions_sql(&cids, None, 900)).await.unwrap();
+    let versions = sink
+        .query_rows(&queries::versions_sql(&cids, None, 900))
+        .await
+        .unwrap();
     assert_eq!(versions.len(), 2, "{versions:?}");
 
     let series = sink
-        .query_rows(&queries::series_sql(cid, "http_requests_total", Some("web"), None, win, 60, true))
+        .query_rows(&queries::series_sql(
+            cid,
+            "http_requests_total",
+            Some("web"),
+            None,
+            win,
+            60,
+            true,
+        ))
         .await
         .unwrap();
     assert!(!series.is_empty());
     let gauge = sink
-        .query_rows(&queries::series_sql(cid, "mem_sys_bytes", None, Some("web-a"), win, 60, false))
+        .query_rows(&queries::series_sql(
+            cid,
+            "mem_sys_bytes",
+            None,
+            Some("web-a"),
+            win,
+            60,
+            false,
+        ))
         .await
         .unwrap();
     assert_eq!(gauge.len(), 1);
     let spark = sink
-        .query_rows(&queries::workload_spark_sql(cid, None, &queries::MEMORY_GAUGES, win, 60, false))
+        .query_rows(&queries::workload_spark_sql(
+            cid,
+            None,
+            &queries::MEMORY_GAUGES,
+            win,
+            60,
+            false,
+        ))
         .await
         .unwrap();
     assert!(!spark.is_empty());
 
-    let events = sink.query_rows(&queries::events_sql(cid, win, None, None, 100)).await.unwrap();
+    let events = sink
+        .query_rows(&queries::events_sql(cid, win, None, None, 100))
+        .await
+        .unwrap();
     assert_eq!(events.len(), 2, "{events:?}");
-    let only_version = sink.query_rows(&queries::events_sql(cid, win, Some("version"), None, 100)).await.unwrap();
+    let only_version = sink
+        .query_rows(&queries::events_sql(cid, win, Some("version"), None, 100))
+        .await
+        .unwrap();
     assert_eq!(only_version.len(), 1);
     assert_eq!(only_version[0]["reason"], "1.0.0 → 1.0.1");
 
@@ -229,7 +342,9 @@ async fn every_query_builder_runs_on_a_real_clickhouse() {
     let mut snap = Snapshot::new();
     snap.insert("shop/web-a".into(), p1);
     snap.insert("shop/web-b".into(), p2);
-    let stats = health::workload_stats(&sink, cid, &snap, None, win).await.unwrap();
+    let stats = health::workload_stats(&sink, cid, &snap, None, win)
+        .await
+        .unwrap();
     assert_eq!(stats.len(), 1);
     let web = &stats[0];
     assert_eq!(web.pods, 2);

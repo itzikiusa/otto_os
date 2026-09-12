@@ -56,14 +56,8 @@ fn row_to_integration(row: &IntegrationRow) -> Integration {
         reply_instructions: row.reply_instructions.clone(),
         channel_id: row.channel_id.clone(),
         preferred_cli: row.preferred_cli.clone(),
-        has_bot_token: row
-            .bot_token_ref
-            .as_deref()
-            .is_some_and(|s| !s.is_empty()),
-        has_app_token: row
-            .app_token_ref
-            .as_deref()
-            .is_some_and(|s| !s.is_empty()),
+        has_bot_token: row.bot_token_ref.as_deref().is_some_and(|s| !s.is_empty()),
+        has_app_token: row.app_token_ref.as_deref().is_some_and(|s| !s.is_empty()),
         updated_at: row.updated_at,
     }
 }

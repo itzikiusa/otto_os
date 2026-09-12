@@ -2140,9 +2140,7 @@ async fn run_docs(
                         // barrier must never hang on an un-stickable slot).
                         let mut retried = false;
                         loop {
-                            if cancel.load(Ordering::Relaxed)
-                                || user_retries >= MAX_USER_RETRIES
-                            {
+                            if cancel.load(Ordering::Relaxed) || user_retries >= MAX_USER_RETRIES {
                                 break;
                             }
                             let stage_open = writers_stage_open(&reg, &run_id, i);

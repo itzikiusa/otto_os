@@ -216,7 +216,11 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         emit_task(ctx, &task.id).await;
 
         let is_leader = has_reports(ctx, &swarm.id, &agent.id).await;
-        let kind = if is_leader && !task.delegated { "planning" } else { "task" };
+        let kind = if is_leader && !task.delegated {
+            "planning"
+        } else {
+            "task"
+        };
         let run = match repo
             .create_run(NewRun {
                 swarm_id: swarm.id.clone(),
@@ -236,7 +240,13 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
                 // in_progress, and let the rest of the batch proceed.
                 tracing::warn!(task = %task.id, error = %e, "swarm: create_run failed; reverting task to todo");
                 let _ = repo
-                    .update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() })
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("todo".into()),
+                            ..Default::default()
+                        },
+                    )
                     .await;
                 emit_task(ctx, &task.id).await;
                 continue;
@@ -264,7 +274,11 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
 /// enqueued for the swarm; the runtime budget is measured from `run_started_at`
 /// (the last time the swarm went active).
 async fn budget_exceeded(ctx: &ServerCtx, swarm: &Swarm) -> Option<String> {
-    if let (None, None, None) = (swarm.max_total_runs, swarm.max_cost_usd, swarm.max_runtime_secs) {
+    if let (None, None, None) = (
+        swarm.max_total_runs,
+        swarm.max_cost_usd,
+        swarm.max_runtime_secs,
+    ) {
         return None;
     }
     let spend = ctx.swarm_repo.swarm_spend(&swarm.id).await.ok()?;
@@ -330,7 +344,10 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
 /// Keyword-overlap score of an agent's title+specialization against task text.
 pub(crate) fn agent_fit_score(a: &SwarmAgent, hay: &str) -> i32 {
     let mut s = 0;
-    for tok in format!("{} {}", a.title, a.specialization).to_lowercase().split_whitespace() {
+    for tok in format!("{} {}", a.title, a.specialization)
+        .to_lowercase()
+        .split_whitespace()
+    {
         if tok.len() >= 4 && hay.contains(tok) {
             s += 1;
         }
@@ -342,8 +359,15 @@ pub(crate) fn agent_fit_score(a: &SwarmAgent, hay: &str) -> i32 {
 /// time fallback so a task whose `assignee_title` didn't resolve still lands
 /// ASSIGNED — unassigned board items are a bug, not a state.
 async fn best_fit_agent_id(ctx: &ServerCtx, swarm_id: &str, hay: &str) -> Option<Id> {
-    let agents = ctx.swarm_repo.list_agents(&swarm_id.to_string()).await.ok()?;
-    let active: Vec<SwarmAgent> = agents.into_iter().filter(|a| a.status == "active").collect();
+    let agents = ctx
+        .swarm_repo
+        .list_agents(&swarm_id.to_string())
+        .await
+        .ok()?;
+    let active: Vec<SwarmAgent> = agents
+        .into_iter()
+        .filter(|a| a.status == "active")
+        .collect();
     let hay = hay.to_lowercase();
     active
         .iter()
@@ -364,7 +388,10 @@ async fn pick_agent(ctx: &ServerCtx, swarm: &Swarm, task: &SwarmTask) -> Option<
         }
     }
     let agents = repo.list_agents(&swarm.id).await.ok()?;
-    let active: Vec<SwarmAgent> = agents.into_iter().filter(|a| a.status == "active").collect();
+    let active: Vec<SwarmAgent> = agents
+        .into_iter()
+        .filter(|a| a.status == "active")
+        .collect();
     if active.is_empty() {
         return None;
     }
@@ -380,17 +407,28 @@ async fn has_reports(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> bool {
     ctx.swarm_repo
         .list_agents(&swarm_id.to_string())
         .await
-        .map(|all| all.iter().any(|a| a.reports_to.as_deref() == Some(agent_id)))
+        .map(|all| {
+            all.iter()
+                .any(|a| a.reports_to.as_deref() == Some(agent_id))
+        })
         .unwrap_or(false)
 }
 
 async fn resolve_agent_by_title(ctx: &ServerCtx, swarm_id: &str, title: &str) -> Option<Id> {
     let want = title.trim().to_lowercase();
-    let agents = ctx.swarm_repo.list_agents(&swarm_id.to_string()).await.ok()?;
+    let agents = ctx
+        .swarm_repo
+        .list_agents(&swarm_id.to_string())
+        .await
+        .ok()?;
     agents
         .iter()
         .find(|a| a.title.to_lowercase() == want)
-        .or_else(|| agents.iter().find(|a| a.title.to_lowercase().contains(&want) || want.contains(&a.title.to_lowercase())))
+        .or_else(|| {
+            agents.iter().find(|a| {
+                a.title.to_lowercase().contains(&want) || want.contains(&a.title.to_lowercase())
+            })
+        })
         .map(|a| a.id.clone())
 }
 
@@ -416,11 +454,24 @@ async fn route_result(
             block_for_attempts(ctx, task).await;
         } else {
             let _ = repo
-                .update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() })
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("todo".into()),
+                        ..Default::default()
+                    },
+                )
                 .await;
             emit_task(ctx, &task.id).await;
-            system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
-                &format!("Run for “{}” did not complete — will retry.", task.title)).await;
+            system_post(
+                ctx,
+                &task.swarm_id,
+                Some(&task.project_id),
+                Some(&task.id),
+                "status",
+                &format!("Run for “{}” did not complete — will retry.", task.title),
+            )
+            .await;
         }
         return;
     };
@@ -430,8 +481,15 @@ async fn route_result(
         if c.text.trim().is_empty() {
             continue;
         }
-        system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "concern",
-            &format!("[{}] {}", c.severity, c.text)).await;
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "concern",
+            &format!("[{}] {}", c.severity, c.text),
+        )
+        .await;
         let _ = ctx.events.send(Event::Notice {
             level: "warn".into(),
             title: "Swarm concern raised".into(),
@@ -443,15 +501,29 @@ async fn route_result(
     if run.kind == "planning" {
         if res.subtasks.is_empty() {
             // Leader produced nothing to delegate — let it act as an IC next time.
-            let _ = repo.update_task(&task.id, TaskPatch {
-                status: Some("todo".into()), delegated: Some(true), ..Default::default()
-            }).await;
+            let _ = repo
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("todo".into()),
+                        delegated: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await;
             emit_task(ctx, &task.id).await;
             return;
         }
-        let _ = repo.update_task(&task.id, TaskPatch {
-            status: Some("in_progress".into()), delegated: Some(true), ..Default::default()
-        }).await;
+        let _ = repo
+            .update_task(
+                &task.id,
+                TaskPatch {
+                    status: Some("in_progress".into()),
+                    delegated: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await;
         create_subtasks(ctx, task, &res.subtasks).await;
         emit_task(ctx, &task.id).await;
         return;
@@ -467,7 +539,10 @@ async fn route_result(
     // creating yet another task.
     let run_agent = repo.get_agent(&run.agent_id).await.ok();
     let manager_id = run_agent.as_ref().and_then(|a| a.reports_to.clone());
-    let agent_name = run_agent.as_ref().map(|a| a.name.clone()).unwrap_or_else(|| "an agent".into());
+    let agent_name = run_agent
+        .as_ref()
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "an agent".into());
     let hops = task_hops(task) + 1;
 
     // Subtasks from a normal task: managed ICs propose to their manager.
@@ -480,8 +555,15 @@ async fn route_result(
                     .map(|s| format!("- {}: {}\n", s.title, clip(&s.description, 160)))
                     .collect();
                 create_agent_task(
-                    ctx, task, run, hops,
-                    &format!("Triage proposal from {}: {}", agent_name, clip(&task.title, 50)),
+                    ctx,
+                    task,
+                    run,
+                    hops,
+                    &format!(
+                        "Triage proposal from {}: {}",
+                        agent_name,
+                        clip(&task.title, 50)
+                    ),
                     &format!(
                         "While working “{}”, an IC proposed new subtasks. As the manager, \
                          delegate the ones that serve the plan and DROP the rest.\n\n{listing}",
@@ -489,7 +571,8 @@ async fn route_result(
                     ),
                     Some(mid.clone()),
                     "proposal",
-                ).await;
+                )
+                .await;
             }
             Some(_) => escalate_chain(ctx, task, "subtask proposal").await,
             None => create_subtasks(ctx, task, &res.subtasks).await,
@@ -508,7 +591,10 @@ async fn route_result(
         match &manager_id {
             Some(mid) => {
                 create_agent_task(
-                    ctx, task, run, hops,
+                    ctx,
+                    task,
+                    run,
+                    hops,
                     &format!("Triage handoff → {}: {}", h.to_role, clip(&h.brief, 50)),
                     &format!(
                         "Handoff raised from “{}” aimed at “{}”. As the manager, decide: \
@@ -518,61 +604,103 @@ async fn route_result(
                     ),
                     Some(mid.clone()),
                     "handoff",
-                ).await;
+                )
+                .await;
             }
             None => {
                 let assignee = resolve_agent_by_title(ctx, &task.swarm_id, &h.to_role).await;
                 create_agent_task(
-                    ctx, task, run, hops,
+                    ctx,
+                    task,
+                    run,
+                    hops,
                     &format!("Handoff: {}", clip(&h.brief, 60)),
                     &h.brief.clone(),
                     assignee,
                     "handoff",
-                ).await;
+                )
+                .await;
             }
         }
     }
 
     // Apply the reported status to the task.
-    let artifact_ref = res.artifacts.iter().find_map(|a| a.path.clone().or_else(|| a.url.clone()));
+    let artifact_ref = res
+        .artifacts
+        .iter()
+        .find_map(|a| a.path.clone().or_else(|| a.url.clone()));
     match res.status.as_str() {
         "done" => {
             // If a review was requested, go to in_review and enqueue a review run
             // (human-review flow takes precedence over goal verification).
             if !res.reviews.is_empty() {
-                let _ = repo.update_task(&task.id, TaskPatch {
-                    status: Some("in_review".into()), result_ref: Some(artifact_ref), ..Default::default()
-                }).await;
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("in_review".into()),
+                            result_ref: Some(artifact_ref),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 enqueue_reviews(ctx, task, run, &res).await;
             } else if crate::swarm_verify::task_has_goals(ctx, task).await {
                 // Goals attached → the leader verifies each sequentially before the
                 // task is done + its worktree branch is merged (requirement 3).
                 // Persist the dev as the assignee so restart-recovery + the
                 // coordinator's per-agent lock can find it.
-                let _ = repo.update_task(&task.id, TaskPatch {
-                    status: Some("verifying".into()),
-                    result_ref: Some(artifact_ref),
-                    assignee_agent_id: Some(Some(run.agent_id.clone())),
-                    ..Default::default()
-                }).await;
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("verifying".into()),
+                            result_ref: Some(artifact_ref),
+                            assignee_agent_id: Some(Some(run.agent_id.clone())),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 emit_task(ctx, &task.id).await;
                 crate::swarm_verify::start_verification(ctx, task.clone(), run.agent_id.clone());
                 return; // controller drives the task to done/blocked + posts summary
             } else {
-                let _ = repo.update_task(&task.id, TaskPatch {
-                    status: Some("done".into()), result_ref: Some(artifact_ref), ..Default::default()
-                }).await;
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("done".into()),
+                            result_ref: Some(artifact_ref),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 complete_parent_if_done(ctx, task).await;
             }
         }
         "needs_review" => {
-            let _ = repo.update_task(&task.id, TaskPatch {
-                status: Some("in_review".into()), result_ref: Some(artifact_ref), ..Default::default()
-            }).await;
+            let _ = repo
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("in_review".into()),
+                        result_ref: Some(artifact_ref),
+                        ..Default::default()
+                    },
+                )
+                .await;
             enqueue_reviews(ctx, task, run, &res).await;
         }
         "blocked" => {
-            let _ = repo.update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() }).await;
+            let _ = repo
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("blocked".into()),
+                        ..Default::default()
+                    },
+                )
+                .await;
         }
         _ => {
             // in_progress / unknown → allow another turn next tick, UNLESS the
@@ -582,14 +710,29 @@ async fn route_result(
             if attempt_ceiling_reached(ctx, task).await {
                 block_for_attempts(ctx, task).await;
             } else {
-                let _ = repo.update_task(&task.id, TaskPatch { status: Some("todo".into()), ..Default::default() }).await;
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("todo".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
             }
         }
     }
     emit_task(ctx, &task.id).await;
     if !res.summary.is_empty() {
-        system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "status",
-            &format!("{} — {}", task.title, clip(&res.summary, 240))).await;
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "status",
+            &format!("{} — {}", task.title, clip(&res.summary, 240)),
+        )
+        .await;
     }
 }
 
@@ -682,7 +825,15 @@ async fn escalate_chain(ctx: &ServerCtx, task: &SwarmTask, what: &str) {
          another task. A human (or the manager) should decide how to proceed.",
         task.title
     );
-    system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "escalation", &body).await;
+    system_post(
+        ctx,
+        &task.swarm_id,
+        Some(&task.project_id),
+        Some(&task.id),
+        "escalation",
+        &body,
+    )
+    .await;
     let _ = ctx.events.send(Event::Notice {
         level: "warn".into(),
         title: "Swarm handoff chain capped".into(),
@@ -695,8 +846,16 @@ async fn escalate_chain(ctx: &ServerCtx, task: &SwarmTask, what: &str) {
 /// each turn) and compares against the swarm's `max_attempts` (default 3, min 1).
 async fn attempt_ceiling_reached(ctx: &ServerCtx, task: &SwarmTask) -> bool {
     let repo = &ctx.swarm_repo;
-    let attempts = repo.get_task(&task.id).await.map(|t| t.attempts).unwrap_or(task.attempts);
-    let ceiling = repo.get_swarm(&task.swarm_id).await.map(|s| s.max_attempts.max(1)).unwrap_or(3);
+    let attempts = repo
+        .get_task(&task.id)
+        .await
+        .map(|t| t.attempts)
+        .unwrap_or(task.attempts);
+    let ceiling = repo
+        .get_swarm(&task.swarm_id)
+        .await
+        .map(|s| s.max_attempts.max(1))
+        .unwrap_or(3);
     attempts >= ceiling
 }
 
@@ -705,16 +864,34 @@ async fn attempt_ceiling_reached(ctx: &ServerCtx, task: &SwarmTask) -> bool {
 /// terminal status.
 async fn block_for_attempts(ctx: &ServerCtx, task: &SwarmTask) {
     let repo = &ctx.swarm_repo;
-    let attempts = repo.get_task(&task.id).await.map(|t| t.attempts).unwrap_or(task.attempts);
+    let attempts = repo
+        .get_task(&task.id)
+        .await
+        .map(|t| t.attempts)
+        .unwrap_or(task.attempts);
     let _ = repo
-        .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
+        .update_task(
+            &task.id,
+            TaskPatch {
+                status: Some("blocked".into()),
+                ..Default::default()
+            },
+        )
         .await;
     emit_task(ctx, &task.id).await;
     let body = format!(
         "Task “{}” blocked after {attempts} attempt(s) without completing — needs a human.",
         task.title
     );
-    system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "escalation", &body).await;
+    system_post(
+        ctx,
+        &task.swarm_id,
+        Some(&task.project_id),
+        Some(&task.id),
+        "escalation",
+        &body,
+    )
+    .await;
     let _ = ctx.events.send(Event::Notice {
         level: "warn".into(),
         title: "Swarm task blocked (attempts)".into(),
@@ -748,46 +925,75 @@ async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run:
             continue; // already on the board
         }
         if open_count >= MAX_OPEN_TASKS_PER_PROJECT {
-            system_post(ctx, &parent.swarm_id, Some(&parent.project_id), Some(&parent.id), "escalation",
+            system_post(
+                ctx,
+                &parent.swarm_id,
+                Some(&parent.project_id),
+                Some(&parent.id),
+                "escalation",
                 &format!(
                     "Board full ({open_count} open tasks) — dropping remaining subtasks of “{}”.",
                     parent.title
-                )).await;
+                ),
+            )
+            .await;
             break;
         }
         let mut assignee = match &st.assignee_role {
-            Some(role) if !role.is_empty() => resolve_agent_by_title(ctx, &parent.swarm_id, role).await,
+            Some(role) if !role.is_empty() => {
+                resolve_agent_by_title(ctx, &parent.swarm_id, role).await
+            }
             _ => None,
         };
         if assignee.is_none() {
             // A role that didn't resolve (or none given) must not land unassigned.
-            assignee =
-                best_fit_agent_id(ctx, &parent.swarm_id, &format!("{} {}", st.title, st.description)).await;
+            assignee = best_fit_agent_id(
+                ctx,
+                &parent.swarm_id,
+                &format!("{} {}", st.title, st.description),
+            )
+            .await;
         }
-        let priority = st.priority.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "medium".into());
-        let labels = if hops > 0 { json!([format!("hops:{hops}")]) } else { json!([]) };
-        if let Ok(task) = repo.create_task(NewTask {
-            project_id: parent.project_id.clone(),
-            swarm_id: parent.swarm_id.clone(),
-            workspace_id: parent.workspace_id.clone(),
-            title: st.title.clone(),
-            description: st.description.clone(),
-            assignee_agent_id: assignee,
-            status: "todo".into(),
-            priority,
-            parent_task_id: Some(parent.id.clone()),
-            depends_on: json!([]),
-            labels,
-            order_idx: i as i64,
-            created_by: parent.created_by.clone(),
-        }).await {
+        let priority = st
+            .priority
+            .clone()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "medium".into());
+        let labels = if hops > 0 {
+            json!([format!("hops:{hops}")])
+        } else {
+            json!([])
+        };
+        if let Ok(task) = repo
+            .create_task(NewTask {
+                project_id: parent.project_id.clone(),
+                swarm_id: parent.swarm_id.clone(),
+                workspace_id: parent.workspace_id.clone(),
+                title: st.title.clone(),
+                description: st.description.clone(),
+                assignee_agent_id: assignee,
+                status: "todo".into(),
+                priority,
+                parent_task_id: Some(parent.id.clone()),
+                depends_on: json!([]),
+                labels,
+                order_idx: i as i64,
+                created_by: parent.created_by.clone(),
+            })
+            .await
+        {
             open_count += 1;
             emit_task(ctx, &task.id).await;
         }
     }
 }
 
-async fn enqueue_reviews(ctx: &ServerCtx, task: &SwarmTask, run: &otto_state::SwarmRun, res: &SwarmTurnResult) {
+async fn enqueue_reviews(
+    ctx: &ServerCtx,
+    task: &SwarmTask,
+    run: &otto_state::SwarmRun,
+    res: &SwarmTurnResult,
+) {
     let repo = &ctx.swarm_repo;
     for rv in &res.reviews {
         let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role).await;
@@ -812,19 +1018,36 @@ async fn enqueue_reviews(ctx: &ServerCtx, task: &SwarmTask, run: &otto_state::Sw
             created_by: run.agent_id.clone(),
         }).await;
     }
-    system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "review_request",
-        &format!("Review requested on “{}”.", task.title)).await;
+    system_post(
+        ctx,
+        &task.swarm_id,
+        Some(&task.project_id),
+        Some(&task.id),
+        "review_request",
+        &format!("Review requested on “{}”.", task.title),
+    )
+    .await;
 }
 
 /// When a task completes, if it has a parent and all the parent's children are
 /// done, complete the parent too (recursively).
 async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
     let repo = &ctx.swarm_repo;
-    let Some(parent_id) = &task.parent_task_id else { return };
+    let Some(parent_id) = &task.parent_task_id else {
+        return;
+    };
     if repo.children_complete(parent_id).await.unwrap_or(false) {
         if let Ok(parent) = repo.get_task(parent_id).await {
             if parent.status != "done" {
-                let _ = repo.update_task(parent_id, TaskPatch { status: Some("done".into()), ..Default::default() }).await;
+                let _ = repo
+                    .update_task(
+                        parent_id,
+                        TaskPatch {
+                            status: Some("done".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 emit_task(ctx, parent_id).await;
                 Box::pin(complete_parent_if_done(ctx, &parent)).await;
             }
@@ -832,7 +1055,14 @@ async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
     }
 }
 
-async fn system_post(ctx: &ServerCtx, swarm_id: &str, project_id: Option<&str>, task_id: Option<&str>, kind: &str, body: &str) {
+async fn system_post(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    kind: &str,
+    body: &str,
+) {
     system_post_meta(ctx, swarm_id, project_id, task_id, kind, body, json!({})).await;
 }
 
@@ -851,19 +1081,23 @@ pub(crate) async fn system_post_meta(
         Ok(s) => s,
         Err(_) => return,
     };
-    if let Ok(msg) = ctx.swarm_repo.create_message(otto_state::NewMessage {
-        swarm_id: swarm_id.to_string(),
-        workspace_id: swarm.workspace_id.clone(),
-        project_id: project_id.map(str::to_string),
-        task_id: task_id.map(str::to_string),
-        run_id: None,
-        author_agent_id: None,
-        author_user_id: None,
-        to_agent_id: None,
-        kind: kind.to_string(),
-        body: body.to_string(),
-        meta,
-    }).await {
+    if let Ok(msg) = ctx
+        .swarm_repo
+        .create_message(otto_state::NewMessage {
+            swarm_id: swarm_id.to_string(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: project_id.map(str::to_string),
+            task_id: task_id.map(str::to_string),
+            run_id: None,
+            author_agent_id: None,
+            author_user_id: None,
+            to_agent_id: None,
+            kind: kind.to_string(),
+            body: body.to_string(),
+            meta,
+        })
+        .await
+    {
         let _ = ctx.events.send(Event::SwarmMessagePosted {
             workspace_id: swarm.workspace_id,
             swarm_id: swarm_id.to_string(),
@@ -932,11 +1166,23 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
         .route("/swarm/projects/{pid}/clear", post(clear_project_h))
         .route("/swarm/swarms/{sid}/utilization", get(utilization_h))
-        .route("/workspaces/{id}/swarm/swarms/{sid}/agent-stop", post(agent_stop))
+        .route(
+            "/workspaces/{id}/swarm/swarms/{sid}/agent-stop",
+            post(agent_stop),
+        )
         // Goals (requirement 3)
-        .route("/swarm/tasks/{tid}/goals", get(list_task_goals).post(create_task_goal))
-        .route("/swarm/projects/{pid}/goals", get(list_project_goals).post(create_project_goal))
-        .route("/swarm/goals/{gid}", patch(update_goal_h).delete(delete_goal_h))
+        .route(
+            "/swarm/tasks/{tid}/goals",
+            get(list_task_goals).post(create_task_goal),
+        )
+        .route(
+            "/swarm/projects/{pid}/goals",
+            get(list_project_goals).post(create_project_goal),
+        )
+        .route(
+            "/swarm/goals/{gid}",
+            patch(update_goal_h).delete(delete_goal_h),
+        )
         .route(
             "/swarm/swarms/{sid}/standing-goals",
             get(list_standing_goals_h).put(put_standing_goals_h),
@@ -946,8 +1192,14 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/swarm/tasks/{tid}/verify/stop", post(stop_verify_h))
         .route("/swarm/tasks/{tid}/verification", get(get_verification_h))
         // Channel triggers (requirement 4)
-        .route("/swarm/swarms/{sid}/triggers", get(list_triggers_h).post(create_trigger_h))
-        .route("/swarm/triggers/{tid}", patch(update_trigger_h).delete(delete_trigger_h))
+        .route(
+            "/swarm/swarms/{sid}/triggers",
+            get(list_triggers_h).post(create_trigger_h),
+        )
+        .route(
+            "/swarm/triggers/{tid}",
+            patch(update_trigger_h).delete(delete_trigger_h),
+        )
 }
 
 // --- HTTP: goals + verification + triggers ---------------------------------
@@ -1015,7 +1267,12 @@ async fn list_task_goals(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.swarm_repo.list_goals_for_task(&tid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo
+            .list_goals_for_task(&tid)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 async fn list_project_goals(
@@ -1025,7 +1282,12 @@ async fn list_project_goals(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
     check(&ctx, &user, &project.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.swarm_repo.list_goals_for_project(&pid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo
+            .list_goals_for_project(&pid)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 async fn create_task_goal(
@@ -1038,7 +1300,14 @@ async fn create_task_goal(
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
     let goal = ctx
         .swarm_repo
-        .create_goal(new_goal_from(req, &task.swarm_id, &task.workspace_id, Some(task.project_id.clone()), Some(tid), &user.0.id))
+        .create_goal(new_goal_from(
+            req,
+            &task.swarm_id,
+            &task.workspace_id,
+            Some(task.project_id.clone()),
+            Some(tid),
+            &user.0.id,
+        ))
         .await
         .map_err(ApiError)?;
     emit_goal(&ctx, &goal).await;
@@ -1055,7 +1324,14 @@ async fn create_project_goal(
     check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
     let goal = ctx
         .swarm_repo
-        .create_goal(new_goal_from(req, &project.swarm_id, &project.workspace_id, Some(pid), None, &user.0.id))
+        .create_goal(new_goal_from(
+            req,
+            &project.swarm_id,
+            &project.workspace_id,
+            Some(pid),
+            None,
+            &user.0.id,
+        ))
         .await
         .map_err(ApiError)?;
     emit_goal(&ctx, &goal).await;
@@ -1141,8 +1417,19 @@ async fn list_standing_goals_h(
     let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
     // Seed defaults on first read so the UI has something to edit.
-    crate::swarm_verify::ensure_standing_goals(&ctx, &swarm.id, &swarm.workspace_id, &swarm.created_by).await;
-    Ok(Json(ctx.swarm_repo.list_standing_goals(&sid).await.map_err(ApiError)?))
+    crate::swarm_verify::ensure_standing_goals(
+        &ctx,
+        &swarm.id,
+        &swarm.workspace_id,
+        &swarm.created_by,
+    )
+    .await;
+    Ok(Json(
+        ctx.swarm_repo
+            .list_standing_goals(&sid)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1159,7 +1446,12 @@ async fn put_standing_goals_h(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    for g in ctx.swarm_repo.list_standing_goals(&sid).await.unwrap_or_default() {
+    for g in ctx
+        .swarm_repo
+        .list_standing_goals(&sid)
+        .await
+        .unwrap_or_default()
+    {
         let _ = ctx.swarm_repo.delete_goal(&g.id).await;
     }
     for (i, r) in req.goals.into_iter().enumerate() {
@@ -1168,7 +1460,12 @@ async fn put_standing_goals_h(
         ng.order_idx = i as i64;
         let _ = ctx.swarm_repo.create_goal(ng).await;
     }
-    Ok(Json(ctx.swarm_repo.list_standing_goals(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo
+            .list_standing_goals(&sid)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 /// Manually kick the verification controller for a task (e.g. after a fix).
@@ -1180,7 +1477,9 @@ async fn verify_task_h(
     let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
     if crate::swarm_verify::is_verifying(&tid) {
-        return Ok(Json(json!({"started": false, "reason": "already verifying"})));
+        return Ok(Json(
+            json!({"started": false, "reason": "already verifying"}),
+        ));
     }
     let dev = task
         .assignee_agent_id
@@ -1188,7 +1487,13 @@ async fn verify_task_h(
         .ok_or_else(|| ApiError(Error::Invalid("task has no assignee to verify".into())))?;
     let _ = ctx
         .swarm_repo
-        .update_task(&tid, TaskPatch { status: Some("verifying".into()), ..Default::default() })
+        .update_task(
+            &tid,
+            TaskPatch {
+                status: Some("verifying".into()),
+                ..Default::default()
+            },
+        )
         .await;
     emit_task(&ctx, &tid).await;
     crate::swarm_verify::start_verification(&ctx, task, dev);
@@ -1213,7 +1518,11 @@ async fn get_verification_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
-    let goals = ctx.swarm_repo.list_goals_for_task(&tid).await.map_err(ApiError)?;
+    let goals = ctx
+        .swarm_repo
+        .list_goals_for_task(&tid)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(json!({
         "running": crate::swarm_verify::is_verifying(&tid),
         "task_status": task.status,
@@ -1263,7 +1572,9 @@ async fn list_triggers_h(
 ) -> ApiResult<Json<Vec<SwarmChannelTrigger>>> {
     let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.swarm_repo.list_triggers(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo.list_triggers(&sid).await.map_err(ApiError)?,
+    ))
 }
 
 async fn create_trigger_h(
@@ -1327,7 +1638,10 @@ async fn delete_trigger_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let cur = ctx.swarm_repo.get_trigger(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &cur.workspace_id, WorkspaceRole::Editor).await?;
-    ctx.swarm_repo.delete_trigger(&tid).await.map_err(ApiError)?;
+    ctx.swarm_repo
+        .delete_trigger(&tid)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(json!({})))
 }
 
@@ -1382,10 +1696,15 @@ async fn start(
         }
     }
 
-    ctx.swarm_repo.set_swarm_status(&sid, "active").await.map_err(ApiError)?;
+    ctx.swarm_repo
+        .set_swarm_status(&sid, "active")
+        .await
+        .map_err(ApiError)?;
     start_coordinator(ctx.clone(), sid.clone());
     emit_status(&ctx, &ws, &sid, "active");
-    Ok(Json(ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?,
+    ))
 }
 
 async fn pause(
@@ -1394,14 +1713,19 @@ async fn pause(
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
-    ctx.swarm_repo.set_swarm_status(&sid, "paused").await.map_err(ApiError)?;
+    ctx.swarm_repo
+        .set_swarm_status(&sid, "paused")
+        .await
+        .map_err(ApiError)?;
     set_paused(&ctx, &sid, true);
     // Suspend idle swarm sessions to free RAM (resume-friendly).
     for s in swarm_session_ids(&ctx, &ws, &sid).await {
         let _ = ctx.manager.suspend(&s).await;
     }
     emit_status(&ctx, &ws, &sid, "paused");
-    Ok(Json(ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?,
+    ))
 }
 
 async fn abort(
@@ -1415,7 +1739,11 @@ async fn abort(
     // sessions, short-circuiting run_swarm_agent retries; review B3).
     crate::swarm_verify::stop_swarm(&ctx, &sid).await;
     // Cancel in-flight runs and mark them stopped.
-    let stopped = ctx.swarm_repo.stop_active_runs(&sid).await.map_err(ApiError)?;
+    let stopped = ctx
+        .swarm_repo
+        .stop_active_runs(&sid)
+        .await
+        .map_err(ApiError)?;
     for rid in &stopped {
         swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
     }
@@ -1423,9 +1751,14 @@ async fn abort(
     for s in swarm_session_ids(&ctx, &ws, &sid).await {
         let _ = ctx.manager.kill_session(&s).await;
     }
-    ctx.swarm_repo.set_swarm_status(&sid, "aborted").await.map_err(ApiError)?;
+    ctx.swarm_repo
+        .set_swarm_status(&sid, "aborted")
+        .await
+        .map_err(ApiError)?;
     emit_status(&ctx, &ws, &sid, "aborted");
-    Ok(Json(ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?,
+    ))
 }
 
 async fn resume(
@@ -1447,11 +1780,16 @@ async fn resume(
         }
     }
 
-    ctx.swarm_repo.set_swarm_status(&sid, "active").await.map_err(ApiError)?;
+    ctx.swarm_repo
+        .set_swarm_status(&sid, "active")
+        .await
+        .map_err(ApiError)?;
     set_paused(&ctx, &sid, false);
     start_coordinator(ctx.clone(), sid.clone());
     emit_status(&ctx, &ws, &sid, "active");
-    Ok(Json(ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?))
+    Ok(Json(
+        ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?,
+    ))
 }
 
 pub(crate) fn emit_status(ctx: &ServerCtx, ws: &Id, sid: &str, status: &str) {
@@ -1479,15 +1817,33 @@ async fn utilization_h(
         .and_then(|v| v.as_i64())
         .unwrap_or(4)
         .max(1);
-    let active = ctx.swarm_repo.active_run_count(&sid).await.map_err(ApiError)?;
-    let ready = ctx.swarm_repo.ready_tasks(&sid).await.map_err(ApiError)?.len();
+    let active = ctx
+        .swarm_repo
+        .active_run_count(&sid)
+        .await
+        .map_err(ApiError)?;
+    let ready = ctx
+        .swarm_repo
+        .ready_tasks(&sid)
+        .await
+        .map_err(ApiError)?
+        .len();
     let mut by_status: HashMap<String, i64> = HashMap::new();
-    for t in ctx.swarm_repo.list_tasks_for_swarm(&sid).await.map_err(ApiError)? {
+    for t in ctx
+        .swarm_repo
+        .list_tasks_for_swarm(&sid)
+        .await
+        .map_err(ApiError)?
+    {
         *by_status.entry(t.status).or_insert(0) += 1;
     }
     let mut agents_out = Vec::new();
     for a in ctx.swarm_repo.list_agents(&sid).await.map_err(ApiError)? {
-        let busy = ctx.swarm_repo.agent_has_active_run(&a.id).await.unwrap_or(false);
+        let busy = ctx
+            .swarm_repo
+            .agent_has_active_run(&a.id)
+            .await
+            .unwrap_or(false);
         agents_out.push(json!({
             "id": a.id, "name": a.name, "title": a.title,
             "status": a.status, "active_run": busy,
@@ -1525,8 +1881,11 @@ async fn clear_project_h(
         swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
         swarm_run::emit_run(&ctx, rid).await;
     }
-    let (tasks_deleted, messages_deleted) =
-        ctx.swarm_repo.clear_project_board(&pid).await.map_err(ApiError)?;
+    let (tasks_deleted, messages_deleted) = ctx
+        .swarm_repo
+        .clear_project_board(&pid)
+        .await
+        .map_err(ApiError)?;
     let _ = ctx.events.send(Event::SwarmProjectCleared {
         workspace_id: project.workspace_id.clone(),
         swarm_id: project.swarm_id.clone(),
@@ -1547,12 +1906,20 @@ async fn run_task(
 ) -> ApiResult<Json<otto_state::SwarmRun>> {
     let task = ctx.swarm_repo.get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
-    let swarm = ctx.swarm_repo.get_swarm(&task.swarm_id).await.map_err(ApiError)?;
+    let swarm = ctx
+        .swarm_repo
+        .get_swarm(&task.swarm_id)
+        .await
+        .map_err(ApiError)?;
     let agent = pick_agent(&ctx, &swarm, &task)
         .await
         .ok_or_else(|| ApiError(Error::Invalid("no active agent to run this task".into())))?;
     let is_leader = has_reports(&ctx, &swarm.id, &agent.id).await;
-    let kind = if is_leader && !task.delegated { "planning" } else { "task" };
+    let kind = if is_leader && !task.delegated {
+        "planning"
+    } else {
+        "task"
+    };
     let run = ctx
         .swarm_repo
         .create_run(NewRun {
@@ -1573,7 +1940,10 @@ async fn run_task(
             TaskPatch {
                 status: Some("in_progress".into()),
                 // Persist the pick on an unassigned task (see coordinator claim).
-                assignee_agent_id: task.assignee_agent_id.is_none().then(|| Some(agent.id.clone())),
+                assignee_agent_id: task
+                    .assignee_agent_id
+                    .is_none()
+                    .then(|| Some(agent.id.clone())),
                 ..Default::default()
             },
         )
@@ -1600,7 +1970,14 @@ async fn stop_run(
     if matches!(run.status.as_str(), "queued" | "running" | "waiting") {
         let _ = ctx
             .swarm_repo
-            .update_run(&rid, RunPatch { status: Some("stopped".into()), finished_at: Some(Some(Utc::now())), ..Default::default() })
+            .update_run(
+                &rid,
+                RunPatch {
+                    status: Some("stopped".into()),
+                    finished_at: Some(Some(Utc::now())),
+                    ..Default::default()
+                },
+            )
             .await;
     }
     swarm_run::emit_run(&ctx, &rid).await;
@@ -1617,8 +1994,14 @@ async fn recruit(
     let (swarm_name, mission, titles) = match &req.swarm_id {
         Some(sid) => {
             let s = ctx.swarm_repo.get_swarm(sid).await.map_err(ApiError)?;
-            let titles = ctx.swarm_repo.list_agents(sid).await.unwrap_or_default()
-                .into_iter().map(|a| a.title).collect::<Vec<_>>();
+            let titles = ctx
+                .swarm_repo
+                .list_agents(sid)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.title)
+                .collect::<Vec<_>>();
             (s.name, s.description, titles)
         }
         None => ("New swarm".to_string(), String::new(), Vec::new()),
@@ -1628,7 +2011,12 @@ async fn recruit(
     // library (potentially hundreds of skills) wastes tokens and can produce
     // bloated, irrelevant skill lists.  `cap_skills_for_role` ranks by name-
     // relevance to the requested role and hard-caps at `RECRUITER_SKILL_CAP`.
-    let all_skills: Vec<String> = ctx.context_library.list_skills().into_iter().map(|s| s.name).collect();
+    let all_skills: Vec<String> = ctx
+        .context_library
+        .list_skills()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
     let capped_skills = otto_swarm::recruiter::cap_skills_for_role(
         &all_skills,
         &req.role,
@@ -1636,7 +2024,9 @@ async fn recruit(
     );
     tracing::debug!(
         "recruiter: injecting {} / {} skills into prompt (cap={})",
-        capped_skills.len(), all_skills.len(), otto_swarm::recruiter::RECRUITER_SKILL_CAP
+        capped_skills.len(),
+        all_skills.len(),
+        otto_swarm::recruiter::RECRUITER_SKILL_CAP
     );
     let providers = {
         use otto_swarm::SwarmCtx;
@@ -1647,8 +2037,14 @@ async fn recruit(
     let workspace = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
     let meta_provider = swarm_meta_provider(&ctx, &workspace).await;
     let prompt = otto_swarm::recruiter::recruiter_prompt(
-        &req.role, &swarm_name, &mission, &titles, &capped_skills, &providers,
-        req.context.as_deref(), req.naming_theme.as_deref(),
+        &req.role,
+        &swarm_name,
+        &mission,
+        &titles,
+        &capped_skills,
+        &providers,
+        req.context.as_deref(),
+        req.naming_theme.as_deref(),
     );
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     // When recruiting into an existing swarm, run as a REAL, openable session
@@ -1666,15 +2062,28 @@ async fn recruit(
                 .unwrap_or_else(|| "recruiter".to_string());
             let cancel = crate::swarm_agent_run::begin(sid);
             let (raw, rid) = crate::swarm_agent_run::run_swarm_agent(
-                &ctx, &workspace, &user.0, sid, None, None, &nominal, &meta_provider, None, "recruit",
-                &format!("Recruit: {}", req.role), &cwd, &prompt,
+                &ctx,
+                &workspace,
+                &user.0,
+                sid,
+                None,
+                None,
+                &nominal,
+                &meta_provider,
+                None,
+                "recruit",
+                &format!("Recruit: {}", req.role),
+                &cwd,
+                &prompt,
                 |t| otto_swarm::recruiter::parse_recruited(t).is_some(),
                 &cancel,
             )
             .await;
             crate::swarm_agent_run::end(sid);
             let raw = raw.ok_or_else(|| {
-                ApiError(Error::Upstream("recruiter produced nothing (stopped or stuck)".into()))
+                ApiError(Error::Upstream(
+                    "recruiter produced nothing (stopped or stuck)".into(),
+                ))
             })?;
             (raw, Some(rid))
         }
@@ -1686,8 +2095,11 @@ async fn recruit(
             None,
         ),
     };
-    let mut recruited = otto_swarm::recruiter::parse_recruited(&reply)
-        .ok_or_else(|| ApiError(Error::Upstream("recruiter returned no usable definition".into())))?;
+    let mut recruited = otto_swarm::recruiter::parse_recruited(&reply).ok_or_else(|| {
+        ApiError(Error::Upstream(
+            "recruiter returned no usable definition".into(),
+        ))
+    })?;
     // Validate skills against the FULL library (not just the capped list); any
     // skill the recruiter invents that is not in the real library is dropped.
     let known: std::collections::HashSet<String> = all_skills.into_iter().collect();
@@ -1698,7 +2110,10 @@ async fn recruit(
         recruited.suggested_provider = if providers.iter().any(|p| p == &meta_provider) {
             meta_provider.clone()
         } else {
-            providers.first().cloned().unwrap_or_else(|| "claude".into())
+            providers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "claude".into())
         };
     }
     // Persist the proposal on the run so it can be hired straight from the Runs
@@ -1729,9 +2144,15 @@ async fn plan(
     let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
     let goal = project.goal_md.clone().unwrap_or_default();
     if goal.trim().is_empty() {
-        return Err(ApiError(Error::Invalid("project has no goal to plan".into())));
+        return Err(ApiError(Error::Invalid(
+            "project has no goal to plan".into(),
+        )));
     }
-    let agents = ctx.swarm_repo.list_agents(&project.swarm_id).await.unwrap_or_default();
+    let agents = ctx
+        .swarm_repo
+        .list_agents(&project.swarm_id)
+        .await
+        .unwrap_or_default();
     let preset_agents: Vec<otto_swarm::PresetAgent> = agents
         .iter()
         .map(|a| otto_swarm::PresetAgent {
@@ -1772,8 +2193,19 @@ async fn plan(
             otto_swarm::recruiter::planner_prompt(&project.name, &goal, &preset_agents, angle);
         let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
-            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
-            &meta_provider, None, "plan", &title, &cwd, &prompt,
+            &ctx,
+            &ws_obj,
+            &user.0,
+            &project.swarm_id,
+            Some(&project.id),
+            None,
+            &nominal_agent,
+            &meta_provider,
+            None,
+            "plan",
+            &title,
+            &cwd,
+            &prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )
@@ -1786,11 +2218,25 @@ async fn plan(
     }
     let final_json = if candidates.len() > 1 {
         let sum_prompt = otto_swarm::recruiter::planner_summarizer_prompt(
-            &project.name, &goal, &preset_agents, &candidates,
+            &project.name,
+            &goal,
+            &preset_agents,
+            &candidates,
         );
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
-            &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
-            &meta_provider, None, "plan", &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
+            &ctx,
+            &ws_obj,
+            &user.0,
+            &project.swarm_id,
+            Some(&project.id),
+            None,
+            &nominal_agent,
+            &meta_provider,
+            None,
+            "plan",
+            &format!("Plan summary: {}", project.name),
+            &cwd,
+            &sum_prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )
@@ -1798,45 +2244,79 @@ async fn plan(
         raw.and_then(|r| otto_swarm::recruiter::extract_json(&r))
             .or_else(|| otto_swarm::recruiter::extract_json(&candidates[0]))
     } else {
-        candidates.first().and_then(|c| otto_swarm::recruiter::extract_json(c))
+        candidates
+            .first()
+            .and_then(|c| otto_swarm::recruiter::extract_json(c))
     };
     crate::swarm_agent_run::end(&project.swarm_id);
-    let v = final_json
-        .ok_or_else(|| ApiError(Error::Upstream("planner produced no tasks (stopped or stuck)".into())))?;
-    let tasks_json = v.get("tasks").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+    let v = final_json.ok_or_else(|| {
+        ApiError(Error::Upstream(
+            "planner produced no tasks (stopped or stuck)".into(),
+        ))
+    })?;
+    let tasks_json = v
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     // Two passes: create tasks, then wire depends_on by matching titles.
     let mut created: Vec<SwarmTask> = Vec::new();
     let mut by_title: HashMap<String, Id> = HashMap::new();
     for (i, t) in tasks_json.iter().enumerate() {
-        let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let title = t
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if title.is_empty() {
             continue;
         }
-        let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let priority = t.get("priority").and_then(|v| v.as_str()).unwrap_or("medium").to_string();
-        let mut assignee = t.get("assignee_title").and_then(|v| v.as_str())
-            .and_then(|title| agents.iter().find(|a| a.title.eq_ignore_ascii_case(title.trim())).map(|a| a.id.clone()));
+        let description = t
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let priority = t
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium")
+            .to_string();
+        let mut assignee = t
+            .get("assignee_title")
+            .and_then(|v| v.as_str())
+            .and_then(|title| {
+                agents
+                    .iter()
+                    .find(|a| a.title.eq_ignore_ascii_case(title.trim()))
+                    .map(|a| a.id.clone())
+            });
         if assignee.is_none() {
             // Planner named a role that doesn't exist (or none) — best-fit instead
             // of leaving the card unassigned.
-            assignee = best_fit_agent_id(&ctx, &project.swarm_id, &format!("{title} {description}")).await;
+            assignee =
+                best_fit_agent_id(&ctx, &project.swarm_id, &format!("{title} {description}")).await;
         }
-        if let Ok(task) = ctx.swarm_repo.create_task(NewTask {
-            project_id: project.id.clone(),
-            swarm_id: project.swarm_id.clone(),
-            workspace_id: project.workspace_id.clone(),
-            title: title.clone(),
-            description,
-            assignee_agent_id: assignee,
-            status: "todo".into(),
-            priority,
-            parent_task_id: None,
-            depends_on: json!([]),
-            labels: json!([]),
-            order_idx: i as i64,
-            created_by: user.0.id.clone(),
-        }).await {
+        if let Ok(task) = ctx
+            .swarm_repo
+            .create_task(NewTask {
+                project_id: project.id.clone(),
+                swarm_id: project.swarm_id.clone(),
+                workspace_id: project.workspace_id.clone(),
+                title: title.clone(),
+                description,
+                assignee_agent_id: assignee,
+                status: "todo".into(),
+                priority,
+                parent_task_id: None,
+                depends_on: json!([]),
+                labels: json!([]),
+                order_idx: i as i64,
+                created_by: user.0.id.clone(),
+            })
+            .await
+        {
             // Live-update open boards: without this, plan-created tasks (and the
             // column counts) only appear after a manual reload.
             emit_task(&ctx, &task.id).await;
@@ -1847,14 +2327,22 @@ async fn plan(
     // Wire dependencies.
     for (t, created_task) in tasks_json.iter().zip(created.iter()) {
         if let Some(deps) = t.get("depends_on_titles").and_then(|v| v.as_array()) {
-            let dep_ids: Vec<String> = deps.iter()
+            let dep_ids: Vec<String> = deps
+                .iter()
                 .filter_map(|d| d.as_str())
                 .filter_map(|d| by_title.get(&d.to_lowercase()).cloned())
                 .collect();
             if !dep_ids.is_empty() {
-                let _ = ctx.swarm_repo.update_task(&created_task.id, TaskPatch {
-                    depends_on: Some(json!(dep_ids)), ..Default::default()
-                }).await;
+                let _ = ctx
+                    .swarm_repo
+                    .update_task(
+                        &created_task.id,
+                        TaskPatch {
+                            depends_on: Some(json!(dep_ids)),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 emit_task(&ctx, &created_task.id).await;
             }
         }

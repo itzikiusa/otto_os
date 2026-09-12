@@ -2,7 +2,9 @@
 //! Confluent-framed Avro values), list subjects for the schema browser, and
 //! expose version history + compatibility checking for the operator workflow.
 
-use crate::types::{CompatCheckReq, CompatCheckResp, SchemaSubject, SchemaVersion, SchemaVersionDetail};
+use crate::types::{
+    CompatCheckReq, CompatCheckResp, SchemaSubject, SchemaVersion, SchemaVersionDetail,
+};
 use dashmap::DashMap;
 use otto_core::{Error, Result};
 use std::time::Duration;
@@ -207,7 +209,11 @@ impl SchemaRegistry {
         subject: &str,
         version: &str,
     ) -> Result<SchemaVersionDetail> {
-        let url = format!("{}/subjects/{}/versions/{version}", self.base, urlenc(subject));
+        let url = format!(
+            "{}/subjects/{}/versions/{version}",
+            self.base,
+            urlenc(subject)
+        );
         self.guard(&url).await?;
         let resp = self.get(url).send().await.map_err(up)?;
         if !resp.status().is_success() {

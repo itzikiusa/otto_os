@@ -147,7 +147,9 @@ impl Orchestrator {
         if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
             return Ok(crate::e2e_stub::canned_reply(prompt));
         }
-        self.claude.run_prompt(prompt, cwd, model, no_progress).await
+        self.claude
+            .run_prompt(prompt, cwd, model, no_progress)
+            .await
     }
 
     /// Rewrite an instruction into a precise prompt (returns ONLY the rewrite).
@@ -433,8 +435,12 @@ mod plan_prompt_tests {
     /// custom provider (grok) is offered to the planner — not a hardcoded set.
     #[test]
     fn plan_prompt_enum_includes_custom_providers() {
-        let prompt = build_plan_prompt("open grok session", &ctx_with(&["claude", "codex", "grok"]));
-        assert!(prompt.contains("\"claude\"|\"codex\"|\"grok\""), "prompt: {prompt}");
+        let prompt =
+            build_plan_prompt("open grok session", &ctx_with(&["claude", "codex", "grok"]));
+        assert!(
+            prompt.contains("\"claude\"|\"codex\"|\"grok\""),
+            "prompt: {prompt}"
+        );
         // The instruction is embedded verbatim so the planner sees "grok".
         assert!(prompt.contains("Instruction: open grok session"));
     }
@@ -449,7 +455,10 @@ mod plan_prompt_tests {
     /// `allowed_providers` mirrors the live registry, with the built-in fallback.
     #[test]
     fn allowed_providers_uses_registry_then_fallback() {
-        assert_eq!(ctx_with(&["grok", "claude"]).allowed_providers(), vec!["grok", "claude"]);
+        assert_eq!(
+            ctx_with(&["grok", "claude"]).allowed_providers(),
+            vec!["grok", "claude"]
+        );
         assert_eq!(
             ctx_with(&[]).allowed_providers(),
             vec!["claude", "codex", "agy", "shell"]

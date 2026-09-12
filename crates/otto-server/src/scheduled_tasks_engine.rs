@@ -37,10 +37,10 @@ use crate::agent_run::{run_with_recovery, watch_for_result};
 use crate::cadence;
 // Report + delivery mechanics are shared with the personal-agents engine; the
 // old `scheduled_tasks_engine::*` paths remain valid via these re-exports.
-pub use crate::report_delivery::{
-    delivery_message, deliver_webhook, destination_kind, extract_summary, report_hash,
-};
 use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
+pub use crate::report_delivery::{
+    deliver_webhook, delivery_message, destination_kind, extract_summary, report_hash,
+};
 use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
@@ -309,7 +309,13 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
             .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
             .await?;
         let summary = extract_summary(&report);
-        return Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 });
+        return Ok(ExecOutcome {
+            report,
+            summary,
+            session_id: None,
+            workflow_run_id: None,
+            attempts: 1,
+        });
     }
 
     // A task with no owner can't open a session under a user — fall back to the
@@ -332,7 +338,13 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
                 .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
             let summary = extract_summary(&report);
-            return Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts: 1 });
+            return Ok(ExecOutcome {
+                report,
+                summary,
+                session_id: None,
+                workflow_run_id: None,
+                attempts: 1,
+            });
         }
     };
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
@@ -355,23 +367,34 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
     let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
 
-    let outcome = run_with_recovery(&ctx.manager, max_attempts, &RETRY_BACKOFF, None, |_attempt| {
-        let captured = captured_sid.clone();
-        let attempts = attempts.clone();
-        let ws = ws.clone();
-        let owner = owner.clone();
-        let cwd = cwd.clone();
-        let augmented = augmented.clone();
-        let out_path = out_path.clone();
-        async move {
-            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            run_one_agent_session(ctx, &ws, &owner, task, run_id, &cwd, &augmented, &out_path, &captured)
+    let outcome = run_with_recovery(
+        &ctx.manager,
+        max_attempts,
+        &RETRY_BACKOFF,
+        None,
+        |_attempt| {
+            let captured = captured_sid.clone();
+            let attempts = attempts.clone();
+            let ws = ws.clone();
+            let owner = owner.clone();
+            let cwd = cwd.clone();
+            let augmented = augmented.clone();
+            let out_path = out_path.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                run_one_agent_session(
+                    ctx, &ws, &owner, task, run_id, &cwd, &augmented, &out_path, &captured,
+                )
                 .await
-        }
-    })
+            }
+        },
+    )
     .await;
 
-    let session_id = captured_sid.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let session_id = captured_sid
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if outcome.errored() {
         return Err(Error::Internal(format!(
             "agent run failed: {}",
@@ -484,10 +507,19 @@ async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutc
         // produced a report for the run record.
         return Err(Error::Internal(format!(
             "shell command exited with {} after {attempts} attempt(s)",
-            run.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+            run.status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into())
         )));
     }
-    Ok(ExecOutcome { report, summary, session_id: None, workflow_run_id: None, attempts })
+    Ok(ExecOutcome {
+        report,
+        summary,
+        session_id: None,
+        workflow_run_id: None,
+        attempts,
+    })
 }
 
 /// Run `/bin/sh -c <cmd>` up to `1 + max_retries` times (clamped to 6), returning
@@ -555,7 +587,9 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let workflow = repo.get(&wf_id.to_string()).await?;
     if workflow.workspace_id != task.workspace_id {
-        return Err(Error::Invalid("workflow belongs to a different workspace".into()));
+        return Err(Error::Invalid(
+            "workflow belongs to a different workspace".into(),
+        ));
     }
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
@@ -742,7 +776,11 @@ fn short(id: &str) -> &str {
 
 /// Format a shell run as a Markdown report.
 fn shell_report(name: &str, cmd: &str, out: &std::process::Output) -> String {
-    let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+    let code = out
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".into());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     format!(
@@ -1023,8 +1061,10 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        sh("git init -q && git config user.email a@b.c && git config user.name t \
-            && git commit -q --allow-empty -m init");
+        sh(
+            "git init -q && git config user.email a@b.c && git config user.name t \
+            && git commit -q --allow-empty -m init",
+        );
         let git = otto_git::LocalGit::new(repo.to_string_lossy().to_string());
         let base = git.current_branch().await.unwrap();
         let task_id = "0123456789abcdef";

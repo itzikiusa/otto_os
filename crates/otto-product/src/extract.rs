@@ -105,7 +105,7 @@ pub fn from_analysis_summary(story_id: &str, a: &ProductAnalysis) -> Vec<NewMemo
             Some(NewMemory {
                 collection: "product".into(),
                 record_type: "item".into(),
-        visibility: "shared".into(),
+                visibility: "shared".into(),
                 scope: Scope::Story,
                 story_id: Some(story_id.into()),
                 kind: kind.into(),
@@ -172,7 +172,8 @@ mod tests {
 
     #[test]
     fn answered_question_becomes_qa() {
-        let m = from_answered_question("s1", &question("answered", Some("USD only at launch"))).unwrap();
+        let m = from_answered_question("s1", &question("answered", Some("USD only at launch")))
+            .unwrap();
         assert_eq!(m.kind, "qa");
         assert_eq!(m.scope, Scope::Story);
         assert!(m.body.contains("USD only"));

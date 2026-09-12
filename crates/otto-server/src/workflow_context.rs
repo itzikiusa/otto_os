@@ -100,7 +100,9 @@ pub(crate) fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
     };
     let mut out = Vec::new();
     for item in arr {
-        let Some(obj) = item.as_object() else { continue };
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
         let get = |k: &str| {
             obj.get(k)
                 .and_then(Value::as_str)
@@ -237,7 +239,11 @@ pub(crate) fn render_brief(
         ("prompt", "Prompt"),
         ("jira_ticket", "Jira ticket"),
     ] {
-        if let Some(v) = input.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        if let Some(v) = input
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
             let v = v.trim();
             if key == "msg" && Some(v) == prompt_val {
                 continue;
@@ -274,13 +280,20 @@ pub(crate) fn render_brief(
     } else {
         md.push_str("| repo | type | work | source | worktree |\n|---|---|---|---|---|\n");
         for e in repos {
-            let status = e.error.as_deref().map(|err| format!(" ⚠ {err}")).unwrap_or_default();
+            let status = e
+                .error
+                .as_deref()
+                .map(|err| format!(" ⚠ {err}"))
+                .unwrap_or_default();
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {}{status} |\n",
                 e.repo,
                 e.kind,
                 e.name,
-                e.source.as_deref().or(e.base.as_deref()).unwrap_or("(auto)"),
+                e.source
+                    .as_deref()
+                    .or(e.base.as_deref())
+                    .unwrap_or("(auto)"),
                 e.worktree.as_deref().unwrap_or("-"),
             ));
         }
@@ -309,7 +322,9 @@ pub(crate) fn render_brief(
         "- This file (`{RUN_BRIEF_FILE}`) is the run's mission brief.\n"
     ));
     if !repos.is_empty() {
-        md.push_str("- `repos.json` — machine-readable registry of every repo/branch/worktree in play.\n");
+        md.push_str(
+            "- `repos.json` — machine-readable registry of every repo/branch/worktree in play.\n",
+        );
     }
     md.push_str(
         "- Each finished step leaves `step{N}-{name}.md` (its handoff summary) and `step{N}-{name}.output.json` (its raw output). Loop iterations add `-iter{X}`.\n\
@@ -394,7 +409,9 @@ pub(crate) fn agent_preamble(
         "- {RUN_BRIEF_FILE} — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n"
     ));
     if repos_present {
-        md.push_str("- repos.json — machine-readable list of every repo/branch/worktree in play.\n");
+        md.push_str(
+            "- repos.json — machine-readable list of every repo/branch/worktree in play.\n",
+        );
     }
     md.push_str(&format!(
         "- Prior step summaries: {prior}\n\
@@ -537,7 +554,10 @@ impl RunContextFiles {
         self.reload_repos_json();
         {
             let mut repos = self.repos.lock().unwrap();
-            if let Some(e) = repos.iter_mut().find(|e| e.repo_id.as_deref() == Some(repo_id)) {
+            if let Some(e) = repos
+                .iter_mut()
+                .find(|e| e.repo_id.as_deref() == Some(repo_id))
+            {
                 if let Some(w) = worktree.map(str::trim).filter(|s| !s.is_empty()) {
                     e.worktree = Some(w.to_string());
                 }
@@ -598,7 +618,9 @@ impl RunContextFiles {
 
     pub fn list_step_mds(&self) -> Vec<String> {
         let Some(dir) = &self.dir else { return vec![] };
-        let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return vec![];
+        };
         let mut out: Vec<String> = rd
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().into_string().ok())
@@ -683,12 +705,18 @@ impl RunContextFiles {
         let bytes = match std::fs::read(dir.join(format!("{base}.md"))) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!("workflow-context({}): read {base}.md for final-output failed: {e}", self.run_id);
+                tracing::warn!(
+                    "workflow-context({}): read {base}.md for final-output failed: {e}",
+                    self.run_id
+                );
                 return None;
             }
         };
         if let Err(e) = std::fs::write(dir.join(FINAL_OUTPUT_FILE), &bytes) {
-            tracing::warn!("workflow-context({}): write {FINAL_OUTPUT_FILE} failed: {e}", self.run_id);
+            tracing::warn!(
+                "workflow-context({}): write {FINAL_OUTPUT_FILE} failed: {e}",
+                self.run_id
+            );
         }
         Some(bytes)
     }
@@ -706,8 +734,13 @@ impl RunContextFiles {
         iter: Option<u64>,
         inner_idx: Option<usize>,
     ) -> String {
-        let Some(dir) = self.dir_str() else { return String::new() };
-        let own_md = format!("{}.md", step_base_name(step_no, display_name, iter, inner_idx));
+        let Some(dir) = self.dir_str() else {
+            return String::new();
+        };
+        let own_md = format!(
+            "{}.md",
+            step_base_name(step_no, display_name, iter, inner_idx)
+        );
         agent_preamble(
             &dir,
             self.has_file(INSTRUCTIONS_FILE),
@@ -730,7 +763,10 @@ impl RunContextFiles {
         match std::fs::write(dir.join(name), content) {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!("workflow-context({}): write {name} failed: {e}", self.run_id);
+                tracing::warn!(
+                    "workflow-context({}): write {name} failed: {e}",
+                    self.run_id
+                );
                 false
             }
         }
@@ -753,9 +789,18 @@ mod tests {
 
     #[test]
     fn step_names_match_user_convention() {
-        assert_eq!(step_base_name(1, "Gather info", None, None), "step1-gather-info");
-        assert_eq!(step_base_name(3, "review", Some(2), None), "step3-review-iter2");
-        assert_eq!(step_base_name(3, "review", Some(2), Some(1)), "step3-review-1-iter2");
+        assert_eq!(
+            step_base_name(1, "Gather info", None, None),
+            "step1-gather-info"
+        );
+        assert_eq!(
+            step_base_name(3, "review", Some(2), None),
+            "step3-review-iter2"
+        );
+        assert_eq!(
+            step_base_name(3, "review", Some(2), Some(1)),
+            "step3-review-1-iter2"
+        );
     }
 
     #[test]
@@ -790,7 +835,10 @@ mod tests {
             error: None,
         };
         let t = entry_to_target(&e);
-        assert_eq!(t, json!({"repo_id": "R1", "worktree": "/w", "base": "develop"}));
+        assert_eq!(
+            t,
+            json!({"repo_id": "R1", "worktree": "/w", "base": "develop"})
+        );
     }
 
     /// One resolved repo entry — a sample non-empty `repos` list for tests
@@ -827,42 +875,104 @@ mod tests {
             false,
         );
         assert!(md.contains("run-brief.md"), "self-references its filename");
-        assert!(md.contains("feat/x") && md.contains("main"), "repos table has work + source");
+        assert!(
+            md.contains("feat/x") && md.contains("main"),
+            "repos table has work + source"
+        );
         assert!(md.contains("Write tests"));
         assert!(md.contains("repos.json"));
         assert!(md.contains("Trigger: chat"));
         assert!(md.contains("tests pass"));
-        assert!(md.contains("step{N}-{name}.md"), "explains the step-file protocol");
+        assert!(
+            md.contains("step{N}-{name}.md"),
+            "explains the step-file protocol"
+        );
     }
 
     #[test]
     fn brief_conditional_sections() {
-        let md = render_brief("W", "", "r1", &json!({"prompt":"do it"}), &[], &[], true, true);
+        let md = render_brief(
+            "W",
+            "",
+            "r1",
+            &json!({"prompt":"do it"}),
+            &[],
+            &[],
+            true,
+            true,
+        );
         assert!(md.contains("run-brief.md") && !md.contains("wf-r1-instruction"));
         assert!(md.contains("instructions.md") && md.contains("prompt.md"));
-        assert!(!md.contains("repos.json"), "no repos declared → no repos.json guidance");
-        assert!(md.contains("## Repos & branches") && md.contains("_No repos declared for this run._"), "empty case still gets the heading + placeholder as signal");
-        let md2 = render_brief("W", "", "r1", &json!({}), &sample_repos(), &[], false, false);
+        assert!(
+            !md.contains("repos.json"),
+            "no repos declared → no repos.json guidance"
+        );
+        assert!(
+            md.contains("## Repos & branches") && md.contains("_No repos declared for this run._"),
+            "empty case still gets the heading + placeholder as signal"
+        );
+        let md2 = render_brief(
+            "W",
+            "",
+            "r1",
+            &json!({}),
+            &sample_repos(),
+            &[],
+            false,
+            false,
+        );
         assert!(md2.contains("repos.json"));
-        assert!(!md2.contains("instructions.md — standing"), "no instructions → not referenced");
+        assert!(
+            !md2.contains("instructions.md — standing"),
+            "no instructions → not referenced"
+        );
     }
 
     #[test]
     fn brief_mission_dedups_msg_equal_to_prompt() {
         // normalize_prompt copies msg into prompt when prompt is absent — the
         // brief must not then show the identical line twice under two labels.
-        let md = render_brief("W", "", "r1", &json!({"msg": "do it", "prompt": "do it"}), &[], &[], false, false);
+        let md = render_brief(
+            "W",
+            "",
+            "r1",
+            &json!({"msg": "do it", "prompt": "do it"}),
+            &[],
+            &[],
+            false,
+            false,
+        );
         assert!(md.contains("**Prompt:** do it"));
-        assert!(!md.contains("**Message:** do it"), "msg row skipped when identical to prompt");
+        assert!(
+            !md.contains("**Message:** do it"),
+            "msg row skipped when identical to prompt"
+        );
         // Distinct msg/prompt still both render.
-        let md2 = render_brief("W", "", "r1", &json!({"msg": "raw msg", "prompt": "distinct prompt"}), &[], &[], false, false);
-        assert!(md2.contains("**Message:** raw msg") && md2.contains("**Prompt:** distinct prompt"));
+        let md2 = render_brief(
+            "W",
+            "",
+            "r1",
+            &json!({"msg": "raw msg", "prompt": "distinct prompt"}),
+            &[],
+            &[],
+            false,
+            false,
+        );
+        assert!(
+            md2.contains("**Message:** raw msg") && md2.contains("**Prompt:** distinct prompt")
+        );
     }
 
     #[test]
     fn step_md_full_reply_never_truncated() {
         let long = "x".repeat(20_000);
-        let md = render_step_md("agent_prompt", "fix", &json!({"reply": long.clone()}), &[], None);
+        let md = render_step_md(
+            "agent_prompt",
+            "fix",
+            &json!({"reply": long.clone()}),
+            &[],
+            None,
+        );
         assert!(md.contains(&long), "full reply, no truncation");
         let md = render_step_md(
             "review_run",
@@ -873,7 +983,13 @@ mod tests {
         );
         assert!(md.contains("55") && md.contains("\"a\"") && md.contains("\"b\""));
         assert!(md.contains("log1"));
-        let md = render_step_md("http_request", "call", &json!({"status": 200}), &[], Some("boom"));
+        let md = render_step_md(
+            "http_request",
+            "call",
+            &json!({"status": 200}),
+            &[],
+            Some("boom"),
+        );
         assert!(md.contains("boom"));
     }
 
@@ -906,13 +1022,18 @@ mod tests {
         assert!(td.path().join("workflow-context/r1/run-brief.md").exists());
         let logs = f.persist_step("step1-a", "log", "a", &json!({"k": "v"}), &[], None, None);
         assert!(td.path().join("workflow-context/r1/step1-a.md").exists());
-        assert!(td.path().join("workflow-context/r1/step1-a.output.json").exists());
+        assert!(td
+            .path()
+            .join("workflow-context/r1/step1-a.output.json")
+            .exists());
         assert!(!logs.is_empty());
         assert_eq!(f.list_step_mds(), vec!["step1-a.md".to_string()]);
         // Disabled handle: everything no-ops.
         let d = RunContextFiles::disabled("rX");
         assert!(d.dir_str().is_none());
-        assert!(d.persist_step("s", "log", "a", &json!({}), &[], None, None).is_empty());
+        assert!(d
+            .persist_step("s", "log", "a", &json!({}), &[], None, None)
+            .is_empty());
     }
 
     #[test]
@@ -941,21 +1062,59 @@ mod tests {
     fn final_output_last_content_step() {
         let td = tempfile::tempdir().unwrap();
         let f = RunContextFiles::create(td.path(), "r9");
-        f.persist_step("step1-prep", "prepare_context", "prep", &json!({"jira":{"found":false}}), &[], None, None);
-        f.persist_step("step2-report", "agent_prompt", "report", &json!({"reply":"THE DELIVERABLE"}), &[], None, None);
-        f.persist_step("step3-notify", "channel_notify", "notify", &json!({"sent":true}), &[], None, None);
+        f.persist_step(
+            "step1-prep",
+            "prepare_context",
+            "prep",
+            &json!({"jira":{"found":false}}),
+            &[],
+            None,
+            None,
+        );
+        f.persist_step(
+            "step2-report",
+            "agent_prompt",
+            "report",
+            &json!({"reply":"THE DELIVERABLE"}),
+            &[],
+            None,
+            None,
+        );
+        f.persist_step(
+            "step3-notify",
+            "channel_notify",
+            "notify",
+            &json!({"sent":true}),
+            &[],
+            None,
+            None,
+        );
         let bytes = f.write_final_output().expect("copied");
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.contains("THE DELIVERABLE"));
-        assert!(td.path().join("workflow-context/r9/final-output.md").exists());
+        assert!(td
+            .path()
+            .join("workflow-context/r9/final-output.md")
+            .exists());
     }
 
     #[test]
     fn final_output_skips_errored_and_handles_none() {
         let td = tempfile::tempdir().unwrap();
         let f = RunContextFiles::create(td.path(), "r10");
-        f.persist_step("step1-x", "agent_prompt", "x", &Value::Null, &[], Some("boom"), None);
-        assert!(f.write_final_output().is_none(), "errored step is not a deliverable");
+        f.persist_step(
+            "step1-x",
+            "agent_prompt",
+            "x",
+            &Value::Null,
+            &[],
+            Some("boom"),
+            None,
+        );
+        assert!(
+            f.write_final_output().is_none(),
+            "errored step is not a deliverable"
+        );
         let d = RunContextFiles::disabled("r11");
         assert!(d.write_final_output().is_none());
     }
@@ -980,10 +1139,14 @@ mod tests {
             Some(attempt_started),
         );
         let got = std::fs::read_to_string(&p).unwrap();
-        assert!(got.contains("fresh full reply"), "stale file replaced: {got}");
+        assert!(
+            got.contains("fresh full reply"),
+            "stale file replaced: {got}"
+        );
         // A file written DURING the winning attempt is the agent's handoff — kept.
         std::fs::write(&p, "agent wrote this").unwrap();
-        let before = std::fs::metadata(&p).unwrap().modified().unwrap() - std::time::Duration::from_secs(1);
+        let before =
+            std::fs::metadata(&p).unwrap().modified().unwrap() - std::time::Duration::from_secs(1);
         f.persist_step(
             "step1-b",
             "agent_prompt",
@@ -993,7 +1156,9 @@ mod tests {
             None,
             Some(before),
         );
-        assert!(std::fs::read_to_string(&p).unwrap().contains("agent wrote this"));
+        assert!(std::fs::read_to_string(&p)
+            .unwrap()
+            .contains("agent wrote this"));
     }
 
     #[test]
@@ -1002,7 +1167,9 @@ mod tests {
         let f = RunContextFiles::create(td.path(), "r3");
         let big = json!({"blob": "y".repeat(6 * 1024 * 1024)});
         f.persist_step("step1-c", "transform", "c", &big, &[], None, None);
-        let raw = std::fs::read_to_string(td.path().join("workflow-context/r3/step1-c.output.json")).unwrap();
+        let raw =
+            std::fs::read_to_string(td.path().join("workflow-context/r3/step1-c.output.json"))
+                .unwrap();
         assert!(raw.len() <= OUTPUT_JSON_CAP + 1024);
         assert!(raw.contains("truncated"), "cap leaves an explicit marker");
     }
@@ -1038,7 +1205,10 @@ mod tests {
         // EVERY declaration errored → the actionable message, never a silent
         // fallback to the run cwd.
         let msg = all_declared_errored(&[bad]).unwrap();
-        assert!(msg.contains("typo") && msg.contains("not checked out"), "{msg}");
+        assert!(
+            msg.contains("typo") && msg.contains("not checked out"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -1089,13 +1259,35 @@ mod tests {
         assert_eq!(f.read_named("nope.md"), None);
 
         f.write_named("jira-ABC-1.md", "# ABC-1\nConfirmed with the provider.");
-        f.persist_step("step1-checkout", "agent_prompt", "x", &json!({}), &[], None, None);
-        f.persist_step("step2-gather", "agent_prompt", "y", &json!({}), &[], None, None);
+        f.persist_step(
+            "step1-checkout",
+            "agent_prompt",
+            "x",
+            &json!({}),
+            &[],
+            None,
+            None,
+        );
+        f.persist_step(
+            "step2-gather",
+            "agent_prompt",
+            "y",
+            &json!({}),
+            &[],
+            None,
+            None,
+        );
 
-        assert!(f.read_jira_md().unwrap().contains("Confirmed with the provider"));
+        assert!(f
+            .read_jira_md()
+            .unwrap()
+            .contains("Confirmed with the provider"));
         assert_eq!(
             f.list_step_mds(),
-            vec!["step1-checkout.md".to_string(), "step2-gather.md".to_string()]
+            vec![
+                "step1-checkout.md".to_string(),
+                "step2-gather.md".to_string()
+            ]
         );
         assert!(f.read_named("step2-gather.md").is_some());
 

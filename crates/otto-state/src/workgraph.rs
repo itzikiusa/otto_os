@@ -425,7 +425,8 @@ pub struct WorkGraphRepo {
     pool: SqlitePool,
 }
 
-const ITEM_COLS: &str = "id, workspace_id, kind, source_id, title, goal, status, owner, owner_kind, \
+const ITEM_COLS: &str =
+    "id, workspace_id, kind, source_id, title, goal, status, owner, owner_kind, \
     repo_id, branch, cost_so_far, risk_level, result_summary, context_summary, started_by_id, \
     last_event_at, created_at, updated_at";
 
@@ -502,7 +503,11 @@ fn row_to_approval(r: &sqlx::sqlite::SqliteRow) -> Result<WorkApproval> {
         id: r.get("id"),
         work_item_id: r.get("work_item_id"),
         workspace_id: r.get("workspace_id"),
-        status: parse_enum(ApprovalStatus::parse(&status_s), &status_s, "approval status")?,
+        status: parse_enum(
+            ApprovalStatus::parse(&status_s),
+            &status_s,
+            "approval status",
+        )?,
         reason: r.get("reason"),
         requested_by: r.get("requested_by"),
         requested_at: ts(&r.get::<String, _>("requested_at"))?,
@@ -1207,7 +1212,13 @@ mod tests {
         pool
     }
 
-    fn upsert(ws: &str, kind: WorkKind, src: &str, title: &str, status: WorkStatus) -> WorkItemUpsert {
+    fn upsert(
+        ws: &str,
+        kind: WorkKind,
+        src: &str,
+        title: &str,
+        status: WorkStatus,
+    ) -> WorkItemUpsert {
         WorkItemUpsert {
             workspace_id: ws.into(),
             kind,
@@ -1229,30 +1240,78 @@ mod tests {
 
     #[test]
     fn enum_roundtrip() {
-        for s in ["session", "swarm", "goal_loop", "workflow", "review", "product_story", "pr", "external_trigger"] {
+        for s in [
+            "session",
+            "swarm",
+            "goal_loop",
+            "workflow",
+            "review",
+            "product_story",
+            "pr",
+            "external_trigger",
+        ] {
             assert_eq!(WorkKind::parse(s).unwrap().as_str(), s);
         }
-        assert_eq!(EdgeRelation::parse("belongs_to").unwrap().as_str(), "belongs_to");
-        assert_eq!(WorkActor::parse("integration").unwrap().as_str(), "integration");
-        assert_eq!(ArtifactKind::parse("test_run").unwrap().as_str(), "test_run");
+        assert_eq!(
+            EdgeRelation::parse("belongs_to").unwrap().as_str(),
+            "belongs_to"
+        );
+        assert_eq!(
+            WorkActor::parse("integration").unwrap().as_str(),
+            "integration"
+        );
+        assert_eq!(
+            ArtifactKind::parse("test_run").unwrap().as_str(),
+            "test_run"
+        );
     }
 
     #[test]
     fn status_normalization() {
-        assert_eq!(WorkStatus::from_source(WorkKind::Session, "Idle"), WorkStatus::Waiting);
-        assert_eq!(WorkStatus::from_source(WorkKind::Session, "exited"), WorkStatus::Done);
-        assert_eq!(WorkStatus::from_source(WorkKind::Swarm, "error"), WorkStatus::Failed);
-        assert_eq!(WorkStatus::from_source(WorkKind::GoalLoop, "exhausted"), WorkStatus::Failed);
-        assert_eq!(WorkStatus::from_source(WorkKind::Workflow, "completed"), WorkStatus::Succeeded);
-        assert_eq!(WorkStatus::from_source(WorkKind::Review, "done"), WorkStatus::Succeeded);
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Session, "Idle"),
+            WorkStatus::Waiting
+        );
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Session, "exited"),
+            WorkStatus::Done
+        );
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Swarm, "error"),
+            WorkStatus::Failed
+        );
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::GoalLoop, "exhausted"),
+            WorkStatus::Failed
+        );
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Workflow, "completed"),
+            WorkStatus::Succeeded
+        );
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Review, "done"),
+            WorkStatus::Succeeded
+        );
         // Unknown → Running (never silently drop from the active view).
-        assert_eq!(WorkStatus::from_source(WorkKind::Swarm, "weird"), WorkStatus::Running);
+        assert_eq!(
+            WorkStatus::from_source(WorkKind::Swarm, "weird"),
+            WorkStatus::Running
+        );
     }
 
     #[tokio::test]
     async fn upsert_is_idempotent_and_tracks_status() {
         let repo = WorkGraphRepo::new(mem_pool().await);
-        let r1 = repo.upsert_item(&upsert("w1", WorkKind::Session, "s1", "fix login", WorkStatus::Running)).await.unwrap();
+        let r1 = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Session,
+                "s1",
+                "fix login",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap();
         assert!(r1.created);
         assert_eq!(r1.prev_status, None);
 
@@ -1266,17 +1325,41 @@ mod tests {
         assert_eq!(r2.item.status, WorkStatus::Done);
         assert_eq!(r2.item.cost_so_far, 1.5);
 
-        let list = repo.list_items(&"w1".into(), &MissionFilter::default()).await.unwrap();
+        let list = repo
+            .list_items(&"w1".into(), &MissionFilter::default())
+            .await
+            .unwrap();
         assert_eq!(list.len(), 1);
     }
 
     #[tokio::test]
     async fn approval_flow_and_summary() {
         let repo = WorkGraphRepo::new(mem_pool().await);
-        let it = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "security review", WorkStatus::Running)).await.unwrap().item;
-        repo.upsert_item(&upsert("w1", WorkKind::Pr, "repo:42", "PR #42", WorkStatus::Running)).await.unwrap();
+        let it = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Review,
+                "r1",
+                "security review",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
+        repo.upsert_item(&upsert(
+            "w1",
+            WorkKind::Pr,
+            "repo:42",
+            "PR #42",
+            WorkStatus::Running,
+        ))
+        .await
+        .unwrap();
 
-        let ap = repo.request_approval(&"w1".into(), &it.id, Some("ship?".into()), "u1").await.unwrap();
+        let ap = repo
+            .request_approval(&"w1".into(), &it.id, Some("ship?".into()), "u1")
+            .await
+            .unwrap();
         assert_eq!(ap.status, ApprovalStatus::Pending);
 
         let detail = repo.item_detail(&"w1".into(), &it.id).await.unwrap();
@@ -1288,11 +1371,21 @@ mod tests {
         assert_eq!(s.needs_approval, 1);
         assert_eq!(s.active, 2);
 
-        let decided = repo.decide_approval(&"w1".into(), &ap.id, ApprovalStatus::Approved, "u2", Some("ok".into())).await.unwrap();
+        let decided = repo
+            .decide_approval(
+                &"w1".into(),
+                &ap.id,
+                ApprovalStatus::Approved,
+                "u2",
+                Some("ok".into()),
+            )
+            .await
+            .unwrap();
         assert_eq!(decided.status, ApprovalStatus::Approved);
         // Deciding again conflicts.
         assert!(matches!(
-            repo.decide_approval(&"w1".into(), &ap.id, ApprovalStatus::Rejected, "u2", None).await,
+            repo.decide_approval(&"w1".into(), &ap.id, ApprovalStatus::Rejected, "u2", None)
+                .await,
             Err(Error::Conflict(_))
         ));
         let s2 = repo.summary(&"w1".into()).await.unwrap();
@@ -1302,20 +1395,47 @@ mod tests {
     #[tokio::test]
     async fn edges_events_artifacts_and_graph() {
         let repo = WorkGraphRepo::new(mem_pool().await);
-        let review = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "review", WorkStatus::Running)).await.unwrap().item;
-        let pr = repo.upsert_item(&upsert("w1", WorkKind::Pr, "repo:42", "PR #42", WorkStatus::Running)).await.unwrap().item;
+        let review = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Review,
+                "r1",
+                "review",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
+        let pr = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Pr,
+                "repo:42",
+                "PR #42",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
 
-        repo.add_edge(&"w1".into(), &review.id, &pr.id, EdgeRelation::Reviews).await.unwrap();
+        repo.add_edge(&"w1".into(), &review.id, &pr.id, EdgeRelation::Reviews)
+            .await
+            .unwrap();
         // Idempotent.
-        repo.add_edge(&"w1".into(), &review.id, &pr.id, EdgeRelation::Reviews).await.unwrap();
+        repo.add_edge(&"w1".into(), &review.id, &pr.id, EdgeRelation::Reviews)
+            .await
+            .unwrap();
 
-        let ev = repo.append_event(&NewWorkEvent {
-            work_item_id: review.id.clone(),
-            workspace_id: "w1".into(),
-            actor: WorkActor::Agent,
-            event_type: "tool_call".into(),
-            payload: serde_json::json!({"tool": "grep"}),
-        }).await.unwrap();
+        let ev = repo
+            .append_event(&NewWorkEvent {
+                work_item_id: review.id.clone(),
+                workspace_id: "w1".into(),
+                actor: WorkActor::Agent,
+                event_type: "tool_call".into(),
+                payload: serde_json::json!({"tool": "grep"}),
+            })
+            .await
+            .unwrap();
         assert_eq!(ev.event_type, "tool_call");
 
         repo.add_artifact(&NewArtifact {
@@ -1325,7 +1445,9 @@ mod tests {
             title: "verdict".into(),
             reference: None,
             payload: serde_json::json!({"verdict": "block"}),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let detail = repo.item_detail(&"w1".into(), &review.id).await.unwrap();
         assert_eq!(detail.edges.len(), 1);
@@ -1334,7 +1456,10 @@ mod tests {
         assert_eq!(detail.events.len(), 1);
         assert_eq!(detail.artifacts.len(), 1);
 
-        let g = repo.graph(&"w1".into(), &MissionFilter::default()).await.unwrap();
+        let g = repo
+            .graph(&"w1".into(), &MissionFilter::default())
+            .await
+            .unwrap();
         assert_eq!(g.nodes.len(), 2);
         assert_eq!(g.edges.len(), 1);
     }
@@ -1346,7 +1471,17 @@ mod tests {
     #[tokio::test]
     async fn add_artifact_dedupes_null_refs() {
         let repo = WorkGraphRepo::new(mem_pool().await);
-        let it = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "review", WorkStatus::Running)).await.unwrap().item;
+        let it = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Review,
+                "r1",
+                "review",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
         let artifact = |title: &str, reference: Option<&str>| NewArtifact {
             work_item_id: it.id.clone(),
             workspace_id: "w1".into(),
@@ -1357,22 +1492,48 @@ mod tests {
         };
 
         let first = repo.add_artifact(&artifact("verdict", None)).await.unwrap();
-        let second = repo.add_artifact(&artifact("verdict again", None)).await.unwrap();
-        assert_eq!(first.id, second.id, "the second call must return the SAME row");
-        assert_eq!(second.title, "verdict", "the pre-existing row wins; the retry is a no-op");
+        let second = repo
+            .add_artifact(&artifact("verdict again", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "the second call must return the SAME row"
+        );
+        assert_eq!(
+            second.title, "verdict",
+            "the pre-existing row wins; the retry is a no-op"
+        );
         assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 1);
 
         // A non-NULL ref of the same kind is still an independent artifact.
-        let reffed = repo.add_artifact(&artifact("linked", Some("repo:42"))).await.unwrap();
+        let reffed = repo
+            .add_artifact(&artifact("linked", Some("repo:42")))
+            .await
+            .unwrap();
         assert_ne!(reffed.id, first.id);
-        repo.add_artifact(&artifact("linked", Some("repo:42"))).await.unwrap();
+        repo.add_artifact(&artifact("linked", Some("repo:42")))
+            .await
+            .unwrap();
         assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 2);
 
         // The existence check the projector asks before writing.
-        assert!(repo.has_artifact(&it.id, ArtifactKind::Report, None).await.unwrap());
-        assert!(repo.has_artifact(&it.id, ArtifactKind::Report, Some("repo:42")).await.unwrap());
-        assert!(!repo.has_artifact(&it.id, ArtifactKind::Report, Some("repo:7")).await.unwrap());
-        assert!(!repo.has_artifact(&it.id, ArtifactKind::Pr, None).await.unwrap());
+        assert!(repo
+            .has_artifact(&it.id, ArtifactKind::Report, None)
+            .await
+            .unwrap());
+        assert!(repo
+            .has_artifact(&it.id, ArtifactKind::Report, Some("repo:42"))
+            .await
+            .unwrap());
+        assert!(!repo
+            .has_artifact(&it.id, ArtifactKind::Report, Some("repo:7"))
+            .await
+            .unwrap());
+        assert!(!repo
+            .has_artifact(&it.id, ArtifactKind::Pr, None)
+            .await
+            .unwrap());
     }
 
     /// Migration 0126 itself: seed the duplicates a pre-0126 daemon accumulated
@@ -1388,11 +1549,29 @@ mod tests {
             .await
             .unwrap();
         let repo = WorkGraphRepo::new(pool.clone());
-        let it = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "review", WorkStatus::Running)).await.unwrap().item;
+        let it = repo
+            .upsert_item(&upsert(
+                "w1",
+                WorkKind::Review,
+                "r1",
+                "review",
+                WorkStatus::Running,
+            ))
+            .await
+            .unwrap()
+            .item;
 
         // 4 NULL-ref reports (the runaway), 1 NULL-ref pr (a different bucket),
         // 2 rows with a real ref (untouched by the cleanup).
-        for (i, created) in ["2026-01-01T00:00:03Z", "2026-01-01T00:00:01Z", "2026-01-01T00:00:04Z", "2026-01-01T00:00:02Z"].iter().enumerate() {
+        for (i, created) in [
+            "2026-01-01T00:00:03Z",
+            "2026-01-01T00:00:01Z",
+            "2026-01-01T00:00:04Z",
+            "2026-01-01T00:00:02Z",
+        ]
+        .iter()
+        .enumerate()
+        {
             sqlx::query(
                 "INSERT INTO work_artifacts (id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, created_at) \
                  VALUES (?,?,?,?,?,NULL,'{}',?)",
@@ -1428,18 +1607,31 @@ mod tests {
         }
         assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 7);
 
-        sqlx::raw_sql(include_str!("../migrations/0126_work_artifacts_nullref.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/0126_work_artifacts_nullref.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let left = repo.artifacts_for(&it.id).await.unwrap();
-        assert_eq!(left.len(), 4, "4 report rows collapse to 1; pr rows survive");
-        let report = left.iter().find(|a| a.kind == ArtifactKind::Report).unwrap();
+        assert_eq!(
+            left.len(),
+            4,
+            "4 report rows collapse to 1; pr rows survive"
+        );
+        let report = left
+            .iter()
+            .find(|a| a.kind == ArtifactKind::Report)
+            .unwrap();
         assert_eq!(report.id, "a1", "the OLDEST created_at survives");
         assert!(left.iter().any(|a| a.id == "b0" && a.reference.is_none()));
-        assert!(left.iter().any(|a| a.reference.as_deref() == Some("repo:42")));
-        assert!(left.iter().any(|a| a.reference.as_deref() == Some("repo:43")));
+        assert!(left
+            .iter()
+            .any(|a| a.reference.as_deref() == Some("repo:42")));
+        assert!(left
+            .iter()
+            .any(|a| a.reference.as_deref() == Some("repo:43")));
 
         // And the re-created index holds the invariant from here on.
         assert_eq!(

@@ -156,9 +156,7 @@ impl LocalGit {
         token: Option<String>,
         mode: PullMode,
     ) -> Result<PullOutcome> {
-        let (ok, stdout, stderr, code) = self
-            .run_remote_raw(&["pull", mode.flag()], token)
-            .await?;
+        let (ok, stdout, stderr, code) = self.run_remote_raw(&["pull", mode.flag()], token).await?;
         let mut output = crate::local::strip_noise(&stdout);
         let err = crate::local::strip_noise(&stderr);
         if !err.is_empty() {
@@ -199,7 +197,11 @@ impl LocalGit {
         token: Option<String>,
         mode: PullMode,
     ) -> Result<(PullOutcome, Option<String>)> {
-        let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+        let dirty = !self
+            .run(&["status", "--porcelain"])
+            .await?
+            .trim()
+            .is_empty();
         if !dirty {
             return Ok((self.pull_outcome_mode(token, mode).await?, None));
         }
@@ -245,9 +247,15 @@ impl LocalGit {
                 let url = url
                     .map(str::trim)
                     .filter(|u| !u.is_empty())
-                    .ok_or_else(|| Error::Invalid("a url is required to add or re-point a remote".into()))?;
+                    .ok_or_else(|| {
+                        Error::Invalid("a url is required to add or re-point a remote".into())
+                    })?;
                 validate_remote_url(url)?;
-                let sub = if op == RemoteOp::Add { "add" } else { "set-url" };
+                let sub = if op == RemoteOp::Add {
+                    "add"
+                } else {
+                    "set-url"
+                };
                 self.run(&["remote", sub, "--end-of-options", name, url])
                     .await?;
             }
@@ -360,7 +368,6 @@ fn validate_remote_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
-
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -528,7 +535,10 @@ mod tests {
         write(&seed, "shared.txt", "line1\nline2\nline3\n");
         sh_git(&seed, &["add", "."]);
         sh_git(&seed, &["commit", "-m", "init"]);
-        sh_git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        sh_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         sh_git(&seed, &["push", "-u", "origin", "main"]);
 
         let dir = tmp.path().join("work");
@@ -657,11 +667,23 @@ mod tests {
             .expect("rebase pull");
         assert!(out.conflicted_files.is_empty());
 
-        let log = git.run(&["log", "--pretty=%s%x1f%P", "-n", "3"]).await.unwrap();
+        let log = git
+            .run(&["log", "--pretty=%s%x1f%P", "-n", "3"])
+            .await
+            .unwrap();
         let rows: Vec<&str> = log.lines().collect();
-        assert!(rows[0].starts_with("local work"), "local work ends on top: {log}");
         assert!(
-            rows.iter().all(|r| r.split('\u{1f}').nth(1).unwrap_or("").split_whitespace().count() <= 1),
+            rows[0].starts_with("local work"),
+            "local work ends on top: {log}"
+        );
+        assert!(
+            rows.iter().all(|r| r
+                .split('\u{1f}')
+                .nth(1)
+                .unwrap_or("")
+                .split_whitespace()
+                .count()
+                <= 1),
             "no merge commit was created: {log}"
         );
     }
@@ -725,14 +747,22 @@ mod tests {
         );
         let git = LocalGit::new(&dir);
         let remotes = git.remotes().await.unwrap();
-        assert_eq!(remotes.len(), 1, "one row per remote, not one per direction");
+        assert_eq!(
+            remotes.len(),
+            1,
+            "one row per remote, not one per direction"
+        );
         assert_eq!(remotes[0].name, "origin");
         assert_eq!(remotes[0].fetch_url, "https://example.com/otto/x.git");
         assert_eq!(remotes[0].push_url, "https://example.com/otto/x.git");
 
         // set-url re-points it; remove drops it.
         let remotes = git
-            .remote_op(RemoteOp::SetUrl, "origin", Some("https://example.com/y.git"))
+            .remote_op(
+                RemoteOp::SetUrl,
+                "origin",
+                Some("https://example.com/y.git"),
+            )
             .await
             .unwrap();
         assert_eq!(remotes[0].fetch_url, "https://example.com/y.git");
@@ -789,7 +819,10 @@ mod tests {
 
         sh_git(&dir, &["config", "commit.gpgsign", "true"]);
         sh_git(&dir, &["config", "gpg.format", "ssh"]);
-        sh_git(&dir, &["config", "user.signingkey", "~/.ssh/id_ed25519.pub"]);
+        sh_git(
+            &dir,
+            &["config", "user.signingkey", "~/.ssh/id_ed25519.pub"],
+        );
         let cfg = git.commit_config().await;
         assert!(cfg.gpgsign);
         assert_eq!(cfg.format.as_deref(), Some("ssh"));

@@ -153,7 +153,11 @@ fn determine_source(
     }
     // Free text (from any surface — a chat reply, a webhook, or the UI launcher's
     // "describe what you want" box) becomes a channel run.
-    if req.seed_text.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+    if req
+        .seed_text
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
         let handle = origin_meta
             .thread
             .clone()

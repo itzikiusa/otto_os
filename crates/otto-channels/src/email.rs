@@ -63,10 +63,12 @@ impl GmailSender {
 
     /// Build a plain-text [`Message`] from the sender to `to`.
     fn build(&self, to: &str, subject: &str, body: &str) -> Result<Message> {
-        let from = self
-            .from_address
-            .parse()
-            .map_err(|e| Error::Invalid(format!("invalid sender address '{}': {e}", self.from_address)))?;
+        let from = self.from_address.parse().map_err(|e| {
+            Error::Invalid(format!(
+                "invalid sender address '{}': {e}",
+                self.from_address
+            ))
+        })?;
         let to = to
             .parse()
             .map_err(|e| Error::Invalid(format!("invalid recipient address '{to}': {e}")))?;
@@ -89,10 +91,12 @@ impl GmailSender {
         filename: &str,
         bytes: &[u8],
     ) -> Result<Message> {
-        let from = self
-            .from_address
-            .parse()
-            .map_err(|e| Error::Invalid(format!("invalid sender address '{}': {e}", self.from_address)))?;
+        let from = self.from_address.parse().map_err(|e| {
+            Error::Invalid(format!(
+                "invalid sender address '{}': {e}",
+                self.from_address
+            ))
+        })?;
         let to = to
             .parse()
             .map_err(|e| Error::Invalid(format!("invalid recipient address '{to}': {e}")))?;

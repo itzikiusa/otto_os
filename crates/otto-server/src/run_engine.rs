@@ -203,7 +203,8 @@ async fn stage_provision(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
             .git_store
             .get_repo(run.repo_id.as_ref().ok_or_else(no_repo)?)
             .await?;
-        let (branch, path, base) = crate::run_workspace::provision_worktree(ctx, run, &repo).await?;
+        let (branch, path, base) =
+            crate::run_workspace::provision_worktree(ctx, run, &repo).await?;
         ctx.runs
             .set_fields(
                 &run.id,
@@ -240,7 +241,11 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     let packet = crate::run_context::build_packet(run, &resolved, &repo);
     // "" = provider default; the model alias goes straight through as `--model`.
     let model = (!run.model.trim().is_empty()).then(|| run.model.trim());
-    let provider = if run.provider.trim().is_empty() { "claude" } else { run.provider.trim() };
+    let provider = if run.provider.trim().is_empty() {
+        "claude"
+    } else {
+        run.provider.trim()
+    };
     // claude runs on the fast headless PTY (also the deterministic E2E-stubbed
     // path). ANY OTHER registered provider (codex / agy / grok / …) runs as a
     // real, openable session so the run view can watch it — both honor `model`.
@@ -266,8 +271,17 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         let rid = run.id.to_string();
         let title = format!("Run with Otto · {}", &rid[..rid.len().min(8)]);
         let (reply, _sid) = crate::agent_session::run_session_turn(
-            ctx, &ws, &user, None, &title, &wt, provider, meta, &packet.prompt,
-            EXEC_NO_PROGRESS, |_id| {},
+            ctx,
+            &ws,
+            &user,
+            None,
+            &title,
+            &wt,
+            provider,
+            meta,
+            &packet.prompt,
+            EXEC_NO_PROGRESS,
+            |_id| {},
         )
         .await
         .map_err(|e| e.0)?;
@@ -297,7 +311,9 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
 }
 
 async fn execute_goal_loop(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
-    use otto_core::domain::{AcceptanceCriterion, GoalLoopConfig, GoalLoopDefinition, GoalLoopLimits};
+    use otto_core::domain::{
+        AcceptanceCriterion, GoalLoopConfig, GoalLoopDefinition, GoalLoopLimits,
+    };
     use otto_state::NewGoalLoop;
 
     let repo = ctx
@@ -365,11 +381,7 @@ async fn execute_goal_loop(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
 
     // The loop removed its worktree on finalize; re-attach one on its branch for
     // the proof/review/PR-draft stages (non-destructive — keeps the commits).
-    let path = ctx
-        .data_dir
-        .join("otto-runs")
-        .join(&run.id)
-        .join("work");
+    let path = ctx.data_dir.join("otto-runs").join(&run.id).join("work");
     let path_str = path.to_string_lossy().to_string();
     otto_git::LocalGit::new(&repo.path)
         .worktree_attach(&path_str, &branch)
@@ -470,9 +482,17 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         return Ok(());
     }
 
-    let (review_id, _base, _no_changes) =
-        crate::modules::run_review_for_branch(ctx, &repo_id, &wt, base.as_deref(), None, None, None, None)
-            .await?;
+    let (review_id, _base, _no_changes) = crate::modules::run_review_for_branch(
+        ctx,
+        &repo_id,
+        &wt,
+        base.as_deref(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
     ctx.runs
         .set_fields(
             &run.id,
@@ -738,11 +758,7 @@ async fn post_origin(ctx: &ServerCtx, run: &OttoRun, text: &str) {
         // Webhook callbacks + UI/api/mcp origins don't have a chat adapter here.
         _ => return,
     };
-    if let Ok(Some(integ)) = ctx
-        .integrations_store
-        .get(&run.workspace_id, channel)
-        .await
-    {
+    if let Ok(Some(integ)) = ctx.integrations_store.get(&run.workspace_id, channel).await {
         let _ = otto_channels::improve_notify::send_to(
             &ctx.secrets,
             &integ,

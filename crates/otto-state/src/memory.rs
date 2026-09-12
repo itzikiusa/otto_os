@@ -367,7 +367,10 @@ impl MemoriesRepo {
             q = q.bind(v);
         }
         q = q.bind(if f.limit > 0 { f.limit } else { 100 });
-        let rows = q.fetch_all(&self.pool).await.map_err(dberr("memory.list"))?;
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("memory.list"))?;
         rows.iter().map(row_to_memory).collect()
     }
 
@@ -655,16 +658,14 @@ impl MemoriesRepo {
     /// the service layer; the repo blindly writes the requested state.
     pub async fn set_state(&self, ws: &str, id: &str, state: &str) -> Result<Memory> {
         let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE memories SET state=?, updated_at=? WHERE id=? AND workspace_id=?",
-        )
-        .bind(state)
-        .bind(&now)
-        .bind(id)
-        .bind(ws)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("memory.set_state"))?;
+        sqlx::query("UPDATE memories SET state=?, updated_at=? WHERE id=? AND workspace_id=?")
+            .bind(state)
+            .bind(&now)
+            .bind(id)
+            .bind(ws)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("memory.set_state"))?;
         self.get(ws, id).await
     }
 
@@ -720,15 +721,13 @@ impl MemoriesRepo {
     /// `undo_token`, set state back to `accepted`. Returns the restored memory.
     pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
         // Locate the row by its undo token, scoped to the workspace.
-        let row = sqlx::query(
-            "SELECT id FROM memories WHERE undo_token=? AND workspace_id=?",
-        )
-        .bind(undo_token)
-        .bind(ws)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(dberr("memory.undo_forget.find"))?
-        .ok_or_else(|| Error::NotFound("undo token not found or already used".into()))?;
+        let row = sqlx::query("SELECT id FROM memories WHERE undo_token=? AND workspace_id=?")
+            .bind(undo_token)
+            .bind(ws)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("memory.undo_forget.find"))?
+            .ok_or_else(|| Error::NotFound("undo token not found or already used".into()))?;
         let id: String = row.get("id");
         let now = fmt(Utc::now());
         sqlx::query(

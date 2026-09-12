@@ -50,8 +50,14 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
     utilization_pass(ctx).await;
     let now = Utc::now();
     for agent in ctx.swarm_repo.list_scheduled_agents().await? {
-        let Some(sched) = agent.schedule.clone() else { continue };
-        if !sched.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+        let Some(sched) = agent.schedule.clone() else {
+            continue;
+        };
+        if !sched
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
         if !is_due(&sched, now) {
@@ -68,10 +74,21 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             .and_then(|v| v.as_i64())
             .unwrap_or(4)
             .max(1);
-        if ctx.swarm_repo.active_run_count(&swarm.id).await.unwrap_or(0) >= cap {
+        if ctx
+            .swarm_repo
+            .active_run_count(&swarm.id)
+            .await
+            .unwrap_or(0)
+            >= cap
+        {
             continue;
         }
-        if ctx.swarm_repo.agent_has_active_run(&agent.id).await.unwrap_or(false) {
+        if ctx
+            .swarm_repo
+            .agent_has_active_run(&agent.id)
+            .await
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -82,7 +99,13 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         }
         let _ = ctx
             .swarm_repo
-            .update_agent(&agent.id, AgentPatch { schedule: Some(Some(sched2)), ..Default::default() })
+            .update_agent(
+                &agent.id,
+                AgentPatch {
+                    schedule: Some(Some(sched2)),
+                    ..Default::default()
+                },
+            )
             .await;
 
         match ctx
@@ -213,7 +236,10 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
         let _ = repo
             .update_task(
                 &t.id,
-                TaskPatch { assignee_agent_id: Some(Some(agent.id.clone())), ..Default::default() },
+                TaskPatch {
+                    assignee_agent_id: Some(Some(agent.id.clone())),
+                    ..Default::default()
+                },
             )
             .await;
         crate::swarm_runtime::emit_task_pub(ctx, &t.id).await;
@@ -229,7 +255,10 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
             "status",
             &format!(
                 "⚖️ Utilization check: {}/{} sessions busy — rebalanced {} ready task(s): {}.",
-                active, cap, moved.len(), moved.join("; ")
+                active,
+                cap,
+                moved.len(),
+                moved.join("; ")
             ),
             json!({ "event": "utilization_rebalance", "moved": moved.len() }),
         )
@@ -255,7 +284,9 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
     {
         let mut cur = util_cursor().lock().unwrap();
         let e = cur.entry(sid.to_string()).or_insert((None, None));
-        if e.1.is_some_and(|t| Instant::now().duration_since(t) < UTIL_ESCALATE_EVERY) {
+        if e.1
+            .is_some_and(|t| Instant::now().duration_since(t) < UTIL_ESCALATE_EVERY)
+        {
             return Ok(());
         }
         e.1 = Some(Instant::now());
@@ -265,7 +296,9 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
         .iter()
         .find(|a| {
             a.status == "active"
-                && agents.iter().any(|b| b.reports_to.as_deref() == Some(a.id.as_str()))
+                && agents
+                    .iter()
+                    .any(|b| b.reports_to.as_deref() == Some(a.id.as_str()))
                 && idle.iter().any(|i| i.id == a.id)
         })
         .cloned()
@@ -293,7 +326,13 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
          back to full capacity, then post a one-paragraph summary with `./otto-post`."
     );
     let _ = repo
-        .update_run(&run.id, RunPatch { result: Some(Some(json!({ "directive": directive }))), ..Default::default() })
+        .update_run(
+            &run.id,
+            RunPatch {
+                result: Some(Some(json!({ "directive": directive }))),
+                ..Default::default()
+            },
+        )
         .await;
     run.result = Some(json!({ "directive": directive }));
     swarm_run::emit_run(ctx, &run.id).await;
@@ -336,9 +375,17 @@ pub fn is_due(sched: &Value, now: DateTime<Utc>) -> bool {
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
-    match sched.get("cadence").and_then(Value::as_str).unwrap_or("interval") {
+    match sched
+        .get("cadence")
+        .and_then(Value::as_str)
+        .unwrap_or("interval")
+    {
         "interval" => {
-            let every = sched.get("every_min").and_then(Value::as_i64).unwrap_or(60).max(1);
+            let every = sched
+                .get("every_min")
+                .and_then(Value::as_i64)
+                .unwrap_or(60)
+                .max(1);
             match last {
                 Some(l) => (now - l).num_minutes() >= every,
                 None => true,

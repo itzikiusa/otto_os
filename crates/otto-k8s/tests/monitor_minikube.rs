@@ -75,7 +75,10 @@ impl MonitorSink for MemSink {
         Box::pin(async { Ok(()) })
     }
     fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> BoxFut<'a, Result<()>> {
-        self.inserts.lock().unwrap().push((table.to_string(), ndjson.to_string()));
+        self.inserts
+            .lock()
+            .unwrap()
+            .push((table.to_string(), ndjson.to_string()));
         Box::pin(async { Ok(()) })
     }
     fn query_rows<'a>(&'a self, _sql: &'a str) -> BoxFut<'a, Result<Vec<serde_json::Value>>> {
@@ -134,10 +137,17 @@ async fn one_cycle_against_the_current_context() {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+        .connect_with(
+            SqliteConnectOptions::new()
+                .in_memory(true)
+                .foreign_keys(true),
+        )
         .await
         .unwrap();
-    sqlx::migrate!("../otto-state/migrations").run(&pool).await.unwrap();
+    sqlx::migrate!("../otto-state/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
     let (events, _) = broadcast::channel(16);
     let ctx = Ctx {
         pool: pool.clone(),
@@ -181,8 +191,20 @@ async fn one_cycle_against_the_current_context() {
         });
     }
 
-    let out = run_cycle(&ctx, &cluster, &cfg, &Snapshot::new(), None, ctx.sink.as_ref()).await;
-    assert!(!out.unreachable, "cluster unreachable: {}", out.status.last_error);
+    let out = run_cycle(
+        &ctx,
+        &cluster,
+        &cfg,
+        &Snapshot::new(),
+        None,
+        ctx.sink.as_ref(),
+    )
+    .await;
+    assert!(
+        !out.unreachable,
+        "cluster unreachable: {}",
+        out.status.last_error
+    );
     assert!(out.status.pods_seen > 0, "no pods in namespace {ns}");
     let inserts = ctx.sink.inserts.lock().unwrap().clone();
     let samples: Vec<&str> = inserts
@@ -190,7 +212,9 @@ async fn one_cycle_against_the_current_context() {
         .filter(|(t, _)| t == "k8s_samples")
         .flat_map(|(_, nd)| nd.lines())
         .collect();
-    assert!(samples.iter().any(|l| l.contains("\"metric\":\"restarts_total\"")));
+    assert!(samples
+        .iter()
+        .any(|l| l.contains("\"metric\":\"restarts_total\"")));
     if !cfg.probes.is_empty() {
         assert!(
             samples.iter().any(|l| l.contains("\"metric\":\"up\"")),

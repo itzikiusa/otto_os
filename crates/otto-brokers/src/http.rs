@@ -378,7 +378,12 @@ async fn delete_topic<S: BrokersCtx>(
     guard(&row, q.confirm)?;
     ctx.brokers().delete_topic(&id, &topic).await?;
     ctx.brokers()
-        .audit_write(&id, &user.id, "delete_topic", serde_json::json!({ "topic": topic }))
+        .audit_write(
+            &id,
+            &user.id,
+            "delete_topic",
+            serde_json::json!({ "topic": topic }),
+        )
         .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -435,7 +440,12 @@ async fn produce<S: BrokersCtx>(
     guard(&row, req.confirm)?;
     let resp = ctx.brokers().produce(&id, &topic, &req).await?;
     ctx.brokers()
-        .audit_write(&id, &user.id, "produce", serde_json::json!({ "topic": topic }))
+        .audit_write(
+            &id,
+            &user.id,
+            "produce",
+            serde_json::json!({ "topic": topic }),
+        )
         .await;
     Ok(Json(resp).into_response())
 }
@@ -481,7 +491,12 @@ async fn reset_group_offsets<S: BrokersCtx>(
     guard(&row, req.confirm)?;
     let detail = ctx.brokers().reset_group_offsets(&id, &group, &req).await?;
     ctx.brokers()
-        .audit_write(&id, &user.id, "reset_group_offsets", serde_json::json!({ "group": group }))
+        .audit_write(
+            &id,
+            &user.id,
+            "reset_group_offsets",
+            serde_json::json!({ "group": group }),
+        )
         .await;
     Ok(Json(detail).into_response())
 }

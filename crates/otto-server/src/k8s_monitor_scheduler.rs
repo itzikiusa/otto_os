@@ -41,10 +41,17 @@ pub struct Reconcile {
 /// `enabled`: (cluster_id, updated_at) rows that should be running.
 pub fn reconcile(running: &HashMap<String, String>, enabled: &[(String, String)]) -> Reconcile {
     let mut r = Reconcile::default();
-    let want: HashMap<&str, &str> = enabled.iter().map(|(id, u)| (id.as_str(), u.as_str())).collect();
+    let want: HashMap<&str, &str> = enabled
+        .iter()
+        .map(|(id, u)| (id.as_str(), u.as_str()))
+        .collect();
     let mut stop: Vec<String> = running
         .iter()
-        .filter(|(id, u)| want.get(id.as_str()).map(|w| *w != u.as_str()).unwrap_or(true))
+        .filter(|(id, u)| {
+            want.get(id.as_str())
+                .map(|w| *w != u.as_str())
+                .unwrap_or(true)
+        })
         .map(|(id, _)| id.clone())
         .collect();
     stop.sort();
@@ -152,14 +159,23 @@ mod tests {
 
     #[test]
     fn reconcile_starts_stops_and_restarts_on_change() {
-        let running: HashMap<String, String> =
-            [("a".to_string(), "t1".to_string()), ("b".to_string(), "t1".to_string())].into();
-        let enabled = vec![("a".to_string(), "t2".to_string()), ("c".to_string(), "t1".to_string())];
+        let running: HashMap<String, String> = [
+            ("a".to_string(), "t1".to_string()),
+            ("b".to_string(), "t1".to_string()),
+        ]
+        .into();
+        let enabled = vec![
+            ("a".to_string(), "t2".to_string()),
+            ("c".to_string(), "t1".to_string()),
+        ];
         let d = reconcile(&running, &enabled);
         assert_eq!(d.stop, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(
             d.start,
-            vec![("a".to_string(), "t2".to_string()), ("c".to_string(), "t1".to_string())]
+            vec![
+                ("a".to_string(), "t2".to_string()),
+                ("c".to_string(), "t1".to_string())
+            ]
         );
     }
 

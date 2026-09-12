@@ -73,8 +73,8 @@ fn valid_slug(s: &str) -> bool {
 
 fn load_manifest(dir: &Path) -> Result<PluginManifestFile, String> {
     let path = dir.join("otto-plugin.json");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let m: PluginManifestFile =
         serde_json::from_str(&raw).map_err(|e| format!("parse otto-plugin.json: {e}"))?;
     if !valid_slug(&m.slug) {
@@ -179,7 +179,11 @@ impl PluginManager {
             .insert(p.slug.clone(), RunningPlugin { port, child });
 
         // Best-effort readiness wait (don't fail the spawn if slow).
-        let health = if p.health.is_empty() { "/health" } else { &p.health };
+        let health = if p.health.is_empty() {
+            "/health"
+        } else {
+            &p.health
+        };
         let url = format!("http://127.0.0.1:{port}{health}");
         for _ in 0..20 {
             if self
@@ -301,7 +305,11 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
     };
     let user = req.extensions().get::<AuthUser>().map(|u| u.0.clone());
     let method = req.method().clone();
-    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
     let ctype = req
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
@@ -314,14 +322,16 @@ async fn proxy(State(ctx): State<ServerCtx>, req: Request) -> Response {
     };
 
     let url = format!("http://127.0.0.1:{port}/{rest}{query}");
-    let rmethod = reqwest::Method::from_bytes(method.as_str().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let rmethod =
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut rb = ctx.plugins.http.request(rmethod, &url).body(body.to_vec());
     if let Some(ct) = ctype {
         rb = rb.header("content-type", ct);
     }
     if let Some(u) = user {
-        rb = rb.header("x-otto-user", u.id.as_str()).header("x-otto-user-name", u.display_name);
+        rb = rb
+            .header("x-otto-user", u.id.as_str())
+            .header("x-otto-user-name", u.display_name);
     }
 
     match rb.send().await {
@@ -410,7 +420,11 @@ async fn install(
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
             .map(|u| u.to_string())
-            .ok_or_else(|| ApiError(Error::Invalid(format!("unsupported plugin source url '{src}'"))))?;
+            .ok_or_else(|| {
+                ApiError(Error::Invalid(format!(
+                    "unsupported plugin source url '{src}'"
+                )))
+            })?;
         let out = Command::new("git")
             .args([
                 "-c",
@@ -489,8 +503,15 @@ async fn enable(
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("plugin {slug}"))))?;
-    ctx.plugins.repo().set_enabled(&slug, true).await.map_err(ApiError)?;
-    let enabled = PluginRecord { enabled: true, ..rec };
+    ctx.plugins
+        .repo()
+        .set_enabled(&slug, true)
+        .await
+        .map_err(ApiError)?;
+    let enabled = PluginRecord {
+        enabled: true,
+        ..rec
+    };
     if let Err(e) = ctx.plugins.spawn(&enabled).await {
         // Roll back the enabled flag if the process won't start.
         let _ = ctx.plugins.repo().set_enabled(&slug, false).await;
@@ -506,7 +527,11 @@ async fn disable(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
-    ctx.plugins.repo().set_enabled(&slug, false).await.map_err(ApiError)?;
+    ctx.plugins
+        .repo()
+        .set_enabled(&slug, false)
+        .await
+        .map_err(ApiError)?;
     ctx.plugins.stop(&slug).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -551,7 +576,11 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
         return StatusCode::NOT_FOUND.into_response();
     };
     let base = PathBuf::from(&rec.source).join(&ui_dir);
-    let rel = if p.path.is_empty() { "index.html" } else { &p.path };
+    let rel = if p.path.is_empty() {
+        "index.html"
+    } else {
+        &p.path
+    };
     // Contain the path within the ui dir (no traversal).
     let target = base.join(rel);
     let (Ok(c_base), Ok(c_target)) = (base.canonicalize(), target.canonicalize()) else {
@@ -596,10 +625,7 @@ fn mime_for(p: &Path) -> &'static str {
 /// The error is BOXED because an `axum::Response` is ~128 bytes: returning one
 /// by value would make every `Result` this produces that wide, on the success
 /// path too (`clippy::result_large_err`). Callers unbox with `return *r`.
-async fn auth_plugin(
-    ctx: &ServerCtx,
-    headers: &HeaderMap,
-) -> Result<PluginRecord, Box<Response>> {
+async fn auth_plugin(ctx: &ServerCtx, headers: &HeaderMap) -> Result<PluginRecord, Box<Response>> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -701,7 +727,11 @@ async fn host_jira_credentials(
     if let Err(r) = auth_plugin(&ctx, &headers).await {
         return *r;
     }
-    let account = match ctx.issues_store.get_account(&otto_core::Id::from(q.account.as_str())).await {
+    let account = match ctx
+        .issues_store
+        .get_account(&otto_core::Id::from(q.account.as_str()))
+        .await
+    {
         Ok(a) => a,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
@@ -760,7 +790,12 @@ async fn host_agents_run(
     let result = match provider.as_str() {
         "claude" => {
             ctx.orchestrator
-                .run_agent(&req.prompt, &cwd, req.model.as_deref(), Duration::from_secs(180))
+                .run_agent(
+                    &req.prompt,
+                    &cwd,
+                    req.model.as_deref(),
+                    Duration::from_secs(180),
+                )
                 .await
         }
         "codex" => run_codex_exec(&req.prompt, &cwd, req.model.as_deref()).await,
@@ -786,7 +821,8 @@ async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_co
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "codex".to_string());
-    let out_file = std::env::temp_dir().join(format!("otto-plugin-codex-{}.txt", uuid::Uuid::new_v4()));
+    let out_file =
+        std::env::temp_dir().join(format!("otto-plugin-codex-{}.txt", uuid::Uuid::new_v4()));
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
@@ -836,7 +872,10 @@ pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         // Skip VCS + heavy build dirs.
-        if matches!(name.to_str(), Some(".git") | Some("node_modules") | Some("target")) {
+        if matches!(
+            name.to_str(),
+            Some(".git") | Some("node_modules") | Some("target")
+        ) {
             continue;
         }
         let from = entry.path();

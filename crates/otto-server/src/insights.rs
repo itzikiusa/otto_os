@@ -193,8 +193,11 @@ pub fn due_period(kind: Kind, now: DateTime<Utc>) -> (NaiveDate, NaiveDate) {
             (start, end)
         }
         Kind::Month => {
-            let first_this = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
-            let start = first_this.checked_sub_months(Months::new(1)).unwrap_or(first_this);
+            let first_this =
+                NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+            let start = first_this
+                .checked_sub_months(Months::new(1))
+                .unwrap_or(first_this);
             // Last day of the previous month = day before the 1st of this month.
             let end = first_this.pred_opt().unwrap_or(start);
             (start, end)
@@ -404,7 +407,11 @@ pub fn build_run_prompt(kind: Kind, offset: i64) -> String {
 /// Returns the spawned session id on success. Returns `Ok(None)` (a no-op) when
 /// the `insights` skill is not installed in the Library — the caller logs a
 /// warning and the UI tells the user to install it.
-pub async fn run_insights(ctx: &ServerCtx, kind: Kind, offset: i64) -> otto_core::Result<Option<otto_core::Id>> {
+pub async fn run_insights(
+    ctx: &ServerCtx,
+    kind: Kind,
+    offset: i64,
+) -> otto_core::Result<Option<otto_core::Id>> {
     // The insights skill is manual-install. If absent, skip (don't spawn a
     // session that would just say "no such skill").
     let installed = ctx
@@ -562,8 +569,11 @@ async fn put_config(
 ) -> ApiResult<Json<InsightsConfig>> {
     require_root(&user)?;
     let dir = insights_dir(&ctx);
-    write_config(&dir, &cfg)
-        .map_err(|e| ApiError(otto_core::Error::Internal(format!("write insights config: {e}"))))?;
+    write_config(&dir, &cfg).map_err(|e| {
+        ApiError(otto_core::Error::Internal(format!(
+            "write insights config: {e}"
+        )))
+    })?;
     Ok(Json(cfg))
 }
 
@@ -857,7 +867,12 @@ mod tests {
         let cfg = read_config(dir.path());
         assert!(!cfg.daily && !cfg.weekly && !cfg.monthly);
 
-        let on = InsightsConfig { daily: true, weekly: false, monthly: true, ..Default::default() };
+        let on = InsightsConfig {
+            daily: true,
+            weekly: false,
+            monthly: true,
+            ..Default::default()
+        };
         write_config(dir.path(), &on).unwrap();
         let read = read_config(dir.path());
         assert_eq!(read, on);
@@ -879,7 +894,11 @@ mod tests {
         // A report HTML → done.
         let weekly = root.join("weekly");
         std::fs::create_dir_all(&weekly).unwrap();
-        std::fs::write(weekly.join("report-weekly-20260610_20260616.html"), "<html>").unwrap();
+        std::fs::write(
+            weekly.join("report-weekly-20260610_20260616.html"),
+            "<html>",
+        )
+        .unwrap();
         assert!(period_done(root, Kind::Week, s, e));
 
         // Different period still not done.
@@ -907,7 +926,11 @@ mod tests {
         std::fs::create_dir_all(&weekly).unwrap();
 
         // Older period.
-        std::fs::write(weekly.join("report-weekly-20260601_20260607.html"), "<html>").unwrap();
+        std::fs::write(
+            weekly.join("report-weekly-20260601_20260607.html"),
+            "<html>",
+        )
+        .unwrap();
         std::fs::write(
             weekly.join("summary-weekly-20260601_20260607.md"),
             "line1\nline2",

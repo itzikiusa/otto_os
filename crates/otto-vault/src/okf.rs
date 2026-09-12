@@ -22,7 +22,9 @@ fn is_iso_date(s: &str) -> bool {
     b.len() == 10
         && b[4] == b'-'
         && b[7] == b'-'
-        && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
 }
 
 impl VaultEngine {
@@ -36,10 +38,19 @@ impl VaultEngine {
         let mut dirs_with_index: BTreeSet<String> = BTreeSet::new();
 
         for r in &rows {
-            let dir = r.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+            let dir = r
+                .path
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
             let fm: serde_json::Value =
                 serde_json::from_str(&r.frontmatter_json).unwrap_or(serde_json::Value::Null);
-            let base = r.path.rsplit('/').next().unwrap_or(&r.path).to_ascii_lowercase();
+            let base = r
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&r.path)
+                .to_ascii_lowercase();
 
             if r.reserved {
                 if base == "index.md" {
@@ -104,7 +115,12 @@ impl VaultEngine {
                 continue; // E2/W* are noise on a file that already fails E1
             }
             // E2 — non-empty `type`.
-            if r.okf_type.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            if r.okf_type
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
                 errors.push(OkfFinding {
                     rule: "E2".into(),
                     path: r.path.clone(),
@@ -175,7 +191,11 @@ impl VaultEngine {
             if *reserved {
                 continue;
             }
-            dirs.insert(p.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default());
+            dirs.insert(
+                p.rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default(),
+            );
         }
         // Parent dirs of concept dirs also get an index (subdirectory bullets).
         let all_dirs: BTreeSet<String> = dirs
@@ -184,7 +204,11 @@ impl VaultEngine {
                 let mut acc = vec![String::new()];
                 let mut cur = String::new();
                 for seg in d.split('/').filter(|s| !s.is_empty()) {
-                    cur = if cur.is_empty() { seg.to_string() } else { format!("{cur}/{seg}") };
+                    cur = if cur.is_empty() {
+                        seg.to_string()
+                    } else {
+                        format!("{cur}/{seg}")
+                    };
                     acc.push(cur.clone());
                 }
                 acc
@@ -225,7 +249,11 @@ impl VaultEngine {
                 for (p, title, desc) in &child_notes {
                     let fname = p.rsplit('/').next().unwrap_or(p);
                     let d = desc.clone().unwrap_or_default();
-                    let tail = if d.is_empty() { String::new() } else { format!(" - {d}") };
+                    let tail = if d.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" - {d}")
+                    };
                     md.push_str(&format!(
                         "* [{title}]({}){tail}\n",
                         crate::parse::percent_encode_spaces(fname)
@@ -239,7 +267,11 @@ impl VaultEngine {
                     md.push_str(&format!("* [{name}]({name}/index.md)\n"));
                 }
             }
-            let rel = if is_root { "index.md".to_string() } else { format!("{dir}/index.md") };
+            let rel = if is_root {
+                "index.md".to_string()
+            } else {
+                format!("{dir}/index.md")
+            };
             let abs = std::path::Path::new(&v.root_path).join(&rel);
             tokio::fs::write(&abs, md)
                 .await

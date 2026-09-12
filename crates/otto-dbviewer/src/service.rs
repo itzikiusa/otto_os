@@ -25,7 +25,7 @@ use otto_core::domain::Connection;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
 use otto_state::{
-    Dashboard, ConnectionsRepo, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery,
+    ConnectionsRepo, Dashboard, DbExplorerRepo, HistoryEntry, NewSavedQuery, NewWidget, SavedQuery,
     Widget,
 };
 use serde_json::Value;
@@ -36,14 +36,14 @@ use crate::driver::Driver;
 use crate::registry::Registry;
 #[cfg(test)]
 use crate::types::QueryHandle;
+use crate::types::{
+    statement_is_write, CancelToken, Capabilities, CompletionContext, CompletionResponse,
+    DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
+    ObjectSearchReq, ObjectSearchResult, QueryRequest, QueryResult, QueryStatus, ResolvedConfig,
+    SchemaGraph, SchemaNode, TestResult,
+};
 use otto_core::redact;
 use otto_ssh::SshTunnel;
-use crate::types::{
-    statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse,
-    DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
-    ObjectSearchReq, ObjectSearchResult, QueryRequest, QueryResult, QueryStatus,
-    ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
-};
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
 /// recognise it (and prompt for a typed confirmation) without string-matching
@@ -307,46 +307,83 @@ impl DbViewerService {
 
     /// Resource gate for trusted adapters. Resolves current feature/workspace,
     /// user/group and direct-rule state on every call.
-    pub async fn authorize(&self, conn_id: &Id, user_id: &Id, node: Option<&str>, operation: &str) -> Result<()> {
+    pub async fn authorize(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        node: Option<&str>,
+        operation: &str,
+    ) -> Result<()> {
         let conn = self.connections.get(conn_id).await?;
         let child = crate::access::child(node);
-        crate::access::check(&self.connections.pool(), &conn, user_id, child.as_deref(), operation).await
+        crate::access::check(
+            &self.connections.pool(),
+            &conn,
+            user_id,
+            child.as_deref(),
+            operation,
+        )
+        .await
     }
 
     pub async fn is_enforced(&self, conn_id: &Id) -> Result<bool> {
-        Ok(crate::access::policy(&self.connections.pool(), conn_id).await?.mode == otto_core::access::AccessMode::Enforced)
+        Ok(crate::access::policy(&self.connections.pool(), conn_id)
+            .await?
+            .mode
+            == otto_core::access::AccessMode::Enforced)
     }
 
     async fn execution_access(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<()> {
-        if !self.is_enforced(conn_id).await? { return Ok(()); }
+        if !self.is_enforced(conn_id).await? {
+            return Ok(());
+        }
         let conn = self.connections.get(conn_id).await?;
-        let engine = Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
+        let engine =
+            Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
         let operations = crate::access::operations(engine, &req.statement)?;
         for operation in &operations {
-            self.authorize(conn_id, user_id, req.node.as_deref(), operation).await?;
+            self.authorize(conn_id, user_id, req.node.as_deref(), operation)
+                .await?;
         }
-        if conn.read_only && operations.iter().any(|op|*op!="db_query") {
-            return Err(Error::Forbidden("read-only connection cannot perform database mutations".into()));
+        if conn.read_only && operations.iter().any(|op| *op != "db_query") {
+            return Err(Error::Forbidden(
+                "read-only connection cannot perform database mutations".into(),
+            ));
         }
         // Production writes must use the independent reviewed-change adapter.
         // Neither root nor confirm_write can turn an approval into an access grant.
-        if conn.environment == otto_core::domain::Environment::Prod && operations.iter().any(|op| *op != "db_query") {
-            return Err(Error::Forbidden("review_required: production changes require an approved immutable change".into()));
+        if conn.environment == otto_core::domain::Environment::Prod
+            && operations.iter().any(|op| *op != "db_query")
+        {
+            return Err(Error::Forbidden(
+                "review_required: production changes require an approved immutable change".into(),
+            ));
         }
         Ok(())
     }
 
     async fn verify_native(&self, conn_id: &Id, user_id: &Id, r: &Resolved) -> Result<()> {
-        if !self.is_enforced(conn_id).await? { return Ok(()); }
+        if !self.is_enforced(conn_id).await? {
+            return Ok(());
+        }
         let conn = self.connections.get(conn_id).await?;
         let user = crate::access::current_user(&self.connections.pool(), &conn, user_id).await?;
-        if user.is_root { return Ok(()); }
+        if user.is_root {
+            return Ok(());
+        }
         let grants = r.driver.native_grants(&r.config).await?;
         for grant in grants {
             let decision = otto_rbac::resource_access::ResourceAccess::new(self.connections.pool())
-                .evaluate(&user, &crate::access::target(conn_id, Some(&grant.child)), grant.operation).await?;
+                .evaluate(
+                    &user,
+                    &crate::access::target(conn_id, Some(&grant.child)),
+                    grant.operation,
+                )
+                .await?;
             if !decision.allowed {
-                return Err(crate::native_access::setup_error("credential privileges exceed the caller's current database/operation scope"));
+                return Err(crate::native_access::setup_error(
+                    "credential privileges exceed the caller's current database/operation scope",
+                ));
             }
         }
         Ok(())
@@ -355,7 +392,10 @@ impl DbViewerService {
     async fn require_local_path_access(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
         if self.is_enforced(conn_id).await? {
             let conn = self.connections.get(conn_id).await?;
-            if !crate::access::current_user(&self.connections.pool(), &conn, user_id).await?.is_root {
+            if !crate::access::current_user(&self.connections.pool(), &conn, user_id)
+                .await?
+                .is_root
+            {
                 return Err(Error::Forbidden("daemon-local file paths require root for governed connections; use browser export".into()));
             }
         }
@@ -366,37 +406,99 @@ impl DbViewerService {
     /// until idle; closing one tab must not close another user's database work.
     pub async fn close_for_user(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
         self.authorize(conn_id, user_id, None, "discover").await?;
-        if !self.is_enforced(conn_id).await? { return self.close_connection(conn_id).await; }
+        if !self.is_enforced(conn_id).await? {
+            return self.close_connection(conn_id).await;
+        }
         let entries = {
-            let mut keys = self.active_keys.lock().map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
+            let mut keys = self
+                .active_keys
+                .lock()
+                .map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
             let prefix = format!("{conn_id}\0{user_id}\0");
-            let owners: Vec<_> = keys.keys().filter(|key| key.starts_with(&prefix)).cloned().collect();
-            owners.into_iter().filter_map(|key| keys.remove(&key)).collect::<Vec<_>>()
+            let owners: Vec<_> = keys
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            owners
+                .into_iter()
+                .filter_map(|key| keys.remove(&key))
+                .collect::<Vec<_>>()
         };
-        for (engine, key) in entries { self.registry.get(engine).close(&key).await; }
-        Ok(())
-    }
-
-    async fn current_scope(&self, conn_id: &Id, user_id: &Id, child: Option<&str>, operation: &str) -> Result<Option<String>> {
-        let logical = self.connections.get(conn_id).await?;
-        let (profile_id, scope) = crate::access::credential_profile(&self.connections.pool(), &logical, user_id, child, operation).await?;
-        let Some(scope) = scope else { return Ok(None); };
-        let profile = self.connections.get(&profile_id).await?;
-        let secret = match &profile.secret_ref { Some(key) => self.secrets.get(key)?, None => None };
-        let cfg = config::parse(&profile, secret)?.config;
-        Ok(Some(format!("{}:{}:{}:{}", scope, cfg.cache_key(), logical.environment.as_str(), logical.read_only)))
-    }
-
-    async fn check_resolved_scope(&self, conn_id: &Id, user_id: &Id, node: Option<&str>, operation: &str, r: &Resolved) -> Result<()> {
-        let child = crate::access::child(node);
-        let current = self.current_scope(conn_id, user_id, child.as_deref(), operation).await?;
-        if current.as_deref() != r.config.params.get("__access_scope").and_then(Value::as_str) {
-            return Err(Error::Forbidden("connection authorization or credentials changed during execution".into()));
+        for (engine, key) in entries {
+            self.registry.get(engine).close(&key).await;
         }
         Ok(())
     }
 
-    async fn monitor_export<T>(&self, conn_id: &Id, user_id: &Id, statement: &str, node: Option<&str>, r: &Resolved, execution: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    async fn current_scope(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        child: Option<&str>,
+        operation: &str,
+    ) -> Result<Option<String>> {
+        let logical = self.connections.get(conn_id).await?;
+        let (profile_id, scope) = crate::access::credential_profile(
+            &self.connections.pool(),
+            &logical,
+            user_id,
+            child,
+            operation,
+        )
+        .await?;
+        let Some(scope) = scope else {
+            return Ok(None);
+        };
+        let profile = self.connections.get(&profile_id).await?;
+        let secret = match &profile.secret_ref {
+            Some(key) => self.secrets.get(key)?,
+            None => None,
+        };
+        let cfg = config::parse(&profile, secret)?.config;
+        Ok(Some(format!(
+            "{}:{}:{}:{}",
+            scope,
+            cfg.cache_key(),
+            logical.environment.as_str(),
+            logical.read_only
+        )))
+    }
+
+    async fn check_resolved_scope(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        node: Option<&str>,
+        operation: &str,
+        r: &Resolved,
+    ) -> Result<()> {
+        let child = crate::access::child(node);
+        let current = self
+            .current_scope(conn_id, user_id, child.as_deref(), operation)
+            .await?;
+        if current.as_deref()
+            != r.config
+                .params
+                .get("__access_scope")
+                .and_then(Value::as_str)
+        {
+            return Err(Error::Forbidden(
+                "connection authorization or credentials changed during execution".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn monitor_export<T>(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        node: Option<&str>,
+        r: &Resolved,
+        execution: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
         tokio::pin!(execution);
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
@@ -429,16 +531,33 @@ impl DbViewerService {
         Ok(self.registry.get(engine).capabilities())
     }
 
-    async fn resolve(&self, conn_id: &Id, user_id: &Id, child: Option<&str>, operation: &str) -> Result<Resolved> {
+    async fn resolve(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        child: Option<&str>,
+        operation: &str,
+    ) -> Result<Resolved> {
         let logical = self.connections.get(conn_id).await?;
-        let (profile_id, scope) = crate::access::credential_profile(&self.connections.pool(), &logical, user_id, child, operation).await?;
-        let conn = if profile_id == *conn_id { logical.clone() } else {
+        let (profile_id, scope) = crate::access::credential_profile(
+            &self.connections.pool(),
+            &logical,
+            user_id,
+            child,
+            operation,
+        )
+        .await?;
+        let conn = if profile_id == *conn_id {
+            logical.clone()
+        } else {
             let profile = self.connections.get(&profile_id).await?;
             let mut logical_params = logical.params.clone();
             let mut profile_params = profile.params.clone();
             for params in [&mut logical_params, &mut profile_params] {
                 if let Some(map) = params.as_object_mut() {
-                    for field in ["user", "username", "password"] { map.remove(field); }
+                    for field in ["user", "username", "password"] {
+                        map.remove(field);
+                    }
                 }
             }
             if profile.kind != logical.kind || profile_params != logical_params {
@@ -455,10 +574,25 @@ impl DbViewerService {
         let driver = self.registry.get(engine);
         let mut config = parsed.config;
         if let Some(scope) = scope {
-            let scope = format!("{}:{}:{}:{}", scope, config.cache_key(), logical.environment.as_str(), logical.read_only);
-            config.params.as_object_mut().ok_or_else(|| Error::Invalid("connection params must be an object".into()))?
+            let scope = format!(
+                "{}:{}:{}:{}",
+                scope,
+                config.cache_key(),
+                logical.environment.as_str(),
+                logical.read_only
+            );
+            config
+                .params
+                .as_object_mut()
+                .ok_or_else(|| Error::Invalid("connection params must be an object".into()))?
                 .insert("__access_scope".into(), Value::String(scope));
-            if matches!(operation,"db_query"|"db_export") {config.params.as_object_mut().unwrap().insert("__read_only_execution".into(),Value::Bool(true));}
+            if matches!(operation, "db_query" | "db_export") {
+                config
+                    .params
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("__read_only_execution".into(), Value::Bool(true));
+            }
         }
         let tunnel = match parsed.ssh {
             Some(ssh) => Some(self.tunnel_for(&profile_id, &ssh, &config, engine).await?),
@@ -515,7 +649,9 @@ impl DbViewerService {
                 .map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
             let owner = if config.params.get("__access_scope").is_some() {
                 format!("{conn_id}\0{user_id}\0{operation}\0{}", child.unwrap_or(""))
-            } else { conn_id.clone() };
+            } else {
+                conn_id.clone()
+            };
             match keys.insert(owner, (engine, key.clone())) {
                 Some((old_engine, old_key)) if old_key != key => Some((old_engine, old_key)),
                 _ => None,
@@ -541,7 +677,16 @@ impl DbViewerService {
     /// reconnect instantly (and hold backend connections forever).
     pub async fn close_connection(&self, conn_id: &Id) -> Result<()> {
         // Cancel in-flight queries scoped to this connection.
-        let queries: Vec<_> = self.in_flight.lock().map(|m| m.values().filter(|q| &q.conn_id == conn_id).cloned().collect()).unwrap_or_default();
+        let queries: Vec<_> = self
+            .in_flight
+            .lock()
+            .map(|m| {
+                m.values()
+                    .filter(|q| &q.conn_id == conn_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         for query in queries {
             if let (Some(handle), Some(r)) = (query.token.handle(), query.resolved) {
                 let _ = r.driver.cancel(&r.config, &handle).await;
@@ -550,10 +695,20 @@ impl DbViewerService {
         // Evict + close the driver-side cached handle for the key this
         // connection last resolved to.
         let entries = {
-            let mut keys = self.active_keys.lock().map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
+            let mut keys = self
+                .active_keys
+                .lock()
+                .map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
             let prefix = format!("{conn_id}\0");
-            let owners: Vec<_> = keys.keys().filter(|key| *key == conn_id || key.starts_with(&prefix)).cloned().collect();
-            owners.into_iter().filter_map(|key| keys.remove(&key)).collect::<Vec<_>>()
+            let owners: Vec<_> = keys
+                .keys()
+                .filter(|key| *key == conn_id || key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            owners
+                .into_iter()
+                .filter_map(|key| keys.remove(&key))
+                .collect::<Vec<_>>()
         };
         for (engine, key) in entries {
             self.registry.get(engine).close(&key).await;
@@ -626,7 +781,9 @@ impl DbViewerService {
 
     pub async fn test(&self, conn_id: &Id, user_id: &Id) -> Result<TestResult> {
         let child = crate::access::child(None);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "configure").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "configure")
+            .await?;
         r.driver.test(&r.config).await
     }
 
@@ -705,11 +862,17 @@ impl DbViewerService {
 
     pub async fn schema_root(&self, conn_id: &Id, user_id: &Id) -> Result<Vec<SchemaNode>> {
         let child = crate::access::child(None);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "discover").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "discover")
+            .await?;
         let nodes = r.driver.schema_root(&r.config).await?;
         let mut visible = Vec::new();
         for node in nodes {
-            if self.authorize(conn_id, user_id, Some(&node.id), "db_browse").await.is_ok() {
+            if self
+                .authorize(conn_id, user_id, Some(&node.id), "db_browse")
+                .await
+                .is_ok()
+            {
                 visible.push(node);
             }
         }
@@ -719,11 +882,13 @@ impl DbViewerService {
 
     pub async fn schema_children(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         path: &str,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
-        self.schema_children_with_counts(conn_id, user_id, path, filter, false).await
+        self.schema_children_with_counts(conn_id, user_id, path, filter, false)
+            .await
     }
 
     /// As above, but `counts` asks the driver to fill each node's `detail` with
@@ -731,18 +896,25 @@ impl DbViewerService {
     /// slow part of expanding a database on a large server.
     pub async fn schema_children_with_counts(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         path: &str,
         filter: Option<&str>,
         counts: bool,
     ) -> Result<Vec<SchemaNode>> {
         let child = crate::access::child(Some(path));
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_browse").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_browse")
+            .await?;
         let node = NodePath::parse(path);
         // An empty/whitespace filter is treated as "no filter".
         let filter = filter.map(str::trim).filter(|s| !s.is_empty());
-        let result = r.driver.schema_children_with_counts(&r.config, &node, filter, counts).await?;
-        self.authorize(conn_id, user_id, Some(path), "db_browse").await?;
+        let result = r
+            .driver
+            .schema_children_with_counts(&r.config, &node, filter, counts)
+            .await?;
+        self.authorize(conn_id, user_id, Some(path), "db_browse")
+            .await?;
         Ok(result)
     }
 
@@ -750,22 +922,39 @@ impl DbViewerService {
     /// nothing rather than the entire catalog.
     pub async fn search_objects(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         req: &ObjectSearchReq,
     ) -> Result<ObjectSearchResult> {
         if req.q.trim().is_empty() {
-            return Ok(ObjectSearchResult { supported: true, ..Default::default() });
+            return Ok(ObjectSearchResult {
+                supported: true,
+                ..Default::default()
+            });
         }
         let child = crate::access::child(None);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "discover").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "discover")
+            .await?;
         let mut result = r.driver.search_objects(&r.config, req).await?;
         let mut visible = Vec::new();
         for hit in result.hits {
-            if self.authorize(conn_id, user_id, Some(&hit.schema), "db_browse").await.is_ok() { visible.push(hit); }
+            if self
+                .authorize(conn_id, user_id, Some(&hit.schema), "db_browse")
+                .await
+                .is_ok()
+            {
+                visible.push(hit);
+            }
         }
         result.hits = visible;
         // Counts cannot reveal how many hidden databases were inspected.
-        result.scanned = result.hits.iter().map(|h| &h.schema).collect::<std::collections::HashSet<_>>().len();
+        result.scanned = result
+            .hits
+            .iter()
+            .map(|h| &h.schema)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         self.authorize(conn_id, user_id, None, "discover").await?;
         Ok(result)
     }
@@ -776,26 +965,48 @@ impl DbViewerService {
     /// The flag is opt-in because it adds an extra query per call.
     pub async fn object_detail(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         path: &str,
         approx_row_count: bool,
     ) -> Result<ObjectDetail> {
         let child = crate::access::child(Some(path));
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_browse").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_browse")
+            .await?;
         let node = NodePath::parse(path);
-        let mut result = r.driver.object_detail_with_opts(&r.config, &node, approx_row_count).await?;
+        let mut result = r
+            .driver
+            .object_detail_with_opts(&r.config, &node, approx_row_count)
+            .await?;
         if self.is_enforced(conn_id).await? {
             let mut foreign_keys = Vec::new();
             for key in result.foreign_keys {
-                if self.authorize(conn_id, user_id, key.ref_schema.as_deref().or(child.as_deref()), "db_browse").await.is_ok() { foreign_keys.push(key); }
+                if self
+                    .authorize(
+                        conn_id,
+                        user_id,
+                        key.ref_schema.as_deref().or(child.as_deref()),
+                        "db_browse",
+                    )
+                    .await
+                    .is_ok()
+                {
+                    foreign_keys.push(key);
+                }
             }
             result.foreign_keys = foreign_keys;
-            if self.authorize(conn_id, user_id, None, "db_browse").await.is_err() {
+            if self
+                .authorize(conn_id, user_id, None, "db_browse")
+                .await
+                .is_err()
+            {
                 result.ddl = None;
             }
             result.extra = Value::Null;
         }
-        self.authorize(conn_id, user_id, Some(path), "db_browse").await?;
+        self.authorize(conn_id, user_id, Some(path), "db_browse")
+            .await?;
         Ok(result)
     }
 
@@ -853,12 +1064,15 @@ impl DbViewerService {
     /// user to pick a subset.
     pub async fn schema_graph(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         schema: &str,
         max_tables: usize,
     ) -> Result<SchemaGraph> {
         let child = crate::access::child(Some(schema));
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_browse").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_browse")
+            .await?;
         let driver = Arc::clone(&r.driver);
         let cfg = r.config.clone();
         let relationships = driver.capabilities().joins;
@@ -991,9 +1205,16 @@ impl DbViewerService {
 
         let mut visible_edges = Vec::new();
         for edge in edges {
-            if self.authorize(conn_id, user_id, Some(&edge.to_schema), "db_browse").await.is_ok() { visible_edges.push(edge); }
+            if self
+                .authorize(conn_id, user_id, Some(&edge.to_schema), "db_browse")
+                .await
+                .is_ok()
+            {
+                visible_edges.push(edge);
+            }
         }
-        self.authorize(conn_id, user_id, Some(schema), "db_browse").await?;
+        self.authorize(conn_id, user_id, Some(schema), "db_browse")
+            .await?;
         Ok(SchemaGraph {
             schema: schema.to_string(),
             tables,
@@ -1014,15 +1235,28 @@ impl DbViewerService {
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
     pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
-        let req = &QueryRequest { node: crate::access::child(req.node.as_deref()), ..req.clone() };
+        let req = &QueryRequest {
+            node: crate::access::child(req.node.as_deref()),
+            ..req.clone()
+        };
         self.execution_access(conn_id, user_id, req).await?;
         self.guard_write(conn_id, req).await?;
         let child = crate::access::child(req.node.as_deref());
-        let mut r = self.resolve(conn_id, user_id, child.as_deref(), "db_query").await?;
-        if self.is_enforced(conn_id).await? && crate::access::operations(r.config.engine,&req.statement)?.iter().any(|op|*op!="db_query") {
+        let mut r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_query")
+            .await?;
+        if self.is_enforced(conn_id).await?
+            && crate::access::operations(r.config.engine, &req.statement)?
+                .iter()
+                .any(|op| *op != "db_query")
+        {
             // Direct nonproduction mutations passed their separate resource gate.
             // Approved changes use another resolver operation entirely.
-            r.config.params.as_object_mut().unwrap().remove("__read_only_execution");
+            r.config
+                .params
+                .as_object_mut()
+                .unwrap()
+                .remove("__read_only_execution");
         }
         self.verify_native(conn_id, user_id, &r).await?;
         let token = CancelToken::new();
@@ -1030,16 +1264,24 @@ impl DbViewerService {
         // Without a `query_id` there is nothing to cancel or re-attach to —
         // request-scoped execution (agents over MCP, widgets) stays inline.
         let Some(qid) = req.query_id.clone().filter(|s| !s.is_empty()) else {
-            return self.execute_recorded(r, conn_id, user_id, req, &token).await;
+            return self
+                .execute_recorded(r, conn_id, user_id, req, &token)
+                .await;
         };
 
         let governed = r.config.params.get("__access_scope").is_some();
-        let qid = if governed { format!("{user_id}:{qid}") } else { qid };
+        let qid = if governed {
+            format!("{user_id}:{qid}")
+        } else {
+            qid
+        };
         // Register the in-flight query so a cancel can find it. The guard moves
         // into the detached task below, so the entry lives exactly as long as
         // the execution — not as long as the HTTP request.
         if let Ok(mut map) = self.in_flight.lock() {
-            if map.contains_key(&qid) { return Err(Error::Conflict("query id is already running".into())); }
+            if map.contains_key(&qid) {
+                return Err(Error::Conflict("query id is already running".into()));
+            }
             map.insert(
                 qid.clone(),
                 InFlightQuery {
@@ -1057,7 +1299,9 @@ impl DbViewerService {
 
         if governed {
             let _guard = guard;
-            return self.execute_recorded(r, conn_id, user_id, req, &token).await;
+            return self
+                .execute_recorded(r, conn_id, user_id, req, &token)
+                .await;
         }
         // Detached execution: the query runs in its own task, so a dropped HTTP
         // request (page navigation, window close, network blip) no longer
@@ -1101,7 +1345,8 @@ impl DbViewerService {
     ) -> Result<QueryResult> {
         let started = Instant::now();
         self.execution_access(conn_id, user_id, req).await?;
-        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r).await?;
+        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r)
+            .await?;
         let execution = r.driver.run_tracked(&r.config, req, token);
         tokio::pin!(execution);
         let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -1123,7 +1368,8 @@ impl DbViewerService {
             }
         };
         self.execution_access(conn_id, user_id, req).await?;
-        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r).await?;
+        self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r)
+            .await?;
         let elapsed = started.elapsed().as_millis() as i64;
 
         // Apply server-side PII masking when the request opts in. Raw cell values
@@ -1157,7 +1403,15 @@ impl DbViewerService {
             Err(e) => {
                 let _ = self
                     .repo
-                    .add_history(conn_id, user_id, &req.statement, false, elapsed, 0, Some(&e.to_string()))
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        &req.statement,
+                        false,
+                        elapsed,
+                        0,
+                        Some(&e.to_string()),
+                    )
                     .await;
             }
         }
@@ -1169,12 +1423,24 @@ impl DbViewerService {
     /// while its parked outcome is retained, `"unknown"` otherwise (never seen,
     /// delivered to a live waiter, or expired). Scoped to `conn_id` — a probe
     /// must not read another connection's outcome through a reused id.
-    pub async fn query_status(&self, conn_id: &Id, user_id: &Id, query_id: &str) -> Result<QueryStatus> {
+    pub async fn query_status(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        query_id: &str,
+    ) -> Result<QueryStatus> {
         self.authorize(conn_id, user_id, None, "discover").await?;
         if self.is_enforced(conn_id).await? {
             let key = format!("{user_id}:{query_id}");
-            let running = self.in_flight.lock().is_ok_and(|m| m.get(&key).is_some_and(|q| &q.conn_id == conn_id));
-            return Ok(QueryStatus { status: if running { "running" } else { "unknown" }, result: None, error: None });
+            let running = self
+                .in_flight
+                .lock()
+                .is_ok_and(|m| m.get(&key).is_some_and(|q| &q.conn_id == conn_id));
+            return Ok(QueryStatus {
+                status: if running { "running" } else { "unknown" },
+                result: None,
+                error: None,
+            });
         }
         Ok(self.legacy_query_status(conn_id, query_id))
     }
@@ -1288,11 +1554,22 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_export").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_export")
+            .await?;
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
-        let result = self.monitor_export(conn_id, user_id, statement, node, &r,
-            r.driver.export_to_path(&r.config, statement, node, format, max_rows, dest)).await;
+        let result = self
+            .monitor_export(
+                conn_id,
+                user_id,
+                statement,
+                node,
+                &r,
+                r.driver
+                    .export_to_path(&r.config, statement, node, format, max_rows, dest),
+            )
+            .await;
         let elapsed = started.elapsed().as_millis() as u64;
 
         // Record in history (best-effort), mirroring `run`.
@@ -1314,7 +1591,15 @@ impl DbViewerService {
             Err(e) => {
                 let _ = self
                     .repo
-                    .add_history(conn_id, user_id, statement, false, elapsed as i64, 0, Some(&e.to_string()))
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        statement,
+                        false,
+                        elapsed as i64,
+                        0,
+                        Some(&e.to_string()),
+                    )
                     .await;
             }
         }
@@ -1341,11 +1626,22 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_export").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_export")
+            .await?;
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
-        let result = self.monitor_export(conn_id, user_id, statement, node, &r,
-            r.driver.export_to_writer(&r.config, statement, node, format, max_rows, w)).await;
+        let result = self
+            .monitor_export(
+                conn_id,
+                user_id,
+                statement,
+                node,
+                &r,
+                r.driver
+                    .export_to_writer(&r.config, statement, node, format, max_rows, w),
+            )
+            .await;
         let elapsed = started.elapsed().as_millis() as u64;
 
         // Record in history (best-effort), mirroring `export_to_path`.
@@ -1367,7 +1663,15 @@ impl DbViewerService {
             Err(e) => {
                 let _ = self
                     .repo
-                    .add_history(conn_id, user_id, statement, false, elapsed as i64, 0, Some(&e.to_string()))
+                    .add_history(
+                        conn_id,
+                        user_id,
+                        statement,
+                        false,
+                        elapsed as i64,
+                        0,
+                        Some(&e.to_string()),
+                    )
                     .await;
             }
         }
@@ -1381,7 +1685,8 @@ impl DbViewerService {
     /// implicitly false — there is no export confirmation path.)
     pub async fn guard_export(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         statement: &str,
         node: Option<&str>,
     ) -> Result<()> {
@@ -1393,9 +1698,12 @@ impl DbViewerService {
         self.authorize(conn_id, user_id, node, "db_export").await?;
         if self.is_enforced(conn_id).await? {
             let conn = self.connections.get(conn_id).await?;
-            let engine = Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
+            let engine = Engine::from_kind(conn.kind)
+                .ok_or_else(|| Error::Invalid("not a database".into()))?;
             if crate::access::operations(engine, statement)? != vec!["db_query"] {
-                return Err(Error::Forbidden("exports must contain only read queries".into()));
+                return Err(Error::Forbidden(
+                    "exports must contain only read queries".into(),
+                ));
             }
         }
         self.execution_access(conn_id, user_id, &guard_req).await?;
@@ -1435,7 +1743,9 @@ impl DbViewerService {
 
         self.authorize(conn_id, user_id, None, "db_data").await?;
         if self.is_enforced(conn_id).await? && !matches!(engine, Engine::Mysql | Engine::Postgres) {
-            return Err(crate::native_access::setup_error("restricted imports are unsupported for this engine"));
+            return Err(crate::native_access::setup_error(
+                "restricted imports are unsupported for this engine",
+            ));
         }
         // Hard byte cap BEFORE reading: the request names any daemon-host file,
         // and the parse/render pipeline holds several copies of the data in RAM
@@ -1512,9 +1822,11 @@ impl DbViewerService {
                     parsed.rows.clone()
                 };
                 self.authorize(conn_id, user_id, None, "db_data").await?;
-        let child = crate::access::child(None);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_data").await?;
-        self.verify_native(conn_id, user_id, &r).await?;
+                let child = crate::access::child(None);
+                let r = self
+                    .resolve(conn_id, user_id, child.as_deref(), "db_data")
+                    .await?;
+                self.verify_native(conn_id, user_id, &r).await?;
                 let (inserted, batches) = r
                     .driver
                     .import_rows(&r.config, table, &parsed.columns, &rows, batch_size, None)
@@ -1549,13 +1861,25 @@ impl DbViewerService {
     /// returns an `Invalid` error → 400).
     pub async fn query_plan(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         statement: &str,
         node: Option<&str>,
     ) -> Result<DbQueryPlan> {
         let child = crate::access::child(node);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_query").await?;
-        self.execution_access(conn_id, user_id, &QueryRequest { statement: statement.into(), node: node.map(str::to_owned), ..Default::default() }).await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_query")
+            .await?;
+        self.execution_access(
+            conn_id,
+            user_id,
+            &QueryRequest {
+                statement: statement.into(),
+                node: node.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await?;
         self.verify_native(conn_id, user_id, &r).await?;
         let result = r.driver.query_plan(&r.config, statement, node).await?;
         self.authorize(conn_id, user_id, node, "db_query").await?;
@@ -1609,12 +1933,15 @@ impl DbViewerService {
     /// introspect is skipped.
     pub async fn schema_summary(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         node: Option<&str>,
         max_tables: usize,
     ) -> Result<String> {
         let schema = node_to_schema(node);
-        let graph = self.schema_graph(conn_id, user_id, &schema, max_tables).await?;
+        let graph = self
+            .schema_graph(conn_id, user_id, &schema, max_tables)
+            .await?;
         let mut out = String::new();
         for t in &graph.tables {
             let cols: Vec<String> = t
@@ -1639,7 +1966,12 @@ impl DbViewerService {
     /// Built from [`Self::schema_graph`] (engine-agnostic introspection) with a
     /// generous table cap; engines without FK metadata (Redis/Mongo) yield tables
     /// with no edges. See [`format_schema_context`] for the (unit-tested) layout.
-    pub async fn schema_context(&self, conn_id: &Id, user_id: &Id, node: Option<&str>) -> Result<String> {
+    pub async fn schema_context(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        node: Option<&str>,
+    ) -> Result<String> {
         let schema = node_to_schema(node);
         let graph = self
             .schema_graph(conn_id, user_id, &schema, SCHEMA_CONTEXT_MAX_TABLES)
@@ -1659,9 +1991,18 @@ impl DbViewerService {
     /// registry entry to match it, so a cancel can't reach across connections.
     pub async fn cancel(&self, conn_id: &Id, user_id: &Id, query_id: &str) -> Result<()> {
         self.authorize(conn_id, user_id, None, "discover").await?;
-        let key = if self.is_enforced(conn_id).await? { format!("{user_id}:{query_id}") } else { query_id.into() };
-        let target = self.in_flight.lock().map_err(|_| Error::Internal("in-flight registry poisoned".into()))?
-            .get(&key).filter(|q| &q.conn_id == conn_id && &q.user_id == user_id).cloned();
+        let key = if self.is_enforced(conn_id).await? {
+            format!("{user_id}:{query_id}")
+        } else {
+            query_id.into()
+        };
+        let target = self
+            .in_flight
+            .lock()
+            .map_err(|_| Error::Internal("in-flight registry poisoned".into()))?
+            .get(&key)
+            .filter(|q| &q.conn_id == conn_id && &q.user_id == user_id)
+            .cloned();
         if let Some(target) = target {
             if let (Some(handle), Some(r)) = (target.token.handle(), target.resolved) {
                 r.driver.cancel(&r.config, &handle).await?;
@@ -1672,19 +2013,32 @@ impl DbViewerService {
 
     pub async fn completion(
         &self,
-        conn_id: &Id, user_id: &Id,
+        conn_id: &Id,
+        user_id: &Id,
         ctx: &CompletionContext,
     ) -> Result<CompletionResponse> {
         let child = crate::access::child(ctx.database.as_deref().or(ctx.node.as_deref()));
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "db_browse").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "db_browse")
+            .await?;
         if self.is_enforced(conn_id).await? {
-            let schema = child.ok_or_else(|| Error::Forbidden("select an authorized database before requesting completion".into()))?;
+            let schema = child.ok_or_else(|| {
+                Error::Forbidden(
+                    "select an authorized database before requesting completion".into(),
+                )
+            })?;
             let graph = self.schema_graph(conn_id, user_id, &schema, 100).await?;
             let mut items = Vec::new();
             for table in graph.tables {
-                items.push(crate::types::CompletionItem::new(table.name, crate::types::CompletionKind::Table));
+                items.push(crate::types::CompletionItem::new(
+                    table.name,
+                    crate::types::CompletionKind::Table,
+                ));
                 for column in table.columns {
-                    items.push(crate::types::CompletionItem::new(column.name, crate::types::CompletionKind::Column));
+                    items.push(crate::types::CompletionItem::new(
+                        column.name,
+                        crate::types::CompletionKind::Column,
+                    ));
                 }
             }
             return Ok(CompletionResponse { items });
@@ -1698,7 +2052,9 @@ impl DbViewerService {
     /// changed — and is a no-op for engines without a snapshot cache (Redis).
     pub async fn refresh_completion_cache(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
         let child = crate::access::child(None);
-        let r = self.resolve(conn_id, user_id, child.as_deref(), "discover").await?;
+        let r = self
+            .resolve(conn_id, user_id, child.as_deref(), "discover")
+            .await?;
         r.driver.invalidate_completion_cache(&r.config).await;
         Ok(())
     }
@@ -1714,14 +2070,23 @@ impl DbViewerService {
         let mut visible = Vec::new();
         for query in self.repo.list_saved_for_user(ws, user_id).await? {
             if let Some(conn) = &query.connection_id {
-                if self.authorize(conn, user_id, None, "db_query").await.is_err() { continue; }
+                if self
+                    .authorize(conn, user_id, None, "db_query")
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
             }
             visible.push(query);
         }
         Ok(visible)
     }
     pub async fn create_saved(&self, q: NewSavedQuery) -> Result<SavedQuery> {
-        if let Some(conn) = &q.connection_id { self.authorize(conn, &q.created_by, None, "db_query").await?; }
+        if let Some(conn) = &q.connection_id {
+            self.authorize(conn, &q.created_by, None, "db_query")
+                .await?;
+        }
         self.repo.create_saved(q).await
     }
     pub async fn get_saved(&self, id: &Id) -> Result<SavedQuery> {
@@ -1750,7 +2115,9 @@ impl DbViewerService {
         limit: i64,
     ) -> Result<Vec<HistoryEntry>> {
         self.authorize(conn_id, user_id, None, "db_query").await?;
-        self.repo.list_history_for_user(conn_id, user_id, limit).await
+        self.repo
+            .list_history_for_user(conn_id, user_id, limit)
+            .await
     }
 
     /// All dashboards for a workspace — root / ws-Admin view.
@@ -1774,7 +2141,9 @@ impl DbViewerService {
         layout: Option<&Value>,
         refresh_secs: Option<Option<i64>>,
     ) -> Result<Dashboard> {
-        self.repo.update_dashboard(id, name, layout, refresh_secs).await
+        self.repo
+            .update_dashboard(id, name, layout, refresh_secs)
+            .await
     }
     pub async fn delete_dashboard(&self, id: &Id) -> Result<()> {
         self.repo.delete_dashboard(id).await
@@ -1788,7 +2157,13 @@ impl DbViewerService {
     pub async fn list_widgets_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Widget>> {
         let mut visible = Vec::new();
         for widget in self.repo.list_widgets_for_user(ws, user_id).await? {
-            if self.authorize(&widget.connection_id, user_id, None, "db_query").await.is_ok() { visible.push(widget); }
+            if self
+                .authorize(&widget.connection_id, user_id, None, "db_query")
+                .await
+                .is_ok()
+            {
+                visible.push(widget);
+            }
         }
         Ok(visible)
     }
@@ -1796,7 +2171,8 @@ impl DbViewerService {
         self.repo.get_widget(id).await
     }
     pub async fn create_widget(&self, w: NewWidget) -> Result<Widget> {
-        self.authorize(&w.connection_id, &w.created_by, None, "db_query").await?;
+        self.authorize(&w.connection_id, &w.created_by, None, "db_query")
+            .await?;
         self.repo.create_widget(w).await
     }
     #[allow(clippy::too_many_arguments)]
@@ -2208,7 +2584,7 @@ mod tests {
         assert!(md.contains("- id int [PK, NOT NULL]"));
         assert!(md.contains("- customer_id int [FK, NOT NULL]"));
         assert!(md.contains("- note text\n")); // nullable, no flags
-        // FK section resolves to schema.table(cols).
+                                               // FK section resolves to schema.table(cols).
         assert!(md.contains("## Foreign keys"));
         assert!(md.contains("orders(customer_id) -> shop.customers(id)"));
     }

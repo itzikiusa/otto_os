@@ -657,7 +657,8 @@ index 1111111..2222222 100644
 "
         );
         // …and the SECOND hunk keeps its function-context trailer verbatim.
-        let p2 = build_hunk_patch(TWO_HUNKS, "a.txt", 1, "@@ -12,5 +13,5 @@ fn tail()", None).unwrap();
+        let p2 =
+            build_hunk_patch(TWO_HUNKS, "a.txt", 1, "@@ -12,5 +13,5 @@ fn tail()", None).unwrap();
         assert!(p2.contains("@@ -12,5 +13,5 @@ fn tail()\n"), "{p2}");
         assert!(p2.contains("+L14\n") && !p2.contains("+L2\n"), "{p2}");
     }
@@ -666,8 +667,9 @@ index 1111111..2222222 100644
     fn subset_of_adds_keeps_context() {
         // Body indices: 0 ' l1', 1 '-l2', 2 '+L2', 3 '+L2b', 4..6 context.
         let p = build_hunk_patch(TWO_HUNKS, "a.txt", 0, HUNK1_HEADER, Some(&[2])).unwrap();
-        assert!(p.ends_with(
-            "\
+        assert!(
+            p.ends_with(
+                "\
 @@ -1,5 +1,6 @@
  l1
  l2
@@ -676,15 +678,18 @@ index 1111111..2222222 100644
  l4
  l5
 "
-        ), "{p}");
+            ),
+            "{p}"
+        );
     }
 
     #[test]
     fn subset_of_dels_converts_rest_to_context() {
         // Keep only '-k2'; '-k3' must survive the apply, so it becomes context.
         let p = build_hunk_patch(TWO_DELS, "d.txt", 0, "@@ -1,5 +1,3 @@", Some(&[1])).unwrap();
-        assert!(p.ends_with(
-            "\
+        assert!(
+            p.ends_with(
+                "\
 @@ -1,5 +1,4 @@
  k1
 -k2
@@ -692,15 +697,18 @@ index 1111111..2222222 100644
  k4
  k5
 "
-        ), "{p}");
+            ),
+            "{p}"
+        );
     }
 
     #[test]
     fn mixed_selection() {
         // Keep the deletion and the SECOND addition; drop the first addition.
         let p = build_hunk_patch(TWO_HUNKS, "a.txt", 0, HUNK1_HEADER, Some(&[1, 3])).unwrap();
-        assert!(p.ends_with(
-            "\
+        assert!(
+            p.ends_with(
+                "\
 @@ -1,5 +1,5 @@
  l1
 -l2
@@ -709,13 +717,18 @@ index 1111111..2222222 100644
  l4
  l5
 "
-        ), "{p}");
+            ),
+            "{p}"
+        );
     }
 
     #[test]
     fn new_file_block() {
         let p = build_hunk_patch(NEW_FILE, "n.txt", 0, "@@ -0,0 +1,3 @@", Some(&[0, 1])).unwrap();
-        assert!(p.starts_with("diff --git a/n.txt b/n.txt\nnew file mode 100644\n"), "{p}");
+        assert!(
+            p.starts_with("diff --git a/n.txt b/n.txt\nnew file mode 100644\n"),
+            "{p}"
+        );
         assert!(p.ends_with("@@ -0,0 +1,2 @@\n+n1\n+n2\n"), "{p}");
     }
 
@@ -728,13 +741,19 @@ index 1111111..2222222 100644
     #[test]
     fn renamed_block_is_invalid() {
         let e = build_hunk_patch(RENAMED, "new.txt", 0, "@@ -1,3 +1,3 @@", None).unwrap_err();
-        assert!(matches!(&e, Error::Invalid(m) if m == "stage the whole file"), "{e:?}");
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "stage the whole file"),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn binary_block_is_invalid() {
         let e = build_hunk_patch(BINARY, "img.png", 0, "@@ -1 +1 @@", None).unwrap_err();
-        assert!(matches!(&e, Error::Invalid(m) if m == "stage the whole file"), "{e:?}");
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "stage the whole file"),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -743,7 +762,8 @@ index 1111111..2222222 100644
         // with '+M3' emitted after it. `git apply` reads that marker as "strip
         // the newline of the preceding line" and glues the two together
         // ("m3M3") without a word of complaint — so the selection is refused.
-        let e = build_hunk_patch(MARKED_DEL, "m.txt", 0, "@@ -1,3 +1,3 @@", Some(&[3])).unwrap_err();
+        let e =
+            build_hunk_patch(MARKED_DEL, "m.txt", 0, "@@ -1,3 +1,3 @@", Some(&[3])).unwrap_err();
         assert!(
             matches!(&e, Error::Invalid(m) if m.contains("splits the file's last line")),
             "{e:?}"
@@ -784,11 +804,17 @@ index 1111111..2222222 100644
     fn lines_out_of_range_is_invalid() {
         // Past the end…
         let e = build_hunk_patch(TWO_HUNKS, "a.txt", 0, HUNK1_HEADER, Some(&[99])).unwrap_err();
-        assert!(matches!(&e, Error::Invalid(m) if m == "lines out of range"), "{e:?}");
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "lines out of range"),
+            "{e:?}"
+        );
         // …and more indices than the hunk has body lines.
         let many: Vec<usize> = (0..20).collect();
         let e = build_hunk_patch(TWO_HUNKS, "a.txt", 0, HUNK1_HEADER, Some(&many)).unwrap_err();
-        assert!(matches!(&e, Error::Invalid(m) if m == "lines out of range"), "{e:?}");
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "lines out of range"),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -828,7 +854,10 @@ index 1111111..2222222 100644
     #[test]
     fn unknown_path_is_not_found() {
         let e = build_hunk_patch(TWO_HUNKS, "nope.txt", 0, HUNK1_HEADER, None).unwrap_err();
-        assert!(matches!(&e, Error::NotFound(m) if m == "no diff for nope.txt"), "{e:?}");
+        assert!(
+            matches!(&e, Error::NotFound(m) if m == "no diff for nope.txt"),
+            "{e:?}"
+        );
     }
 
     /// The builder indexes raw body lines with markers skipped; `parse_diff`
@@ -1013,7 +1042,10 @@ index 1111111..2222222 100644
             .unwrap();
 
         let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
-        assert!(staged.trim().is_empty(), "index should be clean again: {staged}");
+        assert!(
+            staged.trim().is_empty(),
+            "index should be clean again: {staged}"
+        );
         // The worktree change is untouched — unstaging moves the index only.
         let worktree = String::from_utf8(git_bytes(&dir, &["diff"])).unwrap();
         assert!(worktree.contains("+LINE TWO") && worktree.contains("+LINE FIFTEEN"));
@@ -1106,7 +1138,10 @@ index 1111111..2222222 100644
         // LF-normalised stage would leave a phantom follow-up diff.
         let indexed = git_bytes(&dir, &["show", ":crlf.txt"]);
         assert_eq!(indexed, std::fs::read(dir.join("crlf.txt")).unwrap());
-        let worktree = git.diff(DiffTarget::Worktree, Some("crlf.txt")).await.unwrap();
+        let worktree = git
+            .diff(DiffTarget::Worktree, Some("crlf.txt"))
+            .await
+            .unwrap();
         assert!(worktree.files.is_empty(), "{worktree:?}");
     }
 
@@ -1128,7 +1163,10 @@ index 1111111..2222222 100644
         let indexed = git_bytes(&dir, &["show", ":nl.txt"]);
         assert_eq!(indexed, b"a\nb\nc\nd");
         assert_ne!(indexed.last(), Some(&b'\n'));
-        let worktree = git.diff(DiffTarget::Worktree, Some("nl.txt")).await.unwrap();
+        let worktree = git
+            .diff(DiffTarget::Worktree, Some("nl.txt"))
+            .await
+            .unwrap();
         assert!(worktree.files.is_empty(), "{worktree:?}");
     }
 
@@ -1140,7 +1178,8 @@ index 1111111..2222222 100644
             Err(Error::Invalid(_))
         ));
         assert!(matches!(
-            git.diff_raw(DiffTarget::Commit("HEAD".into()), "two.txt").await,
+            git.diff_raw(DiffTarget::Commit("HEAD".into()), "two.txt")
+                .await,
             Err(Error::Invalid(_))
         ));
     }

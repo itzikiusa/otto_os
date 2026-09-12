@@ -47,7 +47,7 @@ impl Default for RepoMapOptions {
 /// A definition discovered in a file.
 struct Def {
     name: String,
-    line: usize,      // 0-based
+    line: usize, // 0-based
     signature: String,
 }
 
@@ -135,10 +135,7 @@ fn collect(root: Node, src: &[u8]) -> (Vec<Def>, HashMap<String, usize>) {
     let mut refs: HashMap<String, usize> = HashMap::new();
     let mut stack = vec![root];
     let mut visited = 0usize;
-    let lines: Vec<&str> = std::str::from_utf8(src)
-        .unwrap_or("")
-        .lines()
-        .collect();
+    let lines: Vec<&str> = std::str::from_utf8(src).unwrap_or("").lines().collect();
 
     while let Some(node) = stack.pop() {
         visited += 1;
@@ -160,7 +157,11 @@ fn collect(root: Node, src: &[u8]) -> (Vec<Def>, HashMap<String, usize>) {
                         }
                     })
                     .unwrap_or_default();
-                defs.push(Def { name, line, signature: sig });
+                defs.push(Def {
+                    name,
+                    line,
+                    signature: sig,
+                });
             }
         } else if IDENT_KINDS.contains(&kind) {
             if let Ok(t) = node.utf8_text(src) {
@@ -217,8 +218,15 @@ fn pagerank(n: usize, edges: &[HashMap<usize, f64>]) -> Vec<f64> {
 }
 
 /// Render the ranked map to markdown, capped at `max_lines`.
-fn render(files: Vec<FileSyms>, ranks: Vec<f64>, ref_totals: &HashMap<String, usize>, max_lines: usize) -> String {
-    let mut order: Vec<usize> = (0..files.len()).filter(|&i| !files[i].defs.is_empty()).collect();
+fn render(
+    files: Vec<FileSyms>,
+    ranks: Vec<f64>,
+    ref_totals: &HashMap<String, usize>,
+    max_lines: usize,
+) -> String {
+    let mut order: Vec<usize> = (0..files.len())
+        .filter(|&i| !files[i].defs.is_empty())
+        .collect();
     order.sort_by(|&a, &b| {
         ranks[b]
             .partial_cmp(&ranks[a])
@@ -384,7 +392,9 @@ pub fn repo_map_cached(root: &Path, opts: &RepoMapOptions) -> Option<String> {
     let map = build_repo_map(root, opts)?;
     if let Some(sig) = sig {
         if let Ok(mut guard) = CACHE.lock() {
-            guard.get_or_insert_with(HashMap::new).insert(key, (sig, map.clone()));
+            guard
+                .get_or_insert_with(HashMap::new)
+                .insert(key, (sig, map.clone()));
         }
     }
     Some(map)
@@ -412,7 +422,10 @@ mod tests {
         write(root, "b.rs", "fn b() { let _ = shared_helper(); }\n");
 
         let map = build_repo_map(root, &RepoMapOptions::default()).expect("a map");
-        assert!(map.contains("shared_helper"), "map names the symbol:\n{map}");
+        assert!(
+            map.contains("shared_helper"),
+            "map names the symbol:\n{map}"
+        );
         // core.rs (2 incoming refs) must out-rank the leaf files.
         let core = map.find("core.rs").expect("core listed");
         let a = map.find("a.rs").unwrap_or(usize::MAX);
@@ -453,9 +466,21 @@ mod tests {
     #[test]
     fn parses_multiple_languages_without_panicking() {
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "x.ts", "export function tsFn() {}\nexport class TsClass {}\n");
-        write(tmp.path(), "y.py", "def py_fn():\n    pass\nclass PyClass:\n    pass\n");
-        write(tmp.path(), "z.go", "package z\nfunc GoFn() {}\ntype GoType struct{}\n");
+        write(
+            tmp.path(),
+            "x.ts",
+            "export function tsFn() {}\nexport class TsClass {}\n",
+        );
+        write(
+            tmp.path(),
+            "y.py",
+            "def py_fn():\n    pass\nclass PyClass:\n    pass\n",
+        );
+        write(
+            tmp.path(),
+            "z.go",
+            "package z\nfunc GoFn() {}\ntype GoType struct{}\n",
+        );
         let map = build_repo_map(tmp.path(), &RepoMapOptions::default()).expect("a map");
         assert!(map.contains("tsFn") || map.contains("TsClass"));
         assert!(map.contains("py_fn") || map.contains("PyClass"));

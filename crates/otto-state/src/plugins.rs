@@ -116,7 +116,12 @@ impl PluginsRepo {
     }
 
     pub async fn list_enabled(&self) -> Result<Vec<PluginRecord>> {
-        Ok(self.list().await?.into_iter().filter(|p| p.enabled).collect())
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|p| p.enabled)
+            .collect())
     }
 
     /// Installed slugs (for the capabilities map).

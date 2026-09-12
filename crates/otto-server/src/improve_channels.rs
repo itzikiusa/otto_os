@@ -119,9 +119,7 @@ fn summarize_edits(edits: &[ImprovementEdit]) -> Option<String> {
     } else {
         msg.push_str(&format!("updated {}", applied.join(", ")));
         if pending > 0 {
-            msg.push_str(&format!(
-                " · {pending} more awaiting approval"
-            ));
+            msg.push_str(&format!(" · {pending} more awaiting approval"));
         }
     }
     Some(msg)

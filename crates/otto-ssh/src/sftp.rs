@@ -438,8 +438,7 @@ drwxr-xr-x    3 me   staff    96 Jun 20 12:00 src
 
     #[test]
     fn parses_name_with_spaces() {
-        let out =
-            "-rw-r--r--  1 me staff 2048 Jun 20 12:00 My Report Final (v2).pdf\n";
+        let out = "-rw-r--r--  1 me staff 2048 Jun 20 12:00 My Report Final (v2).pdf\n";
         let e = parse_longname_listing(out);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].name, "My Report Final (v2).pdf");
@@ -449,8 +448,7 @@ drwxr-xr-x    3 me   staff    96 Jun 20 12:00 src
 
     #[test]
     fn parses_symlink_with_target() {
-        let out =
-            "lrwxr-xr-x  1 me staff 11 Jun 20 12:00 current -> releases/42\n";
+        let out = "lrwxr-xr-x  1 me staff 11 Jun 20 12:00 current -> releases/42\n";
         let e = parse_longname_listing(out);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].name, "current");
@@ -535,7 +533,10 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a.starts_with("ControlPath=")));
         assert!(args.iter().any(|a| a == "ControlPersist=60s"));
-        assert_eq!(args[args.iter().position(|a| a == "-P").unwrap() + 1], "2222");
+        assert_eq!(
+            args[args.iter().position(|a| a == "-P").unwrap() + 1],
+            "2222"
+        );
         assert_eq!(
             args[args.iter().position(|a| a == "-i").unwrap() + 1],
             "/home/me/.ssh/id_ed25519"

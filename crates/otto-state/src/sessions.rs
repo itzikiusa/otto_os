@@ -245,7 +245,10 @@ impl SessionsRepo {
 
     /// `(session id, transcript_path)` for every session in `ws` — the History
     /// merge joins these onto the workspace's session list.
-    pub async fn transcript_paths_for_workspace(&self, ws: &Id) -> Result<Vec<(Id, Option<String>)>> {
+    pub async fn transcript_paths_for_workspace(
+        &self,
+        ws: &Id,
+    ) -> Result<Vec<(Id, Option<String>)>> {
         let rows = sqlx::query("SELECT id, transcript_path FROM sessions WHERE workspace_id = ?")
             .bind(ws)
             .fetch_all(&self.pool)
@@ -253,7 +256,12 @@ impl SessionsRepo {
             .map_err(dberr("sessions"))?;
         Ok(rows
             .iter()
-            .map(|r| (r.get::<String, _>("id"), r.get::<Option<String>, _>("transcript_path")))
+            .map(|r| {
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<Option<String>, _>("transcript_path"),
+                )
+            })
             .collect())
     }
 
@@ -262,16 +270,20 @@ impl SessionsRepo {
     /// indexed on-disk transcript from ALSO showing up as an `on_disk` History
     /// entry.
     pub async fn transcript_paths(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT transcript_path FROM sessions WHERE transcript_path IS NOT NULL")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("sessions"))?;
+        let rows =
+            sqlx::query("SELECT transcript_path FROM sessions WHERE transcript_path IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("sessions"))?;
         Ok(rows.iter().map(|r| r.get("transcript_path")).collect())
     }
 
     /// The session (any workspace) that already owns `provider_session_id`, if
     /// one does — History import returns it instead of minting a duplicate.
-    pub async fn find_by_provider_session(&self, provider_session_id: &str) -> Result<Option<Session>> {
+    pub async fn find_by_provider_session(
+        &self,
+        provider_session_id: &str,
+    ) -> Result<Option<Session>> {
         let r = sqlx::query("SELECT * FROM sessions WHERE provider_session_id = ? LIMIT 1")
             .bind(provider_session_id)
             .fetch_optional(&self.pool)
@@ -392,9 +404,8 @@ impl SessionsRepo {
         &self,
         max_idle: std::time::Duration,
     ) -> Result<Vec<Session>> {
-        let cutoff = fmt(
-            Utc::now() - chrono::Duration::from_std(max_idle).unwrap_or_else(|_| chrono::Duration::zero()),
-        );
+        let cutoff = fmt(Utc::now()
+            - chrono::Duration::from_std(max_idle).unwrap_or_else(|_| chrono::Duration::zero()));
         let before = cutoff.as_str();
         let rows = sqlx::query(
             "SELECT * FROM sessions \
@@ -416,10 +427,8 @@ impl SessionsRepo {
         &self,
         max_age: std::time::Duration,
     ) -> Result<Vec<Session>> {
-        let cutoff = fmt(
-            Utc::now()
-                - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::zero()),
-        );
+        let cutoff = fmt(Utc::now()
+            - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::zero()));
         let before = cutoff.as_str();
         let rows = sqlx::query(
             "SELECT * FROM sessions \
@@ -515,8 +524,13 @@ mod tests {
             .bind(&user).bind("u").bind("x").bind("U").bind(&now)
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&ws).bind("w").bind("/tmp").bind(&now)
-            .execute(pool).await.unwrap();
+            .bind(&ws)
+            .bind("w")
+            .bind("/tmp")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .unwrap();
         (user, ws)
     }
 
@@ -535,8 +549,16 @@ mod tests {
                                    created_by, created_at, last_active_at, archived, meta_json)
              VALUES (?, ?, 'agent', 'claude', 't', 'idle', '/tmp', ?, ?, ?, ?, ?)",
         )
-        .bind(&id).bind(ws).bind(user).bind(&now).bind(last_active).bind(archived).bind(meta)
-        .execute(pool).await.unwrap();
+        .bind(&id)
+        .bind(ws)
+        .bind(user)
+        .bind(&now)
+        .bind(last_active)
+        .bind(archived)
+        .bind(meta)
+        .execute(pool)
+        .await
+        .unwrap();
         id
     }
 
@@ -596,18 +618,29 @@ mod tests {
         // Two independent merges (a keep-alive toggle racing a resize persist):
         // neither may clobber the other's key — the old get→set read-modify-
         // write lost one of them.
-        repo.merge_meta(&s.id, &serde_json::json!({ "keep_alive": true })).await.unwrap();
-        repo.merge_meta(&s.id, &serde_json::json!({ "pty_cols": 120, "pty_rows": 40 }))
+        repo.merge_meta(&s.id, &serde_json::json!({ "keep_alive": true }))
             .await
             .unwrap();
+        repo.merge_meta(
+            &s.id,
+            &serde_json::json!({ "pty_cols": 120, "pty_rows": 40 }),
+        )
+        .await
+        .unwrap();
         let got = repo.get(&s.id).await.unwrap();
-        assert_eq!(got.meta.get("keep_alive"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            got.meta.get("keep_alive"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert_eq!(got.meta.get("pty_cols"), Some(&serde_json::json!(120)));
 
         // Null removes a key (RFC-7396); scalars replace.
-        repo.merge_meta(&s.id, &serde_json::json!({ "keep_alive": null, "pty_cols": 80 }))
-            .await
-            .unwrap();
+        repo.merge_meta(
+            &s.id,
+            &serde_json::json!({ "keep_alive": null, "pty_cols": 80 }),
+        )
+        .await
+        .unwrap();
         let got = repo.get(&s.id).await.unwrap();
         assert!(got.meta.get("keep_alive").is_none());
         assert_eq!(got.meta.get("pty_cols"), Some(&serde_json::json!(80)));
@@ -621,9 +654,19 @@ mod tests {
         let repo = SessionsRepo::new(pool.clone());
 
         // Matches: exited + has provider_session_id.
-        let exited = insert_session_full(&pool, &ws, &user, "claude", "exited", Some("sid-1"), 0).await;
+        let exited =
+            insert_session_full(&pool, &ws, &user, "claude", "exited", Some("sid-1"), 0).await;
         // Matches: reconnectable + has provider_session_id (archived still counts).
-        let recon = insert_session_full(&pool, &ws, &user, "claude", "reconnectable", Some("sid-2"), 1).await;
+        let recon = insert_session_full(
+            &pool,
+            &ws,
+            &user,
+            "claude",
+            "reconnectable",
+            Some("sid-2"),
+            1,
+        )
+        .await;
         // Excluded: still running.
         insert_session_full(&pool, &ws, &user, "claude", "running", Some("sid-3"), 0).await;
         // Excluded: working.
@@ -646,7 +689,8 @@ mod tests {
         let repo = SessionsRepo::new(pool.clone());
 
         // A live claude session with a provider id.
-        let live = insert_session_full(&pool, &ws, &user, "claude", "running", Some("psid-1"), 0).await;
+        let live =
+            insert_session_full(&pool, &ws, &user, "claude", "running", Some("psid-1"), 0).await;
         // An exited+archived codex session with NO provider id — must still be
         // returned (analysis sessions finish fast but transcripts keep growing).
         let exited = insert_session_full(&pool, &ws, &user, "codex", "exited", None, 1).await;
@@ -728,8 +772,13 @@ mod tests {
         let ws2 = new_id();
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&ws2).bind("w2").bind("/tmp2").bind(&now)
-            .execute(&pool).await.unwrap();
+            .bind(&ws2)
+            .bind("w2")
+            .bind("/tmp2")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
         let repo = SessionsRepo::new(pool.clone());
 
         let a1 = insert_session_full(&pool, &ws1, &alice, "claude", "running", None, 0).await;
@@ -760,7 +809,15 @@ mod tests {
         let old = fmt(Utc::now() - ChronoDuration::hours(20));
         let recent = fmt(Utc::now());
         // The only row that should match: old + channel + not archived.
-        let idle = insert_session(&pool, &ws, &user, &old, r#"{"source":"channel","channel":"telegram"}"#, 0).await;
+        let idle = insert_session(
+            &pool,
+            &ws,
+            &user,
+            &old,
+            r#"{"source":"channel","channel":"telegram"}"#,
+            0,
+        )
+        .await;
         // Excluded: recent channel session.
         insert_session(&pool, &ws, &user, &recent, r#"{"source":"channel"}"#, 0).await;
         // Excluded: old but not a channel session.
@@ -769,7 +826,15 @@ mod tests {
         insert_session(&pool, &ws, &user, &old, r#"{"source":"channel"}"#, 1).await;
         // Excluded: old timestamp but mid-turn — `last_active_at` only moves on a
         // status transition, so a working session can look stale while answering.
-        let working = insert_session(&pool, &ws, &user, &old, r#"{"source":"channel","channel":"slack"}"#, 0).await;
+        let working = insert_session(
+            &pool,
+            &ws,
+            &user,
+            &old,
+            r#"{"source":"channel","channel":"slack"}"#,
+            0,
+        )
+        .await;
         sqlx::query("UPDATE sessions SET status = 'working' WHERE id = ?")
             .bind(&working)
             .execute(&pool)

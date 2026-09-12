@@ -49,10 +49,7 @@ curl -s -X POST "$BASE/api/v1/ingest/swarm/board" \
 "#;
 
 fn swarm_base(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> PathBuf {
-    ctx.data_dir
-        .join("swarm")
-        .join(swarm_id)
-        .join(agent_id)
+    ctx.data_dir.join("swarm").join(swarm_id).join(agent_id)
 }
 
 fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
@@ -112,7 +109,11 @@ pub fn integration_branch_name(swarm: &Swarm, project: &SwarmProject) -> String 
 
 /// Path of the dedicated integration worktree (checked out on `integration_branch`).
 /// All merges happen here so Otto never touches the user's primary checkout.
-pub fn integration_worktree_path(ctx: &ServerCtx, swarm_id: &str, project_id: &str) -> std::path::PathBuf {
+pub fn integration_worktree_path(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    project_id: &str,
+) -> std::path::PathBuf {
     ctx.data_dir
         .join("swarm")
         .join(swarm_id)
@@ -200,7 +201,13 @@ pub async fn ensure_cwd_info(
 
     if mode == "repo" {
         if let Some(r) = &repo {
-            return Ok(CwdInfo { path: r.clone(), mode, created: false, branch: None, integration_branch: None });
+            return Ok(CwdInfo {
+                path: r.clone(),
+                mode,
+                created: false,
+                branch: None,
+                integration_branch: None,
+            });
         }
     }
 
@@ -221,10 +228,18 @@ pub async fn ensure_cwd_info(
             // Base the agent worktree on the pinned integration branch — but only
             // on first creation. `worktree_add_if_absent` reuses an existing tree
             // as-is, so a resumed turn keeps the agent's prior commits.
-            match git.worktree_add_if_absent(&wt_str, &branch, &integration_branch).await {
+            match git
+                .worktree_add_if_absent(&wt_str, &branch, &integration_branch)
+                .await
+            {
                 Ok(created) => {
                     if created {
-                        tracing::info!("swarm: created worktree {} on {} (base {})", wt_str, branch, integration_branch);
+                        tracing::info!(
+                            "swarm: created worktree {} on {} (base {})",
+                            wt_str,
+                            branch,
+                            integration_branch
+                        );
                     }
                     return Ok(CwdInfo {
                         path: wt_str,
@@ -235,7 +250,10 @@ pub async fn ensure_cwd_info(
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("swarm: worktree add failed ({}), falling back to scratch: {e}", wt_str);
+                    tracing::warn!(
+                        "swarm: worktree add failed ({}), falling back to scratch: {e}",
+                        wt_str
+                    );
                 }
             }
         }
@@ -261,7 +279,11 @@ fn scratch_info(ctx: &ServerCtx, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
 /// project (`project.skills`) and per-agent (`agent.skills`) skills, deduped by name
 /// (first-seen order). Each layer is `[{name, must_use?}]` or `["name", …]`. This is
 /// how a team/project adds skills on top of an agent's defaults (requirement 2).
-pub fn resolve_skills(swarm: &Swarm, project: Option<&SwarmProject>, agent: &SwarmAgent) -> Vec<String> {
+pub fn resolve_skills(
+    swarm: &Swarm,
+    project: Option<&SwarmProject>,
+    agent: &SwarmAgent,
+) -> Vec<String> {
     use std::collections::HashSet;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
@@ -302,7 +324,11 @@ pub fn render_identity(
     s.push_str(&format!(
         "You are a member of the **{}** agent swarm. Mission: {}\n\n",
         swarm.name,
-        if swarm.description.is_empty() { "(not specified)" } else { &swarm.description }
+        if swarm.description.is_empty() {
+            "(not specified)"
+        } else {
+            &swarm.description
+        }
     ));
     if !agent.specialization.is_empty() {
         s.push_str(&format!("**Specialization:** {}\n\n", agent.specialization));
@@ -335,7 +361,10 @@ pub fn render_identity(
         s.push('\n');
     }
     if let Some(t) = task {
-        s.push_str(&format!("## Your current task: {}\n{}\n\n", t.title, t.description));
+        s.push_str(&format!(
+            "## Your current task: {}\n{}\n\n",
+            t.title, t.description
+        ));
     }
     s.push_str(
         "## Working with your team (shared board)\n\
@@ -499,8 +528,13 @@ pub fn provision_agent(
         ..Default::default()
     };
     let ctx_root = otto_context::materialize::default_context_root();
-    let _ =
-        otto_context::materialize::provision(&ctx.context_library, &cfg, cwd, &agent.provider, &ctx_root);
+    let _ = otto_context::materialize::provision(
+        &ctx.context_library,
+        &cfg,
+        cwd,
+        &agent.provider,
+        &ctx_root,
+    );
     install_helper(cwd, "otto-post", OTTO_POST);
     install_helper(cwd, "otto-product", OTTO_PRODUCT);
     install_helper(cwd, "otto-mockup", OTTO_MOCKUP);
@@ -602,11 +636,22 @@ mod tests {
     #[test]
     fn helper_scripts_parse_flags_and_fail_loud() {
         for (name, body, flags) in [
-            ("otto-product", OTTO_PRODUCT, &["--title", "--folder", "--kind"][..]),
-            ("otto-mockup", OTTO_MOCKUP, &["--title", "--format", "--folder"][..]),
+            (
+                "otto-product",
+                OTTO_PRODUCT,
+                &["--title", "--folder", "--kind"][..],
+            ),
+            (
+                "otto-mockup",
+                OTTO_MOCKUP,
+                &["--title", "--format", "--folder"][..],
+            ),
         ] {
             for f in flags {
-                assert!(body.contains(&format!("    {f}) ")), "{name}: {f} handled in case");
+                assert!(
+                    body.contains(&format!("    {f}) ")),
+                    "{name}: {f} handled in case"
+                );
             }
             // Unknown flags are rejected ONLY while the body is empty and the arg is a
             // single token — `---` front-matter / an hrule body (has whitespace) is body.
@@ -617,11 +662,20 @@ mod tests {
                 "{name}: unknown-flag arm guarded by empty-body + single-token"
             );
             assert!(body.contains("exit 2"), "{name}: unknown flags exit 2");
-            assert!(body.contains("-w '%{http_code}'"), "{name}: reports HTTP status");
-            assert!(!body.contains(">/dev/null 2>&1"), "{name}: no swallowed curl");
+            assert!(
+                body.contains("-w '%{http_code}'"),
+                "{name}: reports HTTP status"
+            );
+            assert!(
+                !body.contains(">/dev/null 2>&1"),
+                "{name}: no swallowed curl"
+            );
             assert!(body.contains("exit 1 ;;"), "{name}: non-zero on failure");
         }
-        assert!(OTTO_PRODUCT.contains("\"tree_kind\""), "--kind maps to tree_kind");
+        assert!(
+            OTTO_PRODUCT.contains("\"tree_kind\""),
+            "--kind maps to tree_kind"
+        );
         assert!(OTTO_MOCKUP.contains("html|mermaid|excalidraw|scene3d"));
     }
 
@@ -631,7 +685,10 @@ mod tests {
         // team-first order, both shapes accepted.
         let sw = swarm(json!({ "skills": ["team-a", "shared"] }));
         let pr = project(json!([{ "name": "proj-b" }, { "name": "shared" }]));
-        let ag = agent(json!([{ "name": "agent-c", "must_use": true }, { "name": "team-a" }]), None);
+        let ag = agent(
+            json!([{ "name": "agent-c", "must_use": true }, { "name": "team-a" }]),
+            None,
+        );
         let got = resolve_skills(&sw, Some(&pr), &ag);
         assert_eq!(got, vec!["team-a", "shared", "proj-b", "agent-c"]);
     }

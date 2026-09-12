@@ -302,7 +302,9 @@ fn local_forward_args(
 ) -> Vec<String> {
     let mut args = base_args(cfg);
     args.push("-L".into());
-    args.push(format!("127.0.0.1:{local_port}:{remote_host}:{remote_port}"));
+    args.push(format!(
+        "127.0.0.1:{local_port}:{remote_host}:{remote_port}"
+    ));
     args.push(ssh_target(cfg));
     args
 }
@@ -351,7 +353,10 @@ mod tests {
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
         assert!(args.iter().any(|a| a == "ServerAliveCountMax=2"));
-        assert_eq!(args[args.iter().position(|a| a == "-p").unwrap() + 1], "2222");
+        assert_eq!(
+            args[args.iter().position(|a| a == "-p").unwrap() + 1],
+            "2222"
+        );
         assert_eq!(
             args[args.iter().position(|a| a == "-i").unwrap() + 1],
             "/home/me/.ssh/id_rsa"
@@ -377,8 +382,7 @@ mod tests {
 
     #[test]
     fn ssh_config_default_port() {
-        let c: SshTunnelConfig =
-            serde_json::from_str(r#"{"host":"h","user":"u"}"#).unwrap();
+        let c: SshTunnelConfig = serde_json::from_str(r#"{"host":"h","user":"u"}"#).unwrap();
         assert_eq!(c.port, 22);
         assert!(c.identity_file.is_none());
     }

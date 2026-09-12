@@ -452,7 +452,9 @@ impl PersonalAgentsRepo {
 
     /// Every enabled schedule of every enabled agent — the scheduler's tick
     /// query. Returns (schedule, agent) pairs so the tick needn't re-fetch.
-    pub async fn list_enabled_schedules(&self) -> Result<Vec<(PersonalAgentSchedule, PersonalAgent)>> {
+    pub async fn list_enabled_schedules(
+        &self,
+    ) -> Result<Vec<(PersonalAgentSchedule, PersonalAgent)>> {
         let rows = sqlx::query(
             "SELECT s.id AS s_id, a.id AS a_id FROM personal_agent_schedules s \
              JOIN personal_agents a ON a.id = s.agent_id \
@@ -470,7 +472,11 @@ impl PersonalAgentsRepo {
         Ok(out)
     }
 
-    pub async fn update_schedule(&self, id: &str, p: AgentSchedulePatch) -> Result<PersonalAgentSchedule> {
+    pub async fn update_schedule(
+        &self,
+        id: &str,
+        p: AgentSchedulePatch,
+    ) -> Result<PersonalAgentSchedule> {
         sqlx::query(
             "UPDATE personal_agent_schedules SET \
                schedule_json = COALESCE(?, schedule_json), \
@@ -605,7 +611,11 @@ impl PersonalAgentsRepo {
 
     /// The report hash of the most recent successful run for an agent (excluding
     /// a given run id) — backs notify-on-change change detection.
-    pub async fn last_ok_report_hash(&self, agent_id: &str, exclude_run: &str) -> Result<Option<String>> {
+    pub async fn last_ok_report_hash(
+        &self,
+        agent_id: &str,
+        exclude_run: &str,
+    ) -> Result<Option<String>> {
         let row = sqlx::query(
             "SELECT report_hash FROM personal_agent_runs WHERE agent_id = ? AND status = 'ok' \
              AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC LIMIT 1",
@@ -672,7 +682,12 @@ impl AgentRoomsRepo {
         Self { pool }
     }
 
-    pub async fn create(&self, workspace_id: &str, name: &str, created_by: Option<&str>) -> Result<AgentRoom> {
+    pub async fn create(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        created_by: Option<&str>,
+    ) -> Result<AgentRoom> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -701,11 +716,12 @@ impl AgentRoomsRepo {
     }
 
     pub async fn list_by_workspace(&self, ws: &str) -> Result<Vec<AgentRoom>> {
-        let rows = sqlx::query("SELECT * FROM agent_rooms WHERE workspace_id = ? ORDER BY created_at ASC")
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list agent rooms"))?;
+        let rows =
+            sqlx::query("SELECT * FROM agent_rooms WHERE workspace_id = ? ORDER BY created_at ASC")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list agent rooms"))?;
         rows.iter().map(row_to_room).collect()
     }
 
@@ -768,12 +784,13 @@ impl AgentRoomsRepo {
 
     /// The room-tool membership check: may this agent post/read here?
     pub async fn is_member(&self, room_id: &str, agent_id: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT 1 AS x FROM agent_room_members WHERE room_id = ? AND agent_id = ?")
-            .bind(room_id)
-            .bind(agent_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("check agent room membership"))?;
+        let row =
+            sqlx::query("SELECT 1 AS x FROM agent_room_members WHERE room_id = ? AND agent_id = ?")
+                .bind(room_id)
+                .bind(agent_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("check agent room membership"))?;
         Ok(row.is_some())
     }
 
@@ -888,7 +905,10 @@ mod tests {
         assert!(!upd.enabled);
         assert_eq!(repo.list_by_workspace("ws1").await.unwrap().len(), 1);
         repo.set_chat_session(&a.id, Some("sess-9")).await.unwrap();
-        assert_eq!(repo.get(&a.id).await.unwrap().chat_session_id.as_deref(), Some("sess-9"));
+        assert_eq!(
+            repo.get(&a.id).await.unwrap().chat_session_id.as_deref(),
+            Some("sess-9")
+        );
         repo.delete(&a.id).await.unwrap();
         assert!(repo.get(&a.id).await.is_err());
     }
@@ -919,9 +939,13 @@ mod tests {
             })
             .await
             .unwrap();
-        repo.set_schedule_runtime(&fast.id, Some("2026-09-01T10:00:00+00:00"), Some("2026-09-01T10:15:00+00:00"))
-            .await
-            .unwrap();
+        repo.set_schedule_runtime(
+            &fast.id,
+            Some("2026-09-01T10:00:00+00:00"),
+            Some("2026-09-01T10:15:00+00:00"),
+        )
+        .await
+        .unwrap();
         let daily2 = repo.get_schedule(&daily.id).await.unwrap();
         let fast2 = repo.get_schedule(&fast.id).await.unwrap();
         assert!(daily2.last_run_at.is_none(), "sibling cursor untouched");
@@ -929,9 +953,15 @@ mod tests {
         assert_eq!(repo.list_schedules(&a.id).await.unwrap().len(), 2);
         // Enabled tick sees both; disabling the agent hides both.
         assert_eq!(repo.list_enabled_schedules().await.unwrap().len(), 2);
-        repo.update(&a.id, PersonalAgentPatch { enabled: Some(false), ..Default::default() })
-            .await
-            .unwrap();
+        repo.update(
+            &a.id,
+            PersonalAgentPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(repo.list_enabled_schedules().await.unwrap().len(), 0);
     }
 
@@ -998,7 +1028,10 @@ mod tests {
         rooms.add_member(&room.id, &a.id).await.unwrap(); // idempotent
         assert!(rooms.is_member(&room.id, &a.id).await.unwrap());
         assert!(!rooms.is_member(&room.id, &b.id).await.unwrap());
-        assert_eq!(rooms.list_members(&room.id).await.unwrap(), vec![a.id.clone()]);
+        assert_eq!(
+            rooms.list_members(&room.id).await.unwrap(),
+            vec![a.id.clone()]
+        );
 
         let m1 = rooms
             .add_message(NewRoomMessage {
@@ -1021,7 +1054,10 @@ mod tests {
         let all = rooms.list_messages(&room.id, None, 50).await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].id, m1.id);
-        let page = rooms.list_messages(&room.id, Some(&m1.id), 50).await.unwrap();
+        let page = rooms
+            .list_messages(&room.id, Some(&m1.id), 50)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, m2.id);
 
@@ -1029,7 +1065,10 @@ mod tests {
         // (the transcript stays user-visible).
         agents.delete(&a.id).await.unwrap();
         assert!(!rooms.is_member(&room.id, &a.id).await.unwrap());
-        assert_eq!(rooms.list_messages(&room.id, None, 50).await.unwrap().len(), 2);
+        assert_eq!(
+            rooms.list_messages(&room.id, None, 50).await.unwrap().len(),
+            2
+        );
         // Deleting the room cascades its messages.
         rooms.delete(&room.id).await.unwrap();
         assert!(rooms.get(&room.id).await.is_err());

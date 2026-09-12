@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 use otto_connections::{ConnectionsService, Spawner};
-use otto_dbviewer::DbViewerService;
-use otto_improve::ImprovementEngine;
 use otto_core::auth::{RoleChecker, TokenAuthenticator};
+use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
+use otto_dbviewer::DbViewerService;
+use otto_improve::ImprovementEngine;
 use otto_orchestrator::Orchestrator;
 use otto_sessions::SessionManager;
-use otto_core::domain::{AgentTask, Notice, TrailEvent};
 use otto_state::{
     ActivityRepo, AuditRepo, GitStore, IntegrationsRepo, IssuesRepo, NewAuditEntry, NewNotice,
     NewTask, NewTrail, NotificationsRepo, ReviewFindingsRepo, ReviewsRepo, SkillEvalsRepo,
@@ -246,7 +246,10 @@ impl ActivityService {
         workspace_id: &otto_core::Id,
         tasks: &[NewTask],
     ) -> otto_core::Result<Vec<AgentTask>> {
-        let tasks = self.repo.replace_tasks(session_id, workspace_id, tasks).await?;
+        let tasks = self
+            .repo
+            .replace_tasks(session_id, workspace_id, tasks)
+            .await?;
         let _ = self.events.send(Event::TasksUpdated {
             workspace_id: workspace_id.clone(),
             session_id: session_id.clone(),

@@ -27,7 +27,7 @@ use otto_core::{Error, Id};
 // re-exports an unrelated `activity::NewTask` (agent task tracker).
 use otto_state::swarm::{NewTask, RunFilter};
 use otto_state::{
-    DiscoveryRun, NewDiscoveryRun, ProductAttachment, ProductStory, NewProject, Swarm,
+    DiscoveryRun, NewDiscoveryRun, NewProject, ProductAttachment, ProductStory, Swarm,
     SwarmMessage, SwarmProject, SwarmTask,
 };
 use serde::{Deserialize, Serialize};
@@ -119,9 +119,7 @@ fn strip_task_prefix(title: &str) -> String {
         let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
         if digits > 0 {
             let after = title["task ".len() + digits..].trim_start();
-            let after = after
-                .trim_start_matches([':', '-', '.', ')'])
-                .trim_start();
+            let after = after.trim_start_matches([':', '-', '.', ')']).trim_start();
             if !after.is_empty() {
                 return after.to_string();
             }
@@ -432,9 +430,7 @@ pub async fn story_to_swarm(
                 tasks.len()
             ),
             actor_id: Some(user.id.clone()),
-            meta_json: Some(
-                json!({ "swarm_id": swarm.id, "project_id": project.id }).to_string(),
-            ),
+            meta_json: Some(json!({ "swarm_id": swarm.id, "project_id": project.id }).to_string()),
         })
         .await;
 
@@ -570,8 +566,11 @@ async fn build_discovery_brief(
         }
     }
     if let Ok(notes) = ctx.product_repo.list_notes(&story.id).await {
-        let notes: Vec<&otto_state::ProductNote> =
-            notes.iter().filter(|n| !n.body.trim().is_empty()).take(10).collect();
+        let notes: Vec<&otto_state::ProductNote> = notes
+            .iter()
+            .filter(|n| !n.body.trim().is_empty())
+            .take(10)
+            .collect();
         if !notes.is_empty() {
             context.push_str("### Notes\n");
             for n in notes {
@@ -797,9 +796,7 @@ pub async fn discover_story(
     let name = req
         .name
         .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!("Discovery: {} (run {})", story.title, existing_runs + 1)
-        });
+        .unwrap_or_else(|| format!("Discovery: {} (run {})", story.title, existing_runs + 1));
     let order_idx = ctx
         .swarm_repo
         .list_projects(&swarm.id)
@@ -887,7 +884,11 @@ pub async fn discover_story(
     crate::swarm_runtime::emit_status(&ctx, &story.workspace_id, &swarm.id, "active");
 
     // 10. Return the run + swarm + project + seeded tasks.
-    let swarm = ctx.swarm_repo.get_swarm(&swarm.id).await.map_err(ApiError)?;
+    let swarm = ctx
+        .swarm_repo
+        .get_swarm(&swarm.id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(DiscoverResp {
         run,
         swarm,

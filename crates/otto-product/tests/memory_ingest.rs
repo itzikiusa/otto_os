@@ -73,7 +73,10 @@ async fn product_artifacts_become_searchable_memories() {
         )
         .await
         .unwrap();
-    assert!(h1.iter().any(|h| h.memory.body.contains("USD only")), "qa not recalled");
+    assert!(
+        h1.iter().any(|h| h.memory.body.contains("USD only")),
+        "qa not recalled"
+    );
 
     // Recall the decision.
     let h2 = mem
@@ -89,7 +92,10 @@ async fn product_artifacts_become_searchable_memories() {
         )
         .await
         .unwrap();
-    assert!(h2.iter().any(|h| h.memory.kind == "decision"), "decision not recalled");
+    assert!(
+        h2.iter().any(|h| h.memory.kind == "decision"),
+        "decision not recalled"
+    );
 }
 
 #[tokio::test]
@@ -119,7 +125,9 @@ async fn recall_brief_groups_story_memories() {
     assert!(!brief.sections.is_empty(), "brief should have sections");
     let headings: Vec<&str> = brief.sections.iter().map(|s| s.heading.as_str()).collect();
     assert!(
-        headings.iter().any(|h| h.contains("Constraints") || h.contains("Decisions") || h.contains("Answered")),
+        headings.iter().any(|h| h.contains("Constraints")
+            || h.contains("Decisions")
+            || h.contains("Answered")),
         "expected grouped headings, got {headings:?}"
     );
     assert!(brief.token_estimate <= 1000);

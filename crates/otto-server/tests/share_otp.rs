@@ -29,14 +29,16 @@ use axum::Router;
 use chrono::Utc;
 use otto_core::auth::{AuthContext, AuthUser};
 use otto_core::domain::WorkspaceRole;
+use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_rbac::AuthRepo;
 use otto_server::feature_guard::feature_guard;
-use otto_core::secrets::SecretStore;
-use otto_server::routes::share::{extend_otp_share, mint_otp_share, resolve_verified_sender, OtpMailer};
+use otto_server::routes::share::{
+    extend_otp_share, mint_otp_share, resolve_verified_sender, OtpMailer,
+};
 use otto_state::{EmailSendersRepo, GrantsRepo, SqlitePool};
-use std::collections::HashMap;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -114,7 +116,10 @@ struct MemSecrets {
 }
 impl SecretStore for MemSecrets {
     fn put(&self, key: &str, value: &str) -> Result<(), Error> {
-        self.map.lock().unwrap().insert(key.to_string(), value.to_string());
+        self.map
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
     fn get(&self, key: &str) -> Result<Option<String>, Error> {
@@ -318,7 +323,12 @@ async fn get_session_denied_until_otp_verified() {
     let wrong = if otp == "000000" { "111111" } else { "000000" };
     assert!(!repo.verify_share_otp(&token, wrong).await.unwrap());
     assert!(
-        repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        repo.authenticate(&token)
+            .await
+            .unwrap()
+            .scope
+            .unwrap()
+            .otp_pending,
         "a wrong OTP must leave the share pending"
     );
 
@@ -333,7 +343,10 @@ async fn get_session_denied_until_otp_verified() {
     assert!(verified_at.is_some(), "verified_at must be set on success");
 
     let ctx = repo.authenticate(&token).await.unwrap();
-    assert!(!ctx.scope.unwrap().otp_pending, "verified share is no longer pending");
+    assert!(
+        !ctx.scope.unwrap().otp_pending,
+        "verified share is no longer pending"
+    );
     let verified_app = app(pool.clone(), repo.authenticate(&token).await.unwrap());
     assert_eq!(
         status(&verified_app, Method::GET, "/api/v1/sessions/S1").await,
@@ -460,7 +473,13 @@ async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
     let old_otp = mailer.sent.lock().unwrap()[0].1.clone();
     assert!(repo.verify_share_otp(&token, &old_otp).await.unwrap());
     assert!(
-        !repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        !repo
+            .authenticate(&token)
+            .await
+            .unwrap()
+            .scope
+            .unwrap()
+            .otp_pending,
         "verified share is not pending before extend"
     );
 
@@ -483,7 +502,12 @@ async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
 
     // The share is OTP-pending again (verified_at was cleared on extend).
     assert!(
-        repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        repo.authenticate(&token)
+            .await
+            .unwrap()
+            .scope
+            .unwrap()
+            .otp_pending,
         "after extend the share must be OTP-pending again (re-verify required)"
     );
 
@@ -497,7 +521,13 @@ async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
         "the fresh OTP re-verifies the share"
     );
     assert!(
-        !repo.authenticate(&token).await.unwrap().scope.unwrap().otp_pending,
+        !repo
+            .authenticate(&token)
+            .await
+            .unwrap()
+            .scope
+            .unwrap()
+            .otp_pending,
         "the share re-opens after re-verifying with the fresh code"
     );
 

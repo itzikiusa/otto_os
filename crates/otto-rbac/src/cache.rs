@@ -101,10 +101,7 @@ impl AuthCache {
         }
         self.entries
             .insert(token_hash.clone(), (ctx, Instant::now()));
-        self.by_user
-            .entry(user_id)
-            .or_default()
-            .push(token_hash);
+        self.by_user.entry(user_id).or_default().push(token_hash);
     }
 
     /// Evict a single token entry by `token_hash`. Also cleans the reverse index
@@ -198,8 +195,14 @@ mod tests {
 
         cache.evict_user("u1");
 
-        assert!(cache.get("h1").is_none(), "u1's first token must be evicted");
-        assert!(cache.get("h2").is_none(), "u1's second token must be evicted");
+        assert!(
+            cache.get("h1").is_none(),
+            "u1's first token must be evicted"
+        );
+        assert!(
+            cache.get("h2").is_none(),
+            "u1's second token must be evicted"
+        );
         assert!(
             cache.get("h3").is_some(),
             "u2's token must not be affected by u1's eviction"
@@ -234,7 +237,10 @@ mod tests {
         // DashMap lets us overwrite the entry.
         cache.entries.insert(
             "hx".into(),
-            (fake_ctx("ux"), Instant::now() - AUTH_CACHE_TTL - Duration::from_secs(1)),
+            (
+                fake_ctx("ux"),
+                Instant::now() - AUTH_CACHE_TTL - Duration::from_secs(1),
+            ),
         );
         assert!(
             cache.get("hx").is_none(),

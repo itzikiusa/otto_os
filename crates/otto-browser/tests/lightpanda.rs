@@ -18,8 +18,7 @@ use otto_browser::BrowserEngine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const FIXTURE_HTML: &str =
-    r#"<!doctype html><html><head><title>Otto Fixture Page</title></head><body><h1>hi</h1></body></html>"#;
+const FIXTURE_HTML: &str = r#"<!doctype html><html><head><title>Otto Fixture Page</title></head><body><h1>hi</h1></body></html>"#;
 
 /// Minimal raw HTTP/1.1 fixture: serves `FIXTURE_HTML` for any request. Same
 /// shape as `tests/lightpanda_login.rs::spawn_fixture`, trimmed to a single

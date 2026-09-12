@@ -345,7 +345,10 @@ mod tests {
         // Unrelated path is untouched.
         assert_eq!(abbreviate_home("/etc/hosts", HOME), "/etc/hosts");
         // Empty home disables abbreviation (no `$HOME` set).
-        assert_eq!(abbreviate_home("/Users/itziklavon/x", ""), "/Users/itziklavon/x");
+        assert_eq!(
+            abbreviate_home("/Users/itziklavon/x", ""),
+            "/Users/itziklavon/x"
+        );
     }
 
     #[test]
@@ -367,7 +370,11 @@ mod tests {
 
     #[test]
     fn read_summary_abbreviates_home() {
-        let evt = tool_line("Read", json!({ "file_path": "/Users/itziklavon/.hermes/x.md" }), HOME);
+        let evt = tool_line(
+            "Read",
+            json!({ "file_path": "/Users/itziklavon/.hermes/x.md" }),
+            HOME,
+        );
         assert_eq!(
             evt,
             TranscriptEvent::Tool {
@@ -386,7 +393,11 @@ mod tests {
             HOME,
         );
         match evt {
-            TranscriptEvent::Tool { name, display, code } => {
+            TranscriptEvent::Tool {
+                name,
+                display,
+                code,
+            } => {
                 assert_eq!(name, "Bash");
                 // The label line carries no inline command — just the heading.
                 assert_eq!(display, "💻 terminal");
@@ -399,7 +410,10 @@ mod tests {
 
     #[test]
     fn terminal_preview_caps_long_multiline_commands() {
-        let cmd = (0..40).map(|i| format!("echo line {i}")).collect::<Vec<_>>().join("\n");
+        let cmd = (0..40)
+            .map(|i| format!("echo line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let preview = terminal_preview(&cmd, HOME);
         assert!(preview.ends_with('…'), "truncation marker appended");
         assert!(preview.lines().count() <= 9, "capped to ~8 lines (+ the …)");
@@ -433,7 +447,9 @@ mod tests {
         .to_string();
         assert_eq!(
             parse_line_with_home(&line, HOME),
-            Some(TranscriptEvent::Final { text: "all done".into() })
+            Some(TranscriptEvent::Final {
+                text: "all done".into()
+            })
         );
     }
 }

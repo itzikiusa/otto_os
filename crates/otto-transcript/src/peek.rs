@@ -33,14 +33,23 @@ pub fn peek(provider: Provider, path: &Path) -> std::io::Result<Peek> {
     } else {
         Some(crate::fold(provider, &tail, FoldOpts::default()))
     };
-    let title = t.as_ref().and_then(|t| t.title.clone()).or_else(|| h.title.clone());
+    let title = t
+        .as_ref()
+        .and_then(|t| t.title.clone())
+        .or_else(|| h.title.clone());
     let last_active_at = t
         .as_ref()
         .and_then(|t| t.last_ts.clone())
         .or_else(|| h.last_ts.clone());
     Ok(Peek {
-        provider_session_id: h.session_id.clone().or_else(|| session_id_from_name(provider, path)),
-        cwd: h.cwd.clone().or_else(|| t.as_ref().and_then(|t| t.cwd.clone())),
+        provider_session_id: h
+            .session_id
+            .clone()
+            .or_else(|| session_id_from_name(provider, path)),
+        cwd: h
+            .cwd
+            .clone()
+            .or_else(|| t.as_ref().and_then(|t| t.cwd.clone())),
         title,
         first_prompt: h.first_prompt.clone(),
         started_at: h.first_ts.clone(),
@@ -74,12 +83,16 @@ mod tests {
 
     #[test]
     fn codex_uuid_is_the_filename_tail() {
-        let p = Path::new("/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
+        let p =
+            Path::new("/x/rollout-2026-06-18T08-53-25-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl");
         assert_eq!(
             session_id_from_name(Provider::Codex, p).as_deref(),
             Some("019ed94a-994a-7010-b01f-9b840c5b7068")
         );
-        assert_eq!(session_id_from_name(Provider::Claude, Path::new("/y/abc.jsonl")).as_deref(), Some("abc"));
+        assert_eq!(
+            session_id_from_name(Provider::Claude, Path::new("/y/abc.jsonl")).as_deref(),
+            Some("abc")
+        );
     }
 
     #[test]

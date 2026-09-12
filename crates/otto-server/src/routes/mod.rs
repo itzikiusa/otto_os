@@ -1,54 +1,54 @@
 //! Core REST routes (contract endpoints #1-16, #57-58).
 
+pub mod access_groups;
 pub mod database_changes;
 pub mod resource_access;
-pub mod access_groups;
 
 pub mod activity;
 pub mod admin_sessions;
 pub mod api_client;
+pub mod api_stream;
+pub mod audit;
+pub mod auth_routes;
 pub mod backup;
 pub mod browser;
 pub mod capabilities;
 pub mod channel_webhook;
-pub mod swarm_webhook;
-pub mod api_stream;
-pub mod audit;
-pub mod auth_routes;
 pub mod email_sender;
 pub mod findings;
+pub mod fs;
 pub mod goal_loops;
 pub mod grants;
 pub mod grpc;
-pub mod fs;
-pub mod proof_pack;
-pub mod repo_rules;
-pub mod runs;
-pub mod personal_agents;
-pub mod scheduled_tasks;
 pub mod handover;
 pub mod impersonate;
 pub mod logs;
-pub mod mcp_servers;
 pub mod mcp_cp;
+pub mod mcp_servers;
 pub mod meta;
 pub mod mission;
-pub mod workgraph;
 pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
-pub mod proof;
+pub mod personal_agents;
 pub mod product_memory;
+pub mod proof;
+pub mod proof_pack;
+pub mod repo_rules;
+pub mod runs;
+pub mod scheduled_tasks;
+pub mod search;
 pub mod settings;
 pub mod share;
+pub mod slash_commands;
 pub mod snips;
 pub mod swarm_ingest;
-pub mod slash_commands;
+pub mod swarm_webhook;
 pub mod transcript;
 pub mod usage;
 pub mod users;
 pub mod workflows;
-pub mod search;
+pub mod workgraph;
 pub mod workspaces;
 
 use axum::extract::Request;
@@ -121,10 +121,16 @@ pub fn public_routes() -> Router<ServerCtx> {
         // Run with Otto webhook entry: launch a source→PR-draft run. Same
         // per-workspace webhook key as the channel webhook. POLICY EXEMPTION:
         // classified `Exempt` in policy.rs (key-guarded, no bearer).
-        .route("/webhooks/{workspace_id}/run", post(channel_webhook::run_inbound))
+        .route(
+            "/webhooks/{workspace_id}/run",
+            post(channel_webhook::run_inbound),
+        )
         // External trigger that auto-plans + starts a specific swarm (worktree
         // isolation). Same per-workspace webhook key as the channel webhook.
-        .route("/webhooks/swarm/{workspace_id}/{swarm_id}", post(swarm_webhook::trigger))
+        .route(
+            "/webhooks/swarm/{workspace_id}/{swarm_id}",
+            post(swarm_webhook::trigger),
+        )
         // DB Assistant `q` tool: the file-backed agent runs `./q '<read-only SQL>'`,
         // which POSTs here with its per-assist `x-assist-key` (NOT a user bearer —
         // the agent's PTY has no user session). Lives in public_routes (outside the
@@ -148,10 +154,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/auth/tokens/{id}", delete(auth_routes::revoke_token))
         // --- Share-link management (mobile plan Task 1.9) ----------------
-        .route(
-            "/auth/shares/{share_id}",
-            delete(share::revoke_share),
-        )
+        .route("/auth/shares/{share_id}", delete(share::revoke_share))
         .route("/auth/shares/revoke-all", post(share::revoke_all_shares))
         // --- Per-user email sender (Gmail App Password → Keychain; mobile
         // plan Task 7.1). Self-owned (any authed user sets their OWN sender):
@@ -184,8 +187,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // prefix rule in policy.rs (Users:Admin); handlers additionally require root.
         .route(
             "/users/{id}/plugin-grants",
-            get(grants::get_plugin_grants::<ServerCtx>)
-                .put(grants::put_plugin_grants::<ServerCtx>),
+            get(grants::get_plugin_grants::<ServerCtx>).put(grants::put_plugin_grants::<ServerCtx>),
         )
         // Caller's effective capability map (any authed user; Exempt in policy).
         .route("/auth/capabilities", get(grants::capabilities::<ServerCtx>))
@@ -281,7 +283,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route(
             "/mcp/otto-server",
-            get(crate::mcp_outward::otto_server_status).patch(crate::mcp_outward::otto_server_config),
+            get(crate::mcp_outward::otto_server_status)
+                .patch(crate::mcp_outward::otto_server_config),
         )
         // Streamable-HTTP MCP transport: external clients reach the otto.* tools
         // over HTTP here (no local stdio subprocess). Confined for kind='mcp'
@@ -301,16 +304,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         // Admin is enforced in-handler because the path guard resolves
         // `/mcp/*` non-GET requests to Edit.
-        .route(
-            "/mcp/tokens/{id}/rotate",
-            post(mcp_cp::rotate_mcp_token),
-        )
+        .route("/mcp/tokens/{id}/rotate", post(mcp_cp::rotate_mcp_token))
         .route(
             "/workspaces/{wid}/mcp/session-attach",
             get(mcp_cp::get_session_attach).patch(mcp_cp::set_session_attach),
         )
         .route("/mcp/gateway/tools", get(crate::mcp_outward::gateway_tools))
-        .route("/mcp/gateway/invoke", post(crate::mcp_outward::gateway_invoke))
+        .route(
+            "/mcp/gateway/invoke",
+            post(crate::mcp_outward::gateway_invoke),
+        )
         .route(
             "/workspaces/{wid}/mcp/code-search",
             get(crate::mcp_capabilities::code_search),
@@ -350,10 +353,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/notifications/read-all",
             post(notifications::mark_all_read),
         )
-        .route(
-            "/notifications/{id}/read",
-            post(notifications::mark_read),
-        )
+        .route("/notifications/{id}/read", post(notifications::mark_read))
         .route("/notifications/{id}", delete(notifications::dismiss))
         .route(
             "/workspaces/{ws}/product/stories/{sid}/memory/ingest",
@@ -508,10 +508,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/workspaces/{wid}/history/rescan",
             post(transcript::history_rescan),
         )
-        .route(
-            "/sessions/{id}/handover",
-            post(handover::handover_session),
-        )
+        .route("/sessions/{id}/handover", post(handover::handover_session))
         .route(
             "/sessions/{id}/handover/brief",
             post(handover::handover_brief),
@@ -546,10 +543,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         // Workflow versioning (history + restore).
         .route("/workflows/{id}/versions", get(workflows::list_versions))
-        .route(
-            "/workflows/{id}/versions/{v}",
-            get(workflows::get_version),
-        )
+        .route("/workflows/{id}/versions/{v}", get(workflows::get_version))
         .route(
             "/workflows/{id}/versions/{v}/restore",
             post(workflows::restore_version),
@@ -565,7 +559,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/workflow-runs/{id}", get(workflows::get_run))
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
-        .route("/workflow-runs/{id}/retry-node", post(workflows::retry_run_node))
+        .route(
+            "/workflow-runs/{id}/retry-node",
+            post(workflows::retry_run_node),
+        )
         // Human-approval resume: requires bearer auth, Editor in the run's workspace.
         .route("/workflow-runs/{id}/approve", post(workflows::approve_run))
         // --- Snips (screenshot → annotate → clipboard) -------------------

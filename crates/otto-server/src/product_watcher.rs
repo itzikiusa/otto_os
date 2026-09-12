@@ -166,15 +166,8 @@ async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
             }
 
             tokio::spawn(async move {
-                if let Err(e) = poll_story(
-                    story,
-                    product_repo,
-                    product,
-                    orchestrator,
-                    improve,
-                    events,
-                )
-                .await
+                if let Err(e) =
+                    poll_story(story, product_repo, product, orchestrator, improve, events).await
                 {
                     warn!("story watcher: poll_story failed: {e}");
                 }
@@ -323,7 +316,10 @@ async fn poll_story(
             let json_val = extract_json_block(&output);
             match json_val {
                 None => {
-                    warn!("story watcher: reconcile parse failed for {story_id} (len={})", output.len());
+                    warn!(
+                        "story watcher: reconcile parse failed for {story_id} (len={})",
+                        output.len()
+                    );
                     String::new()
                 }
                 Some(v) => {
@@ -371,10 +367,7 @@ async fn poll_story(
                                     story_id: story_id.clone(),
                                     analysis_id: None,
                                     text,
-                                    rationale: nq["rationale"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    rationale: nq["rationale"].as_str().unwrap_or("").to_string(),
                                     category: nq["category"]
                                         .as_str()
                                         .unwrap_or("general")
@@ -424,10 +417,13 @@ async fn poll_story(
             tracing::warn!("story watcher: list_questions({story_id}) failed: {e}");
             Vec::new()
         });
-    let notes = product_repo.list_notes(&story_id).await.unwrap_or_else(|e| {
-        tracing::warn!("story watcher: list_notes({story_id}) failed: {e}");
-        Vec::new()
-    });
+    let notes = product_repo
+        .list_notes(&story_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("story watcher: list_notes({story_id}) failed: {e}");
+            Vec::new()
+        });
     let narrative = build_improve_narrative_from_clarifications(&story, &all_questions, &notes);
     let target_skills = vec![
         "story-clarifying-questions".to_string(),
@@ -471,10 +467,7 @@ async fn poll_story(
 ///
 /// Includes every open/posted question's id + text, plus the new comments
 /// joined as markdown. The output contract is appended by the caller.
-pub fn build_reconcile_prompt(
-    open_questions: &[ProductQuestion],
-    new_comments_md: &str,
-) -> String {
+pub fn build_reconcile_prompt(open_questions: &[ProductQuestion], new_comments_md: &str) -> String {
     let mut prompt = String::new();
 
     prompt.push_str(
@@ -487,7 +480,10 @@ pub fn build_reconcile_prompt(
     if !open_questions.is_empty() {
         prompt.push_str("## Open Questions\n\n");
         for q in open_questions {
-            prompt.push_str(&format!("- **ID:** {}\n  **Question:** {}\n\n", q.id, q.text));
+            prompt.push_str(&format!(
+                "- **ID:** {}\n  **Question:** {}\n\n",
+                q.id, q.text
+            ));
         }
     } else {
         prompt.push_str("## Open Questions\n\n(none)\n\n");
@@ -536,7 +532,8 @@ mod tests {
     fn build_reconcile_prompt_includes_question_id_and_text() {
         let q1 = make_question("q-id-001", "What is the rollback plan?");
         let q2 = make_question("q-id-002", "Who is the target user?");
-        let comments_md = "**Alice** (2026-06-01T10:00:00Z): The rollback plan is to revert the migration.";
+        let comments_md =
+            "**Alice** (2026-06-01T10:00:00Z): The rollback plan is to revert the migration.";
 
         let prompt = build_reconcile_prompt(&[q1, q2], comments_md);
 

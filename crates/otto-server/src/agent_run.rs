@@ -93,10 +93,18 @@ pub struct RunOutcome {
 
 impl RunOutcome {
     pub fn ok(raw: String, sid: Id) -> Self {
-        Self { raw: Some(raw), session_id: Some(sid), reason: None }
+        Self {
+            raw: Some(raw),
+            session_id: Some(sid),
+            reason: None,
+        }
     }
     pub fn failed(sid: Option<Id>, reason: FailReason) -> Self {
-        Self { raw: None, session_id: sid, reason: Some(reason) }
+        Self {
+            raw: None,
+            session_id: sid,
+            reason: Some(reason),
+        }
     }
     pub fn errored(&self) -> bool {
         self.reason.is_some()
@@ -352,7 +360,9 @@ where
         // Progress note (orchestrator rows / a held result). Rate-limited and
         // only on change, since the caller persists it.
         let note = if decision == GuardDecision::Hold {
-            Some(format!("findings written — {pending} sub-agents still running"))
+            Some(format!(
+                "findings written — {pending} sub-agents still running"
+            ))
         } else if !guard.lens_files.is_empty() {
             let done: Vec<String> = guard
                 .lens_files
@@ -392,7 +402,10 @@ where
                 };
                 // Fail fast once truly silent for stuck_idle so recovery can retry.
                 if stuck_fires(quiet_for, stuck_idle, out_exists) {
-                    warn!("agent_run: session ({provider}) stuck — no output for {}s", stuck_idle.as_secs());
+                    warn!(
+                        "agent_run: session ({provider}) stuck — no output for {}s",
+                        stuck_idle.as_secs()
+                    );
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Stuck);
                 }
                 if idle >= waiting_idle && !flagged_waiting {
@@ -419,7 +432,10 @@ where
                 .map(|h| h.last_output_at().elapsed())
                 .unwrap_or(Duration::MAX);
             if deadline_fires(idle, waiting_idle) {
-                warn!("agent_run: session ({provider}) timed out (idle {}s past grace)", idle.as_secs());
+                warn!(
+                    "agent_run: session ({provider}) timed out (idle {}s past grace)",
+                    idle.as_secs()
+                );
                 return RunOutcome::failed(Some(sid.clone()), FailReason::Timeout);
             }
             if !flagged_over_budget {
@@ -456,7 +472,15 @@ where
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = RunOutcome>,
 {
-    run_with_recovery_until(manager, max_attempts, backoff, cancel, || async { false }, attempt).await
+    run_with_recovery_until(
+        manager,
+        max_attempts,
+        backoff,
+        cancel,
+        || async { false },
+        attempt,
+    )
+    .await
 }
 
 /// [`run_with_recovery`] with a `give_up` predicate consulted before every
@@ -510,7 +534,12 @@ where
                 last.reason = Some(FailReason::Stopped);
                 return last;
             }
-            warn!("agent_run: retry attempt {}/{} (prev: {})", i + 1, max_attempts, last.reason.map(|r| r.as_str()).unwrap_or("?"));
+            warn!(
+                "agent_run: retry attempt {}/{} (prev: {})",
+                i + 1,
+                max_attempts,
+                last.reason.map(|r| r.as_str()).unwrap_or("?")
+            );
         }
 
         let res = attempt(i).await;

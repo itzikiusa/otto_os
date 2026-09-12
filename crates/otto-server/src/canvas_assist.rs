@@ -101,7 +101,11 @@ pub async fn assist_scene(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("canvas scene {id}"))))?;
     crate::auth::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor).await?;
-    let ws = ctx.workspaces.get(&scene.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&scene.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Resolve the scene's current source + format from its opaque doc.
     let doc: Value = serde_json::from_str(&scene.doc_json).unwrap_or(Value::Null);
@@ -112,8 +116,14 @@ pub async fn assist_scene(
     // a resumed session always finds the same file). Scene ids are daemon-minted,
     // but the id arrived as a route param — confine the join under the canvas
     // root so a hostile id can't steer the fs ops (rust/path-injection).
-    let dir = otto_core::paths::confine_join(&ctx.data_dir.join("canvas"), &scene.id)
-        .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe canvas scene id {}", scene.id))))?;
+    let dir = otto_core::paths::confine_join(&ctx.data_dir.join("canvas"), &scene.id).ok_or_else(
+        || {
+            ApiError(Error::Invalid(format!(
+                "unsafe canvas scene id {}",
+                scene.id
+            )))
+        },
+    )?;
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return Err(ApiError(Error::Internal(format!(
             "canvas scratch dir: {e}"
@@ -239,13 +249,18 @@ pub async fn assist_preview(
     CurrentUser(user): CurrentUser,
     Json(req): Json<AssistReq>,
 ) -> ApiResult<Json<AssistResult>> {
-    let ws_id = req
-        .workspace_id
-        .clone()
-        .ok_or_else(|| ApiError(Error::Invalid("workspace_id is required for preview".into())))?;
+    let ws_id = req.workspace_id.clone().ok_or_else(|| {
+        ApiError(Error::Invalid(
+            "workspace_id is required for preview".into(),
+        ))
+    })?;
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id.clone()), WorkspaceRole::Editor)
         .await?;
-    let ws = ctx.workspaces.get(&Id::from(ws_id)).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&Id::from(ws_id))
+        .await
+        .map_err(ApiError)?;
 
     let prompt = build_assist_prompt(&req.prompt, "mermaid", "canvas.mermaid", "flowchart TD\n");
     let meta = serde_json::json!({ "source": "canvas_assist_preview" });
@@ -350,7 +365,9 @@ async fn resolve_source(
     format: &str,
     parsed: &AssistResult,
 ) -> String {
-    let after = tokio::fs::read_to_string(file_path).await.unwrap_or_default();
+    let after = tokio::fs::read_to_string(file_path)
+        .await
+        .unwrap_or_default();
     if !after.trim().is_empty() && after.trim() != current.trim() {
         return after;
     }
@@ -606,7 +623,12 @@ mod tests {
 
     #[test]
     fn prompt_has_sentinel_and_file() {
-        let p = build_assist_prompt("a login flow", "mermaid", "canvas.mermaid", "flowchart TD\n");
+        let p = build_assist_prompt(
+            "a login flow",
+            "mermaid",
+            "canvas.mermaid",
+            "flowchart TD\n",
+        );
         assert!(p.contains("OTTO_TASK: canvas_assist"));
         assert!(p.contains("canvas.mermaid"));
         assert!(p.contains("MERMAID file"));
@@ -627,10 +649,16 @@ mod tests {
     #[test]
     fn base_and_format_defaults() {
         assert_eq!(doc_format(&Value::Null), "mermaid");
-        assert_eq!(doc_format(&serde_json::json!({"format":"excalidraw"})), "excalidraw");
+        assert_eq!(
+            doc_format(&serde_json::json!({"format":"excalidraw"})),
+            "excalidraw"
+        );
         assert_eq!(doc_format(&serde_json::json!({"format":"d2"})), "d2");
         // unknown format → default
-        assert_eq!(doc_format(&serde_json::json!({"format":"weird"})), "mermaid");
+        assert_eq!(
+            doc_format(&serde_json::json!({"format":"weird"})),
+            "mermaid"
+        );
         assert!(base_source("mermaid").contains("flowchart"));
         assert!(base_source("excalidraw").contains("elements"));
         assert!(base_source("d2").contains("direction"));
@@ -651,7 +679,10 @@ mod tests {
         let doc = serde_json::json!({"type":"otto-canvas","format":"mermaid","source":"flowchart LR\n  A-->B"});
         assert_eq!(current_source(&doc, "mermaid"), "flowchart LR\n  A-->B");
         // empty / missing → base
-        assert_eq!(current_source(&serde_json::json!({"source":"  "}), "mermaid"), base_source("mermaid"));
+        assert_eq!(
+            current_source(&serde_json::json!({"source":"  "}), "mermaid"),
+            base_source("mermaid")
+        );
     }
 
     #[test]
@@ -662,7 +693,11 @@ mod tests {
         assert_eq!(m.format, "mermaid");
         assert_eq!(m.note, "done");
 
-        let x = result_for("excalidraw", "{\"elements\":[{\"type\":\"rectangle\"}]}", "ok".into());
+        let x = result_for(
+            "excalidraw",
+            "{\"elements\":[{\"type\":\"rectangle\"}]}",
+            "ok".into(),
+        );
         assert!(x.excalidraw.is_some());
         assert!(x.mermaid.is_none());
         assert_eq!(x.format, "excalidraw");
@@ -718,7 +753,9 @@ mod tests {
         let path = dir.join("canvas.mermaid");
 
         // Agent edited the file → use the file.
-        tokio::fs::write(&path, "flowchart TD\n  A-->B\n  B-->C").await.unwrap();
+        tokio::fs::write(&path, "flowchart TD\n  A-->B\n  B-->C")
+            .await
+            .unwrap();
         let parsed = AssistResult::default();
         let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed).await;
         assert!(got.contains("B-->C"));
@@ -732,11 +769,16 @@ mod tests {
         let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed).await;
         assert!(got.contains("X-->Y"));
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(on_disk.contains("X-->Y"), "reply source written back to file");
+        assert!(
+            on_disk.contains("X-->Y"),
+            "reply source written back to file"
+        );
 
         // Same reply-fallback path for a D2 scene.
         let d2_path = dir.join("canvas.d2");
-        tokio::fs::write(&d2_path, "direction: right\n").await.unwrap();
+        tokio::fs::write(&d2_path, "direction: right\n")
+            .await
+            .unwrap();
         let parsed = AssistResult {
             d2: Some("direction: right\na -> b: hi".into()),
             ..Default::default()
@@ -744,7 +786,10 @@ mod tests {
         let got = resolve_source(&d2_path, "direction: right\n", "d2", &parsed).await;
         assert!(got.contains("a -> b: hi"));
         let on_disk = tokio::fs::read_to_string(&d2_path).await.unwrap();
-        assert!(on_disk.contains("a -> b: hi"), "reply source written back to file");
+        assert!(
+            on_disk.contains("a -> b: hi"),
+            "reply source written back to file"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

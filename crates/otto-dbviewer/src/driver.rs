@@ -7,7 +7,7 @@ use otto_core::Result;
 
 use crate::export::{ExportCounts, ExportFormat};
 use crate::types::{
-    Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine, NodePath,
+    CancelToken, Capabilities, CompletionContext, CompletionResponse, Engine, NodePath,
     ObjectDetail, ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult,
     ResolvedConfig, SchemaNode, TestResult,
 };
@@ -33,8 +33,13 @@ pub trait Driver: Send + Sync {
 
     /// Inspect the actual native credential ceiling. Unsupported engines fail
     /// closed for governed arbitrary scripts; no caller-supplied assertion is used.
-    async fn native_grants(&self, _cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
-        Err(crate::native_access::setup_error("native privilege verification is unsupported for this engine"))
+    async fn native_grants(
+        &self,
+        _cfg: &ResolvedConfig,
+    ) -> Result<Vec<crate::native_access::NativeGrant>> {
+        Err(crate::native_access::setup_error(
+            "native privilege verification is unsupported for this engine",
+        ))
     }
 
     /// Top level of the object tree (databases / keyspaces / etc.).
@@ -264,7 +269,7 @@ mod tests {
 
     use super::*;
     use crate::types::{
-        Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine, NodePath,
+        CancelToken, Capabilities, CompletionContext, CompletionResponse, Engine, NodePath,
         ObjectDetail, QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaNode,
         TestResult, TlsConfig,
     };
@@ -464,10 +469,18 @@ mod tests {
         async fn run(&self, _: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
             let n = self.rows.min(req.max_rows.unwrap_or(self.rows));
             let rows: Vec<Vec<serde_json::Value>> = (0..n)
-                .map(|i| vec![serde_json::json!(i as i64), serde_json::json!(format!("r{i}"))])
+                .map(|i| {
+                    vec![
+                        serde_json::json!(i as i64),
+                        serde_json::json!(format!("r{i}")),
+                    ]
+                })
                 .collect();
             Ok(QueryResult {
-                columns: vec![crate::types::Column::new("id"), crate::types::Column::new("name")],
+                columns: vec![
+                    crate::types::Column::new("id"),
+                    crate::types::Column::new("name"),
+                ],
                 rows,
                 ..QueryResult::empty()
             })
@@ -492,7 +505,14 @@ mod tests {
         };
         let sink: Box<dyn std::io::Write + Send> = Box::new(std::io::sink());
         let err = d
-            .export_to_writer(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, sink)
+            .export_to_writer(
+                &cfg(),
+                "GET *",
+                None,
+                ExportFormat::CsvWithNames,
+                None,
+                sink,
+            )
             .await
             .expect_err("over-cap export must be refused");
         assert!(
@@ -526,7 +546,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("export.csv");
         let counts = d
-            .export_to_path(&cfg(), "GET *", None, ExportFormat::CsvWithNames, None, &dest)
+            .export_to_path(
+                &cfg(),
+                "GET *",
+                None,
+                ExportFormat::CsvWithNames,
+                None,
+                &dest,
+            )
             .await
             .expect("export_to_path ok");
         assert_eq!(counts.rows, 3);

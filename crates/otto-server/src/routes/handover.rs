@@ -66,7 +66,9 @@ pub async fn handover_session(
         HandoverTarget::NewAgent { provider } => {
             let provider = provider.trim();
             if provider.is_empty() {
-                return Err(ApiError(Error::Invalid("provider must not be empty".into())));
+                return Err(ApiError(Error::Invalid(
+                    "provider must not be empty".into(),
+                )));
             }
             let workspace = ctx
                 .workspaces
@@ -275,7 +277,12 @@ async fn generate_brief(
     let model = if fast { Some("haiku") } else { None };
     match ctx
         .orchestrator
-        .run_agent(&summary_prompt(&context, focus), &source.cwd, model, SUMMARY_TIMEOUT)
+        .run_agent(
+            &summary_prompt(&context, focus),
+            &source.cwd,
+            model,
+            SUMMARY_TIMEOUT,
+        )
         .await
     {
         Ok(text) if !text.trim().is_empty() => (text.trim().to_string(), false, true),
@@ -390,7 +397,9 @@ fn transcript_digest(jsonl: &str, cap: usize) -> String {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue; // metadata / partially-written lines
         };
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         if role != "user" && role != "assistant" {
             continue;
@@ -427,7 +436,11 @@ fn transcript_digest(jsonl: &str, cap: usize) -> String {
 
         let text = text.trim();
         if !text.is_empty() {
-            out.push_str(if role == "user" { "USER: " } else { "ASSISTANT: " });
+            out.push_str(if role == "user" {
+                "USER: "
+            } else {
+                "ASSISTANT: "
+            });
             out.push_str(text);
             out.push('\n');
         }
@@ -478,7 +491,10 @@ async fn git_digest(ctx: &ServerCtx, workspace_id: &Id, cwd: &str) -> Option<Str
 
     let mut out = format!("Branch: {}", status.branch);
     if status.ahead > 0 || status.behind > 0 {
-        out.push_str(&format!(" (ahead {}, behind {})", status.ahead, status.behind));
+        out.push_str(&format!(
+            " (ahead {}, behind {})",
+            status.ahead, status.behind
+        ));
     }
     out.push('\n');
 

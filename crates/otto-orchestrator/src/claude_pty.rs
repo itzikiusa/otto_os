@@ -115,7 +115,8 @@ impl ClaudePty {
                     tracing::warn!("claude turn attempt {attempt}/{MAX_ATTEMPTS} failed: {e}");
                     // A claude API error (wrong model, auth, rate-limit) is terminal
                     // — retrying just re-hits the same error. Surface it now.
-                    let is_api_error = matches!(&e, Error::Upstream(m) if m.starts_with("agent error:"));
+                    let is_api_error =
+                        matches!(&e, Error::Upstream(m) if m.starts_with("agent error:"));
                     last_err = Some(e);
                     if is_api_error {
                         break;
@@ -126,8 +127,7 @@ impl ClaudePty {
                 }
             }
         }
-        Err(last_err
-            .unwrap_or_else(|| Error::Upstream("claude turn failed with no detail".into())))
+        Err(last_err.unwrap_or_else(|| Error::Upstream("claude turn failed with no detail".into())))
     }
 }
 
@@ -326,7 +326,9 @@ pub fn completed_turn_count(jsonl: &str) -> usize {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         // Legacy in-file sub-agent lines — see `completed_turn_text`.
         if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
             continue;
@@ -368,7 +370,9 @@ pub fn last_user_text(jsonl: &str) -> Option<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
         }
@@ -415,7 +419,9 @@ pub fn transcript_api_error(jsonl: &str) -> Option<String> {
         if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) != Some(true) {
             continue;
         }
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
             continue;
         }
@@ -518,11 +524,18 @@ mod tests {
         let a = r#"{"message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#;
         assert_eq!(last_user_text(a).as_deref(), Some("hello"));
         // a later tool_result user turn carries no text → the typed prompt still wins
-        let tool = r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"42"}]}}"#;
-        assert_eq!(last_user_text(&format!("{s}\n{tool}")).as_deref(), Some("do the thing"));
+        let tool =
+            r#"{"message":{"role":"user","content":[{"type":"tool_result","content":"42"}]}}"#;
+        assert_eq!(
+            last_user_text(&format!("{s}\n{tool}")).as_deref(),
+            Some("do the thing")
+        );
         // the LAST typed prompt wins across turns
         let s2 = r#"{"message":{"role":"user","content":"second prompt"}}"#;
-        assert_eq!(last_user_text(&format!("{s}\n{s2}")).as_deref(), Some("second prompt"));
+        assert_eq!(
+            last_user_text(&format!("{s}\n{s2}")).as_deref(),
+            Some("second prompt")
+        );
         // assistant turns and empty transcripts contribute nothing
         let asst = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(last_user_text(asst), None);

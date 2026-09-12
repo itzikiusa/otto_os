@@ -41,7 +41,12 @@ fn session_alive(s: &Session) -> bool {
 /// the `meta` stamped at creation (`source: "channel"`, `channel`, `chat`,
 /// `thread`). `thread` compares as an optional string: a top-level chat
 /// (no thread) only matches a session created without one.
-fn session_matches_conversation(s: &Session, channel: &str, chat: &str, thread: Option<&str>) -> bool {
+fn session_matches_conversation(
+    s: &Session,
+    channel: &str,
+    chat: &str,
+    thread: Option<&str>,
+) -> bool {
     let m = &s.meta;
     m.get("source").and_then(|v| v.as_str()) == Some("channel")
         && m.get("channel").and_then(|v| v.as_str()) == Some(channel)
@@ -486,7 +491,12 @@ impl Bridge {
                         .filter(|s| {
                             s.kind == SessionKind::Agent
                                 && session_alive(s)
-                                && session_matches_conversation(s, channel, &msg.chat, msg.thread.as_deref())
+                                && session_matches_conversation(
+                                    s,
+                                    channel,
+                                    &msg.chat,
+                                    msg.thread.as_deref(),
+                                )
                         })
                         .max_by_key(|s| s.created_at)
                     {
@@ -540,18 +550,19 @@ impl Bridge {
                 // workspace's default → the global default → "claude". Guard
                 // against a stale/removed provider so the session still spawns
                 // rather than erroring out.
-                let global_default = self
-                    .settings
-                    .get("default_provider")
-                    .await
-                    .ok()
-                    .flatten();
+                let global_default = self.settings.get("default_provider").await.ok().flatten();
                 let mut provider = otto_core::provider::resolve_provider(&[
                     &integ.preferred_cli,
                     otto_core::provider::workspace_default(&ws.settings),
                     otto_core::provider::global_default(global_default.as_ref()),
                 ]);
-                if !self.manager.providers().names().iter().any(|n| n == &provider) {
+                if !self
+                    .manager
+                    .providers()
+                    .names()
+                    .iter()
+                    .any(|n| n == &provider)
+                {
                     warn!(
                         channel = %adapter.channel().as_str(),
                         workspace = %msg.workspace_id,
@@ -671,7 +682,9 @@ impl Bridge {
         // started (retrying Enter once if not).
         // Record the human's message on the session's activity trail (the
         // "by user" side), before the trusted-context wrapping.
-        self.manager.record_user_message(&session_id, &msg.text).await;
+        self.manager
+            .record_user_message(&session_id, &msg.text)
+            .await;
 
         let input = agent_paste_input(&text);
         tokio::spawn(submit_to_agent(
@@ -824,10 +837,16 @@ impl Bridge {
                     None => "No session is mapped to this conversation.".to_string(),
                     Some(sid) => match sessions.iter().find(|s| s.id == sid) {
                         Some(s) => {
-                            let title = if s.title.is_empty() { s.id.as_str() } else { s.title.as_str() };
+                            let title = if s.title.is_empty() {
+                                s.id.as_str()
+                            } else {
+                                s.title.as_str()
+                            };
                             format!("This conversation is mapped to: {} — {:?}", title, s.status)
                         }
-                        None => format!("Mapped to session {} (not found in listing)", sid.as_str()),
+                        None => {
+                            format!("Mapped to session {} (not found in listing)", sid.as_str())
+                        }
                     },
                 };
                 let _ = adapter.send(&msg.chat, msg.thread.as_deref(), &reply).await;
@@ -865,16 +884,45 @@ mod tests {
     fn conversation_match_uses_the_meta_stamped_at_creation() {
         let meta = serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK", "thread": "1789.51"});
         let s = session(meta.clone(), SessionStatus::Idle, false);
-        assert!(session_matches_conversation(&s, "slack", "D0BK", Some("1789.51")));
+        assert!(session_matches_conversation(
+            &s,
+            "slack",
+            "D0BK",
+            Some("1789.51")
+        ));
         // Any differing coordinate is a different conversation.
-        assert!(!session_matches_conversation(&s, "telegram", "D0BK", Some("1789.51")));
-        assert!(!session_matches_conversation(&s, "slack", "C0AA", Some("1789.51")));
-        assert!(!session_matches_conversation(&s, "slack", "D0BK", Some("other")));
+        assert!(!session_matches_conversation(
+            &s,
+            "telegram",
+            "D0BK",
+            Some("1789.51")
+        ));
+        assert!(!session_matches_conversation(
+            &s,
+            "slack",
+            "C0AA",
+            Some("1789.51")
+        ));
+        assert!(!session_matches_conversation(
+            &s,
+            "slack",
+            "D0BK",
+            Some("other")
+        ));
         assert!(!session_matches_conversation(&s, "slack", "D0BK", None));
         // A top-level chat session (no thread) only matches a thread-less message.
-        let top = session(serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK", "thread": null}), SessionStatus::Idle, false);
+        let top = session(
+            serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK", "thread": null}),
+            SessionStatus::Idle,
+            false,
+        );
         assert!(session_matches_conversation(&top, "slack", "D0BK", None));
-        assert!(!session_matches_conversation(&top, "slack", "D0BK", Some("1789.51")));
+        assert!(!session_matches_conversation(
+            &top,
+            "slack",
+            "D0BK",
+            Some("1789.51")
+        ));
         // A user-started session is never a channel conversation.
         let plain = session(serde_json::json!({}), SessionStatus::Idle, false);
         assert!(!session_matches_conversation(&plain, "slack", "D0BK", None));
@@ -883,10 +931,26 @@ mod tests {
     #[test]
     fn alive_means_not_exited_and_not_archived() {
         let meta = serde_json::json!({});
-        assert!(session_alive(&session(meta.clone(), SessionStatus::Idle, false)));
-        assert!(session_alive(&session(meta.clone(), SessionStatus::Working, false)));
-        assert!(session_alive(&session(meta.clone(), SessionStatus::Reconnectable, false)));
-        assert!(!session_alive(&session(meta.clone(), SessionStatus::Exited, false)));
+        assert!(session_alive(&session(
+            meta.clone(),
+            SessionStatus::Idle,
+            false
+        )));
+        assert!(session_alive(&session(
+            meta.clone(),
+            SessionStatus::Working,
+            false
+        )));
+        assert!(session_alive(&session(
+            meta.clone(),
+            SessionStatus::Reconnectable,
+            false
+        )));
+        assert!(!session_alive(&session(
+            meta.clone(),
+            SessionStatus::Exited,
+            false
+        )));
         assert!(!session_alive(&session(meta, SessionStatus::Idle, true)));
     }
 
@@ -906,7 +970,10 @@ mod tests {
             "Investigate ticket XYZ"
         );
         // Leading blank lines / whitespace are skipped + trimmed.
-        assert_eq!(session_title("\n   \n  hello there  ", "Slack"), "hello there");
+        assert_eq!(
+            session_title("\n   \n  hello there  ", "Slack"),
+            "hello there"
+        );
         // Empty / whitespace-only falls back to "<Channel> chat".
         assert_eq!(session_title("   \n  ", "Telegram"), "Telegram chat");
         assert_eq!(session_title("", "Slack"), "Slack chat");

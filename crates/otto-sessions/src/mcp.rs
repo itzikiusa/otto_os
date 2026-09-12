@@ -234,9 +234,7 @@ pub fn reconcile_managed_servers(
                 .unwrap_or_default();
             existing
                 .into_iter()
-                .filter(|n| {
-                    n == SERVER_KEY || n == OTTO_TOOLS_KEY || desired_names.contains(n)
-                })
+                .filter(|n| n == SERVER_KEY || n == OTTO_TOOLS_KEY || desired_names.contains(n))
                 .collect()
         }
     };
@@ -357,7 +355,10 @@ pub fn codex_user_server_args(servers: &[UserMcpServer]) -> Vec<String> {
 /// args = ["mcp-tools"]
 /// enabled = true
 /// ```
-pub fn enable_otto_tools_grok(workspace_root: &str, server: &OttoToolsServer) -> Result<(), String> {
+pub fn enable_otto_tools_grok(
+    workspace_root: &str,
+    server: &OttoToolsServer,
+) -> Result<(), String> {
     use toml_edit::{value, Array, Item, Table};
 
     let lock = cwd_lock(workspace_root);
@@ -583,7 +584,10 @@ mod tests {
         let otto = servers.get("otto").and_then(|v| v.as_object()).unwrap();
         assert_eq!(otto["command"], json!("/usr/local/bin/ottod"));
         assert_eq!(otto["args"], json!(["mcp-tools"]));
-        assert!(otto.get("env").is_none(), "shared config leaked session env: {otto:?}");
+        assert!(
+            otto.get("env").is_none(),
+            "shared config leaked session env: {otto:?}"
+        );
         assert!(servers.contains_key("otto-browser"));
         assert!(servers.contains_key("myserver"));
         assert_eq!(marker(root), names);
@@ -614,7 +618,10 @@ mod tests {
         )
         .unwrap();
         let servers = read_servers(root);
-        assert!(!servers.contains_key("jira"), "disabled server survived: {servers:?}");
+        assert!(
+            !servers.contains_key("jira"),
+            "disabled server survived: {servers:?}"
+        );
         assert!(servers.contains_key("linear"));
         assert!(servers.contains_key("otto"));
         assert_eq!(marker(root), vec!["otto", "linear"]);
@@ -690,8 +697,15 @@ mod tests {
         let servers = read_servers(root);
         assert!(!servers.contains_key("otto"));
         assert!(!servers.contains_key("otto-browser"));
-        assert_eq!(servers["jira"]["args"], json!(["x.js"]), "adopted entry refreshed");
-        assert!(servers.contains_key("mine"), "hand-added entry adopted by mistake");
+        assert_eq!(
+            servers["jira"]["args"],
+            json!(["x.js"]),
+            "adopted entry refreshed"
+        );
+        assert!(
+            servers.contains_key("mine"),
+            "hand-added entry adopted by mistake"
+        );
         assert_eq!(marker(root), vec!["jira"]);
 
         // And a later disable of jira now removes it.
@@ -793,7 +807,10 @@ mod tests {
         let otto = &doc["mcp_servers"]["otto"];
         assert_eq!(otto["command"].as_str(), Some("/usr/local/bin/ottod"));
         assert_eq!(otto["enabled"].as_bool(), Some(true));
-        assert!(otto.get("env").is_none(), "shared Grok config leaked session env: {otto:?}");
+        assert!(
+            otto.get("env").is_none(),
+            "shared Grok config leaked session env: {otto:?}"
+        );
     }
 
     /// grok project config: created from scratch when absent.
@@ -894,29 +911,67 @@ mod tests {
 /// A preview is read-only. Untracked entries require an explicit manual cleanup
 /// because Otto cannot claim ownership of somebody else's launcher config.
 pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Result<(), String> {
-    let lock=cwd_lock(workspace_root);
-    let _guard=lock.lock().unwrap_or_else(|e| e.into_inner());
-    let path=mcp_path(workspace_root);
+    let lock = cwd_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let path = mcp_path(workspace_root);
     if path.exists() {
-        let mut doc=read_doc(&path)?;
-        if doc.get("mcpServers").and_then(Value::as_object).is_some_and(|s| s.contains_key(name)) {
-            let tracked=doc.get(MANAGED_KEY).and_then(Value::as_array).is_some_and(|names| names.iter().any(|n| n.as_str()==Some(name)));
-            if !tracked {return Err(format!("remove the untracked direct MCP entry '{name}' from {} before enforcement",path.display()));}
+        let mut doc = read_doc(&path)?;
+        if doc
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .is_some_and(|s| s.contains_key(name))
+        {
+            let tracked = doc
+                .get(MANAGED_KEY)
+                .and_then(Value::as_array)
+                .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
+            if !tracked {
+                return Err(format!(
+                    "remove the untracked direct MCP entry '{name}' from {} before enforcement",
+                    path.display()
+                ));
+            }
             if apply {
-                doc.get_mut("mcpServers").and_then(Value::as_object_mut).unwrap().remove(name);
-                if let Some(names)=doc.get_mut(MANAGED_KEY).and_then(Value::as_array_mut) {names.retain(|n|n.as_str()!=Some(name));}
-                write_doc(&path,&doc)?;
+                doc.get_mut("mcpServers")
+                    .and_then(Value::as_object_mut)
+                    .unwrap()
+                    .remove(name);
+                if let Some(names) = doc.get_mut(MANAGED_KEY).and_then(Value::as_array_mut) {
+                    names.retain(|n| n.as_str() != Some(name));
+                }
+                write_doc(&path, &doc)?;
             }
         }
     }
-    let (dir,path,mut doc)=read_grok_doc(workspace_root)?;
-    if path.exists() && doc.get("mcp_servers").and_then(toml_edit::Item::as_table).is_some_and(|s|s.contains_key(name)) {
-        let tracked=doc.get(MANAGED_KEY_TOML).and_then(toml_edit::Item::as_array).is_some_and(|names|names.iter().any(|n|n.as_str()==Some(name)));
-        if !tracked {return Err(format!("remove the untracked direct MCP entry '{name}' from {} before enforcement",path.display()));}
+    let (dir, path, mut doc) = read_grok_doc(workspace_root)?;
+    if path.exists()
+        && doc
+            .get("mcp_servers")
+            .and_then(toml_edit::Item::as_table)
+            .is_some_and(|s| s.contains_key(name))
+    {
+        let tracked = doc
+            .get(MANAGED_KEY_TOML)
+            .and_then(toml_edit::Item::as_array)
+            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
+        if !tracked {
+            return Err(format!(
+                "remove the untracked direct MCP entry '{name}' from {} before enforcement",
+                path.display()
+            ));
+        }
         if apply {
-            doc.get_mut("mcp_servers").and_then(toml_edit::Item::as_table_mut).unwrap().remove(name);
-            if let Some(names)=doc.get_mut(MANAGED_KEY_TOML).and_then(toml_edit::Item::as_array_mut) {names.retain(|n|n.as_str()!=Some(name));}
-            write_grok_doc(&dir,&path,&doc)?;
+            doc.get_mut("mcp_servers")
+                .and_then(toml_edit::Item::as_table_mut)
+                .unwrap()
+                .remove(name);
+            if let Some(names) = doc
+                .get_mut(MANAGED_KEY_TOML)
+                .and_then(toml_edit::Item::as_array_mut)
+            {
+                names.retain(|n| n.as_str() != Some(name));
+            }
+            write_grok_doc(&dir, &path, &doc)?;
         }
     }
     Ok(())
@@ -927,13 +982,33 @@ mod retirement_tests {
     use super::*;
     #[test]
     fn retiring_direct_credentials_preserves_other_servers_and_preview_is_readonly() {
-        let dir=tempfile::tempdir().unwrap(); let root=dir.path().to_str().unwrap();
-        let config=ManagedMcpConfig {user_servers:vec![UserMcpServer{name:"private".into(),command:"server".into(),args:vec![],env:Default::default()},UserMcpServer{name:"keep".into(),command:"other".into(),args:vec![],env:Default::default()}],..Default::default()};
-        reconcile_managed_servers(root,&config).unwrap();
-        retire_user_server(root,"private",false).unwrap();
-        assert!(read_doc(&mcp_path(root)).unwrap()["mcpServers"].get("private").is_some());
-        retire_user_server(root,"private",true).unwrap();
-        let doc=read_doc(&mcp_path(root)).unwrap();
-        assert!(doc["mcpServers"].get("private").is_none());assert!(doc["mcpServers"].get("keep").is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let config = ManagedMcpConfig {
+            user_servers: vec![
+                UserMcpServer {
+                    name: "private".into(),
+                    command: "server".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                UserMcpServer {
+                    name: "keep".into(),
+                    command: "other".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        reconcile_managed_servers(root, &config).unwrap();
+        retire_user_server(root, "private", false).unwrap();
+        assert!(read_doc(&mcp_path(root)).unwrap()["mcpServers"]
+            .get("private")
+            .is_some());
+        retire_user_server(root, "private", true).unwrap();
+        let doc = read_doc(&mcp_path(root)).unwrap();
+        assert!(doc["mcpServers"].get("private").is_none());
+        assert!(doc["mcpServers"].get("keep").is_some());
     }
 }

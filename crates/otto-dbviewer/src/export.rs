@@ -79,7 +79,10 @@ impl ExportFormat {
 
     /// True when this format emits a leading header row of column names.
     fn has_header(self) -> bool {
-        matches!(self, ExportFormat::CsvWithNames | ExportFormat::TsvWithNames)
+        matches!(
+            self,
+            ExportFormat::CsvWithNames | ExportFormat::TsvWithNames
+        )
     }
 
     /// The delimited-text field separator, when this is a delimited format.
@@ -142,7 +145,8 @@ impl<W: Write> ExportSink<W> {
         self.columns = columns.iter().map(|c| c.name.clone()).collect();
         if self.format.has_header() {
             if let Some(delim) = self.format.delimiter() {
-                let line = join_delimited(self.columns.iter().map(String::as_str), delim, self.format);
+                let line =
+                    join_delimited(self.columns.iter().map(String::as_str), delim, self.format);
                 self.write_line(&line)?;
             }
         }
@@ -181,7 +185,9 @@ impl<W: Write> ExportSink<W> {
                     bytes.push(b',');
                 }
                 let obj = row_object(&self.columns, row);
-                bytes.extend_from_slice(&serde_json::to_vec(&Value::Object(obj)).unwrap_or_default());
+                bytes.extend_from_slice(
+                    &serde_json::to_vec(&Value::Object(obj)).unwrap_or_default(),
+                );
                 self.write_bytes(&bytes)?;
                 self.json_any = true;
             }
@@ -273,9 +279,7 @@ fn escape_field(s: &str, format: ExportFormat) -> String {
                 s.to_string()
             }
         }
-        ExportFormat::Tsv | ExportFormat::TsvWithNames => {
-            s.replace(['\t', '\n', '\r'], " ")
-        }
+        ExportFormat::Tsv | ExportFormat::TsvWithNames => s.replace(['\t', '\n', '\r'], " "),
         // Not delimited — never called for these.
         ExportFormat::Json | ExportFormat::Ndjson => s.to_string(),
     }
@@ -342,7 +346,11 @@ mod tests {
     }
 
     /// Run a small fixed result through the sink and return the file text.
-    fn render(format: ExportFormat, columns: &[Column], rows: &[Vec<Value>]) -> (String, ExportCounts) {
+    fn render(
+        format: ExportFormat,
+        columns: &[Column],
+        rows: &[Vec<Value>],
+    ) -> (String, ExportCounts) {
         let mut buf: Vec<u8> = Vec::new();
         let counts = {
             let mut sink = ExportSink::new(&mut buf, format);
@@ -379,7 +387,10 @@ mod tests {
             ExportFormat::TsvWithNames.clickhouse_format(),
             Some("TabSeparatedWithNames")
         );
-        assert_eq!(ExportFormat::Ndjson.clickhouse_format(), Some("JSONEachRow"));
+        assert_eq!(
+            ExportFormat::Ndjson.clickhouse_format(),
+            Some("JSONEachRow")
+        );
         // The JSON *array* shape has no single-pass CH FORMAT.
         assert_eq!(ExportFormat::Json.clickhouse_format(), None);
     }
@@ -468,7 +479,10 @@ mod tests {
             ],
         );
         let parsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed, json!([{ "id": 1, "tags": ["a", "b"] }, { "id": 2, "tags": null }]));
+        assert_eq!(
+            parsed,
+            json!([{ "id": 1, "tags": ["a", "b"] }, { "id": 2, "tags": null }])
+        );
         assert_eq!(counts.rows, 2);
     }
 
@@ -517,7 +531,11 @@ mod tests {
         let (out, _) = render(
             ExportFormat::Csv,
             &cols(&["a", "b", "c"]),
-            &[vec![json!("=cmd|' /C calc'!A0"), json!(-5), json!("@SUM(1)")]],
+            &[vec![
+                json!("=cmd|' /C calc'!A0"),
+                json!(-5),
+                json!("@SUM(1)"),
+            ]],
         );
         assert_eq!(out, "'=cmd|' /C calc'!A0,-5,'@SUM(1)\n");
         // NDJSON keeps the raw value (JSON is not a spreadsheet surface).

@@ -49,7 +49,10 @@ pub fn provider_skill_dirs() -> Vec<PathBuf> {
 
 /// `$HOME` as a path, or `None` when unset/empty (mirrors `materialize`).
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(PathBuf::from)
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Codex's home: `$CODEX_HOME` if set, else `~/.codex` (mirrors

@@ -30,7 +30,7 @@ use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
+    self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit,
     ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, ResolvedConfig,
     SchemaNode, TestResult,
@@ -88,7 +88,10 @@ impl Driver for PostgresDriver {
                 });
             }
         };
-        let version: String = match sqlx::query_scalar("SELECT version()").fetch_one(&pool).await {
+        let version: String = match sqlx::query_scalar("SELECT version()")
+            .fetch_one(&pool)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 return Ok(TestResult {
@@ -107,8 +110,11 @@ impl Driver for PostgresDriver {
         })
     }
 
-    async fn native_grants(&self, cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
-        use crate::native_access::{NativeGrant, setup_error};
+    async fn native_grants(
+        &self,
+        cfg: &ResolvedConfig,
+    ) -> Result<Vec<crate::native_access::NativeGrant>> {
+        use crate::native_access::{setup_error, NativeGrant};
         let pool = self.pool(cfg).await?;
         let elevated: bool = sqlx::query_scalar("SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
             .fetch_one(&pool).await.map_err(types::upstream)?;
@@ -136,17 +142,49 @@ impl Driver for PostgresDriver {
         for (child, create, usage) in schemas {
             // Caller SQL cannot address PUBLIC catalogs or metadata functions:
             // the shared AST gate directs those reads through filtered metadata.
-            if usage { grants.push(NativeGrant { child: child.clone(), operation: "db_browse" }); }
-            if create { grants.push(NativeGrant { child: child.clone(), operation: "db_schema" }); }
-            if !usage { continue; }
+            if usage {
+                grants.push(NativeGrant {
+                    child: child.clone(),
+                    operation: "db_browse",
+                });
+            }
+            if create {
+                grants.push(NativeGrant {
+                    child: child.clone(),
+                    operation: "db_schema",
+                });
+            }
+            if !usage {
+                continue;
+            }
             let rights: (bool, bool, bool) = sqlx::query_as("SELECT COALESCE(bool_or(has_table_privilege(c.oid,'SELECT') OR has_any_column_privilege(c.oid,'SELECT')),false), COALESCE(bool_or(has_table_privilege(c.oid,'INSERT,UPDATE,DELETE,TRUNCATE') OR has_any_column_privilege(c.oid,'INSERT,UPDATE')),false), COALESCE(bool_or(c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)),false) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind IN ('r','p','v','m','f')")
                 .bind(&child).fetch_one(&pool).await.map_err(types::upstream)?;
-            if rights.0 { grants.push(NativeGrant { child: child.clone(), operation: "db_query" }); }
-            if rights.1 { grants.push(NativeGrant { child: child.clone(), operation: "db_data" }); }
-            if rights.2 { grants.push(NativeGrant { child: child.clone(), operation: "db_schema" }); }
+            if rights.0 {
+                grants.push(NativeGrant {
+                    child: child.clone(),
+                    operation: "db_query",
+                });
+            }
+            if rights.1 {
+                grants.push(NativeGrant {
+                    child: child.clone(),
+                    operation: "db_data",
+                });
+            }
+            if rights.2 {
+                grants.push(NativeGrant {
+                    child: child.clone(),
+                    operation: "db_schema",
+                });
+            }
             let sequences: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(c.oid,'USAGE,UPDATE') ELSE false END)")
                 .bind(&child).fetch_one(&pool).await.map_err(types::upstream)?;
-            if sequences { grants.push(NativeGrant { child, operation: "db_data" }); }
+            if sequences {
+                grants.push(NativeGrant {
+                    child,
+                    operation: "db_data",
+                });
+            }
         }
         Ok(grants)
     }
@@ -215,11 +253,23 @@ impl Driver for PostgresDriver {
             if !req.wants(label) {
                 continue;
             }
-            let path = NodePath::parse(&format!("db:{schema}")).child(seg, &name).to_id();
+            let path = NodePath::parse(&format!("db:{schema}"))
+                .child(seg, &name)
+                .to_id();
             schemas.insert(schema.clone());
-            hits.push(ObjectHit { schema, name, kind, path });
+            hits.push(ObjectHit {
+                schema,
+                name,
+                kind,
+                path,
+            });
         }
-        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
+        Ok(ObjectSearchResult {
+            hits,
+            truncated,
+            scanned: schemas.len(),
+            supported: true,
+        })
     }
 
     async fn schema_children(
@@ -255,10 +305,18 @@ impl Driver for PostgresDriver {
         // db:<schema> → the object folders. Tables & Views always; Materialized
         // Views & Functions only when the schema actually has some (dimmed count).
         let mut folders = vec![
-            SchemaNode::new(parent.child("folder", "tables").to_id(), "Tables", NodeKind::Folder)
-                .expandable(),
-            SchemaNode::new(parent.child("folder", "views").to_id(), "Views", NodeKind::Folder)
-                .expandable(),
+            SchemaNode::new(
+                parent.child("folder", "tables").to_id(),
+                "Tables",
+                NodeKind::Folder,
+            )
+            .expandable(),
+            SchemaNode::new(
+                parent.child("folder", "views").to_id(),
+                "Views",
+                NodeKind::Folder,
+            )
+            .expandable(),
         ];
         if let Ok(pool) = self.pool(cfg).await {
             let matviews: i64 = sqlx::query_scalar(
@@ -374,10 +432,18 @@ impl Driver for PostgresDriver {
             })
             .collect();
 
-        let indexes = self.indexes_of(&pool, &schema, &name).await.unwrap_or_default();
-        let foreign_keys = self.foreign_keys_of(&pool, &schema, &name).await.unwrap_or_default();
+        let indexes = self
+            .indexes_of(&pool, &schema, &name)
+            .await
+            .unwrap_or_default();
+        let foreign_keys = self
+            .foreign_keys_of(&pool, &schema, &name)
+            .await
+            .unwrap_or_default();
         let ddl = if is_view {
-            self.view_ddl(&pool, &schema, &name, path.get("matview").is_some()).await.ok()
+            self.view_ddl(&pool, &schema, &name, path.get("matview").is_some())
+                .await
+                .ok()
         } else {
             self.table_ddl(&pool, &schema, &name, &columns).await.ok()
         };
@@ -444,8 +510,13 @@ impl Driver for PostgresDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        if cfg.params.get("__read_only_execution").and_then(Value::as_bool)==Some(true) {
-            return governed_read(&self.pool(cfg).await?,req,token).await;
+        if cfg
+            .params
+            .get("__read_only_execution")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return governed_read(&self.pool(cfg).await?, req, token).await;
         }
         let text = req.statement.trim();
         if text.is_empty() {
@@ -471,7 +542,10 @@ impl Driver for PostgresDriver {
                 ri.limited.then_some(max_rows as u64),
             )
         } else {
-            (run_write(&pool, statement, active_schema, token).await, None)
+            (
+                run_write(&pool, statement, active_schema, token).await,
+                None,
+            )
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -512,7 +586,10 @@ impl Driver for PostgresDriver {
         }
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
-        let mut conn = conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
+        let mut conn = conn
+            .begin_with("BEGIN READ ONLY")
+            .await
+            .map_err(types::upstream)?;
         if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
@@ -573,12 +650,17 @@ impl Driver for PostgresDriver {
             return Err(types::invalid("empty statement"));
         }
         if !is_read_statement(statement) {
-            return Err(types::invalid("export supports row-returning statements only"));
+            return Err(types::invalid(
+                "export supports row-returning statements only",
+            ));
         }
 
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
-        let mut conn = conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
+        let mut conn = conn
+            .begin_with("BEGIN READ ONLY")
+            .await
+            .map_err(types::upstream)?;
         if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
@@ -635,31 +717,39 @@ impl PostgresDriver {
     ) -> Result<Vec<SchemaNode>> {
         let pool = self.pool(cfg).await?;
         let rows: Vec<(String, String)> = match filter {
-            Some(f) if !f.is_empty() => sqlx::query_as(
-                "SELECT column_name, data_type FROM information_schema.columns \
+            Some(f) if !f.is_empty() => {
+                sqlx::query_as(
+                    "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = $1 AND table_name = $2 AND column_name ILIKE $3 \
                  ORDER BY ordinal_position",
-            )
-            .bind(schema)
-            .bind(table)
-            .bind(format!("%{f}%"))
-            .fetch_all(&pool)
-            .await,
-            _ => sqlx::query_as(
-                "SELECT column_name, data_type FROM information_schema.columns \
+                )
+                .bind(schema)
+                .bind(table)
+                .bind(format!("%{f}%"))
+                .fetch_all(&pool)
+                .await
+            }
+            _ => {
+                sqlx::query_as(
+                    "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position",
-            )
-            .bind(schema)
-            .bind(table)
-            .fetch_all(&pool)
-            .await,
+                )
+                .bind(schema)
+                .bind(table)
+                .fetch_all(&pool)
+                .await
+            }
         }
         .map_err(types::upstream)?;
         Ok(rows
             .into_iter()
             .map(|(name, ty)| {
-                SchemaNode::new(parent.child("column", &name).to_id(), name, NodeKind::Column)
-                    .with_detail(ty)
+                SchemaNode::new(
+                    parent.child("column", &name).to_id(),
+                    name,
+                    NodeKind::Column,
+                )
+                .with_detail(ty)
             })
             .collect())
     }
@@ -680,23 +770,27 @@ impl PostgresDriver {
         // Functions live in pg_proc; the leaves aren't expandable (no children).
         if folder == "functions" {
             let names: Vec<(String,)> = match &pat {
-                Some(p) => sqlx::query_as(
-                    "SELECT p.proname FROM pg_catalog.pg_proc p \
+                Some(p) => {
+                    sqlx::query_as(
+                        "SELECT p.proname FROM pg_catalog.pg_proc p \
                      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
                      WHERE n.nspname = $1 AND p.proname ILIKE $2 ORDER BY p.proname",
-                )
-                .bind(schema)
-                .bind(p)
-                .fetch_all(&pool)
-                .await,
-                None => sqlx::query_as(
-                    "SELECT p.proname FROM pg_catalog.pg_proc p \
+                    )
+                    .bind(schema)
+                    .bind(p)
+                    .fetch_all(&pool)
+                    .await
+                }
+                None => {
+                    sqlx::query_as(
+                        "SELECT p.proname FROM pg_catalog.pg_proc p \
                      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
                      WHERE n.nspname = $1 ORDER BY p.proname",
-                )
-                .bind(schema)
-                .fetch_all(&pool)
-                .await,
+                    )
+                    .bind(schema)
+                    .fetch_all(&pool)
+                    .await
+                }
             }
             .map_err(types::upstream)?;
             return Ok(names
@@ -730,15 +824,19 @@ impl PostgresDriver {
              WHERE n.nspname = $1 AND c.relkind IN ({in_list})"
         );
         let rows: Vec<(String,)> = match &pat {
-            Some(p) => sqlx::query_as(&format!("{base} AND c.relname ILIKE $2 ORDER BY c.relname"))
-                .bind(schema)
-                .bind(p)
-                .fetch_all(&pool)
-                .await,
-            None => sqlx::query_as(&format!("{base} ORDER BY c.relname"))
-                .bind(schema)
-                .fetch_all(&pool)
-                .await,
+            Some(p) => {
+                sqlx::query_as(&format!("{base} AND c.relname ILIKE $2 ORDER BY c.relname"))
+                    .bind(schema)
+                    .bind(p)
+                    .fetch_all(&pool)
+                    .await
+            }
+            None => {
+                sqlx::query_as(&format!("{base} ORDER BY c.relname"))
+                    .bind(schema)
+                    .fetch_all(&pool)
+                    .await
+            }
         }
         .map_err(types::upstream)?;
         Ok(rows
@@ -794,7 +892,10 @@ impl PostgresDriver {
                 entry.columns.push(col);
             }
         }
-        Ok(order.into_iter().filter_map(|n| by_name.remove(&n)).collect())
+        Ok(order
+            .into_iter()
+            .filter_map(|n| by_name.remove(&n))
+            .collect())
     }
 
     async fn foreign_keys_of(
@@ -841,7 +942,10 @@ impl PostgresDriver {
             entry.columns.push(r.col);
             entry.ref_columns.push(r.ref_col);
         }
-        Ok(order.into_iter().filter_map(|n| by_name.remove(&n)).collect())
+        Ok(order
+            .into_iter()
+            .filter_map(|n| by_name.remove(&n))
+            .collect())
     }
 
     /// Synthesize a `CREATE TABLE` from the catalog: columns + every constraint
@@ -1135,7 +1239,10 @@ impl PostgresDriver {
                 order.push(t.clone());
                 Vec::new()
             });
-            by_table.get_mut(&t).unwrap().push(FieldSnap::new(c, Some(ty), r));
+            by_table
+                .get_mut(&t)
+                .unwrap()
+                .push(FieldSnap::new(c, Some(ty), r));
         }
 
         let mut objects: Vec<ObjectSnap> = Vec::new();
@@ -1204,7 +1311,12 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
     // never match), and an explicit `tls.server_name` override has no sqlx
     // surface to honour — both keep chain-only verification (VerifyCa).
     let hostname_checkable = cfg.param_str("__tunnel_host").is_none()
-        && cfg.tls.server_name.as_deref().filter(|s| !s.is_empty()).is_none();
+        && cfg
+            .tls
+            .server_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_none();
     let ssl_mode = match cfg.tls.mode {
         types::TlsMode::Disabled => PgSslMode::Disable,
         types::TlsMode::Preferred => PgSslMode::Prefer,
@@ -1233,9 +1345,7 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
     }
 
     // Session timezone (default: leave the server's) applied on each new connection.
-    let tz = cfg
-        .param_str("timezone")
-        .filter(|s| !s.is_empty());
+    let tz = cfg.param_str("timezone").filter(|s| !s.is_empty());
     PgPoolOptions::new()
         .max_connections(POOL_MAX_CONNECTIONS)
         .idle_timeout(POOL_IDLE_TIMEOUT)
@@ -1269,9 +1379,17 @@ fn first_keyword(statement: &str) -> String {
     let mut s = statement.trim_start();
     loop {
         if let Some(rest) = s.strip_prefix("--") {
-            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once('\n')
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once("*/")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else {
             break;
         }
@@ -1323,11 +1441,15 @@ async fn run_read(
     // Per-statement wall-clock cap (reset to unlimited afterwards so the pooled
     // connection doesn't carry the timeout into its next use).
     if let Some(ms) = timeout_ms {
-        let _ = (&mut *conn).execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}"))).await;
+        let _ = (&mut *conn)
+            .execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}")))
+            .await;
     }
     let out = exec_read_conn(&mut conn, statement, max_rows).await;
     if timeout_ms.is_some() {
-        let _ = (&mut *conn).execute(sqlx::raw_sql("SET statement_timeout = 0")).await;
+        let _ = (&mut *conn)
+            .execute(sqlx::raw_sql("SET statement_timeout = 0"))
+            .await;
     }
     out
 }
@@ -1369,7 +1491,9 @@ async fn run_batch(
             .map_err(types::upstream)?;
     }
     if let Some(ms) = timeout_ms {
-        let _ = (&mut *conn).execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}"))).await;
+        let _ = (&mut *conn)
+            .execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}")))
+            .await;
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -1397,7 +1521,9 @@ async fn run_batch(
         }
     }
     if timeout_ms.is_some() {
-        let _ = (&mut *conn).execute(sqlx::raw_sql("SET statement_timeout = 0")).await;
+        let _ = (&mut *conn)
+            .execute(sqlx::raw_sql("SET statement_timeout = 0"))
+            .await;
     }
     Ok(types::fold_batch_results(results))
 }
@@ -1487,39 +1613,54 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
     }
     // NUMERIC / DECIMAL → exact string (never lossy f64).
     if let Ok(v) = row.try_get::<Option<BigDecimal>, _>(idx) {
-        return v.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|n| Value::String(n.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
         return v.map(Value::String).unwrap_or(Value::Null);
     }
     // Temporal types → ISO-ish strings (chrono formats without extra features).
     if let Ok(v) = row.try_get::<Option<DateTime<Utc>>, _>(idx) {
-        return v.map(|t| Value::String(t.to_rfc3339())).unwrap_or(Value::Null);
+        return v
+            .map(|t| Value::String(t.to_rfc3339()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(idx) {
-        return v.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(idx) {
-        return v.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(idx) {
-        return v.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Uuid>, _>(idx) {
-        return v.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|u| Value::String(u.to_string()))
+            .unwrap_or(Value::Null);
     }
     // Arrays — Postgres uses these everywhere (int[]/text[]/uuid[]/…). Without
     // explicit branches they fell through to Null like the DECIMAL/DATETIME bugs.
     if let Ok(v) = row.try_get::<Option<Vec<String>>, _>(idx) {
-        return v.map(|a| Value::Array(a.into_iter().map(Value::String).collect()))
+        return v
+            .map(|a| Value::Array(a.into_iter().map(Value::String).collect()))
             .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<i64>>, _>(idx) {
-        return v.map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
+        return v
+            .map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
             .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<i32>>, _>(idx) {
-        return v.map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
+        return v
+            .map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
             .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<f64>>, _>(idx) {
@@ -1528,27 +1669,42 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
             .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<bool>>, _>(idx) {
-        return v.map(|a| Value::Array(a.into_iter().map(Value::Bool).collect()))
+        return v
+            .map(|a| Value::Array(a.into_iter().map(Value::Bool).collect()))
             .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<Uuid>>, _>(idx) {
         return v
-            .map(|a| Value::Array(a.into_iter().map(|u| Value::String(u.to_string())).collect()))
+            .map(|a| {
+                Value::Array(
+                    a.into_iter()
+                        .map(|u| Value::String(u.to_string()))
+                        .collect(),
+                )
+            })
             .unwrap_or(Value::Null);
     }
     // INTERVAL / MONEY — structured binary encodings with no String decode.
     if let Ok(v) = row.try_get::<Option<sqlx::postgres::types::PgInterval>, _>(idx) {
-        return v.map(|i| Value::String(interval_to_string(&i))).unwrap_or(Value::Null);
+        return v
+            .map(|i| Value::String(interval_to_string(&i)))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<sqlx::postgres::types::PgMoney>, _>(idx) {
-        return v.map(|m| Value::String(money_to_string(m.0))).unwrap_or(Value::Null);
+        return v
+            .map(|m| Value::String(money_to_string(m.0)))
+            .unwrap_or(Value::Null);
     }
     // INET / CIDR / MACADDR — network types (need the ipnetwork/mac_address features).
     if let Ok(v) = row.try_get::<Option<sqlx::types::ipnetwork::IpNetwork>, _>(idx) {
-        return v.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|n| Value::String(n.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<sqlx::types::mac_address::MacAddress>, _>(idx) {
-        return v.map(|m| Value::String(m.to_string())).unwrap_or(Value::Null);
+        return v
+            .map(|m| Value::String(m.to_string()))
+            .unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
         return match v {
@@ -1660,17 +1816,104 @@ struct PgFkRow {
 // --- Completion data --------------------------------------------------------
 
 const KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-    "ALTER", "DROP", "TABLE", "VIEW", "MATERIALIZED", "INDEX", "SCHEMA", "SEQUENCE", "JOIN",
-    "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "LATERAL", "ON", "USING", "GROUP", "BY",
-    "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "AS", "DISTINCT", "ON CONFLICT", "RETURNING",
-    "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "EXISTS",
-    "CASE", "WHEN", "THEN", "ELSE", "END", "UNION", "INTERSECT", "EXCEPT", "ALL", "ANY", "ASC",
-    "DESC", "NULLS", "FIRST", "LAST", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE",
-    "CHECK", "DEFAULT", "CONSTRAINT", "WITH", "RECURSIVE", "TRUNCATE", "GRANT", "REVOKE",
-    "BEGIN", "COMMIT", "ROLLBACK", "ANALYZE", "EXPLAIN", "VACUUM", "COPY", "GENERATED", "IDENTITY",
-    "SERIAL", "TEXT", "INTEGER", "BIGINT", "BOOLEAN", "TIMESTAMP", "TIMESTAMPTZ", "JSONB", "UUID",
-    "NUMERIC", "ARRAY",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TABLE",
+    "VIEW",
+    "MATERIALIZED",
+    "INDEX",
+    "SCHEMA",
+    "SEQUENCE",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "LATERAL",
+    "ON",
+    "USING",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "FETCH",
+    "AS",
+    "DISTINCT",
+    "ON CONFLICT",
+    "RETURNING",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "LIKE",
+    "ILIKE",
+    "SIMILAR",
+    "BETWEEN",
+    "EXISTS",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "ALL",
+    "ANY",
+    "ASC",
+    "DESC",
+    "NULLS",
+    "FIRST",
+    "LAST",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "CHECK",
+    "DEFAULT",
+    "CONSTRAINT",
+    "WITH",
+    "RECURSIVE",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "ANALYZE",
+    "EXPLAIN",
+    "VACUUM",
+    "COPY",
+    "GENERATED",
+    "IDENTITY",
+    "SERIAL",
+    "TEXT",
+    "INTEGER",
+    "BIGINT",
+    "BOOLEAN",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "JSONB",
+    "UUID",
+    "NUMERIC",
+    "ARRAY",
 ];
 
 const FUNCTIONS: &[(&str, &str)] = &[
@@ -1703,11 +1946,20 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("split_part", "split_part(str, delim, n) — nth field"),
     ("concat", "concat(a, b, …) — concatenate"),
     ("concat_ws", "concat_ws(sep, …) — concat with separator"),
-    ("string_agg", "string_agg(expr, delim) — aggregate to string"),
+    (
+        "string_agg",
+        "string_agg(expr, delim) — aggregate to string",
+    ),
     ("array_agg", "array_agg(expr) — aggregate to array"),
     ("jsonb_agg", "jsonb_agg(expr) — aggregate to JSON array"),
-    ("jsonb_build_object", "jsonb_build_object(k, v, …) — build JSON object"),
-    ("jsonb_extract_path", "jsonb_extract_path(json, path…) — extract"),
+    (
+        "jsonb_build_object",
+        "jsonb_build_object(k, v, …) — build JSON object",
+    ),
+    (
+        "jsonb_extract_path",
+        "jsonb_extract_path(json, path…) — extract",
+    ),
     ("round", "round(num, decimals) — round"),
     ("floor", "floor(num) — round down"),
     ("ceil", "ceil(num) — round up"),
@@ -1730,21 +1982,58 @@ const FUNCTIONS: &[(&str, &str)] = &[
 /// Native read-only transaction is the authority for effects hidden behind
 /// overload resolution, operators, casts, views and routines, including root.
 /// This path is selected only by a server-derived resolved-config flag.
-async fn governed_read(pool:&sqlx::PgPool,req:&QueryRequest,token:&CancelToken)->Result<QueryResult> {
-    let mut conn=pool.acquire().await.map_err(types::upstream)?;
-    capture_backend_pid(&mut conn,token).await;
-    let mut tx=conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
-    if let Some(schema)=req.node.as_deref().filter(|n|!n.is_empty()) {(&mut *tx).execute(sqlx::raw_sql(&set_search_path_sql(schema))).await.map_err(types::upstream)?;}
-    if let Some(ms)=req.timeout_ms.filter(|ms|*ms>0) {(&mut *tx).execute(sqlx::raw_sql(&format!("SET LOCAL statement_timeout = {ms}"))).await.map_err(types::upstream)?;}
-    let spans=split_statements(req.statement.trim(),SqlDialect::Postgres);
-    if spans.is_empty(){return Err(types::invalid("empty statement"));}
-    let max_rows=req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);let single=spans.len()==1;let mut results=Vec::new();
+async fn governed_read(
+    pool: &sqlx::PgPool,
+    req: &QueryRequest,
+    token: &CancelToken,
+) -> Result<QueryResult> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    capture_backend_pid(&mut conn, token).await;
+    let mut tx = conn
+        .begin_with("BEGIN READ ONLY")
+        .await
+        .map_err(types::upstream)?;
+    if let Some(schema) = req.node.as_deref().filter(|n| !n.is_empty()) {
+        (&mut *tx)
+            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
+            .await
+            .map_err(types::upstream)?;
+    }
+    if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
+        (&mut *tx)
+            .execute(sqlx::raw_sql(&format!(
+                "SET LOCAL statement_timeout = {ms}"
+            )))
+            .await
+            .map_err(types::upstream)?;
+    }
+    let spans = split_statements(req.statement.trim(), SqlDialect::Postgres);
+    if spans.is_empty() {
+        return Err(types::invalid("empty statement"));
+    }
+    let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
+    let single = spans.len() == 1;
+    let mut results = Vec::new();
     for span in spans {
-        let started=Instant::now();
-        let sql=if single {types::inject_row_limit(&span.text,max_rows.saturating_add(1),req.offset)}else{types::inject_row_limit(&span.text,usize::MAX,None)};
-        let mut result=exec_read_conn(&mut tx,if single{&sql.sql}else{&span.text},max_rows).await?;
-        result.stats.duration_ms=started.elapsed().as_millis() as u64;result.stats.row_count=result.rows.len();
-        if single{result.auto_limited=sql.limited.then_some(max_rows as u64)}else{result.statement=Some(types::statement_preview(&span.text));}
+        let started = Instant::now();
+        let sql = if single {
+            types::inject_row_limit(&span.text, max_rows.saturating_add(1), req.offset)
+        } else {
+            types::inject_row_limit(&span.text, usize::MAX, None)
+        };
+        let mut result = exec_read_conn(
+            &mut tx,
+            if single { &sql.sql } else { &span.text },
+            max_rows,
+        )
+        .await?;
+        result.stats.duration_ms = started.elapsed().as_millis() as u64;
+        result.stats.row_count = result.rows.len();
+        if single {
+            result.auto_limited = sql.limited.then_some(max_rows as u64)
+        } else {
+            result.statement = Some(types::statement_preview(&span.text));
+        }
         results.push(result);
     }
     tx.rollback().await.map_err(types::upstream)?;
@@ -1758,11 +2047,23 @@ mod tests {
     #[test]
     fn interval_renders_iso_ish() {
         use sqlx::postgres::types::PgInterval;
-        let i = PgInterval { months: 1, days: 2, microseconds: 3_500_000 };
+        let i = PgInterval {
+            months: 1,
+            days: 2,
+            microseconds: 3_500_000,
+        };
         assert_eq!(interval_to_string(&i), "P1M2DT3.5S");
-        let whole = PgInterval { months: 0, days: 0, microseconds: 90_000_000 };
+        let whole = PgInterval {
+            months: 0,
+            days: 0,
+            microseconds: 90_000_000,
+        };
         assert_eq!(interval_to_string(&whole), "PT90S");
-        let zero = PgInterval { months: 0, days: 0, microseconds: 0 };
+        let zero = PgInterval {
+            months: 0,
+            days: 0,
+            microseconds: 0,
+        };
         assert_eq!(interval_to_string(&zero), "PT0S");
     }
 
@@ -1808,7 +2109,10 @@ mod tests {
     fn quote_ident_doubles_quotes() {
         assert_eq!(quote_ident("plain"), "\"plain\"");
         assert_eq!(quote_ident("we\"ird"), "\"we\"\"ird\"");
-        assert_eq!(set_search_path_sql("public"), "SET search_path TO \"public\"");
+        assert_eq!(
+            set_search_path_sql("public"),
+            "SET search_path TO \"public\""
+        );
     }
 
     #[test]

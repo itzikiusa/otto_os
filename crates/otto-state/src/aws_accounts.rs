@@ -61,9 +61,7 @@ pub struct AwsAccountPatch {
 }
 
 fn opt_ts(r: &sqlx::sqlite::SqliteRow, col: &str) -> Result<Option<DateTime<Utc>>> {
-    r.get::<Option<String>, _>(col)
-        .map(|s| ts(&s))
-        .transpose()
+    r.get::<Option<String>, _>(col).map(|s| ts(&s)).transpose()
 }
 
 fn opt_json(r: &sqlx::sqlite::SqliteRow, col: &str) -> Result<Option<serde_json::Value>> {
@@ -189,7 +187,8 @@ impl AwsAccountsRepo {
                 .map_err(dberr("update aws account"))?;
         }
         if let Some(v) = p.environment {
-            self.set_col(id, "environment", v.as_str().to_string()).await?;
+            self.set_col(id, "environment", v.as_str().to_string())
+                .await?;
         }
         sqlx::query("UPDATE aws_accounts SET updated_at = ? WHERE id = ?")
             .bind(&now)
@@ -267,7 +266,11 @@ mod tests {
     async fn pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();

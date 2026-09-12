@@ -129,8 +129,11 @@ impl CredentialMonitor {
                         Ok(Some(detected)) => {
                             // Persist when it differs so it surfaces in the UI.
                             if account.token_expires_at != Some(detected) {
-                                if let Err(e) =
-                                    self.ctx.git_store.set_token_expiry(&account.id, Some(detected)).await
+                                if let Err(e) = self
+                                    .ctx
+                                    .git_store
+                                    .set_token_expiry(&account.id, Some(detected))
+                                    .await
                                 {
                                     tracing::warn!(
                                         "credential monitor: persist git expiry {}: {e}",
@@ -486,9 +489,7 @@ pub fn spawn_metrics_sampler(ctx: ServerCtx) {
                         }
                         // Broadcast a tick so the dashboard can refresh
                         // sparklines in near-real-time without polling blindly.
-                        let ts = chrono::Utc::now()
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string();
+                        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
                         let _ = ctx.events.send(Event::UsageMetricsTick { ts });
                     }
                     Err(e) => tracing::warn!("usage: metrics sampler join error: {e}"),
@@ -511,9 +512,7 @@ pub fn spawn_session_event_listener(ctx: ServerCtx) {
         loop {
             match rx.recv().await {
                 Ok(Event::SessionStatus {
-                    session_id,
-                    status,
-                    ..
+                    session_id, status, ..
                 }) => {
                     let prev = last.insert(session_id.clone(), status);
                     if prev == Some(status) {
@@ -680,7 +679,9 @@ async fn emit_session_notice(
         });
     let body = match status {
         SessionStatus::Idle => match &current_task {
-            Some(task) => format!("{label} is idle and may be waiting for your input · was on: {task}"),
+            Some(task) => {
+                format!("{label} is idle and may be waiting for your input · was on: {task}")
+            }
             None => format!("{label} is idle and may be waiting for your input."),
         },
         _ => match &current_task {
@@ -756,10 +757,7 @@ pub struct AuthScanner {
 
 impl AuthScanner {
     /// Build from a DB pool + event bus (available before `ServerCtx`).
-    pub fn new(
-        pool: sqlx::SqlitePool,
-        events: tokio::sync::broadcast::Sender<Event>,
-    ) -> Arc<Self> {
+    pub fn new(pool: sqlx::SqlitePool, events: tokio::sync::broadcast::Sender<Event>) -> Arc<Self> {
         Arc::new(Self {
             notifications: crate::state::NotificationService::new(pool, events),
             flagged: Mutex::new(std::collections::HashSet::new()),
@@ -954,7 +952,10 @@ mod tests {
         }
         trim_tail(&mut s, 256); // must not panic on a mid-char byte index
         assert!(s.len() <= 256, "tail trimmed to within the cap");
-        assert!(s.chars().all(|c| c == glyph), "no split/garbled code points");
+        assert!(
+            s.chars().all(|c| c == glyph),
+            "no split/garbled code points"
+        );
     }
 
     #[test]
@@ -969,10 +970,16 @@ mod tests {
         // 1000 ASCII bytes; trimming must retain the *newest* tail (a needle that
         // just arrived must survive), not the oldest.
         let mut s: String = (0..1000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let want_tail: String = s.chars().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
+        let want_tail: String = s
+            .chars()
+            .rev()
+            .take(50)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         trim_tail(&mut s, 256);
         assert!(s.len() <= 256);
         assert!(s.ends_with(&want_tail), "kept the most recent content");
     }
 }
-

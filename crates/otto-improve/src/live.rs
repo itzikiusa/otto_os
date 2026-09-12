@@ -159,7 +159,9 @@ impl LiveEvolver {
             };
             let grown = {
                 let map = episodes.lock().await;
-                map.get(&session_id).map(|e| turns > e.last_turns).unwrap_or(false)
+                map.get(&session_id)
+                    .map(|e| turns > e.last_turns)
+                    .unwrap_or(false)
             };
 
             if grown {
@@ -191,7 +193,11 @@ impl LiveEvolver {
             if s.archived {
                 return false;
             }
-            if s.meta.get("evolve").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if s.meta
+                .get("evolve")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 return true;
             }
         }
@@ -205,7 +211,10 @@ mod tests {
 
     #[test]
     fn live_trigger_round_trips() {
-        assert_eq!(ImprovementTrigger::parse("live"), Some(ImprovementTrigger::Live));
+        assert_eq!(
+            ImprovementTrigger::parse("live"),
+            Some(ImprovementTrigger::Live)
+        );
         assert_eq!(ImprovementTrigger::Live.as_str(), "live");
     }
 }

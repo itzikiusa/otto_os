@@ -555,7 +555,10 @@ mod tests {
         }
         assert_eq!(reg.model_args_template("shell"), None);
         assert!(!reg.supports_model("shell"));
-        assert!(!reg.supports_model("nope"), "unknown provider has no template");
+        assert!(
+            !reg.supports_model("nope"),
+            "unknown provider has no template"
+        );
     }
 
     /// A custom provider's `model_args` override is honored verbatim; one

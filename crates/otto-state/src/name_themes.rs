@@ -47,13 +47,12 @@ impl NameThemesRepo {
 
     /// All custom themes owned by `owner`, newest-first.
     pub async fn list_for_owner(&self, owner: &Id) -> Result<Vec<CustomTheme>> {
-        let rows = sqlx::query(
-            "SELECT * FROM name_themes WHERE owner_id = ? ORDER BY created_at DESC",
-        )
-        .bind(owner)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list name themes"))?;
+        let rows =
+            sqlx::query("SELECT * FROM name_themes WHERE owner_id = ? ORDER BY created_at DESC")
+                .bind(owner)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list name themes"))?;
         rows.iter().map(row_to_theme).collect()
     }
 
@@ -192,7 +191,12 @@ mod tests {
         assert_eq!(list.len(), 1);
 
         let upd = repo
-            .update(&t.id, &uid, "Family", &["Dad".into(), "Mom".into(), "Sis".into()])
+            .update(
+                &t.id,
+                &uid,
+                "Family",
+                &["Dad".into(), "Mom".into(), "Sis".into()],
+            )
             .await
             .unwrap();
         assert_eq!(upd.names.len(), 3);
@@ -214,7 +218,10 @@ mod tests {
 
         assert_eq!(repo.active(&uid).await.unwrap(), None);
         repo.set_active(&uid, "footballers").await.unwrap();
-        assert_eq!(repo.active(&uid).await.unwrap().as_deref(), Some("footballers"));
+        assert_eq!(
+            repo.active(&uid).await.unwrap().as_deref(),
+            Some("footballers")
+        );
         repo.set_active(&uid, "none").await.unwrap();
         assert_eq!(repo.active(&uid).await.unwrap().as_deref(), Some("none"));
     }

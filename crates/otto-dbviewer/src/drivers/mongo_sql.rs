@@ -45,8 +45,8 @@ pub fn looks_like_sql(statement: &str) -> bool {
 /// generated command string (also shown to the user).
 pub fn translate(sql: &str) -> Result<String> {
     let dialect = GenericDialect {};
-    let statements =
-        Parser::parse_sql(&dialect, sql).map_err(|e| types::invalid(format!("SQL parse error: {e}")))?;
+    let statements = Parser::parse_sql(&dialect, sql)
+        .map_err(|e| types::invalid(format!("SQL parse error: {e}")))?;
     if statements.len() != 1 {
         return Err(types::invalid("expected a single SELECT statement"));
     }
@@ -59,7 +59,9 @@ pub fn translate(sql: &str) -> Result<String> {
         _ => return Err(types::invalid("UNION/set queries are not supported")),
     };
     if select.from.len() != 1 {
-        return Err(types::invalid("SQL→Mongo supports a single base collection"));
+        return Err(types::invalid(
+            "SQL→Mongo supports a single base collection",
+        ));
     }
     if select.having.is_some() {
         return Err(types::invalid("HAVING is not supported"));
@@ -88,15 +90,29 @@ pub fn translate(sql: &str) -> Result<String> {
     let group_keys = group_by_keys(&select.group_by, &ctx)?;
 
     if !group_keys.is_empty() {
-        let stages = aggregate_stages(&filter, &select.projection, &group_keys, true, &sort, limit, &ctx)?;
-        return Ok(format!("db.{base}.aggregate({})", compact(&J::Array(stages))));
+        let stages = aggregate_stages(
+            &filter,
+            &select.projection,
+            &group_keys,
+            true,
+            &sort,
+            limit,
+            &ctx,
+        )?;
+        return Ok(format!(
+            "db.{base}.aggregate({})",
+            compact(&J::Array(stages))
+        ));
     }
     if is_count_star_only(&select.projection) {
         return Ok(format!("db.{base}.countDocuments({})", compact(&filter)));
     }
     if projection_has_aggregate(&select.projection) {
         let stages = aggregate_stages(&filter, &select.projection, &[], true, &sort, limit, &ctx)?;
-        return Ok(format!("db.{base}.aggregate({})", compact(&J::Array(stages))));
+        return Ok(format!(
+            "db.{base}.aggregate({})",
+            compact(&J::Array(stages))
+        ));
     }
 
     // Plain find with projection / sort / limit.
@@ -169,7 +185,11 @@ fn build_join_query(
         };
         let on = match constraint {
             JoinConstraint::On(expr) => expr,
-            _ => return Err(types::invalid("JOIN must use an ON <field> = <field> condition")),
+            _ => {
+                return Err(types::invalid(
+                    "JOIN must use an ON <field> = <field> condition",
+                ))
+            }
         };
         let (local, foreign) = equi_on(on, ctx, &alias)?;
         pipeline.push(json!({
@@ -191,9 +211,20 @@ fn build_join_query(
     let group_keys = group_by_keys(&select.group_by, ctx)?;
     let has_agg = !group_keys.is_empty() || projection_has_aggregate(&select.projection);
 
-    let stages = aggregate_stages(&filter, &select.projection, &group_keys, has_agg, &sort, limit, ctx)?;
+    let stages = aggregate_stages(
+        &filter,
+        &select.projection,
+        &group_keys,
+        has_agg,
+        &sort,
+        limit,
+        ctx,
+    )?;
     pipeline.extend(stages);
-    Ok(format!("db.{base}.aggregate({})", compact(&J::Array(pipeline))))
+    Ok(format!(
+        "db.{base}.aggregate({})",
+        compact(&J::Array(pipeline))
+    ))
 }
 
 /// Resolve a join's `ON a.x = b.y` into `(localField, foreignField)` where
@@ -205,7 +236,11 @@ fn equi_on(on: &Expr, ctx: &Ctx, join_alias: &str) -> Result<(String, String)> {
             op: BinaryOperator::Eq,
             right,
         } => (left.as_ref(), right.as_ref()),
-        _ => return Err(types::invalid("JOIN ON must be a single <field> = <field> equality")),
+        _ => {
+            return Err(types::invalid(
+                "JOIN ON must be a single <field> = <field> equality",
+            ))
+        }
     };
     let (lq, lf) = qualified(left)?;
     let (rq, rf) = qualified(right)?;
@@ -226,7 +261,11 @@ fn qualified(expr: &Expr) -> Result<(Option<String>, String)> {
         Expr::Identifier(id) => Ok((None, id.value.clone())),
         Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
             let q = parts[0].value.clone();
-            let f = parts[1..].iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".");
+            let f = parts[1..]
+                .iter()
+                .map(|p| p.value.clone())
+                .collect::<Vec<_>>()
+                .join(".");
             Ok((Some(q), f))
         }
         Expr::Nested(inner) => qualified(inner),
@@ -380,7 +419,9 @@ fn expr_to_json(expr: &Expr) -> Result<J> {
             _ => Err(types::invalid("unary minus on non-number")),
         },
         Expr::Identifier(id) => Ok(J::String(id.value.clone())),
-        _ => Err(types::invalid(format!("unsupported value expression: {expr:?}"))),
+        _ => Err(types::invalid(format!(
+            "unsupported value expression: {expr:?}"
+        ))),
     }
 }
 
@@ -388,7 +429,9 @@ fn value_to_json(v: &SqlValue) -> Result<J> {
     match v {
         SqlValue::Number(n, _) => serde_json::from_str::<J>(n)
             .map_err(|_| types::invalid(format!("bad number literal: {n}"))),
-        SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => Ok(J::String(s.clone())),
+        SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
+            Ok(J::String(s.clone()))
+        }
         SqlValue::Boolean(b) => Ok(J::Bool(*b)),
         SqlValue::Null => Ok(J::Null),
         other => Err(types::invalid(format!("unsupported literal: {other:?}"))),
@@ -428,7 +471,11 @@ fn order_by_doc(query: &Query, ctx: &Ctx) -> Result<Option<J>> {
         let dir = if o.options.asc == Some(false) { -1 } else { 1 };
         m.insert(field_path(&o.expr, ctx)?, json!(dir));
     }
-    Ok(if m.is_empty() { None } else { Some(J::Object(m)) })
+    Ok(if m.is_empty() {
+        None
+    } else {
+        Some(J::Object(m))
+    })
 }
 
 fn limit_value(query: &Query) -> Result<Option<i64>> {
@@ -436,9 +483,7 @@ fn limit_value(query: &Query) -> Result<Option<i64>> {
         return Ok(None);
     };
     match lc {
-        LimitClause::LimitOffset {
-            limit: Some(e), ..
-        } => match expr_to_json(e)? {
+        LimitClause::LimitOffset { limit: Some(e), .. } => match expr_to_json(e)? {
             J::Number(n) => Ok(n.as_i64()),
             _ => Err(types::invalid("LIMIT must be an integer")),
         },
@@ -488,10 +533,12 @@ fn is_count_star(expr: &Expr) -> bool {
 
 /// A Mongo projection from the SELECT list (None = all fields / `*`).
 fn projection_doc(items: &[SelectItem], ctx: &Ctx) -> Result<Option<J>> {
-    if items
-        .iter()
-        .any(|i| matches!(i, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)))
-    {
+    if items.iter().any(|i| {
+        matches!(
+            i,
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)
+        )
+    }) {
         return Ok(None);
     }
     let mut m = Map::new();
@@ -503,7 +550,11 @@ fn projection_doc(items: &[SelectItem], ctx: &Ctx) -> Result<Option<J>> {
         };
         m.insert(field_path(expr, ctx)?, json!(1));
     }
-    Ok(if m.is_empty() { None } else { Some(J::Object(m)) })
+    Ok(if m.is_empty() {
+        None
+    } else {
+        Some(J::Object(m))
+    })
 }
 
 // --- aggregate stages -------------------------------------------------------
@@ -579,7 +630,9 @@ fn group_stage(items: &[SelectItem], group_keys: &[String], ctx: &Ctx) -> Result
 /// An aggregate function in the SELECT list → `(output_name, { $op: arg })`.
 fn accumulator(expr: &Expr, alias: Option<String>, ctx: &Ctx) -> Result<(String, J)> {
     let Expr::Function(f) = expr else {
-        return Err(types::invalid("non-aggregated column must appear in GROUP BY"));
+        return Err(types::invalid(
+            "non-aggregated column must appear in GROUP BY",
+        ));
     };
     let fname = f.name.to_string().to_ascii_lowercase();
     let arg_field = first_func_field(f, ctx);

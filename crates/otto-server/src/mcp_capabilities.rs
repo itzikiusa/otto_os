@@ -21,7 +21,18 @@ use crate::state::ServerCtx;
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_RESULTS_CAP: usize = 500;
 const MAX_WALK: usize = 20_000;
-const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".svn", ".hg", "vendor", ".venv", "__pycache__"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".svn",
+    ".hg",
+    "vendor",
+    ".venv",
+    "__pycache__",
+];
 
 #[derive(Deserialize)]
 pub struct CodeSearchQuery {
@@ -62,7 +73,9 @@ pub async fn code_search(
             let canon = std::fs::canonicalize(&joined)
                 .map_err(|_| ApiError(Error::NotFound("path not found".into())))?;
             if !canon.starts_with(&root) {
-                return Err(ApiError(Error::Forbidden("path escapes the workspace root".into())));
+                return Err(ApiError(Error::Forbidden(
+                    "path escapes the workspace root".into(),
+                )));
             }
             canon
         }
@@ -78,7 +91,9 @@ pub async fn code_search(
         if results.len() >= max || walked >= MAX_WALK {
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             walked += 1;
             if walked >= MAX_WALK || results.len() >= max {
@@ -102,13 +117,19 @@ pub async fn code_search(
             if meta.map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(true) {
                 continue;
             }
-            let Ok(content) = std::fs::read(&p) else { continue };
+            let Ok(content) = std::fs::read(&p) else {
+                continue;
+            };
             // Skip binary (NUL in the first chunk).
             if content.iter().take(1024).any(|&b| b == 0) {
                 continue;
             }
             let text = String::from_utf8_lossy(&content);
-            let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .to_string();
             for (i, line) in text.lines().enumerate() {
                 if line.to_lowercase().contains(&needle_lower) {
                     let snippet: String = line.trim().chars().take(240).collect();
@@ -192,7 +213,8 @@ pub struct ProofPackQuery {
 fn valid_ref(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
         && !s.contains("..")
 }
 
@@ -206,7 +228,12 @@ fn safe_git(path: &Path, args: &[&str]) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).chars().take(8000).collect())
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .chars()
+            .take(8000)
+            .collect(),
+    )
 }
 
 /// `GET /workspaces/{wid}/mcp/proof-pack?repo_id=&branch=&goal_loop_id=` — a
@@ -229,7 +256,17 @@ pub async fn proof_pack(
         if !valid_ref(branch) {
             return Err(ApiError(Error::Invalid("invalid branch/ref".into())));
         }
-        let commits = safe_git(&path, &["log", "-n", "20", "--pretty=format:%h %an %ad %s", "--date=short", branch]);
+        let commits = safe_git(
+            &path,
+            &[
+                "log",
+                "-n",
+                "20",
+                "--pretty=format:%h %an %ad %s",
+                "--date=short",
+                branch,
+            ],
+        );
         let status = safe_git(&path, &["status", "--porcelain"]);
         let diffstat = safe_git(&path, &["diff", "--stat", "HEAD"]);
         pack["repo"] = json!({

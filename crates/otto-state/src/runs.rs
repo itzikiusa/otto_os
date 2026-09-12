@@ -213,13 +213,14 @@ impl RunsRepo {
     }
 
     pub async fn list_by_workspace(&self, ws: &Id, limit: i64) -> Result<Vec<OttoRun>> {
-        let rows =
-            sqlx::query("SELECT * FROM otto_runs WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?")
-                .bind(ws)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(dberr("list runs"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM otto_runs WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?",
+        )
+        .bind(ws)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list runs"))?;
         rows.iter().map(row_to_run).collect()
     }
 
@@ -376,25 +377,29 @@ impl RunsRepo {
         thread: Option<&str>,
     ) -> Result<Option<OttoRun>> {
         let row = match thread {
-            Some(t) => sqlx::query(
-                "SELECT * FROM otto_runs WHERE workspace_id = ? AND origin_chat = ? \
+            Some(t) => {
+                sqlx::query(
+                    "SELECT * FROM otto_runs WHERE workspace_id = ? AND origin_chat = ? \
                  AND origin_thread = ? AND status = 'awaiting_approval' \
                  ORDER BY updated_at DESC LIMIT 1",
-            )
-            .bind(ws)
-            .bind(chat)
-            .bind(t)
-            .fetch_optional(&self.pool)
-            .await,
-            None => sqlx::query(
-                "SELECT * FROM otto_runs WHERE workspace_id = ? AND origin_chat = ? \
+                )
+                .bind(ws)
+                .bind(chat)
+                .bind(t)
+                .fetch_optional(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT * FROM otto_runs WHERE workspace_id = ? AND origin_chat = ? \
                  AND origin_thread IS NULL AND status = 'awaiting_approval' \
                  ORDER BY updated_at DESC LIMIT 1",
-            )
-            .bind(ws)
-            .bind(chat)
-            .fetch_optional(&self.pool)
-            .await,
+                )
+                .bind(ws)
+                .bind(chat)
+                .fetch_optional(&self.pool)
+                .await
+            }
         }
         .map_err(dberr("find awaiting run"))?;
         row.as_ref().map(row_to_run).transpose()
@@ -445,12 +450,14 @@ mod tests {
     async fn seed_ws(pool: &SqlitePool) -> Id {
         let ws = new_id();
         let now = fmt(Utc::now());
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)")
-            .bind(&ws)
-            .bind(&now)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
         ws
     }
 

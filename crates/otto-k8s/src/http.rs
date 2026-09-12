@@ -146,7 +146,13 @@ pub fn api_router<S: K8sCtx>() -> Router<S> {
 }
 
 /// Best-effort audit row (failure is logged, never propagated).
-pub(crate) async fn audit<S: K8sCtx>(ctx: &S, user: &User, action: &str, target: &Id, detail: Value) {
+pub(crate) async fn audit<S: K8sCtx>(
+    ctx: &S,
+    user: &User,
+    action: &str,
+    target: &Id,
+    detail: Value,
+) {
     if let Err(e) = AuditRepo::new(ctx.pool())
         .insert(NewAuditEntry {
             user_id: Some(user.id.clone()),
@@ -300,7 +306,12 @@ async fn test_cluster<S: K8sCtx>(
     let c = svc.get(&id).await?;
     let mut result = svc.test(&c).await?;
     if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
-        result.message = if result.ok { "Connection succeeded" } else { "Connection failed" }.into();
+        result.message = if result.ok {
+            "Connection succeeded"
+        } else {
+            "Connection failed"
+        }
+        .into();
     }
     Ok(Json(result))
 }

@@ -79,30 +79,21 @@ struct TokenQuery {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientFrame {
-    Input {
-        data: String,
-    },
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
+    Input { data: String },
+    Resize { cols: u16, rows: u16 },
     // Request a history-inclusive snapshot: up to `lines` rows of scrollback
     // history (rows that scrolled off above the visible screen) followed by a
     // coherent current-screen frame. Honors the requested `lines`. The client
     // treats every snapshot as a full rebuild (reset + repaint), so this must
     // always carry the complete retained history.
-    Scrollback {
-        lines: usize,
-    },
+    Scrollback { lines: usize },
     // Server-side search: grep the ring-buffer scrollback for `query` (plain
     // substring, case-insensitive). The server replies with a JSON
     // `{"type":"search_result","query":"…","matches":[…]}` frame containing
     // up to `MAX_SEARCH_RESULTS` matching line objects. This keeps results
     // across WS reconnects (the ring survives), unlike the xterm SearchAddon
     // which only searches the emulator's current viewport.
-    Search {
-        query: String,
-    },
+    Search { query: String },
     // Claim size authority without typing — sent when the terminal gains
     // FOCUS, so clicking into a pane reclaims the PTY size from a stale
     // viewer (e.g. a phone tab that typed once and stayed attached).
@@ -311,17 +302,22 @@ async fn ws_auth_gate<S: SessionsCtx>(
         }
     };
 
-    if let Err(e) = st.ctx.check_resource(&user,&session).await {
-        return problem(StatusCode::FORBIDDEN,&e);
+    if let Err(e) = st.ctx.check_resource(&user, &session).await {
+        return problem(StatusCode::FORBIDDEN, &e);
     }
 
     // Propagate auth results to the handler via extensions.
-    req.extensions_mut().insert(LiveTerminalAuth { user:user.clone(),token,auth:st.auth.clone() });
+    req.extensions_mut().insert(LiveTerminalAuth {
+        user: user.clone(),
+        token,
+        auth: st.auth.clone(),
+    });
     req.extensions_mut().insert(AuthUser(user));
     req.extensions_mut().insert(CanInput(can_input));
     // Tell term_ws whether the client used the subprotocol path so it can echo
     // `otto-bearer` back in the upgrade response (Task 1.10).
-    req.extensions_mut().insert(UsedSubprotocol(used_subprotocol));
+    req.extensions_mut()
+        .insert(UsedSubprotocol(used_subprotocol));
 
     next.run(req).await
 }
@@ -337,21 +333,37 @@ struct LiveTerminalAuth {
     auth: Arc<dyn TokenAuthenticator>,
 }
 impl LiveTerminalAuth {
-    async fn check<S: SessionsCtx>(&self,ctx:&S,session:&otto_core::domain::Session)->otto_core::Result<bool> {
-        let auth=self.auth.authenticate(&self.token).await?;
-        if auth.effective_user.id != self.user.id || auth.mcp_only { return Err(Error::Unauthorized); }
-        let can_input=if let Some(scope)=auth.scope {
-            if scope.session_id != session.id || scope.otp_pending { return Err(Error::Unauthorized); }
-            scope.role==WorkspaceRole::Editor
+    async fn check<S: SessionsCtx>(
+        &self,
+        ctx: &S,
+        session: &otto_core::domain::Session,
+    ) -> otto_core::Result<bool> {
+        let auth = self.auth.authenticate(&self.token).await?;
+        if auth.effective_user.id != self.user.id || auth.mcp_only {
+            return Err(Error::Unauthorized);
+        }
+        let can_input = if let Some(scope) = auth.scope {
+            if scope.session_id != session.id || scope.otp_pending {
+                return Err(Error::Unauthorized);
+            }
+            scope.role == WorkspaceRole::Editor
         } else {
-            if !session_owner_or_admin(ctx.roles().as_ref(),&auth.effective_user,session).await {return Err(Error::Forbidden("session access revoked".into()));}
-            ctx.roles().check(&auth.effective_user,&session.workspace_id,WorkspaceRole::Editor).await.is_ok()
+            if !session_owner_or_admin(ctx.roles().as_ref(), &auth.effective_user, session).await {
+                return Err(Error::Forbidden("session access revoked".into()));
+            }
+            ctx.roles()
+                .check(
+                    &auth.effective_user,
+                    &session.workspace_id,
+                    WorkspaceRole::Editor,
+                )
+                .await
+                .is_ok()
         };
-        ctx.check_resource(&auth.effective_user,session).await?;
+        ctx.check_resource(&auth.effective_user, session).await?;
         Ok(can_input)
     }
 }
-
 
 /// Newtype extension: true iff the client presented the token via the
 /// `Sec-WebSocket-Protocol: otto-bearer, <token>` header. When set, `term_ws`
@@ -380,11 +392,27 @@ async fn term_ws<S: SessionsCtx>(
     if used_subprotocol {
         ws.protocols([BEARER_SUBPROTOCOL])
             .on_upgrade(move |socket| async move {
-                serve_terminal(socket, st.ctx, session_id, initial_status, can_input, live_auth).await;
+                serve_terminal(
+                    socket,
+                    st.ctx,
+                    session_id,
+                    initial_status,
+                    can_input,
+                    live_auth,
+                )
+                .await;
             })
     } else {
         ws.on_upgrade(move |socket| async move {
-            serve_terminal(socket, st.ctx, session_id, initial_status, can_input, live_auth).await;
+            serve_terminal(
+                socket,
+                st.ctx,
+                session_id,
+                initial_status,
+                can_input,
+                live_auth,
+            )
+            .await;
         })
     }
 }
@@ -527,8 +555,13 @@ async fn serve_terminal<S: SessionsCtx>(
     // Read-only viewers (shares) never trigger a resume: watching must not
     // spawn a process on the host. (`ensure_live` itself also refuses archived
     // sessions, so an archived row can no longer come back live via attach.)
-    let Ok(current)=ctx.manager().get(&session_id).await else {return;};
-    match live_auth.check(&ctx,&current).await {Ok(allowed)=>can_input &= allowed,Err(_)=>return}
+    let Ok(current) = ctx.manager().get(&session_id).await else {
+        return;
+    };
+    match live_auth.check(&ctx, &current).await {
+        Ok(allowed) => can_input &= allowed,
+        Err(_) => return,
+    }
     if can_input {
         if let Err(e) = ctx.manager().ensure_live(&session_id).await {
             tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
@@ -1045,7 +1078,11 @@ mod tests {
 
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
         let resp = gate(&app, &s1, &token).await;
-        assert_eq!(resp.status(), StatusCode::OK, "viewer share must pass the gate");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "viewer share must pass the gate"
+        );
         assert_eq!(
             resp.headers().get("x-can-input").unwrap(),
             "0",
@@ -1064,7 +1101,11 @@ mod tests {
 
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Editor).await;
         let resp = gate(&app, &s1, &token).await;
-        assert_eq!(resp.status(), StatusCode::OK, "editor share must pass the gate");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "editor share must pass the gate"
+        );
         assert_eq!(
             resp.headers().get("x-can-input").unwrap(),
             "1",

@@ -98,8 +98,14 @@ impl Gitlab {
             }
         }
         let path = format!("/users?username={}", percent_encode_query(username));
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
-        let id = varr(&v, &[]).first().map(|u| vu64(u, &["id"])).filter(|id| *id > 0);
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
+        let id = varr(&v, &[])
+            .first()
+            .map(|u| vu64(u, &["id"]))
+            .filter(|id| *id > 0);
         if let Some(id) = id {
             CACHE
                 .get_or_init(Default::default)
@@ -132,8 +138,13 @@ impl Gitlab {
             "success" => ("success", 1u32, 0u32),
             "failed" | "canceled" => ("failure", 0, 1),
             "skipped" => ("success", 1, 0), // skipped counts as passing
-            "created" | "pending" | "running" | "waiting_for_resource" | "preparing"
-            | "manual" | "scheduled" => ("pending", 0, 0),
+            "created"
+            | "pending"
+            | "running"
+            | "waiting_for_resource"
+            | "preparing"
+            | "manual"
+            | "scheduled" => ("pending", 0, 0),
             _ => ("none", 0, 0),
         };
         CiStatus {
@@ -180,8 +191,14 @@ fn summary_from(v: &Value) -> PrSummary {
         reviewer_warnings: Vec::new(),
         draft: Some(draft),
         ci_status: None,
-        labels: v.get("labels").and_then(|l| l.as_array())
-            .map(|arr| arr.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
+        labels: v
+            .get("labels")
+            .and_then(|l| l.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| l.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
         url: vstr(v, &["web_url"]),
     }
@@ -217,7 +234,10 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
         .map(|l| l as u32);
     // Notes carry `resolvable` + `resolved` booleans; the head note's state is
     // the thread's state.
-    let resolved = note.get("resolved").and_then(Value::as_bool).unwrap_or(false);
+    let resolved = note
+        .get("resolved")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     PrComment {
         id: id_override.unwrap_or_else(|| vu64(note, &["id"]).to_string()),
         author: vstr(note, &["author", "name"]),
@@ -242,7 +262,10 @@ impl super::GitProvider for Gitlab {
     ) -> Result<super::PrPage> {
         let mut rb = self
             .req(reqwest::Method::GET, &Self::mr_path(r, ""))
-            .query(&[("per_page", per_page.to_string()), ("page", page.to_string())]);
+            .query(&[
+                ("per_page", per_page.to_string()),
+                ("page", page.to_string()),
+            ]);
         rb = match state {
             PrState::Open => rb.query(&[("state", "opened")]),
             PrState::Merged => rb.query(&[("state", "merged")]),
@@ -303,7 +326,11 @@ impl super::GitProvider for Gitlab {
             let Some(first) = notes.first() else { continue };
             let mut head = note_to_comment(first, Some(disc_id.clone()));
             // Resolve targets the discussion; only resolvable threads get one.
-            if first.get("resolvable").and_then(Value::as_bool).unwrap_or(false) {
+            if first
+                .get("resolvable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 head.thread_id = Some(disc_id);
             }
             for reply in &notes[1..] {
@@ -414,7 +441,9 @@ impl super::GitProvider for Gitlab {
         for name in req.reviewers.as_deref().unwrap_or_default() {
             match self.resolve_user_id(name).await {
                 Ok(Some(id)) => reviewer_ids.push(id),
-                Ok(None) => warnings.push(format!("could not request reviewer {name}: no such user")),
+                Ok(None) => {
+                    warnings.push(format!("could not request reviewer {name}: no such user"))
+                }
                 Err(e) => warnings.push(format!("could not request reviewer {name}: {e}")),
             }
         }
@@ -635,14 +664,20 @@ impl super::GitProvider for Gitlab {
         if !q.is_empty() {
             path.push_str(&format!("&query={}", percent_encode_query(q)));
         }
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
         Ok(varr(&v, &[]).iter().map(member_to_collaborator).collect())
     }
 
     /// `GET /user` with the bound token: proves authentication. GitLab exposes
     /// no scopes header on this call — scopes stay empty.
     async fn verify_token(&self) -> Result<super::TokenCheck> {
-        let v = self.http.json(self.req(reqwest::Method::GET, "/user")).await?;
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, "/user"))
+            .await?;
         Ok(super::TokenCheck {
             login: vstr(&v, &["username"]),
             scopes: Vec::new(),
@@ -714,7 +749,10 @@ impl super::GitProvider for Gitlab {
     /// An MR with no pipeline yields no rows rather than an error.
     async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
         let path = Self::mr_path(r, &format!("/{number}/pipelines?per_page=5"));
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
         let Some(pipeline_id) = varr(&v, &[])
             .first()
             .map(|p| vu64(p, &["id"]))
@@ -750,7 +788,11 @@ fn member_to_collaborator(v: &Value) -> otto_core::api::Collaborator {
     let username = vstr(v, &["username"]);
     let name = vstr(v, &["name"]);
     otto_core::api::Collaborator {
-        display_name: if name.is_empty() { username.clone() } else { name },
+        display_name: if name.is_empty() {
+            username.clone()
+        } else {
+            name
+        },
         name: username,
     }
 }
@@ -788,11 +830,22 @@ fn parse_pipeline_fixture(json_str: &str) -> crate::types::CiStatus {
         "success" => ("success", 1u32, 0u32),
         "failed" | "canceled" => ("failure", 0, 1),
         "skipped" => ("success", 1, 0),
-        "created" | "pending" | "running" | "waiting_for_resource" | "preparing"
-        | "manual" | "scheduled" => ("pending", 0, 0),
+        "created"
+        | "pending"
+        | "running"
+        | "waiting_for_resource"
+        | "preparing"
+        | "manual"
+        | "scheduled" => ("pending", 0, 0),
         _ => ("none", 0, 0),
     };
-    crate::types::CiStatus { state: state.to_string(), total: 1, passed, failed, url }
+    crate::types::CiStatus {
+        state: state.to_string(),
+        total: 1,
+        passed,
+        failed,
+        url,
+    }
 }
 
 use super::PrCheck;
@@ -874,7 +927,10 @@ mod tests {
 
     #[test]
     fn draft_becomes_title_prefix() {
-        assert_eq!(create_mr_body(&req(Some(true)), &[])["title"], json!("Draft: t"));
+        assert_eq!(
+            create_mr_body(&req(Some(true)), &[])["title"],
+            json!("Draft: t")
+        );
         assert_eq!(create_mr_body(&req(None), &[])["title"], json!("t"));
         assert_eq!(create_mr_body(&req(Some(false)), &[])["title"], json!("t"));
         // Idempotent when the caller already typed the prefix.
@@ -885,8 +941,13 @@ mod tests {
 
     #[test]
     fn reviewer_ids_only_when_non_empty() {
-        assert!(create_mr_body(&req(None), &[]).get("reviewer_ids").is_none());
-        assert_eq!(create_mr_body(&req(None), &[5, 7])["reviewer_ids"], json!([5, 7]));
+        assert!(create_mr_body(&req(None), &[])
+            .get("reviewer_ids")
+            .is_none());
+        assert_eq!(
+            create_mr_body(&req(None), &[5, 7])["reviewer_ids"],
+            json!([5, 7])
+        );
     }
 
     #[test]
@@ -995,7 +1056,10 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].url.as_deref(), Some("https://gl.example.com/j/1"));
-        assert_eq!(rows[0].completed_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+        assert_eq!(
+            rows[0].completed_at.as_deref(),
+            Some("2026-01-01T00:02:00Z")
+        );
     }
 
     #[test]

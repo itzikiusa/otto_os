@@ -145,7 +145,10 @@ fn strip_tags(s: &str) -> String {
     out
 }
 
-async fn issue_account(ctx: &ServerCtx, created_by: &Id) -> Result<otto_core::domain::IssueAccount> {
+async fn issue_account(
+    ctx: &ServerCtx,
+    created_by: &Id,
+) -> Result<otto_core::domain::IssueAccount> {
     // `into_iter().next()` (not `remove(0)`) so no panic path can ever carry
     // account data into a panic message / log.
     if let Ok(a) = ctx.issues_store.list_accounts(created_by).await {
@@ -190,7 +193,10 @@ async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
     Ok(ResolvedSource {
         title: format!("{}: {}", issue.key, issue.summary),
         body_md: body,
-        goal: format!("Implement and resolve Jira issue {}: {}", issue.key, issue.summary),
+        goal: format!(
+            "Implement and resolve Jira issue {}: {}",
+            issue.key, issue.summary
+        ),
         source_url: Some(issue.url),
         repo_hint: None,
         metadata: json!({"key": issue.key, "type": issue.issue_type}),
@@ -240,7 +246,10 @@ async fn resolve_github_pr(ctx: &ServerCtx, run: &OttoRun, repo: &Repo) -> Resul
             &format!("{}\n\n## Discussion\n{}", pr.description_md, comments),
             BODY_CAP,
         ),
-        goal: format!("Address pull request #{}: {}", pr.summary.number, pr.summary.title),
+        goal: format!(
+            "Address pull request #{}: {}",
+            pr.summary.number, pr.summary.title
+        ),
         source_url: Some(pr.summary.url),
         repo_hint: Some(repo.name.clone()),
         metadata: json!({"pr": pr.summary.number}),
@@ -302,7 +311,12 @@ async fn resolve_product_story(ctx: &ServerCtx, run: &OttoRun) -> Result<Resolve
 
 async fn resolve_finding(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let f = ctx.findings_store.get_full(&run.source_ref).await?;
-    let mut body = format!("Severity: {}\n\n{}\n\n## Evidence\n{}", f.severity.as_str(), f.body, f.evidence);
+    let mut body = format!(
+        "Severity: {}\n\n{}\n\n## Evidence\n{}",
+        f.severity.as_str(),
+        f.body,
+        f.evidence
+    );
     if let Some(fix) = &f.suggested_fix {
         body.push_str(&format!("\n\n## Suggested fix\n{fix}"));
     }

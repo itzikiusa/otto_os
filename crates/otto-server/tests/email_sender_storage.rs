@@ -38,7 +38,10 @@ struct MemSecrets {
 
 impl SecretStore for MemSecrets {
     fn put(&self, key: &str, value: &str) -> Result<()> {
-        self.map.lock().unwrap().insert(key.to_string(), value.to_string());
+        self.map
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
     fn get(&self, key: &str) -> Result<Option<String>> {
@@ -109,21 +112,29 @@ async fn put_stores_password_in_keychain_not_db() {
     repo.upsert(&uid, gmail, &secret_ref).await.unwrap();
 
     // The password is in the secret store under the expected ref.
-    assert_eq!(secrets.get(&secret_ref).unwrap().as_deref(), Some(app_password));
+    assert_eq!(
+        secrets.get(&secret_ref).unwrap().as_deref(),
+        Some(app_password)
+    );
     assert_eq!(secret_ref, format!("email-sender-{uid}"));
 
     // The DB row holds only the ref + address, never the password.
-    let row = sqlx::query("SELECT gmail_address, secret_ref, verified_at FROM email_senders WHERE user_id = ?")
-        .bind(&uid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let row = sqlx::query(
+        "SELECT gmail_address, secret_ref, verified_at FROM email_senders WHERE user_id = ?",
+    )
+    .bind(&uid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let stored_addr: String = row.get("gmail_address");
     let stored_ref: String = row.get("secret_ref");
     let verified_at: Option<i64> = row.get("verified_at");
     assert_eq!(stored_addr, gmail);
     assert_eq!(stored_ref, secret_ref);
-    assert!(verified_at.is_none(), "row is unverified until SMTP verify succeeds");
+    assert!(
+        verified_at.is_none(),
+        "row is unverified until SMTP verify succeeds"
+    );
 
     // Defense in depth: the raw password must NOT appear anywhere in the row.
     assert_ne!(stored_ref, app_password);
@@ -133,7 +144,10 @@ async fn put_stores_password_in_keychain_not_db() {
     let when = Utc::now();
     repo.set_verified(&uid, when).await.unwrap();
     let got = repo.get(&uid).await.unwrap().expect("sender");
-    assert_eq!(got.verified_at.map(|t| t.timestamp()), Some(when.timestamp()));
+    assert_eq!(
+        got.verified_at.map(|t| t.timestamp()),
+        Some(when.timestamp())
+    );
     // The repo's typed view never exposes a password field — only the ref.
     assert_eq!(got.secret_ref, secret_ref);
 }
@@ -145,11 +159,15 @@ async fn reconfigure_resets_verification() {
     let repo = EmailSendersRepo::new(pool.clone());
     let uid = seed_user(&pool, "bob").await;
 
-    repo.upsert(&uid, "old@gmail.com", &secret_ref_for(&uid)).await.unwrap();
+    repo.upsert(&uid, "old@gmail.com", &secret_ref_for(&uid))
+        .await
+        .unwrap();
     repo.set_verified(&uid, Utc::now()).await.unwrap();
     assert!(repo.get(&uid).await.unwrap().unwrap().verified_at.is_some());
 
-    repo.upsert(&uid, "new@gmail.com", &secret_ref_for(&uid)).await.unwrap();
+    repo.upsert(&uid, "new@gmail.com", &secret_ref_for(&uid))
+        .await
+        .unwrap();
     assert!(
         repo.get(&uid).await.unwrap().unwrap().verified_at.is_none(),
         "re-config must clear verified_at"

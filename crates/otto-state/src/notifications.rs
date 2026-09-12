@@ -137,14 +137,13 @@ impl NotificationsRepo {
             // De-dupe within the same owner: a NULL `user_id` (global notice)
             // must match other global rows, so use NULL-safe equality (`IS`)
             // rather than `=`, which never matches NULL in SQLite.
-            let existing = sqlx::query(
-                "SELECT id FROM notifications WHERE source_key = ? AND user_id IS ?",
-            )
-            .bind(key)
-            .bind(&n.user_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("notification dedupe"))?;
+            let existing =
+                sqlx::query("SELECT id FROM notifications WHERE source_key = ? AND user_id IS ?")
+                    .bind(key)
+                    .bind(&n.user_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(dberr("notification dedupe"))?;
             if let Some(row) = existing {
                 let id: Id = row.get("id");
                 sqlx::query(
@@ -243,13 +242,15 @@ impl NotificationsRepo {
                     .fetch_one(&self.pool)
                     .await
             }
-            NoticeAccess::User(uid) => sqlx::query(
-                "SELECT COUNT(*) AS n FROM notifications
+            NoticeAccess::User(uid) => {
+                sqlx::query(
+                    "SELECT COUNT(*) AS n FROM notifications
                  WHERE read = 0 AND user_id = ?",
-            )
-            .bind(uid)
-            .fetch_one(&self.pool)
-            .await,
+                )
+                .bind(uid)
+                .fetch_one(&self.pool)
+                .await
+            }
         }
         .map_err(dberr("unread count"))?;
         Ok(r.get::<i64, _>("n"))
@@ -266,13 +267,13 @@ impl NotificationsRepo {
                     .execute(&self.pool)
                     .await
             }
-            NoticeAccess::User(uid) => sqlx::query(
-                "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?",
-            )
-            .bind(id)
-            .bind(uid)
-            .execute(&self.pool)
-            .await,
+            NoticeAccess::User(uid) => {
+                sqlx::query("UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?")
+                    .bind(id)
+                    .bind(uid)
+                    .execute(&self.pool)
+                    .await
+            }
         }
         .map_err(dberr("mark notification read"))?;
         Ok(())
@@ -287,12 +288,12 @@ impl NotificationsRepo {
                     .execute(&self.pool)
                     .await
             }
-            NoticeAccess::User(uid) => sqlx::query(
-                "UPDATE notifications SET read = 1 WHERE read = 0 AND user_id = ?",
-            )
-            .bind(uid)
-            .execute(&self.pool)
-            .await,
+            NoticeAccess::User(uid) => {
+                sqlx::query("UPDATE notifications SET read = 1 WHERE read = 0 AND user_id = ?")
+                    .bind(uid)
+                    .execute(&self.pool)
+                    .await
+            }
         }
         .map_err(dberr("mark all notifications read"))?;
         Ok(())

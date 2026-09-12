@@ -68,7 +68,11 @@ impl MetricsSampler {
             cpu_pct: self.sys.global_cpu_usage() as f64,
             mem_used_mb: used / mb,
             mem_total_mb: total / mb,
-            mem_pct: if total > 0.0 { used / total * 100.0 } else { 0.0 },
+            mem_pct: if total > 0.0 {
+                used / total * 100.0
+            } else {
+                0.0
+            },
             load_avg_1: System::load_average().one,
             process_rss_mb: rss,
             process_cpu_pct: pcpu,

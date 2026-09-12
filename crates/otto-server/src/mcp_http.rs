@@ -83,7 +83,11 @@ pub async fn mcp_http_post(
 
 /// Handle a single JSON-RPC message. Returns `Some(response)` for a request and
 /// `None` for a notification (no `id`).
-async fn handle_one(ctx: &ServerCtx, auth: &otto_core::auth::AuthContext, msg: &Value) -> Option<Value> {
+async fn handle_one(
+    ctx: &ServerCtx,
+    auth: &otto_core::auth::AuthContext,
+    msg: &Value,
+) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let id = msg.get("id").cloned();
     let is_notification = id.is_none();
@@ -112,8 +116,15 @@ async fn handle_one(ctx: &ServerCtx, auth: &otto_core::auth::AuthContext, msg: &
         }
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             // Route through the SAME governed choke point as the stdio bridge:
             // per-token scope → global enable → approval → execute → audit.
             let result = match governed_invoke(ctx, auth, &name, &args, false, None).await {
@@ -121,7 +132,10 @@ async fn handle_one(ctx: &ServerCtx, auth: &otto_core::auth::AuthContext, msg: &
                     let is_error = envelope.get("decision").and_then(Value::as_str)
                         == Some("denied")
                         || envelope.get("decision").and_then(Value::as_str) == Some("error")
-                        || envelope.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                        || envelope
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                     tool_result(&envelope, is_error)
                 }
                 Err(e) => tool_result(&json!({ "error": e.0.to_string() }), true),

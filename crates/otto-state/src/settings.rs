@@ -30,7 +30,9 @@ pub fn otto_mcp_enabled_for(value: Option<&serde_json::Value>, workspace_id: &st
         Some(serde_json::Value::Bool(b)) => *b,
         Some(serde_json::Value::Object(map)) => {
             // Explicit per-workspace entry wins; unlisted ⇒ default ON.
-            map.get(workspace_id).and_then(|v| v.as_bool()).unwrap_or(true)
+            map.get(workspace_id)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
         }
         // Absent / malformed ⇒ default ON (attach to every session).
         _ => true,
@@ -150,9 +152,18 @@ mod tests {
         // default agent model — inheriting a reasoning model is what made the
         // draft dialog sit for minutes.
         assert_eq!(pr_draft_model_from(None), PR_DRAFT_MODEL_DEFAULT);
-        assert_eq!(pr_draft_model_from(Some(&json!(""))), PR_DRAFT_MODEL_DEFAULT);
-        assert_eq!(pr_draft_model_from(Some(&json!("   "))), PR_DRAFT_MODEL_DEFAULT);
-        assert_eq!(pr_draft_model_from(Some(&json!(true))), PR_DRAFT_MODEL_DEFAULT);
+        assert_eq!(
+            pr_draft_model_from(Some(&json!(""))),
+            PR_DRAFT_MODEL_DEFAULT
+        );
+        assert_eq!(
+            pr_draft_model_from(Some(&json!("   "))),
+            PR_DRAFT_MODEL_DEFAULT
+        );
+        assert_eq!(
+            pr_draft_model_from(Some(&json!(true))),
+            PR_DRAFT_MODEL_DEFAULT
+        );
         // An explicit choice wins, whitespace-trimmed.
         assert_eq!(pr_draft_model_from(Some(&json!("sonnet"))), "sonnet");
         assert_eq!(pr_draft_model_from(Some(&json!("  opus  "))), "opus");

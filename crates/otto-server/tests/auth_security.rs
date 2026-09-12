@@ -184,7 +184,9 @@ async fn ip_rotation_does_not_defeat_username_lockout() {
         let rotating_peer = ipv4(203, 0, 113, i as u8);
         // The attacker is not blocked yet at the point of *this* request...
         assert!(
-            store.check_locked(&login_throttle::ip_key(rotating_peer, user)).is_none(),
+            store
+                .check_locked(&login_throttle::ip_key(rotating_peer, user))
+                .is_none(),
             "a never-before-seen rotating IP must have no per-client lock"
         );
         record_failed_attempt(&store, rotating_peer, user);
@@ -194,13 +196,17 @@ async fn ip_rotation_does_not_defeat_username_lockout() {
     for i in 0..FAILURE_THRESHOLD {
         let p = ipv4(203, 0, 113, i as u8);
         assert!(
-            store.check_locked(&login_throttle::ip_key(p, user)).is_none(),
+            store
+                .check_locked(&login_throttle::ip_key(p, user))
+                .is_none(),
             "no rotated per-client key should have crossed the threshold"
         );
     }
     // But the global per-username key IS locked — the rotation bought nothing.
     assert!(
-        store.check_locked(&login_throttle::username_key(user)).is_some(),
+        store
+            .check_locked(&login_throttle::username_key(user))
+            .is_some(),
         "username lockout must survive IP rotation (S5)"
     );
     // And a brand-new IP attempting that same username is now blocked outright.

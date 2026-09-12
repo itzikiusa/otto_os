@@ -198,7 +198,14 @@ mod tests {
 
         // update with None clears it
         let updated = repo
-            .update_account(&a.id, "jira", "me@example.com", "ref", "https://x.atlassian.net", None)
+            .update_account(
+                &a.id,
+                "jira",
+                "me@example.com",
+                "ref",
+                "https://x.atlassian.net",
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(updated.token_expires_at, None);

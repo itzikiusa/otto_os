@@ -186,16 +186,22 @@ impl MonitorConfig {
     pub fn validate(&self, cluster_default_ns: Option<&str>) -> Result<()> {
         let inv = |m: String| Error::Invalid(m);
         if !(MIN_INTERVAL..=MAX_INTERVAL).contains(&self.interval_secs) {
-            return Err(inv(format!("interval_secs must be {MIN_INTERVAL}..{MAX_INTERVAL}")));
+            return Err(inv(format!(
+                "interval_secs must be {MIN_INTERVAL}..{MAX_INTERVAL}"
+            )));
         }
         if !(1..=MAX_CONCURRENCY).contains(&self.concurrency) {
             return Err(inv(format!("concurrency must be 1..{MAX_CONCURRENCY}")));
         }
         if !(1..=MAX_RETENTION_DAYS).contains(&self.retention_days) {
-            return Err(inv(format!("retention_days must be 1..{MAX_RETENTION_DAYS}")));
+            return Err(inv(format!(
+                "retention_days must be 1..{MAX_RETENTION_DAYS}"
+            )));
         }
         if !(MIN_SERIES_CAP..=MAX_SERIES_CAP).contains(&self.series_cap) {
-            return Err(inv(format!("series_cap must be {MIN_SERIES_CAP}..{MAX_SERIES_CAP}")));
+            return Err(inv(format!(
+                "series_cap must be {MIN_SERIES_CAP}..{MAX_SERIES_CAP}"
+            )));
         }
         if self.probes.len() > MAX_PROBES {
             return Err(inv(format!("at most {MAX_PROBES} probes")));
@@ -220,7 +226,9 @@ impl MonitorConfig {
                 return Err(inv(format!("probe '{name}': port must be 1..65535")));
             }
             if !(100..=30_000).contains(&p.timeout_ms) {
-                return Err(inv(format!("probe '{name}': timeout_ms must be 100..30000")));
+                return Err(inv(format!(
+                    "probe '{name}': timeout_ms must be 100..30000"
+                )));
             }
             for m in &p.mappings {
                 if m.field.trim().is_empty() {
@@ -286,8 +294,7 @@ impl MonitorConfig {
 pub fn metric_name_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
-        && s
-            .chars()
+        && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.'))
 }
 
@@ -387,8 +394,18 @@ fn probe(name: &str, port: Option<u16>, path: &str, format: ProbeFormat) -> Prob
 pub fn presets() -> Vec<(String, String, Vec<Probe>)> {
     let go_info = Probe {
         mappings: vec![
-            mapping("memory_stats.sys", Some("mem_sys_bytes"), None, Unit::BytesHuman),
-            mapping("memory_stats.alloc", Some("mem_alloc_bytes"), None, Unit::BytesHuman),
+            mapping(
+                "memory_stats.sys",
+                Some("mem_sys_bytes"),
+                None,
+                Unit::BytesHuman,
+            ),
+            mapping(
+                "memory_stats.alloc",
+                Some("mem_alloc_bytes"),
+                None,
+                Unit::BytesHuman,
+            ),
             mapping("go_routines_num", Some("goroutines"), None, Unit::Number),
             mapping("build_info.version", None, Some("version"), Unit::Number),
             mapping("build_info.commit", None, Some("commit"), Unit::Number),
@@ -397,9 +414,19 @@ pub fn presets() -> Vec<(String, String, Vec<Probe>)> {
     };
     let go_prom = Probe {
         include: vec!["http_*".into()],
-        ..probe("prom", Some(9000), "/actuator/prometheus", ProbeFormat::Prometheus)
+        ..probe(
+            "prom",
+            Some(9000),
+            "/actuator/prometheus",
+            ProbeFormat::Prometheus,
+        )
     };
-    let go_health = probe("health", Some(9000), "/actuator/health", ProbeFormat::Health);
+    let go_health = probe(
+        "health",
+        Some(9000),
+        "/actuator/health",
+        ProbeFormat::Health,
+    );
 
     let spring_prom = Probe {
         include: vec![
@@ -408,7 +435,12 @@ pub fn presets() -> Vec<(String, String, Vec<Probe>)> {
             "jvm_memory_max_bytes".into(),
             "http_server_requests_seconds_*".into(),
         ],
-        ..probe("prom", None, "/actuator/prometheus", ProbeFormat::Prometheus)
+        ..probe(
+            "prom",
+            None,
+            "/actuator/prometheus",
+            ProbeFormat::Prometheus,
+        )
     };
     let spring_health = probe("health", None, "/actuator/health", ProbeFormat::Health);
 
@@ -521,9 +553,24 @@ mod tests {
             workload: "gowithdrawal-confsrv",
             labels: &l,
         };
-        assert!(is_excluded(&[Exclusion::Pod { pattern: "*-confsrv-*".into() }], &pr));
-        assert!(is_excluded(&[Exclusion::Workload { pattern: "cronjob:*".into() }], &pr));
-        assert!(!is_excluded(&[Exclusion::Namespace { pattern: "kube-*".into() }], &pr));
+        assert!(is_excluded(
+            &[Exclusion::Pod {
+                pattern: "*-confsrv-*".into()
+            }],
+            &pr
+        ));
+        assert!(is_excluded(
+            &[Exclusion::Workload {
+                pattern: "cronjob:*".into()
+            }],
+            &pr
+        ));
+        assert!(!is_excluded(
+            &[Exclusion::Namespace {
+                pattern: "kube-*".into()
+            }],
+            &pr
+        ));
         assert!(!is_excluded(&[], &pr));
     }
 
@@ -550,7 +597,10 @@ mod tests {
         assert!(c.validate(Some("ns")).is_err());
         let mut c = cfg();
         c.probes[0].mappings = vec![mapping("x", None, None, Unit::Number)];
-        assert!(c.validate(Some("ns")).is_err(), "mapping needs metric or label");
+        assert!(
+            c.validate(Some("ns")).is_err(),
+            "mapping needs metric or label"
+        );
         let mut c = cfg();
         c.probes[0].mappings = vec![mapping("x", Some("bad name"), None, Unit::Number)];
         assert!(c.validate(Some("ns")).is_err(), "metric name charset");
@@ -560,7 +610,10 @@ mod tests {
         c.namespaces = vec!["groove".into()];
         assert!(c.validate(None).is_ok());
         assert_eq!(c.effective_namespaces(None), vec!["groove".to_string()]);
-        assert_eq!(cfg().effective_namespaces(Some("mscasino")), vec!["mscasino".to_string()]);
+        assert_eq!(
+            cfg().effective_namespaces(Some("mscasino")),
+            vec!["mscasino".to_string()]
+        );
     }
 
     #[test]
@@ -572,7 +625,8 @@ mod tests {
         }
         assert!(presets()
             .iter()
-            .any(|(id, _, p)| id == "go_actuator" && p.iter().any(|x| x.path == "/actuator/prometheus")));
+            .any(|(id, _, p)| id == "go_actuator"
+                && p.iter().any(|x| x.path == "/actuator/prometheus")));
     }
 
     #[test]
@@ -587,9 +641,20 @@ mod tests {
 
     #[test]
     fn exclusion_json_shape() {
-        let e: Exclusion = serde_json::from_str(r#"{"kind":"label","selector":"tier=job"}"#).unwrap();
-        assert_eq!(e, Exclusion::Label { selector: "tier=job".into() });
+        let e: Exclusion =
+            serde_json::from_str(r#"{"kind":"label","selector":"tier=job"}"#).unwrap();
+        assert_eq!(
+            e,
+            Exclusion::Label {
+                selector: "tier=job".into()
+            }
+        );
         let e: Exclusion = serde_json::from_str(r#"{"kind":"pod","match":"*-x"}"#).unwrap();
-        assert_eq!(e, Exclusion::Pod { pattern: "*-x".into() });
+        assert_eq!(
+            e,
+            Exclusion::Pod {
+                pattern: "*-x".into()
+            }
+        );
     }
 }

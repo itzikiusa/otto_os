@@ -81,8 +81,8 @@ async fn seed_user(pool: &SqlitePool, username: &str, is_root: bool) -> User {
 #[test]
 fn share_routes_have_correct_policy() {
     use axum::http::Method;
-    use otto_server::policy::{policy_for, PolicyDecision};
     use otto_core::domain::{Capability, Feature};
+    use otto_server::policy::{policy_for, PolicyDecision};
 
     // POST /sessions/{id}/share → Agents:Edit
     assert_eq!(
@@ -128,7 +128,13 @@ async fn owner_mints_viewer_share_and_token_authenticates() {
     let owner = seed_user(&pool, "owner", false).await;
 
     let (raw, info) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .expect("mint share");
 
@@ -141,7 +147,10 @@ async fn owner_mints_viewer_share_and_token_authenticates() {
 
     // URL pattern: info carries the session_id for building /#/s/<id>/<token>
     let url = format!("/#/s/{}/{}", info.session_id, raw);
-    assert!(url.contains("/#/s/S1/"), "url must contain /#/s/<session_id>/");
+    assert!(
+        url.contains("/#/s/S1/"),
+        "url must contain /#/s/<session_id>/"
+    );
 }
 
 /// Editor share carries Editor scope.
@@ -152,7 +161,13 @@ async fn owner_mints_editor_share_carries_editor_scope() {
     let owner = seed_user(&pool, "owner", false).await;
 
     let (raw, _info) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Editor, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Editor,
+            3600,
+            None,
+        )
         .await
         .expect("mint editor share");
 
@@ -182,13 +197,21 @@ async fn revoked_share_token_cannot_authenticate() {
     let owner = seed_user(&pool, "owner", false).await;
 
     let (raw, info) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .expect("mint");
 
     assert!(repo.authenticate(&raw).await.is_ok(), "before revoke");
 
-    repo.revoke_share(&owner.id, &info.id).await.expect("revoke");
+    repo.revoke_share(&owner.id, &info.id)
+        .await
+        .expect("revoke");
 
     assert!(
         repo.authenticate(&raw).await.is_err(),
@@ -205,16 +228,34 @@ async fn revoke_all_shares_clears_all_for_user() {
     let other = seed_user(&pool, "other", false).await;
 
     let (raw1, _) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .unwrap();
     let (raw2, _) = repo
-        .issue_share_token(&owner.id, &Id::from("S2"), WorkspaceRole::Editor, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S2"),
+            WorkspaceRole::Editor,
+            3600,
+            None,
+        )
         .await
         .unwrap();
     // Other user's share must be unaffected.
     let (raw_other, _) = repo
-        .issue_share_token(&other.id, &Id::from("S3"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &other.id,
+            &Id::from("S3"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .unwrap();
 
@@ -254,16 +295,34 @@ async fn list_shares_returns_live_shares_for_session() {
     let owner = seed_user(&pool, "owner", false).await;
 
     let (_raw1, info1) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Viewer, 3600, Some("viewer".into()))
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            Some("viewer".into()),
+        )
         .await
         .unwrap();
     let (_raw2, info2) = repo
-        .issue_share_token(&owner.id, &Id::from("S1"), WorkspaceRole::Editor, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Editor,
+            3600,
+            None,
+        )
         .await
         .unwrap();
     // Share for another session must not appear.
     let (_raw3, _) = repo
-        .issue_share_token(&owner.id, &Id::from("S2"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S2"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .unwrap();
 
@@ -305,10 +364,8 @@ fn build_scope_check_app(pool: SqlitePool, auth_ctx: AuthContext) -> Router {
         .route("/sessions/{id}/share", post(stub_ok))
         .route("/sessions/{id}/shares", get(stub_ok));
 
-    let protected = protected.route_layer(from_fn_with_state(
-        state.clone(),
-        feature_guard::<MinState>,
-    ));
+    let protected =
+        protected.route_layer(from_fn_with_state(state.clone(), feature_guard::<MinState>));
 
     let ctx = Arc::new(auth_ctx);
     let protected = protected.layer(from_fn(move |mut req: Request, next: Next| {
@@ -354,19 +411,32 @@ async fn scoped_token_cannot_mint_share() {
     .unwrap();
 
     let (raw, _info) = repo
-        .issue_share_token(&Id::from(&owner_id), &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &Id::from(&owner_id),
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .expect("mint share for scoped-owner");
 
     // Authenticate to get the scoped AuthContext.
-    let auth_ctx = repo.authenticate(&raw).await.expect("authenticate scoped token");
+    let auth_ctx = repo
+        .authenticate(&raw)
+        .await
+        .expect("authenticate scoped token");
     assert!(auth_ctx.scope.is_some(), "must be a scoped context");
 
     let app = build_scope_check_app(pool, auth_ctx);
 
     // A scoped token hitting POST /sessions/S1/share → 403 (scope guard denies non-allow-listed routes)
     let st = status(&app, Method::POST, "/api/v1/sessions/S1/share").await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token must be denied POST /sessions/{{id}}/share");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "scoped token must be denied POST /sessions/{{id}}/share"
+    );
 }
 
 /// A scoped token calling GET /sessions/{id}/shares → 403.
@@ -390,7 +460,13 @@ async fn scoped_token_cannot_list_shares() {
     .unwrap();
 
     let (raw, _) = repo
-        .issue_share_token(&Id::from(&owner_id), &Id::from("S1"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &Id::from(&owner_id),
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .unwrap();
 
@@ -398,7 +474,11 @@ async fn scoped_token_cannot_list_shares() {
     let app = build_scope_check_app(pool, auth_ctx);
 
     let st = status(&app, Method::GET, "/api/v1/sessions/S1/shares").await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token must be denied GET /sessions/{{id}}/shares");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "scoped token must be denied GET /sessions/{{id}}/shares"
+    );
 }
 
 /// share_session_id returns the correct session id for a share.
@@ -409,15 +489,22 @@ async fn share_session_id_lookup_works() {
     let owner = seed_user(&pool, "owner", false).await;
 
     let (_raw, info) = repo
-        .issue_share_token(&owner.id, &Id::from("SESS-42"), WorkspaceRole::Viewer, 3600, None)
+        .issue_share_token(
+            &owner.id,
+            &Id::from("SESS-42"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
         .await
         .unwrap();
 
-    let found = repo
-        .share_session_id(&owner.id, &info.id)
-        .await
-        .unwrap();
-    assert_eq!(found, Some(Id::from("SESS-42")), "must return the pinned session id");
+    let found = repo.share_session_id(&owner.id, &info.id).await.unwrap();
+    assert_eq!(
+        found,
+        Some(Id::from("SESS-42")),
+        "must return the pinned session id"
+    );
 
     // Another user cannot find it.
     let other = seed_user(&pool, "other", false).await;

@@ -1158,7 +1158,14 @@ async fn aws_parent_page_is_required_and_discovery_redacts_configuration() {
     assert!(account["permissions"].is_null());
     let (_, list, _) = call(&ctx, &user, "GET", "/aws/accounts", None).await;
     assert!(list[0]["profile"].is_null());
-    let (st, probe, _) = call(&ctx, &user, "POST", &format!("/aws/accounts/{id}/test"), None).await;
+    let (st, probe, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/aws/accounts/{id}/test"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert!(probe["identity"].is_null());
     assert_eq!(probe["message"], "Connection succeeded");

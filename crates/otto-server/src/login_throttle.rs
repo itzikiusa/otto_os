@@ -82,7 +82,9 @@ impl AttemptStore {
             return;
         }
         let entry = store.entry(key.to_string()).or_default();
-        entry.failures.retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
+        entry
+            .failures
+            .retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
         entry.failures.push(now);
         if entry.failures.len() as u32 >= FAILURE_THRESHOLD {
             entry.locked_until = Some(now + LOCKOUT_DURATION);

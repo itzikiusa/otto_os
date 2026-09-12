@@ -529,15 +529,11 @@ impl BrokersService {
         };
         // Cleanup policy comes from topic config; some clusters/users can't read
         // configs (e.g. MSK without DESCRIBE_CONFIGS) — degrade gracefully.
-        let cleanup_policy = client
-            .topic_configs(topic)
-            .await
-            .ok()
-            .and_then(|cfgs| {
-                cfgs.into_iter()
-                    .find(|c| c.name == "cleanup.policy")
-                    .and_then(|c| c.value)
-            });
+        let cleanup_policy = client.topic_configs(topic).await.ok().and_then(|cfgs| {
+            cfgs.into_iter()
+                .find(|c| c.name == "cleanup.policy")
+                .and_then(|c| c.value)
+        });
         let msg_per_sec = {
             let sampler = self
                 .samplers
@@ -622,15 +618,11 @@ impl BrokersService {
             // Only fetch config if the count succeeded (avoids double-erroring on
             // permission issues where the cluster can't be reached at all).
             let cleanup_policy = if count >= 0 {
-                client
-                    .topic_configs(name)
-                    .await
-                    .ok()
-                    .and_then(|cfgs| {
-                        cfgs.into_iter()
-                            .find(|c| c.name == "cleanup.policy")
-                            .and_then(|c| c.value)
-                    })
+                client.topic_configs(name).await.ok().and_then(|cfgs| {
+                    cfgs.into_iter()
+                        .find(|c| c.name == "cleanup.policy")
+                        .and_then(|c| c.value)
+                })
             } else {
                 None
             };
@@ -897,11 +889,14 @@ impl BrokersService {
         // lag_delta = old_lag - new_lag, so:
         //   total_lag_before = sum(old_lag)  = sum(new_lag + lag_delta)
         //   total_lag_after  = total_lag_before - sum(lag_delta)
-        let total_lag_before: i64 = detail.offsets.iter()
+        let total_lag_before: i64 = detail
+            .offsets
+            .iter()
             .filter(|o| topic_filter.as_deref().is_none_or(|f| o.topic == f))
             .map(|o| o.lag)
             .sum();
-        let total_lag_after: i64 = (total_lag_before - partitions.iter().map(|p| p.lag_delta).sum::<i64>()).max(0);
+        let total_lag_after: i64 =
+            (total_lag_before - partitions.iter().map(|p| p.lag_delta).sum::<i64>()).max(0);
 
         Ok(DryRunResp {
             group: group.to_string(),
@@ -936,13 +931,19 @@ impl BrokersService {
             let key_preview = m.key.as_deref().and_then(|k| {
                 std::str::from_utf8(k).ok().map(|s| {
                     let s = s.trim_end_matches('\0');
-                    if s.len() > 64 { format!("{}…", &s[..64]) } else { s.to_string() }
+                    if s.len() > 64 {
+                        format!("{}…", &s[..64])
+                    } else {
+                        s.to_string()
+                    }
                 })
             });
 
             // Apply transform: override key if requested.
             let key: Option<Vec<u8>> = if let Some(t) = &req.transform {
-                t.set_key.as_deref().map(|k| k.as_bytes().to_vec())
+                t.set_key
+                    .as_deref()
+                    .map(|k| k.as_bytes().to_vec())
                     .or_else(|| m.key.clone())
             } else {
                 m.key.clone()
@@ -964,7 +965,9 @@ impl BrokersService {
             let value = m.value.clone().unwrap_or_default();
             let produce_req = ProduceReq {
                 partition: None, // let the broker choose
-                key: key.as_deref().and_then(|k| std::str::from_utf8(k).ok().map(|s| s.to_string())),
+                key: key
+                    .as_deref()
+                    .and_then(|k| std::str::from_utf8(k).ok().map(|s| s.to_string())),
                 value: String::from_utf8_lossy(&value).into_owned(),
                 headers: headers
                     .into_iter()
@@ -995,7 +998,8 @@ impl BrokersService {
 
         // Persist the evidence row so operators can audit replays.
         let replay_id = if let Some(ops) = &self.ops {
-            let ev_json = serde_json::to_value(&evidence).unwrap_or(serde_json::Value::Array(vec![]));
+            let ev_json =
+                serde_json::to_value(&evidence).unwrap_or(serde_json::Value::Array(vec![]));
             let row = ops
                 .record_replay(
                     cluster_id,
@@ -1033,7 +1037,10 @@ impl BrokersService {
             .as_ref()
             .ok_or_else(|| Error::Internal("ops repo not initialised".into()))?;
         let rows = ops.list_alerts(cluster_id).await?;
-        Ok(rows.into_iter().map(|r| lag_alert_from_row(r, current_lags)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| lag_alert_from_row(r, current_lags))
+            .collect())
     }
 
     pub async fn create_lag_alert(
@@ -1337,7 +1344,11 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             decode: ValueFormat::Auto,
             mask: None,
         },
-        ReplaySelector::OffsetRange { partition, from, to } => ConsumeReq {
+        ReplaySelector::OffsetRange {
+            partition,
+            from,
+            to,
+        } => ConsumeReq {
             partition: Some(*partition),
             start: StartPosition::Offset { offset: *from },
             limit: (*to - *from + 1).max(1) as usize,
@@ -1348,9 +1359,14 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             decode: ValueFormat::Auto,
             mask: None,
         },
-        ReplaySelector::Timestamp { timestamp_ms, limit } => ConsumeReq {
+        ReplaySelector::Timestamp {
+            timestamp_ms,
+            limit,
+        } => ConsumeReq {
             partition: None,
-            start: StartPosition::Timestamp { timestamp_ms: *timestamp_ms },
+            start: StartPosition::Timestamp {
+                timestamp_ms: *timestamp_ms,
+            },
             limit: *limit,
             max_wait_ms: Some(15_000),
             key_filter: None,
@@ -1371,7 +1387,11 @@ fn lag_alert_from_row(
     // Key convention: "{group_name}:{topic}" — matches what the metrics sweep writes.
     let key = format!("{}:{}", r.group_name, r.topic);
     let breach_lag = current_lags.get(&key).and_then(|&lag| {
-        if r.enabled && lag >= r.threshold { Some(lag) } else { None }
+        if r.enabled && lag >= r.threshold {
+            Some(lag)
+        } else {
+            None
+        }
     });
     LagAlert {
         id: r.id,

@@ -211,7 +211,10 @@ mod tests {
         let skill_md = dir.path().join("skills/po-story-overview/SKILL.md");
         assert!(skill_md.exists(), "SKILL.md must be seeded");
         let content = fs::read_to_string(&skill_md).unwrap();
-        assert!(content.contains("description:"), "SKILL.md must have frontmatter");
+        assert!(
+            content.contains("description:"),
+            "SKILL.md must have frontmatter"
+        );
 
         // references/ directory seeded.
         let refs_dir = dir.path().join("skills/po-story-overview/references");
@@ -253,6 +256,9 @@ mod tests {
         // Second seed must be a no-op (marker already at current version).
         seed_skills(&library).unwrap();
         let after = fs::read_to_string(&skill_md).unwrap();
-        assert_eq!(after, "custom edit by user", "second seed must not clobber user edits");
+        assert_eq!(
+            after, "custom edit by user",
+            "second seed must not clobber user edits"
+        );
     }
 }

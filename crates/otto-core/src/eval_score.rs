@@ -21,7 +21,11 @@ pub fn signal_from_cmd(ran: bool, success: bool, detail: impl Into<String>) -> S
 
 /// A review-findings score (0–100) that already came from `score_findings`.
 pub fn signal_score(ran: bool, score: f64, detail: impl Into<String>) -> SignalScore {
-    SignalScore { ran, score: score.clamp(0.0, 100.0), detail: detail.into() }
+    SignalScore {
+        ran,
+        score: score.clamp(0.0, 100.0),
+        detail: detail.into(),
+    }
 }
 
 /// The diff-quality signal: `100 − min(80, risk)` — small, focused, low-risk diffs
@@ -42,12 +46,18 @@ pub fn diff_score(files: u32, additions: u32, deletions: u32, risky: u32, risk: 
 }
 
 /// The human-rating signal (0–5 → 0–100). `ran` is implied by `rating.is_some()`.
-pub fn human_score(rating: Option<u8>, note: impl Into<String>, rater: impl Into<String>) -> HumanScore {
+pub fn human_score(
+    rating: Option<u8>,
+    note: impl Into<String>,
+    rater: impl Into<String>,
+) -> HumanScore {
     HumanScore {
         rating,
         note: note.into(),
         rater: rater.into(),
-        score: rating.map(|r| (r.min(5) as f64) / 5.0 * 100.0).unwrap_or(0.0),
+        score: rating
+            .map(|r| (r.min(5) as f64) / 5.0 * 100.0)
+            .unwrap_or(0.0),
     }
 }
 
@@ -116,7 +126,13 @@ mod tests {
     use super::*;
     use crate::domain::ScoreWeights;
 
-    fn score(tests: SignalScore, lint: SignalScore, diff: DiffScore, review: SignalScore, human: HumanScore) -> EvalScore {
+    fn score(
+        tests: SignalScore,
+        lint: SignalScore,
+        diff: DiffScore,
+        review: SignalScore,
+        human: HumanScore,
+    ) -> EvalScore {
         let mut s = EvalScore {
             tests,
             lint,
@@ -137,11 +153,11 @@ mod tests {
         // Only tests + diff ran; lint/review/human absent → composite is the
         // weight-weighted mean of just those two, not diluted by absent signals.
         let s = score(
-            signal_from_cmd(true, true, "pass"),       // 100, w 0.35
-            SignalScore::default(),                      // absent
-            diff_score(1, 5, 0, 0, 0),                   // 100, w 0.15
-            SignalScore::default(),                      // absent
-            human_score(None, "", ""),                   // absent
+            signal_from_cmd(true, true, "pass"), // 100, w 0.35
+            SignalScore::default(),              // absent
+            diff_score(1, 5, 0, 0, 0),           // 100, w 0.15
+            SignalScore::default(),              // absent
+            human_score(None, "", ""),           // absent
         );
         assert!((s.composite - 100.0).abs() < 1e-9, "got {}", s.composite);
     }

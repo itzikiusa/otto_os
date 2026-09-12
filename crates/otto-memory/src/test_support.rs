@@ -24,15 +24,13 @@ pub async fn mem_pool() -> (SqlitePool, String, String) {
     .execute(&pool)
     .await
     .expect("seed user");
-    sqlx::query(
-        "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&ws)
-    .bind("Test WS")
-    .bind("/tmp/test-ws")
-    .bind(TS)
-    .execute(&pool)
-    .await
-    .expect("seed workspace");
+    sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+        .bind(&ws)
+        .bind("Test WS")
+        .bind("/tmp/test-ws")
+        .bind(TS)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
     (pool, ws, user)
 }

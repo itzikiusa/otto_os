@@ -128,14 +128,8 @@ pub async fn import_governed(
 /// Paths are relative to the `/api/v1` mount point.
 pub fn memory_gov_routes() -> Router<ServerCtx> {
     Router::new()
-        .route(
-            "/workspaces/{ws}/memory/{mid}/state",
-            post(set_state),
-        )
-        .route(
-            "/workspaces/{ws}/memory/{mid}/forget",
-            post(forget),
-        )
+        .route("/workspaces/{ws}/memory/{mid}/state", post(set_state))
+        .route("/workspaces/{ws}/memory/{mid}/forget", post(forget))
         .route(
             "/workspaces/{ws}/memory/{mid}/forget/undo",
             post(forget_undo),

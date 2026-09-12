@@ -387,7 +387,9 @@ async fn rewrite_fc_frame(
 
 /// Read one length-prefixed Kafka frame (the bytes after the 4-byte length).
 /// `Ok(None)` on a clean EOF.
-async fn read_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    r: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}

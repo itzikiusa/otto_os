@@ -239,7 +239,13 @@ impl Bitbucket {
         } else {
             "none"
         };
-        CiStatus { state: state.to_string(), total, passed, failed, url }
+        CiStatus {
+            state: state.to_string(),
+            total,
+            passed,
+            failed,
+            url,
+        }
     }
 }
 
@@ -282,8 +288,10 @@ fn create_pr_body(req: &CreatePrReq, reviewer_uuids: &[String]) -> Value {
         body["draft"] = json!(draft);
     }
     if !reviewer_uuids.is_empty() {
-        body["reviewers"] =
-            json!(reviewer_uuids.iter().map(|u| json!({ "uuid": u })).collect::<Vec<_>>());
+        body["reviewers"] = json!(reviewer_uuids
+            .iter()
+            .map(|u| json!({ "uuid": u }))
+            .collect::<Vec<_>>());
     }
     body
 }
@@ -558,7 +566,11 @@ impl super::GitProvider for Bitbucket {
             .parse()
             .map_err(|_| Error::Invalid(format!("bad comment id: {thread_id}")))?;
         let path = Self::pr_path(r, &format!("/{number}/comments/{id}/resolve"));
-        let method = if resolved { reqwest::Method::POST } else { reqwest::Method::DELETE };
+        let method = if resolved {
+            reqwest::Method::POST
+        } else {
+            reqwest::Method::DELETE
+        };
         self.send(method, &path, None).await.map(|_| ())
     }
 
@@ -673,7 +685,11 @@ impl super::GitProvider for Bitbucket {
                     || m.display_name.to_ascii_lowercase().contains(&needle)
             })
             .map(|m| otto_core::api::Collaborator {
-                name: if m.nickname.is_empty() { m.uuid } else { m.nickname },
+                name: if m.nickname.is_empty() {
+                    m.uuid
+                } else {
+                    m.nickname
+                },
                 display_name: m.display_name,
             })
             .collect())
@@ -690,7 +706,11 @@ impl super::GitProvider for Bitbucket {
             .map_err(|e| Error::Upstream(format!("bitbucket decode: {e}")))?;
         let login = {
             let u = vstr(&v, &["username"]);
-            if u.is_empty() { vstr(&v, &["display_name"]) } else { u }
+            if u.is_empty() {
+                vstr(&v, &["display_name"])
+            } else {
+                u
+            }
         };
         Ok(super::TokenCheck { login, scopes })
     }
@@ -790,7 +810,13 @@ fn parse_statuses_fixture(json_str: &str) -> CiStatus {
     } else {
         "none"
     };
-    CiStatus { state: state.to_string(), total, passed, failed, url }
+    CiStatus {
+        state: state.to_string(),
+        total,
+        passed,
+        failed,
+        url,
+    }
 }
 
 use super::PrCheck;
@@ -810,7 +836,11 @@ pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
             };
             let name = vstr(item, &["name"]);
             PrCheck {
-                name: if name.is_empty() { vstr(item, &["key"]) } else { name },
+                name: if name.is_empty() {
+                    vstr(item, &["key"])
+                } else {
+                    name
+                },
                 state: state.to_string(),
                 url: vstr_opt(item, &["url"]),
                 started_at: vstr_opt(item, &["created_on"]),
@@ -895,7 +925,9 @@ mod tests {
 
     #[test]
     fn member_mapping() {
-        let m = member_from(&json!({"user": {"uuid": "{u-2}", "nickname": "kay", "display_name": "Kay B"}}));
+        let m = member_from(
+            &json!({"user": {"uuid": "{u-2}", "nickname": "kay", "display_name": "Kay B"}}),
+        );
         assert_eq!(m.uuid, "{u-2}");
         assert_eq!(m.nickname, "kay");
         assert_eq!(m.display_name, "Kay B");

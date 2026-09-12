@@ -148,7 +148,9 @@ pub async fn resolve_walkthrough(
     // string, and never another scheme / host / port.
     let parsed = reqwest::Url::parse(q.url.trim())
         .ok()
-        .filter(|u| u.scheme() == "https" && u.host_str() == Some("github.com") && u.port().is_none())
+        .filter(|u| {
+            u.scheme() == "https" && u.host_str() == Some("github.com") && u.port().is_none()
+        })
         .ok_or_else(|| {
             ApiError(otto_core::Error::Invalid(
                 "only github.com walkthrough assets can be resolved".into(),
@@ -157,7 +159,9 @@ pub async fn resolve_walkthrough(
     let mut safe = reqwest::Url::parse(WALKTHROUGH_ORIGIN).expect("static origin parses");
     safe.set_path(parsed.path());
     safe.set_query(parsed.query());
-    let url = resolve_one_hop(safe.as_str()).await.map_err(|e| ApiError(otto_core::Error::Upstream(e)))?;
+    let url = resolve_one_hop(safe.as_str())
+        .await
+        .map_err(|e| ApiError(otto_core::Error::Upstream(e)))?;
     Ok(Json(ResolveWalkthroughResp { url }))
 }
 
@@ -211,6 +215,9 @@ mod walkthrough_tests {
         )
         .await
         .unwrap();
-        assert!(url.starts_with("https://release-assets.githubusercontent.com/"), "{url}");
+        assert!(
+            url.starts_with("https://release-assets.githubusercontent.com/"),
+            "{url}"
+        );
     }
 }

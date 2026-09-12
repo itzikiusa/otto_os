@@ -120,8 +120,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // any authenticated user may call it; no feature gate needed.
     // Share revocation (`/auth/shares/*`) is self-owned, like `/auth/tokens/*`:
     // a user revokes their own shares; no feature grant needed.
-    if matches!(p, "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities")
-        || p.starts_with("/auth/tokens/")
+    if matches!(
+        p,
+        "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities"
+    ) || p.starts_with("/auth/tokens/")
         || p.starts_with("/auth/shares")
     {
         return Exempt;
@@ -190,8 +192,21 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/members" {
         return Exempt;
     }
-    if p == "/database-changes" || p == "/database-changes/{id}"
-        || ["validate","submit","approve","reject","execute","cancel","reconcile","executors"].iter().any(|action| p == format!("/database-changes/{{id}}/{action}")) {
+    if p == "/database-changes"
+        || p == "/database-changes/{id}"
+        || [
+            "validate",
+            "submit",
+            "approve",
+            "reject",
+            "execute",
+            "cancel",
+            "reconcile",
+            "executors",
+        ]
+        .iter()
+        .any(|action| p == format!("/database-changes/{{id}}/{action}"))
+    {
         return Require(Database, View);
     }
     if p == "/mcp-servers/{id}" || p == "/workspaces/{id}/mcp-servers" {
@@ -303,10 +318,25 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
 
     // Resource management handlers resolve the resource and enforce its page,
     // workspace and management operation themselves. No prefix-wide exemption.
-    if matches!(p, "/access/groups" | "/access/groups/{id}" | "/access/groups/{id}/members" | "/access/groups/{id}/members/{uid}" | "/access/roles" | "/access/roles/{id}") {
+    if matches!(
+        p,
+        "/access/groups"
+            | "/access/groups/{id}"
+            | "/access/groups/{id}/members"
+            | "/access/groups/{id}/members/{uid}"
+            | "/access/roles"
+            | "/access/roles/{id}"
+    ) {
         return Require(Users, Admin);
     }
-    if matches!(p, "/access/{kind}/{id}" | "/access/{kind}/{id}/subjects" | "/access/{kind}/{id}/capabilities" | "/access/{kind}/{id}/effective" | "/access/{kind}/{id}/preview") {
+    if matches!(
+        p,
+        "/access/{kind}/{id}"
+            | "/access/{kind}/{id}/subjects"
+            | "/access/{kind}/{id}/capabilities"
+            | "/access/{kind}/{id}/effective"
+            | "/access/{kind}/{id}/preview"
+    ) {
         return Exempt;
     }
 
@@ -614,9 +644,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // produced and consumed by the Product workflows (the per-story ingest route
     // is mounted under `/product/…` and already covered above). We gate the
     // standalone memory API on Product: read=View, mutate=Edit. Root bypasses.
-    if p.starts_with("/workspaces/{ws}/memories")
-        || p.starts_with("/workspaces/{ws}/memory/")
-    {
+    if p.starts_with("/workspaces/{ws}/memories") || p.starts_with("/workspaces/{ws}/memory/") {
         // Search is a read that travels as POST (query body) — gate it View,
         // mirroring the `/db/test` precedent.
         if p == "/workspaces/{ws}/memory/search" {
@@ -652,9 +680,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // lives in the shared `/connection-sections` tree — the unified Connections
     // hub — so only `/brokers/clusters*` remains under this prefix.) Root
     // bypasses.
-    if p.starts_with("/brokers/cluster")
-        || p.starts_with("/workspaces/{wid}/brokers/cluster")
-    {
+    if p.starts_with("/brokers/cluster") || p.starts_with("/workspaces/{wid}/brokers/cluster") {
         let read = get
             || p.ends_with("/test") // connectivity probe — non-mutating
             || p.ends_with("/consume"); // peek messages — does not mutate the topic
@@ -1128,7 +1154,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Monitoring dashboard: the cross-cluster overview is a read; the per-cluster
     // `/monitor*` routes fall under the `{id}/` rule above (GET View, else Edit).
-    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") || p.starts_with("/k8s/monitor/fleet/") {
+    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") || p.starts_with("/k8s/monitor/fleet/")
+    {
         return Require(Kubernetes, View);
     }
     if matches!(p, "/k8s/install" | "/k8s/discover") {
@@ -1157,24 +1184,39 @@ mod tests {
     fn vault_docs_agent_routes_ride_the_product_feature() {
         // ws-scoped launch/refine routes ride the existing vault prefix rule.
         assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/run"),
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/run"
+            ),
             Require(Product, Edit),
         );
         assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine"),
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine"
+            ),
             Require(Product, Edit),
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
+            pol(
+                Method::GET,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"
+            ),
             Require(Product, View),
         );
         // Reset (detach the note's refine session) is a mutation → Edit.
         assert_eq!(
-            pol(Method::DELETE, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
+            pol(
+                Method::DELETE,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"
+            ),
             Require(Product, Edit),
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs"),
+            pol(
+                Method::GET,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs"
+            ),
             Require(Product, View),
         );
         // Non-ws run poll/cancel (the handlers re-check the run's ws role).
@@ -1183,7 +1225,10 @@ mod tests {
             Require(Product, View),
         );
         assert_eq!(
-            pol(Method::POST, "/api/v1/vault/docs-agents/runs/{run_id}/cancel"),
+            pol(
+                Method::POST,
+                "/api/v1/vault/docs-agents/runs/{run_id}/cancel"
+            ),
             Require(Product, Edit),
         );
         assert_eq!(
@@ -1205,7 +1250,10 @@ mod tests {
     #[test]
     fn vault_text_file_route_requires_product_edit() {
         assert_eq!(
-            pol(Method::PUT, "/api/v1/workspaces/{ws}/vault/vaults/{id}/file"),
+            pol(
+                Method::PUT,
+                "/api/v1/workspaces/{ws}/vault/vaults/{id}/file"
+            ),
             Require(Product, Edit),
         );
     }
@@ -1248,10 +1296,7 @@ mod tests {
 
     #[test]
     fn model_catalog_read_view_refresh_edit() {
-        assert_eq!(
-            pol(Method::GET, "/api/v1/walkthroughs/resolve"),
-            Exempt
-        );
+        assert_eq!(pol(Method::GET, "/api/v1/walkthroughs/resolve"), Exempt);
         assert_eq!(
             pol(Method::GET, "/api/v1/providers/models"),
             Require(Agents, View)
@@ -1268,7 +1313,10 @@ mod tests {
     fn snips_routes_ride_the_agents_feature() {
         assert_eq!(pol(Method::GET, "/api/v1/snips"), Require(Agents, View));
         assert_eq!(pol(Method::POST, "/api/v1/snips"), Require(Agents, Edit));
-        assert_eq!(pol(Method::POST, "/api/v1/snips/capture"), Require(Agents, Edit));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/snips/capture"),
+            Require(Agents, Edit)
+        );
         assert_eq!(
             pol(Method::GET, "/api/v1/snips/{id}/image"),
             Require(Agents, View),
@@ -1374,7 +1422,10 @@ mod tests {
             "starting a DB Assistant turn is Connections:Edit"
         );
         assert_eq!(
-            pol(Method::POST, "/api/v1/connections/{id}/db/assist/{aid}/summary"),
+            pol(
+                Method::POST,
+                "/api/v1/connections/{id}/db/assist/{aid}/summary"
+            ),
             Require(Connections, Edit)
         );
         assert_eq!(
@@ -1383,10 +1434,7 @@ mod tests {
         );
         // The `q`-tool query route is assist-key authed (NOT user bearer), like
         // `/ingest/*` — Exempt from the feature gate.
-        assert_eq!(
-            pol(Method::POST, "/api/v1/db-assist/{aid}/query"),
-            Exempt
-        );
+        assert_eq!(pol(Method::POST, "/api/v1/db-assist/{aid}/query"), Exempt);
     }
 
     #[test]
@@ -1417,15 +1465,24 @@ mod tests {
         );
         // Import connections from other DB tools: detect=View, scan/create=Edit.
         assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{id}/connections/import/sources"),
+            pol(
+                Method::GET,
+                "/api/v1/workspaces/{id}/connections/import/sources"
+            ),
             Require(Connections, View)
         );
         assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{id}/connections/import/scan"),
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{id}/connections/import/scan"
+            ),
             Require(Connections, Edit)
         );
         assert_eq!(
-            pol(Method::POST, "/api/v1/workspaces/{id}/connections/import/create"),
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{id}/connections/import/create"
+            ),
             Require(Connections, Edit)
         );
     }
@@ -1515,10 +1572,7 @@ mod tests {
         // STOP is self-scoped (revokes the presented token) and must NOT require
         // Users:Admin — the effective user mid-impersonation is a plain user, so
         // an Admin gate would make "Exit" impossible.
-        assert_eq!(
-            pol(Method::POST, "/api/v1/admin/impersonate/stop"),
-            Exempt
-        );
+        assert_eq!(pol(Method::POST, "/api/v1/admin/impersonate/stop"), Exempt);
     }
 
     #[test]
@@ -1569,7 +1623,10 @@ mod tests {
             pol(Method::POST, "/api/v1/workspaces/{id}/mcp-servers"),
             Require(Mcp, Admin)
         );
-        assert_eq!(pol(Method::DELETE, "/api/v1/mcp-servers/{id}"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/mcp-servers/{id}"),
+            Require(Mcp, Admin)
+        );
     }
 
     #[test]
@@ -1579,35 +1636,68 @@ mod tests {
             pol(Method::GET, "/api/v1/workspaces/{wid}/mcp/servers"),
             Require(Mcp, View)
         );
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/servers/{id}/tools"), Require(Mcp, View));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/servers/{id}/tools"),
+            Require(Mcp, View)
+        );
         assert_eq!(pol(Method::GET, "/api/v1/mcp/audit"), Require(Mcp, View));
         assert_eq!(pol(Method::GET, "/api/v1/mcp/stats"), Require(Mcp, View));
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/policies"),
+            Require(Mcp, Admin)
+        );
         // Non-mutating previews (POST but read-only) = View.
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies/export"), Require(Mcp, Admin));
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/evaluate"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp/policies/export"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/policies/evaluate"),
+            Require(Mcp, Admin)
+        );
         // Mutations / invoke = Edit.
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/mcp/servers"),
             Require(Mcp, Edit)
         );
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/servers/{id}/discover"), Require(Mcp, Edit));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/servers/{id}/discover"),
+            Require(Mcp, Edit)
+        );
         assert_eq!(
             pol(Method::POST, "/api/v1/mcp/servers/{id}/tools/{name}/invoke"),
             Require(Mcp, Edit)
         );
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/otto-tools/invoke"), Require(Mcp, Edit));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/otto-tools/invoke"),
+            Require(Mcp, Edit)
+        );
         // Posture changes = Admin.
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies"), Require(Mcp, Admin));
-        assert_eq!(pol(Method::PATCH, "/api/v1/mcp/policies/{id}"), Require(Mcp, Admin));
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/import"), Require(Mcp, Admin));
-        assert_eq!(pol(Method::PATCH, "/api/v1/mcp/otto-server"), Require(Mcp, Admin));
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/policies"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/mcp/policies/{id}"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/mcp/policies/import"),
+            Require(Mcp, Admin)
+        );
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/mcp/otto-server"),
+            Require(Mcp, Admin)
+        );
         assert_eq!(
             pol(Method::POST, "/api/v1/mcp/approvals/{id}/decide"),
             Require(Mcp, Admin)
         );
         // The legacy config CRUD is still Exempt (workspace-role axis only).
-        assert_eq!(pol(Method::GET, "/api/v1/mcp-servers/{id}"), Require(Mcp, View));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/mcp-servers/{id}"),
+            Require(Mcp, View)
+        );
     }
 
     #[test]
@@ -1744,11 +1834,17 @@ mod tests {
         );
         // eval-lab subroutes.
         assert_eq!(
-            pol(Method::POST, "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/rate"),
+            pol(
+                Method::POST,
+                "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/rate"
+            ),
             Require(SkillEval, Edit)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/proof-pack"),
+            pol(
+                Method::GET,
+                "/api/v1/skill-evaluations/{id}/iterations/{iter_id}/proof-pack"
+            ),
             Require(SkillEval, View)
         );
         // golden tasks + matrices.
@@ -1876,7 +1972,10 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/sessions/{id}/transcript/images/{img_id}"),
+            pol(
+                Method::GET,
+                "/api/v1/sessions/{id}/transcript/images/{img_id}"
+            ),
             Require(Agents, View)
         );
         assert_eq!(
@@ -1904,7 +2003,10 @@ mod tests {
             Require(Agents, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/workspaces/{wid}/history/transcript/images/{img_id}"),
+            pol(
+                Method::GET,
+                "/api/v1/workspaces/{wid}/history/transcript/images/{img_id}"
+            ),
             Require(Agents, View)
         );
         assert_eq!(
@@ -2003,20 +2105,53 @@ mod tests {
             Require(Git, View)
         );
         // Findings WORKFLOW (id-keyed): GET=View, action POSTs=Edit (Git feature).
-        assert_eq!(pol(Method::GET, "/api/v1/findings/{id}"), Require(Git, View));
-        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/fix"), Require(Git, Edit));
-        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/verify"), Require(Git, Edit));
-        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/accept"), Require(Git, Edit));
-        assert_eq!(pol(Method::POST, "/api/v1/findings/{id}/jira"), Require(Git, Edit));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/findings/{id}"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/findings/{id}/fix"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/findings/{id}/verify"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/findings/{id}/accept"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/findings/{id}/jira"),
+            Require(Git, Edit)
+        );
         // Proof pack rides the /reviews/ rule: GET=View, export POST=Edit.
-        assert_eq!(pol(Method::GET, "/api/v1/reviews/{rid}/proof-pack"), Require(Git, View));
-        assert_eq!(pol(Method::POST, "/api/v1/reviews/{rid}/proof-pack/export"), Require(Git, Edit));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/reviews/{rid}/proof-pack"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/reviews/{rid}/proof-pack/export"),
+            Require(Git, Edit)
+        );
         // Repo rules feed the Context Engine (Context feature): GET=View, write=Edit.
-        assert_eq!(pol(Method::GET, "/api/v1/workspaces/{ws}/repo-rules"), Require(Context, View));
-        assert_eq!(pol(Method::POST, "/api/v1/repo-rules/{id}/toggle"), Require(Context, Edit));
-        assert_eq!(pol(Method::DELETE, "/api/v1/repo-rules/{id}"), Require(Context, Edit));
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{ws}/repo-rules"),
+            Require(Context, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/repo-rules/{id}/toggle"),
+            Require(Context, Edit)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/repo-rules/{id}"),
+            Require(Context, Edit)
+        );
         // E2E seed route is exempt from the feature gate (handler env-gates it).
-        assert_eq!(pol(Method::POST, "/api/v1/workspaces/{ws}/__e2e/findings"), Exempt);
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{ws}/__e2e/findings"),
+            Exempt
+        );
     }
 
     #[test]

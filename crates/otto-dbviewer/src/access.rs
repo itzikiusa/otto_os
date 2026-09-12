@@ -405,8 +405,11 @@ mod select_into_regressions {
     use super::*;
     #[test]
     fn select_into_never_receives_read_only_authority() {
-        for sql in ["SELECT 1 INTO shop.new_table", "WITH copied AS (SELECT 1 INTO shop.new_table) SELECT * FROM copied"] {
-            assert!(operations(Engine::Postgres,sql).is_err(),"{sql}");
+        for sql in [
+            "SELECT 1 INTO shop.new_table",
+            "WITH copied AS (SELECT 1 INTO shop.new_table) SELECT * FROM copied",
+        ] {
+            assert!(operations(Engine::Postgres, sql).is_err(), "{sql}");
         }
     }
 }

@@ -165,7 +165,7 @@ pub struct SwarmGoal {
     pub workspace_id: Id,
     pub project_id: Option<Id>,
     pub task_id: Option<Id>,
-    pub kind: String,    // explicit | standing
+    pub kind: String, // explicit | standing
     pub title: String,
     pub description: String,
     pub metric: Option<String>,
@@ -175,7 +175,7 @@ pub struct SwarmGoal {
     pub verify_cmd: Option<String>,
     pub max_retries: i64,
     pub blocking: bool,
-    pub status: String,  // pending|verifying|passed|warned|unmet|skipped|error
+    pub status: String, // pending|verifying|passed|warned|unmet|skipped|error
     pub verdict: Option<Value>,
     pub iterations: i64,
     pub order_idx: i64,
@@ -657,11 +657,12 @@ impl SwarmRepo {
     // -- Swarms -------------------------------------------------------------
 
     pub async fn list_swarms(&self, ws: &Id) -> Result<Vec<Swarm>> {
-        let rows = sqlx::query("SELECT * FROM swarms WHERE workspace_id = ? ORDER BY created_at DESC")
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list swarms"))?;
+        let rows =
+            sqlx::query("SELECT * FROM swarms WHERE workspace_id = ? ORDER BY created_at DESC")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list swarms"))?;
         rows.iter().map(row_to_swarm).collect()
     }
 
@@ -1331,13 +1332,11 @@ impl SwarmRepo {
 
     /// Are all child tasks of a parent complete (done/cancelled)?
     pub async fn children_complete(&self, parent_id: &Id) -> Result<bool> {
-        let rows = sqlx::query(
-            "SELECT status FROM swarm_tasks WHERE parent_task_id = ?",
-        )
-        .bind(parent_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("children complete"))?;
+        let rows = sqlx::query("SELECT status FROM swarm_tasks WHERE parent_task_id = ?")
+            .bind(parent_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("children complete"))?;
         if rows.is_empty() {
             return Ok(false);
         }
@@ -2005,7 +2004,9 @@ mod tests {
 
         let s = repo.create_swarm(new_swarm(&ws)).await.unwrap();
         assert_eq!(s.max_attempts, 3, "default attempt ceiling");
-        assert!(s.max_total_runs.is_none() && s.max_cost_usd.is_none() && s.max_runtime_secs.is_none());
+        assert!(
+            s.max_total_runs.is_none() && s.max_cost_usd.is_none() && s.max_runtime_secs.is_none()
+        );
         assert!(s.run_started_at.is_none() && s.pause_reason.is_none());
 
         // Set limits via the patch (Some(Some(..)) = set the value).
@@ -2031,7 +2032,10 @@ mod tests {
         let s = repo
             .update_swarm(
                 &s.id,
-                SwarmPatch { max_cost_usd: Some(None), ..Default::default() },
+                SwarmPatch {
+                    max_cost_usd: Some(None),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -2054,12 +2058,31 @@ mod tests {
         let r1 = repo.create_run(new_run(&swarm)).await.unwrap();
         let r2 = repo.create_run(new_run(&swarm)).await.unwrap();
         let _r3 = repo.create_run(new_run(&swarm)).await.unwrap(); // cost stays NULL
-        repo.update_run(&r1.id, RunPatch { cost_usd: Some(Some(1.25)), ..Default::default() }).await.unwrap();
-        repo.update_run(&r2.id, RunPatch { cost_usd: Some(Some(0.75)), ..Default::default() }).await.unwrap();
+        repo.update_run(
+            &r1.id,
+            RunPatch {
+                cost_usd: Some(Some(1.25)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo.update_run(
+            &r2.id,
+            RunPatch {
+                cost_usd: Some(Some(0.75)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let spend = repo.swarm_spend(&swarm).await.unwrap();
         assert_eq!(spend.total_runs, 3, "every run counts, even with null cost");
-        assert!((spend.cost_usd - 2.0).abs() < 1e-9, "1.25 + 0.75 + (null=0)");
+        assert!(
+            (spend.cost_usd - 2.0).abs() < 1e-9,
+            "1.25 + 0.75 + (null=0)"
+        );
     }
 
     /// D8: the per-task attempt counter starts at 0 and increments, returning the
@@ -2092,7 +2115,9 @@ mod tests {
         assert!(s.run_started_at.is_some(), "active anchors the wall clock");
         assert!(s.pause_reason.is_none());
 
-        repo.pause_swarm_with_reason(&s.id, "cost budget reached").await.unwrap();
+        repo.pause_swarm_with_reason(&s.id, "cost budget reached")
+            .await
+            .unwrap();
         let s = repo.get_swarm(&s.id).await.unwrap();
         assert_eq!(s.status, "paused");
         assert_eq!(s.pause_reason.as_deref(), Some("cost budget reached"));
@@ -2113,9 +2138,25 @@ mod tests {
 
         let queued = repo.create_run(new_run(&swarm)).await.unwrap(); // status 'queued'
         let running = repo.create_run(new_run(&swarm)).await.unwrap();
-        repo.update_run(&running.id, RunPatch { status: Some("running".into()), ..Default::default() }).await.unwrap();
+        repo.update_run(
+            &running.id,
+            RunPatch {
+                status: Some("running".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let done = repo.create_run(new_run(&swarm)).await.unwrap();
-        repo.update_run(&done.id, RunPatch { status: Some("done".into()), ..Default::default() }).await.unwrap();
+        repo.update_run(
+            &done.id,
+            RunPatch {
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let n = repo.fail_running("interrupted").await.unwrap();
         assert_eq!(n, 2, "queued + running stopped; done untouched");
@@ -2146,7 +2187,10 @@ mod tests {
         // Finish the dependency → the blocked task becomes ready.
         repo.update_task(
             &dep.id,
-            TaskPatch { status: Some("done".into()), ..Default::default() },
+            TaskPatch {
+                status: Some("done".into()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2189,14 +2233,29 @@ mod tests {
         assert_eq!(repo.task_run_count(&task.id).await.unwrap(), 2);
 
         // Cost sums (best-effort): set cost on the runs and confirm SUM.
-        repo.update_run(&r0.id, RunPatch { cost_usd: Some(Some(1.50)), ..Default::default() })
-            .await
-            .unwrap();
-        repo.update_run(&r1.id, RunPatch { cost_usd: Some(Some(2.25)), ..Default::default() })
-            .await
-            .unwrap();
+        repo.update_run(
+            &r0.id,
+            RunPatch {
+                cost_usd: Some(Some(1.50)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo.update_run(
+            &r1.id,
+            RunPatch {
+                cost_usd: Some(Some(2.25)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let spent = repo.total_cost(&swarm.id).await.unwrap();
-        assert!((spent - 3.75).abs() < 1e-9, "summed cost = 3.75, got {spent}");
+        assert!(
+            (spent - 3.75).abs() < 1e-9,
+            "summed cost = 3.75, got {spent}"
+        );
     }
     fn new_project(swarm: &Id, story_id: Option<Id>) -> NewProject {
         NewProject {
@@ -2225,7 +2284,10 @@ mod tests {
             .create_project(new_project(&swarm, Some(story.clone())))
             .await
             .unwrap();
-        let loser = repo.create_project(new_project(&swarm, None)).await.unwrap();
+        let loser = repo
+            .create_project(new_project(&swarm, None))
+            .await
+            .unwrap();
         let err = repo
             .update_project(
                 &loser.id,
@@ -2247,15 +2309,27 @@ mod tests {
         let pool = mem_pool().await;
         let repo = SwarmRepo::new(pool);
         let swarm = new_id();
-        let project = repo.create_project(new_project(&swarm, None)).await.unwrap();
+        let project = repo
+            .create_project(new_project(&swarm, None))
+            .await
+            .unwrap();
         let a = new_id();
         let b = new_id();
         assert!(repo.link_story_if_unlinked(&project.id, &a).await.unwrap());
         assert!(!repo.link_story_if_unlinked(&project.id, &b).await.unwrap());
-        assert_eq!(repo.get_project(&project.id).await.unwrap().story_id, Some(a.clone()));
+        assert_eq!(
+            repo.get_project(&project.id).await.unwrap().story_id,
+            Some(a.clone())
+        );
         // A story rooting another project → Conflict.
-        let other = repo.create_project(new_project(&swarm, None)).await.unwrap();
-        let err = repo.link_story_if_unlinked(&other.id, &a).await.unwrap_err();
+        let other = repo
+            .create_project(new_project(&swarm, None))
+            .await
+            .unwrap();
+        let err = repo
+            .link_story_if_unlinked(&other.id, &a)
+            .await
+            .unwrap_err();
         assert!(matches!(err, otto_core::Error::Conflict(_)), "got {err:?}");
     }
 }

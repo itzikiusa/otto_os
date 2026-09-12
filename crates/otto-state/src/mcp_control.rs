@@ -414,15 +414,19 @@ impl McpRegistryRepo {
         macro_rules! set_str {
             ($col:literal, $val:expr) => {
                 if let Some(v) = $val {
-                    sqlx::query(concat!("UPDATE mcp_servers SET ", $col, " = ? WHERE id = ?"))
-                        .bind(v)
-                        .bind(id)
-                        .execute(&self.pool)
-                        .await
-                        .map_err(dberr_unique(
-                            "update mcp server",
-                            "an MCP server with this name already exists in the workspace",
-                        ))?;
+                    sqlx::query(concat!(
+                        "UPDATE mcp_servers SET ",
+                        $col,
+                        " = ? WHERE id = ?"
+                    ))
+                    .bind(v)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(dberr_unique(
+                        "update mcp server",
+                        "an MCP server with this name already exists in the workspace",
+                    ))?;
                 }
             };
         }
@@ -435,28 +439,43 @@ impl McpRegistryRepo {
         if let Some(v) = args {
             let s = serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
             sqlx::query("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
-                .bind(&s).bind(id).execute(&self.pool).await
+                .bind(&s)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("update mcp server"))?;
         }
         if let Some(v) = env {
             let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
             sqlx::query("UPDATE mcp_servers SET env_json = ? WHERE id = ?")
-                .bind(&s).bind(id).execute(&self.pool).await
+                .bind(&s)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("update mcp server"))?;
         }
         if let Some(v) = headers {
             let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
             sqlx::query("UPDATE mcp_servers SET headers_json = ? WHERE id = ?")
-                .bind(&s).bind(id).execute(&self.pool).await
+                .bind(&s)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("update mcp server"))?;
         }
         if let Some(v) = enabled {
             sqlx::query("UPDATE mcp_servers SET enabled = ? WHERE id = ?")
-                .bind(v as i64).bind(id).execute(&self.pool).await
+                .bind(v as i64)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("update mcp server"))?;
         }
         sqlx::query("UPDATE mcp_servers SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now())).bind(id).execute(&self.pool).await
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
             .map_err(dberr("update mcp server"))?;
         self.get(id).await
     }
@@ -495,17 +514,21 @@ impl McpRegistryRepo {
     }
 
     pub async fn set_tools_meta(&self, id: &Id, count: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE mcp_servers SET tools_count = ?, tools_discovered_at = ? WHERE id = ?",
-        )
-        .bind(count).bind(fmt(Utc::now())).bind(id)
-        .execute(&self.pool).await.map_err(dberr("set mcp tools meta"))?;
+        sqlx::query("UPDATE mcp_servers SET tools_count = ?, tools_discovered_at = ? WHERE id = ?")
+            .bind(count)
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set mcp tools meta"))?;
         Ok(())
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
-            .bind(id).execute(&self.pool).await
+            .bind(id)
+            .execute(&self.pool)
+            .await
             .map_err(dberr("delete mcp server"))?;
         Ok(())
     }
@@ -641,28 +664,45 @@ impl McpToolsRepo {
     ) -> Result<McpTool> {
         if let Some(v) = enabled {
             sqlx::query("UPDATE mcp_tools SET enabled = ? WHERE id = ?")
-                .bind(v as i64).bind(id).execute(&self.pool).await
+                .bind(v as i64)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("patch mcp tool"))?;
         }
         if let Some(v) = require_approval {
             sqlx::query("UPDATE mcp_tools SET require_approval = ? WHERE id = ?")
-                .bind(v as i64).bind(id).execute(&self.pool).await
+                .bind(v as i64)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("patch mcp tool"))?;
         }
         // A human setting risk/injection pins it (risk_overridden=1) so rediscovery
         // never lowers it.
         if let Some(v) = risk_label {
             sqlx::query("UPDATE mcp_tools SET risk_label = ?, risk_overridden = 1 WHERE id = ?")
-                .bind(v).bind(id).execute(&self.pool).await
+                .bind(v)
+                .bind(id)
+                .execute(&self.pool)
+                .await
                 .map_err(dberr("patch mcp tool"))?;
         }
         if let Some(v) = injection_risk {
-            sqlx::query("UPDATE mcp_tools SET injection_risk = ?, risk_overridden = 1 WHERE id = ?")
-                .bind(v).bind(id).execute(&self.pool).await
-                .map_err(dberr("patch mcp tool"))?;
+            sqlx::query(
+                "UPDATE mcp_tools SET injection_risk = ?, risk_overridden = 1 WHERE id = ?",
+            )
+            .bind(v)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("patch mcp tool"))?;
         }
         sqlx::query("UPDATE mcp_tools SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now())).bind(id).execute(&self.pool).await
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
             .map_err(dberr("patch mcp tool"))?;
         self.get(id).await
     }
@@ -734,12 +774,7 @@ impl McpAllowlistRepo {
     /// Resolve the effective allow/deny for (ws, server, tool). A `deny` (tool- or
     /// server-scoped) wins; else a matching `allow`; else `None` (caller falls back
     /// to the server's `default_tool_access`). Returns the matched mode.
-    pub async fn resolve(
-        &self,
-        ws: &Id,
-        server_id: &Id,
-        tool: &str,
-    ) -> Result<Option<String>> {
+    pub async fn resolve(&self, ws: &Id, server_id: &Id, tool: &str) -> Result<Option<String>> {
         let rows = sqlx::query(
             "SELECT tool_name, mode FROM mcp_allowlist WHERE workspace_id = ? AND server_id = ?",
         )
@@ -813,7 +848,10 @@ impl McpPolicyRepo {
 
     pub async fn get(&self, id: &Id) -> Result<McpPolicy> {
         let r = sqlx::query("SELECT * FROM mcp_policies WHERE id = ?")
-            .bind(id).fetch_one(&self.pool).await.map_err(dberr("policy"))?;
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("policy"))?;
         row_to_policy(&r)
     }
 
@@ -859,39 +897,69 @@ impl McpPolicyRepo {
         reason: Option<&str>,
     ) -> Result<McpPolicy> {
         if let Some(v) = name {
-            sqlx::query("UPDATE mcp_policies SET name = ? WHERE id = ?").bind(v).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET name = ? WHERE id = ?")
+                .bind(v)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         if let Some(v) = enabled {
-            sqlx::query("UPDATE mcp_policies SET enabled = ? WHERE id = ?").bind(v as i64).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET enabled = ? WHERE id = ?")
+                .bind(v as i64)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         if let Some(v) = priority {
-            sqlx::query("UPDATE mcp_policies SET priority = ? WHERE id = ?").bind(v).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET priority = ? WHERE id = ?")
+                .bind(v)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         if let Some(v) = match_json {
             let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
-            sqlx::query("UPDATE mcp_policies SET match_json = ? WHERE id = ?").bind(&s).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET match_json = ? WHERE id = ?")
+                .bind(&s)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         if let Some(v) = effect {
-            sqlx::query("UPDATE mcp_policies SET effect = ? WHERE id = ?").bind(v).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET effect = ? WHERE id = ?")
+                .bind(v)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         if let Some(v) = reason {
-            sqlx::query("UPDATE mcp_policies SET reason = ? WHERE id = ?").bind(v).bind(id)
-                .execute(&self.pool).await.map_err(dberr("update policy"))?;
+            sqlx::query("UPDATE mcp_policies SET reason = ? WHERE id = ?")
+                .bind(v)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update policy"))?;
         }
         sqlx::query("UPDATE mcp_policies SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now())).bind(id).execute(&self.pool).await
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
             .map_err(dberr("update policy"))?;
         self.get(id).await
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM mcp_policies WHERE id = ?")
-            .bind(id).execute(&self.pool).await.map_err(dberr("delete policy"))?;
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete policy"))?;
         Ok(())
     }
 }
@@ -1021,7 +1089,10 @@ impl McpCallLogRepo {
         }
         let limit = if q.limit <= 0 { 200 } else { q.limit.min(1000) };
         query = query.bind(limit).bind(q.offset.max(0));
-        let rows = query.fetch_all(&self.pool).await.map_err(dberr("call log list"))?;
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("call log list"))?;
         Ok(rows.iter().map(row_to_call_log).collect())
     }
 
@@ -1044,7 +1115,9 @@ impl McpCallLogRepo {
                 return Ok(vec![]);
             }
             let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            sql.push_str(&format!(" AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"));
+            sql.push_str(&format!(
+                " AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"
+            ));
         }
         sql.push_str(" GROUP BY server_id, tool ORDER BY calls DESC");
         let mut query = sqlx::query(&sql);
@@ -1053,7 +1126,10 @@ impl McpCallLogRepo {
                 query = query.bind(id);
             }
         }
-        let rows = query.fetch_all(&self.pool).await.map_err(dberr("call log stats"))?;
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("call log stats"))?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -1065,7 +1141,11 @@ impl McpCallLogRepo {
                     tool: r.get("tool"),
                     calls,
                     errors,
-                    error_rate: if calls > 0 { errors as f64 / calls as f64 } else { 0.0 },
+                    error_rate: if calls > 0 {
+                        errors as f64 / calls as f64
+                    } else {
+                        0.0
+                    },
                     avg_latency_ms: r.get::<f64, _>("avg_latency"),
                     max_latency_ms: r.get::<i64, _>("max_latency"),
                     total_bytes: r.get::<i64, _>("total_bytes"),
@@ -1132,7 +1212,10 @@ impl McpApprovalRepo {
 
     pub async fn get(&self, id: &Id) -> Result<McpApproval> {
         let r = sqlx::query("SELECT * FROM mcp_approvals WHERE id = ?")
-            .bind(id).fetch_one(&self.pool).await.map_err(dberr("approval"))?;
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("approval"))?;
         Ok(row_to_approval(&r))
     }
 
@@ -1148,7 +1231,9 @@ impl McpApprovalRepo {
                 return Ok(vec![]);
             }
             let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            sql.push_str(&format!(" AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"));
+            sql.push_str(&format!(
+                " AND (workspace_id IN ({ph}) OR workspace_id IS NULL)"
+            ));
         }
         if status.is_some() {
             sql.push_str(" AND status = ?");
@@ -1164,7 +1249,10 @@ impl McpApprovalRepo {
             query = query.bind(s);
         }
         query = query.bind(if limit <= 0 { 200 } else { limit.min(1000) });
-        let rows = query.fetch_all(&self.pool).await.map_err(dberr("approvals"))?;
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("approvals"))?;
         Ok(rows.iter().map(row_to_approval).collect())
     }
 
@@ -1265,7 +1353,9 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     async fn mem_pool() -> SqlitePool {
-        let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
@@ -1281,8 +1371,14 @@ mod tests {
         let now = fmt(Utc::now());
         sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, 'u', 'x', 'U', 0, ?)")
             .bind(&user).bind(&now).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)")
-            .bind(&ws).bind(&now).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
         (ws, user)
     }
 
@@ -1336,15 +1432,29 @@ mod tests {
         repo.replace_for_ws(
             &ws,
             &[
-                NewAllowlistEntry { server_id: s.id.clone(), tool_name: None, mode: "allow".into() },
-                NewAllowlistEntry { server_id: s.id.clone(), tool_name: Some("danger".into()), mode: "deny".into() },
+                NewAllowlistEntry {
+                    server_id: s.id.clone(),
+                    tool_name: None,
+                    mode: "allow".into(),
+                },
+                NewAllowlistEntry {
+                    server_id: s.id.clone(),
+                    tool_name: Some("danger".into()),
+                    mode: "deny".into(),
+                },
             ],
             &user,
         )
         .await
         .unwrap();
-        assert_eq!(repo.resolve(&ws, &s.id, "safe").await.unwrap().as_deref(), Some("allow"));
-        assert_eq!(repo.resolve(&ws, &s.id, "danger").await.unwrap().as_deref(), Some("deny"));
+        assert_eq!(
+            repo.resolve(&ws, &s.id, "safe").await.unwrap().as_deref(),
+            Some("allow")
+        );
+        assert_eq!(
+            repo.resolve(&ws, &s.id, "danger").await.unwrap().as_deref(),
+            Some("deny")
+        );
     }
 
     #[tokio::test]
@@ -1374,7 +1484,10 @@ mod tests {
         // Requester cannot self-approve.
         assert!(repo.decide(&a.id, true, "requester", None).await.is_err());
         // A different user approves.
-        let decided = repo.decide(&a.id, true, "approver", Some("ok")).await.unwrap();
+        let decided = repo
+            .decide(&a.id, true, "approver", Some("ok"))
+            .await
+            .unwrap();
         assert_eq!(decided.status, "approved");
 
         // Gate finds it only for the exact (tool, args_hash, server, ws).

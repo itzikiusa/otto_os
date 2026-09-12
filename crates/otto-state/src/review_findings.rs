@@ -169,7 +169,12 @@ pub fn fallback_dedupe_key(path: Option<&str>, line: Option<u32>, body: &str) ->
     let mut hasher = Sha256::new();
     hasher.update(path.unwrap_or("").trim().to_lowercase().as_bytes());
     hasher.update(b"|");
-    hasher.update(line.map(|l| l / 10).unwrap_or(u32::MAX).to_string().as_bytes());
+    hasher.update(
+        line.map(|l| l / 10)
+            .unwrap_or(u32::MAX)
+            .to_string()
+            .as_bytes(),
+    );
     hasher.update(b"|");
     hasher.update(normalized_body_cap(body).as_bytes());
     hex::encode(hasher.finalize())
@@ -371,7 +376,12 @@ impl ReviewFindingsRepo {
                AND fingerprint NOT IN ({placeholders})"
         );
         let now = fmt(Utc::now());
-        let mut q = sqlx::query(&sql).bind(run_id).bind(&now).bind(workspace_id).bind(repo_id).bind(pr_number as i64);
+        let mut q = sqlx::query(&sql)
+            .bind(run_id)
+            .bind(&now)
+            .bind(workspace_id)
+            .bind(repo_id)
+            .bind(pr_number as i64);
         for fp in seen_fingerprints {
             q = q.bind(*fp);
         }
@@ -445,7 +455,11 @@ impl ReviewFindingsRepo {
             review_id: r.try_get("review_id").unwrap_or_default(),
             workspace_id: r.get("workspace_id"),
             repo_id: r.get("repo_id"),
-            pr_number: if pr_num > 0 { Some(pr_num as u64) } else { None },
+            pr_number: if pr_num > 0 {
+                Some(pr_num as u64)
+            } else {
+                None
+            },
             fingerprint: r.get("fingerprint"),
             severity: FindingSeverity::normalize(&sev_raw),
             category,
@@ -577,16 +591,43 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_across_identical_inputs() {
-        let fp1 = compute_fingerprint("repo-abc", 42, Some("src/main.rs"), Some("bug"), "use of unsafe block");
-        let fp2 = compute_fingerprint("repo-abc", 42, Some("src/main.rs"), Some("bug"), "use of unsafe block");
+        let fp1 = compute_fingerprint(
+            "repo-abc",
+            42,
+            Some("src/main.rs"),
+            Some("bug"),
+            "use of unsafe block",
+        );
+        let fp2 = compute_fingerprint(
+            "repo-abc",
+            42,
+            Some("src/main.rs"),
+            Some("bug"),
+            "use of unsafe block",
+        );
         assert_eq!(fp1, fp2);
     }
 
     #[test]
     fn fingerprint_normalises_case_and_whitespace() {
-        let fp1 = compute_fingerprint("repo-abc", 42, Some("src/main.rs"), Some("Bug"), "  Use of Unsafe Block  ");
-        let fp2 = compute_fingerprint("repo-abc", 42, Some("src/main.rs"), Some("bug"), "use of unsafe block");
-        assert_eq!(fp1, fp2, "fingerprints must be case-and-whitespace normalised");
+        let fp1 = compute_fingerprint(
+            "repo-abc",
+            42,
+            Some("src/main.rs"),
+            Some("Bug"),
+            "  Use of Unsafe Block  ",
+        );
+        let fp2 = compute_fingerprint(
+            "repo-abc",
+            42,
+            Some("src/main.rs"),
+            Some("bug"),
+            "use of unsafe block",
+        );
+        assert_eq!(
+            fp1, fp2,
+            "fingerprints must be case-and-whitespace normalised"
+        );
     }
 
     #[test]
@@ -669,15 +710,27 @@ mod tests {
         assert_eq!(f.status, FindingStatus::Open);
         assert_eq!(f.severity, FindingSeverity::High); // bug -> high (normalized on write)
         assert_eq!(f.evidence, "let q = format!(\"... {}\", name);");
-        assert_eq!(f.agent_reasoning_summary, "user input reaches the query unescaped");
-        assert_eq!(f.suggested_fix.as_deref(), Some("use a parameterized query"));
+        assert_eq!(
+            f.agent_reasoning_summary,
+            "user input reaches the query unescaped"
+        );
+        assert_eq!(
+            f.suggested_fix.as_deref(),
+            Some("use a parameterized query")
+        );
         assert_eq!(f.line, Some(42));
         assert_eq!(f.line_end, Some(48));
         assert_eq!(f.reviewer, "grill");
 
         // Human triages it to `verified` (workflow axis).
-        let f = repo.set_status(&f.id, FindingStatus::Accepted, "alice").await.unwrap();
-        let f = repo.set_status(&f.id, FindingStatus::Verified, "alice").await.unwrap();
+        let f = repo
+            .set_status(&f.id, FindingStatus::Accepted, "alice")
+            .await
+            .unwrap();
+        let f = repo
+            .set_status(&f.id, FindingStatus::Verified, "alice")
+            .await
+            .unwrap();
         assert_eq!(f.status, FindingStatus::Verified);
         assert_eq!(f.reviewer, "alice");
 
@@ -686,7 +739,11 @@ mod tests {
         let (f2, created2) = repo.upsert(&sample("fp-aaa", "bug")).await.unwrap();
         assert!(!created2);
         assert_eq!(f2.id, f.id);
-        assert_eq!(f2.status, FindingStatus::Verified, "re-detection must not reset workflow status");
+        assert_eq!(
+            f2.status,
+            FindingStatus::Verified,
+            "re-detection must not reset workflow status"
+        );
         assert_eq!(f2.occurrence_count, 2);
     }
 
@@ -698,7 +755,10 @@ mod tests {
         let err = repo.set_status(&f.id, FindingStatus::Verified, "u1").await;
         assert!(err.is_err(), "open -> verified must be rejected");
         // open -> accepted is legal
-        assert!(repo.set_status(&f.id, FindingStatus::Accepted, "u1").await.is_ok());
+        assert!(repo
+            .set_status(&f.id, FindingStatus::Accepted, "u1")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -718,13 +778,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(patched.linked_commit.as_deref(), Some("abc123"));
-        assert_eq!(patched.linked_test.as_deref(), Some("tests/db_test.rs::no_injection"));
+        assert_eq!(
+            patched.linked_test.as_deref(),
+            Some("tests/db_test.rs::no_injection")
+        );
         assert!(patched.requires_human_approval);
         // status untouched by set_fields
         assert_eq!(patched.status, FindingStatus::Open);
         // a second patch leaving linked_commit None keeps the old value (COALESCE)
         let again = repo
-            .set_fields(&f.id, &FindingPatch { jira_key: Some("PROJ-1".into()), ..Default::default() })
+            .set_fields(
+                &f.id,
+                &FindingPatch {
+                    jira_key: Some("PROJ-1".into()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(again.linked_commit.as_deref(), Some("abc123"));

@@ -30,7 +30,12 @@ impl RepoRulesRepo {
         Self { pool }
     }
 
-    pub async fn create(&self, workspace_id: &str, by: &str, r: NewRepoRule<'_>) -> Result<RepoRule> {
+    pub async fn create(
+        &self,
+        workspace_id: &str,
+        by: &str,
+        r: NewRepoRule<'_>,
+    ) -> Result<RepoRule> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(

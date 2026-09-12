@@ -70,7 +70,10 @@ mod tests {
 
     #[test]
     fn workspace_default_reads_string_field_only() {
-        assert_eq!(workspace_default(&json!({"default_provider": "codex"})), "codex");
+        assert_eq!(
+            workspace_default(&json!({"default_provider": "codex"})),
+            "codex"
+        );
         assert_eq!(workspace_default(&json!({"default_provider": 42})), "");
         assert_eq!(workspace_default(&json!({"notes": "hi"})), "");
         assert_eq!(workspace_default(&json!({})), "");

@@ -27,9 +27,9 @@ use axum::http::{Method, StatusCode};
 use axum::Router;
 use chrono::Utc;
 use otto_core::auth::{AuthUser, RoleChecker};
+use otto_core::domain::WorkspaceRole;
 use otto_core::domain::{Session, SessionKind, User};
 use otto_core::Id;
-use otto_core::domain::WorkspaceRole;
 use otto_rbac::{tokens::AuthRepo, RbacAuthenticator, RbacRoleChecker};
 use otto_sessions::{api_router, ws_router, ProviderRegistry, SessionManager, SessionsCtx};
 use otto_state::{SessionsRepo, SqlitePool, WorkspacesRepo};
@@ -49,9 +49,22 @@ struct Ctx {
 }
 
 impl SessionsCtx for Ctx {
-    fn check_resource<'a>(&'a self,_user:&'a User,session:&'a Session)->otto_core::auth::BoxFuture<'a,otto_core::Result<()>> {
+    fn check_resource<'a>(
+        &'a self,
+        _user: &'a User,
+        session: &'a Session,
+    ) -> otto_core::auth::BoxFuture<'a, otto_core::Result<()>> {
         Box::pin(async move {
-            if session.meta.get("resource_denied").and_then(|v| v.as_bool())==Some(true) {Err(otto_core::Error::Forbidden("resource revoked".into()))} else {Ok(())}
+            if session
+                .meta
+                .get("resource_denied")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                Err(otto_core::Error::Forbidden("resource revoked".into()))
+            } else {
+                Ok(())
+            }
         })
     }
     fn manager(&self) -> &Arc<SessionManager> {
@@ -323,11 +336,7 @@ async fn list_is_owner_scoped_for_non_admin() {
     // carol (workspace admin) and root see both.
     for caller in [user("carol", false), user("root", true)] {
         let list = list_sessions(&app, &caller, "ws1").await;
-        assert_eq!(
-            list.len(),
-            2,
-            "admin/root caller must see all sessions"
-        );
+        assert_eq!(list.len(), 2, "admin/root caller must see all sessions");
     }
 }
 
@@ -378,7 +387,12 @@ async fn mint_token(pool: &SqlitePool, user_id: &str) -> String {
 /// Mint a real **share-link** (`kind='share'`) token scoped to `session_id` at
 /// `role`, owned by `owner`. `authenticate` will attach the corresponding
 /// `SessionScope`, exercising the scoped-attach branch of `ws_auth_gate`.
-async fn mint_share(pool: &SqlitePool, owner: &str, session_id: &Id, role: WorkspaceRole) -> String {
+async fn mint_share(
+    pool: &SqlitePool,
+    owner: &str,
+    session_id: &Id,
+    role: WorkspaceRole,
+) -> String {
     let repo = AuthRepo::new(pool.clone());
     let (raw, _info) = repo
         .issue_share_token(&owner.into(), session_id, role, 3600, None)
@@ -447,7 +461,11 @@ async fn owner_and_admin_can_attach_terminal() {
     let sid = insert_session(&repo, "ws1", "alice").await; // alice owns it
     let app = ws_app(&pool).await;
 
-    for (label, uid) in [("owner alice", "alice"), ("ws-admin carol", "carol"), ("root", "root_usr")] {
+    for (label, uid) in [
+        ("owner alice", "alice"),
+        ("ws-admin carol", "carol"),
+        ("root", "root_usr"),
+    ] {
         let token = mint_token(&pool, uid).await;
         let status = term_ws_status(&app, &sid, &token).await;
         assert_ne!(
@@ -590,47 +608,82 @@ async fn scoped_share_bypasses_owner_gate_on_its_session() {
 
 #[tokio::test]
 async fn governance_activation_blocks_pending_create_and_restart_before_configuration_lookup() {
-    let pool=mem_pool().await;
-    seed_user(&pool,"owner",true).await;
-    seed_workspace(&pool,"workspace").await;
-    let repo=SessionsRepo::new(pool.clone());
-    let id=insert_session(&repo,"workspace","owner").await;
-    let (events,_rx)=broadcast::channel(64);
-    let manager=SessionManager::new(repo,events,ProviderRegistry::new(None));
-    let ws=WorkspacesRepo::new(pool).get(&"workspace".into()).await.unwrap();
-    let owner="owner".to_string();
-    let create=manager.create(&ws,&owner,otto_core::api::CreateSessionReq {
-        kind:SessionKind::Agent,provider:Some("unknown-test-provider".into()),title:None,cwd:None,connection_id:None,meta:None,model:None,
-    },None);
+    let pool = mem_pool().await;
+    seed_user(&pool, "owner", true).await;
+    seed_workspace(&pool, "workspace").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let id = insert_session(&repo, "workspace", "owner").await;
+    let (events, _rx) = broadcast::channel(64);
+    let manager = SessionManager::new(repo, events, ProviderRegistry::new(None));
+    let ws = WorkspacesRepo::new(pool)
+        .get(&"workspace".into())
+        .await
+        .unwrap();
+    let owner = "owner".to_string();
+    let create = manager.create(
+        &ws,
+        &owner,
+        otto_core::api::CreateSessionReq {
+            kind: SessionKind::Agent,
+            provider: Some("unknown-test-provider".into()),
+            title: None,
+            cwd: None,
+            connection_id: None,
+            meta: None,
+            model: None,
+        },
+        None,
+    );
     tokio::pin!(create);
-    let restart=manager.restart(&id,None);
+    let restart = manager.restart(&id, None);
     tokio::pin!(restart);
-    let exclusive=otto_sessions::mcp::activation_gate().write().await;
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(30),&mut create).await.is_err());
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(30),&mut restart).await.is_err());
+    let exclusive = otto_sessions::mcp::activation_gate().write().await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut create)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), &mut restart)
+            .await
+            .is_err()
+    );
     // No lookup or launch happened during retirement. Don't poll restart after
     // release: its shell provider could spawn a real process in this test.
     drop(exclusive);
-    assert!(create.await.is_err(),"after activation completes the unknown provider should fail normally");
+    assert!(
+        create.await.is_err(),
+        "after activation completes the unknown provider should fail normally"
+    );
 }
 
 #[tokio::test]
 async fn bulk_session_actions_respect_resource_denial() {
-    let pool=mem_pool().await;
-    seed_user(&pool,"owner",false).await;
-    seed_workspace(&pool,"ws").await;
-    set_member(&pool,"ws","owner","editor").await;
-    let repo=SessionsRepo::new(pool.clone());
-    let id=insert_session(&repo,"ws","owner").await;
-    repo.merge_meta(&id,&serde_json::json!({"resource_denied":true})).await.unwrap();
-    let app=app(&pool).await;
-    let mut req=Request::builder().method(Method::POST).uri("/sessions/bulk").header("content-type","application/json")
-        .body(Body::from(serde_json::json!({"action":"archive","ids":[id]}).to_string())).unwrap();
-    req.extensions_mut().insert(AuthUser(user("owner",false)));
-    let response=app.oneshot(req).await.unwrap();
-    assert_eq!(response.status(),StatusCode::OK);
-    let data=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
-    let outcomes:serde_json::Value=serde_json::from_slice(&data).unwrap();
-    assert_eq!(outcomes[0]["ok"],false);
+    let pool = mem_pool().await;
+    seed_user(&pool, "owner", false).await;
+    seed_workspace(&pool, "ws").await;
+    set_member(&pool, "ws", "owner", "editor").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let id = insert_session(&repo, "ws", "owner").await;
+    repo.merge_meta(&id, &serde_json::json!({"resource_denied":true}))
+        .await
+        .unwrap();
+    let app = app(&pool).await;
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/sessions/bulk")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"action":"archive","ids":[id]}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(user("owner", false)));
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let data = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let outcomes: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(outcomes[0]["ok"], false);
     assert!(!repo.get(&id).await.unwrap().archived);
 }

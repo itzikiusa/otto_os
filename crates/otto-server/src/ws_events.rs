@@ -511,8 +511,13 @@ mod tests {
         // alice owns the session but has no role at all in the workspace.
         let roles = StubRoles::new("nobody", "ws1", WorkspaceRole::Viewer);
         assert!(
-            session_owner_admin_or_root(&roles, &user("alice", false), &"ws1".into(), &"alice".into())
-                .await
+            session_owner_admin_or_root(
+                &roles,
+                &user("alice", false),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
     }
 
@@ -523,8 +528,13 @@ mod tests {
         // user's session events.
         let roles = StubRoles::new("bob", "ws1", WorkspaceRole::Editor);
         assert!(
-            !session_owner_admin_or_root(&roles, &user("bob", false), &"ws1".into(), &"alice".into())
-                .await
+            !session_owner_admin_or_root(
+                &roles,
+                &user("bob", false),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
     }
 
@@ -533,8 +543,13 @@ mod tests {
         // carol is a workspace Admin (not the owner) -> allowed.
         let roles = StubRoles::new("carol", "ws1", WorkspaceRole::Admin);
         assert!(
-            session_owner_admin_or_root(&roles, &user("carol", false), &"ws1".into(), &"alice".into())
-                .await
+            session_owner_admin_or_root(
+                &roles,
+                &user("carol", false),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
     }
 
@@ -543,8 +558,13 @@ mod tests {
         // The stub grants nothing to root; the helper's own root branch wins.
         let roles = StubRoles::new("nobody", "nowhere", WorkspaceRole::Viewer);
         assert!(
-            session_owner_admin_or_root(&roles, &user("root", true), &"ws1".into(), &"alice".into())
-                .await
+            session_owner_admin_or_root(
+                &roles,
+                &user("root", true),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
     }
 
@@ -554,14 +574,28 @@ mod tests {
         // session_owner_or_admin's short-circuit and keeps the hot path cheap).
         let roles = StubRoles::new("nobody", "nowhere", WorkspaceRole::Admin);
         assert!(
-            session_owner_admin_or_root(&roles, &user("alice", false), &"ws1".into(), &"alice".into())
-                .await
+            session_owner_admin_or_root(
+                &roles,
+                &user("alice", false),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
         assert!(
-            session_owner_admin_or_root(&roles, &user("root", true), &"ws1".into(), &"alice".into())
-                .await
+            session_owner_admin_or_root(
+                &roles,
+                &user("root", true),
+                &"ws1".into(),
+                &"alice".into()
+            )
+            .await
         );
-        assert_eq!(roles.calls.load(Ordering::SeqCst), 0, "no admin check for owner/root");
+        assert_eq!(
+            roles.calls.load(Ordering::SeqCst),
+            0,
+            "no admin check for owner/root"
+        );
     }
 
     // ---- workspace_viewer cache -------------------------------------------
@@ -696,13 +730,19 @@ mod tests {
             role: WorkspaceRole::Viewer,
             otp_pending: false,
         }));
-        assert!(scope_denied(&denied), "a viewer share must be denied /ws/events");
+        assert!(
+            scope_denied(&denied),
+            "a viewer share must be denied /ws/events"
+        );
         let denied = ctx_with_scope(Some(otto_core::auth::SessionScope {
             session_id: "S1".into(),
             role: WorkspaceRole::Editor,
             otp_pending: false,
         }));
-        assert!(scope_denied(&denied), "an editor share must be denied /ws/events too");
+        assert!(
+            scope_denied(&denied),
+            "an editor share must be denied /ws/events too"
+        );
     }
 
     /// A normal (unscoped) token is unaffected — it proceeds to the per-event

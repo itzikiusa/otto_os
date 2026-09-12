@@ -97,7 +97,11 @@ pub struct Transcript {
 
 impl Transcript {
     /// The empty transcript a session without a resolvable file gets (HTTP 200).
-    pub fn unavailable(provider: Provider, session_id: Option<String>, why: UnavailableReason) -> Self {
+    pub fn unavailable(
+        provider: Provider,
+        session_id: Option<String>,
+        why: UnavailableReason,
+    ) -> Self {
         Self {
             session_id,
             provider,
@@ -144,9 +148,13 @@ pub struct Turn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Block {
-    Text { md: String },
+    Text {
+        md: String,
+    },
     /// Marker only — no thinking text is persisted on disk.
-    Thinking { count: u64 },
+    Thinking {
+        count: u64,
+    },
     /// Served by `GET …/transcript/images/{id}`.
     Image {
         id: String,
@@ -169,7 +177,9 @@ pub enum Block {
         status: Option<SubagentStatus>,
     },
     /// The task-list state AFTER the call.
-    Tasks { tasks: Vec<TaskItem> },
+    Tasks {
+        tasks: Vec<TaskItem>,
+    },
     /// Claude `queue-operation`; `injected` = the content is a
     /// `<task-notification>` / system payload rather than something typed.
     Queued {
@@ -177,8 +187,12 @@ pub enum Block {
         text: String,
         injected: bool,
     },
-    Artifact { artifact: Artifact },
-    Notice { note: SystemNote },
+    Artifact {
+        artifact: Artifact,
+    },
+    Notice {
+        note: SystemNote,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,10 +457,16 @@ mod tests {
     fn claude_tool_kinds_follow_the_table() {
         assert_eq!(tool_kind_for_claude("Bash"), ToolKind::Shell);
         assert_eq!(tool_kind_for_claude("MultiEdit"), ToolKind::Edit);
-        assert_eq!(tool_kind_for_claude("mcp__otto__otto_vault_read"), ToolKind::Mcp);
+        assert_eq!(
+            tool_kind_for_claude("mcp__otto__otto_vault_read"),
+            ToolKind::Mcp
+        );
         assert_eq!(tool_kind_for_claude("TaskUpdate"), ToolKind::Task);
         assert_eq!(tool_kind_for_claude("Frobnicate"), ToolKind::Other);
         assert_eq!(tool_kind_for_codex_function("apply_patch"), ToolKind::Edit);
-        assert_eq!(tool_kind_for_codex_function("exec_command"), ToolKind::Shell);
+        assert_eq!(
+            tool_kind_for_codex_function("exec_command"),
+            ToolKind::Shell
+        );
     }
 }

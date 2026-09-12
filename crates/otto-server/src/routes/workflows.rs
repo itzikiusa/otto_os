@@ -177,7 +177,14 @@ pub async fn restore_version(
         // Restore rewinds the live graph AND instructions; the historical
         // name/description are recorded in the version snapshot below, not
         // applied back to the live row.
-        .update(&id, None, None, Some(&ver.instructions), Some(&ver.graph), Some(&ver.on_restart))
+        .update(
+            &id,
+            None,
+            None,
+            Some(&ver.instructions),
+            Some(&ver.graph),
+            Some(&ver.on_restart),
+        )
         .await
         .map_err(ApiError)?;
     let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
@@ -233,7 +240,9 @@ pub async fn generate_workflow(
     crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let description = req.description.trim();
     if description.is_empty() {
-        return Err(ApiError(Error::Invalid("description must not be empty".into())));
+        return Err(ApiError(Error::Invalid(
+            "description must not be empty".into(),
+        )));
     }
     let ws = ctx.workspaces.get(&wid).await.map_err(ApiError)?;
 
@@ -261,7 +270,12 @@ async fn generate_graph(ctx: &ServerCtx, cwd: &str, description: &str) -> Workfl
     let catalog = workflow_engine::node_catalog();
     let kinds = catalog
         .iter()
-        .map(|s| format!("- {} (in {}, out {}): {}", s.kind, s.inputs, s.outputs, s.description))
+        .map(|s| {
+            format!(
+                "- {} (in {}, out {}): {}",
+                s.kind, s.inputs, s.outputs, s.description
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!(
@@ -447,7 +461,15 @@ fn slug_title(description: &str) -> String {
     let words: Vec<&str> = description.split_whitespace().take(6).collect();
     let s = words.join(" ");
     if s.len() > 60 {
-        format!("{}…", &s[..s.char_indices().take(57).last().map(|(i, _)| i).unwrap_or(57)])
+        format!(
+            "{}…",
+            &s[..s
+                .char_indices()
+                .take(57)
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(57)]
+        )
     } else {
         s
     }
@@ -460,7 +482,9 @@ pub(crate) fn seed_review_mode(
     input: Value,
     review_mode: Option<&str>,
 ) -> otto_core::Result<Value> {
-    let Some(raw) = review_mode else { return Ok(input) };
+    let Some(raw) = review_mode else {
+        return Ok(input);
+    };
     let mode = otto_core::domain::ReviewMode::parse(raw).ok_or_else(|| {
         otto_core::Error::Invalid("review_mode must be \"fan_out\" or \"orchestrator\"".into())
     })?;
@@ -485,7 +509,11 @@ pub async fn run_workflow(
 ) -> ApiResult<Json<WorkflowRun>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
-    let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&wf.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     let input = seed_review_mode(req.input.unwrap_or(Value::Null), req.review_mode.as_deref())
         .map_err(ApiError)?;
@@ -561,7 +589,11 @@ pub async fn retry_run_node(
         ))));
     }
     let wf = repo(&ctx).get(&run.workflow_id).await.map_err(ApiError)?;
-    let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&wf.workspace_id)
+        .await
+        .map_err(ApiError)?;
     repo(&ctx).reopen_run(&id).await.map_err(ApiError)?;
 
     workflow_engine::spawn_run(
@@ -630,8 +662,7 @@ pub async fn list_runs(
 fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
     // Run ids are daemon-generated ULIDs, but confine the join anyway so a
     // hostile id can never stat outside the workflow-context tree.
-    let Some(dir) =
-        otto_core::paths::confine_join(&ctx.data_dir.join("workflow-context"), &run.id)
+    let Some(dir) = otto_core::paths::confine_join(&ctx.data_dir.join("workflow-context"), &run.id)
     else {
         return run;
     };
@@ -661,7 +692,9 @@ pub async fn list_active_runs(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<ActiveWorkflowRun>>> {
     crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_active_runs(&wid).await.map_err(ApiError)?))
+    Ok(Json(
+        repo(&ctx).list_active_runs(&wid).await.map_err(ApiError)?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +733,14 @@ pub async fn create_from_template(
         .map(str::to_string)
         .unwrap_or_else(|| tpl.name.clone());
     let wf = repo(&ctx)
-        .create(&wid, &name, &tpl.description, &tpl.instructions, &tpl.graph, &user.id)
+        .create(
+            &wid,
+            &name,
+            &tpl.description,
+            &tpl.instructions,
+            &tpl.graph,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(wf))
@@ -710,15 +750,16 @@ pub async fn create_from_template(
 /// trigger → agent (design rules) → game_engine (kind) → verifier.
 fn game_templates() -> Vec<WorkflowTemplate> {
     fn pipeline(game: &str, design: &str) -> WorkflowGraph {
-        let node = |id: &str, kind: &str, name: &str, x: f64, params: serde_json::Value| WorkflowNode {
-            id: id.into(),
-            kind: kind.into(),
-            name: name.into(),
-            x,
-            y: 70.0,
-            params,
-            retry: None,
-        };
+        let node =
+            |id: &str, kind: &str, name: &str, x: f64, params: serde_json::Value| WorkflowNode {
+                id: id.into(),
+                kind: kind.into(),
+                name: name.into(),
+                x,
+                y: 70.0,
+                params,
+                retry: None,
+            };
         let edge = |s: &str, t: &str| WorkflowEdge {
             id: format!("{s}-{t}"),
             source: s.into(),
@@ -727,10 +768,34 @@ fn game_templates() -> Vec<WorkflowTemplate> {
         };
         WorkflowGraph {
             nodes: vec![
-                node("trigger", "manual_trigger", "Start", 40.0, serde_json::Value::Null),
-                node("design", "agent_prompt", "Design game", 320.0, serde_json::json!({ "prompt": design })),
-                node("game", "game_engine", "Build game", 600.0, serde_json::json!({ "game": game })),
-                node("verify", "verifier", "Verify", 880.0, serde_json::Value::Null),
+                node(
+                    "trigger",
+                    "manual_trigger",
+                    "Start",
+                    40.0,
+                    serde_json::Value::Null,
+                ),
+                node(
+                    "design",
+                    "agent_prompt",
+                    "Design game",
+                    320.0,
+                    serde_json::json!({ "prompt": design }),
+                ),
+                node(
+                    "game",
+                    "game_engine",
+                    "Build game",
+                    600.0,
+                    serde_json::json!({ "game": game }),
+                ),
+                node(
+                    "verify",
+                    "verifier",
+                    "Verify",
+                    880.0,
+                    serde_json::Value::Null,
+                ),
             ],
             edges: vec![
                 edge("trigger", "design"),
@@ -1350,7 +1415,11 @@ pub async fn webhook_trigger(
         .map_err(|_| ApiError(Error::Unauthorized))?;
 
     let wf = repo(&ctx).get(&wf_id).await.map_err(ApiError)?;
-    let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&wf.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Parse the body as JSON input; fall back to null if empty/invalid.
     let mut input: Value = if body.is_empty() {
@@ -1372,11 +1441,20 @@ pub async fn webhook_trigger(
                 }
             }
         };
-        for key in ["result_channel", "result_chat", "result_thread", "result_webhook"] {
+        for key in [
+            "result_channel",
+            "result_chat",
+            "result_thread",
+            "result_webhook",
+        ] {
             if map.contains_key(key) {
                 continue;
             }
-            if let Some(v) = spec_defaults.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            if let Some(v) = spec_defaults
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
                 map.insert(key.into(), Value::String(v.to_string()));
             }
         }
@@ -1388,8 +1466,13 @@ pub async fn webhook_trigger(
         .map_err(ApiError)?;
 
     workflow_engine::spawn_run(
-        ctx.clone(), ws, wf, run.id.clone(), input,
-        otto_core::workflows::RunScope::default(), None,
+        ctx.clone(),
+        ws,
+        wf,
+        run.id.clone(),
+        input,
+        otto_core::workflows::RunScope::default(),
+        None,
     );
 
     Ok(Json(run))
@@ -1429,14 +1512,13 @@ pub async fn approve_run(
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
 
     // Confirm the run is actually waiting for approval.
-    let row = sqlx::query(
-        "SELECT waiting_approval, approval_node_id FROM workflow_runs WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_optional(&ctx.pool)
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("approve_run: {e}"))))?
-    .ok_or_else(|| ApiError(Error::NotFound("run".into())))?;
+    let row =
+        sqlx::query("SELECT waiting_approval, approval_node_id FROM workflow_runs WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&ctx.pool)
+            .await
+            .map_err(|e| ApiError(Error::Internal(format!("approve_run: {e}"))))?
+            .ok_or_else(|| ApiError(Error::NotFound("run".into())))?;
 
     use sqlx::Row as _;
     let waiting: i64 = row.get("waiting_approval");
@@ -1596,10 +1678,22 @@ mod tests {
     #[test]
     fn all_new_kinds_are_in_catalog() {
         let new_kinds = [
-            "db_query", "broker_peek", "channel_notify", "budget_gate",
-            "human_approval", "swarm_task", "api_run",
-            "product_analyze", "product_rewrite", "product_plan", "review_run",
-            "condition", "loop", "product_publish", "canvas", "git_pr",
+            "db_query",
+            "broker_peek",
+            "channel_notify",
+            "budget_gate",
+            "human_approval",
+            "swarm_task",
+            "api_run",
+            "product_analyze",
+            "product_rewrite",
+            "product_plan",
+            "review_run",
+            "condition",
+            "loop",
+            "product_publish",
+            "canvas",
+            "git_pr",
         ];
         for kind in new_kinds {
             assert!(
@@ -1613,7 +1707,10 @@ mod tests {
     fn flow_templates_are_valid() {
         let ids: Vec<String> = flow_templates().into_iter().map(|t| t.id).collect();
         for want in ["write-tests", "implement-feature", "po-lifecycle"] {
-            assert!(ids.iter().any(|id| id == want), "missing flow template {want}");
+            assert!(
+                ids.iter().any(|id| id == want),
+                "missing flow template {want}"
+            );
         }
         for t in flow_templates() {
             assert!(!t.graph.nodes.is_empty(), "{} has no nodes", t.id);
@@ -1645,8 +1742,16 @@ mod tests {
             let ids: std::collections::HashSet<&str> =
                 t.graph.nodes.iter().map(|n| n.id.as_str()).collect();
             for e in &t.graph.edges {
-                assert!(ids.contains(e.source.as_str()), "{}: dangling edge source", t.id);
-                assert!(ids.contains(e.target.as_str()), "{}: dangling edge target", t.id);
+                assert!(
+                    ids.contains(e.source.as_str()),
+                    "{}: dangling edge source",
+                    t.id
+                );
+                assert!(
+                    ids.contains(e.target.as_str()),
+                    "{}: dangling edge target",
+                    t.id
+                );
             }
         }
     }
@@ -1655,16 +1760,38 @@ mod tests {
     fn test_flow_templates_shape() {
         let all = flow_templates();
         for id in ["ui-test-authoring", "api-acceptance-test-authoring"] {
-            let t = all.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id} missing"));
-            assert!(!t.instructions.trim().is_empty(), "{id} ships standing instructions");
+            let t = all
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"));
+            assert!(
+                !t.instructions.trim().is_empty(),
+                "{id} ships standing instructions"
+            );
             assert!(t.graph.nodes.iter().any(|n| n.kind == "prepare_context"));
-            assert!(t.graph.nodes.iter().any(|n| n.id == "report" && n.kind == "agent_prompt"));
+            assert!(t
+                .graph
+                .nodes
+                .iter()
+                .any(|n| n.id == "report" && n.kind == "agent_prompt"));
             for n in &t.graph.nodes {
-                assert!(crate::workflow_engine::is_known_kind(&n.kind), "unknown kind {}", n.kind);
+                assert!(
+                    crate::workflow_engine::is_known_kind(&n.kind),
+                    "unknown kind {}",
+                    n.kind
+                );
             }
             // report is reachable from BOTH pr and iterate (runs on failure too)
-            assert!(t.graph.edges.iter().any(|e| e.source == "pr" && e.target == "report"));
-            assert!(t.graph.edges.iter().any(|e| e.source == "iterate" && e.target == "report"));
+            assert!(t
+                .graph
+                .edges
+                .iter()
+                .any(|e| e.source == "pr" && e.target == "report"));
+            assert!(t
+                .graph
+                .edges
+                .iter()
+                .any(|e| e.source == "iterate" && e.target == "report"));
         }
     }
 
@@ -1699,21 +1826,30 @@ mod tests {
     fn run_workflow_non_object_input_with_review_mode_is_400() {
         let err = seed_review_mode(json!("just a string"), Some("fan_out")).unwrap_err();
         let want = "input must be a JSON object when review_mode is set";
-        assert!(matches!(&err, Error::Invalid(m) if m == want), "unexpected error: {err:?}");
+        assert!(
+            matches!(&err, Error::Invalid(m) if m == want),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
     fn run_workflow_rejects_unknown_review_mode_400() {
         let err = seed_review_mode(Value::Null, Some("swarm")).unwrap_err();
         let want = "review_mode must be \"fan_out\" or \"orchestrator\"";
-        assert!(matches!(&err, Error::Invalid(m) if m == want), "unexpected error: {err:?}");
+        assert!(
+            matches!(&err, Error::Invalid(m) if m == want),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
     fn run_workflow_without_review_mode_leaves_input_untouched() {
         // Every pre-field caller (UI, MCP, triggers) must keep posting bare inputs.
         for input in [Value::Null, json!("scalar"), json!({ "repo_id": "r1" })] {
-            assert_eq!(seed_review_mode(input.clone(), None).expect("passthrough"), input);
+            assert_eq!(
+                seed_review_mode(input.clone(), None).expect("passthrough"),
+                input
+            );
         }
     }
 }

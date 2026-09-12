@@ -219,11 +219,12 @@ impl ImprovementsRepo {
     }
 
     pub async fn list_edits_by_run(&self, run_id: &Id) -> Result<Vec<ImprovementEdit>> {
-        let rows = sqlx::query("SELECT * FROM improvement_edits WHERE run_id = ? ORDER BY created_at")
-            .bind(run_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("edits"))?;
+        let rows =
+            sqlx::query("SELECT * FROM improvement_edits WHERE run_id = ? ORDER BY created_at")
+                .bind(run_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("edits"))?;
         rows.iter().map(row_to_edit).collect()
     }
 

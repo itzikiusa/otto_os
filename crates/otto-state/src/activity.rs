@@ -88,7 +88,10 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<AgentTask> {
 /// A user-added "Fix the  Login bug" and the agent's later "fix the login bug"
 /// are the same task and must keep one row.
 pub fn normalize_title(t: &str) -> String {
-    t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    t.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// A task row still waiting for its nudge prompt (design §4.5).
@@ -205,7 +208,8 @@ impl ActivityRepo {
         workspace_id: &Id,
         user_id: &Id,
     ) -> Result<Vec<SessionActivitySummary>> {
-        self.workspace_summary_inner(workspace_id, Some(user_id)).await
+        self.workspace_summary_inner(workspace_id, Some(user_id))
+            .await
     }
 
     /// Inner implementation: when `user_id` is `Some`, restricts the aggregate
@@ -274,13 +278,15 @@ impl ActivityRepo {
             let sid: String = r.get("session_id");
             let status: String = r.get("status");
             let title: String = r.get("title");
-            let e = map.entry(sid.clone()).or_insert_with(|| SessionActivitySummary {
-                session_id: sid,
-                total: 0,
-                done: 0,
-                in_progress: None,
-                last_ts: None,
-            });
+            let e = map
+                .entry(sid.clone())
+                .or_insert_with(|| SessionActivitySummary {
+                    session_id: sid,
+                    total: 0,
+                    done: 0,
+                    in_progress: None,
+                    last_ts: None,
+                });
             e.total += 1;
             if status == "completed" {
                 e.done += 1;
@@ -297,13 +303,15 @@ impl ActivityRepo {
                 Some(s) => Some(ts(&s)?),
                 None => None,
             };
-            let e = map.entry(sid.clone()).or_insert_with(|| SessionActivitySummary {
-                session_id: sid,
-                total: 0,
-                done: 0,
-                in_progress: None,
-                last_ts: None,
-            });
+            let e = map
+                .entry(sid.clone())
+                .or_insert_with(|| SessionActivitySummary {
+                    session_id: sid,
+                    total: 0,
+                    done: 0,
+                    in_progress: None,
+                    last_ts: None,
+                });
             e.last_ts = last_ts;
         }
 
@@ -389,13 +397,11 @@ impl ActivityRepo {
 
         for (i, t) in tasks.iter().enumerate() {
             let norm = normalize_title(&t.title);
-            let hit = rows
-                .iter()
-                .enumerate()
-                .position(|(j, r)| {
-                    !matched[j]
-                        && ((t.ext_id.is_some() && r.ext_id.is_some() && r.ext_id == t.ext_id) || r.norm == norm)
-                });
+            let hit = rows.iter().enumerate().position(|(j, r)| {
+                !matched[j]
+                    && ((t.ext_id.is_some() && r.ext_id.is_some() && r.ext_id == t.ext_id)
+                        || r.norm == norm)
+            });
             match hit {
                 Some(j) => {
                     matched[j] = true;
@@ -481,10 +487,14 @@ impl ActivityRepo {
     ) -> Result<Vec<AgentTask>> {
         let now = fmt(Utc::now());
         let existing = self.list_tasks(session_id).await?;
-        let by_ext = existing.iter().find(|t| t.ext_id.as_deref() == Some(ext_id));
+        let by_ext = existing
+            .iter()
+            .find(|t| t.ext_id.as_deref() == Some(ext_id));
         let by_title = title.and_then(|t| {
             let n = normalize_title(t);
-            existing.iter().find(|x| x.ext_id.is_none() && normalize_title(&x.title) == n)
+            existing
+                .iter()
+                .find(|x| x.ext_id.is_none() && normalize_title(&x.title) == n)
         });
         match by_ext.or(by_title) {
             Some(row) => {
@@ -537,12 +547,14 @@ impl ActivityRepo {
     ) -> Result<AgentTask> {
         let now = fmt(Utc::now());
         let id = new_id();
-        let position: i64 = sqlx::query("SELECT COALESCE(MAX(position) + 1, 0) AS p FROM agent_tasks WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(dberr("task position"))?
-            .get("p");
+        let position: i64 = sqlx::query(
+            "SELECT COALESCE(MAX(position) + 1, 0) AS p FROM agent_tasks WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("task position"))?
+        .get("p");
         sqlx::query(
             "INSERT INTO agent_tasks
                 (id, session_id, workspace_id, ext_id, title, status, position, created_at, updated_at,
@@ -633,13 +645,15 @@ impl ActivityRepo {
     /// The nudge for `task_id` was submitted to the session.
     pub async fn mark_nudged(&self, task_id: &Id) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query("UPDATE agent_tasks SET nudge_pending = 0, nudged_at = ?, updated_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(&now)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("mark nudged"))?;
+        sqlx::query(
+            "UPDATE agent_tasks SET nudge_pending = 0, nudged_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("mark nudged"))?;
         Ok(())
     }
 }
@@ -786,7 +800,11 @@ mod tests {
             .await
             .expect("bob summary");
         let bob_ids: Vec<&str> = bob_summary.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(bob_ids, vec![bob_sid.as_str()], "bob must only see his own session");
+        assert_eq!(
+            bob_ids,
+            vec![bob_sid.as_str()],
+            "bob must only see his own session"
+        );
         assert!(
             !bob_ids.contains(&alice_sid.as_str()),
             "alice's session must not appear in bob's summary"
@@ -832,7 +850,10 @@ mod tests {
             .workspace_summary_for_user(&"ws1".into(), &"carol".into())
             .await
             .expect("carol summary");
-        assert!(carol.is_empty(), "carol with no sessions must get an empty summary");
+        assert!(
+            carol.is_empty(),
+            "carol with no sessions must get an empty summary"
+        );
     }
 
     fn nt(title: &str, status: TaskStatus, ext_id: Option<&str>) -> NewTask {
@@ -855,11 +876,26 @@ mod tests {
         let ws: Id = "ws1".into();
 
         let first = repo
-            .replace_tasks(&sid, &ws, &[nt("design", TaskStatus::Completed, None), nt("build", TaskStatus::InProgress, None)])
+            .replace_tasks(
+                &sid,
+                &ws,
+                &[
+                    nt("design", TaskStatus::Completed, None),
+                    nt("build", TaskStatus::InProgress, None),
+                ],
+            )
             .await
             .unwrap();
-        let build_id = first.iter().find(|t| t.title == "build").unwrap().id.clone();
-        let user = repo.insert_user_task(&sid, &ws, "Fix the  Login bug", Some("see ticket")).await.unwrap();
+        let build_id = first
+            .iter()
+            .find(|t| t.title == "build")
+            .unwrap()
+            .id
+            .clone();
+        let user = repo
+            .insert_user_task(&sid, &ws, "Fix the  Login bug", Some("see ticket"))
+            .await
+            .unwrap();
         assert_eq!(user.source, "user");
         assert!(user.nudge_pending);
         assert_eq!(user.description.as_deref(), Some("see ticket"));
@@ -879,18 +915,28 @@ mod tests {
             .await
             .unwrap();
         let titles: Vec<&str> = second.iter().map(|t| t.title.as_str()).collect();
-        assert_eq!(titles, ["build", "fix the login bug", "test"], "design deleted, order = plan order");
+        assert_eq!(
+            titles,
+            ["build", "fix the login bug", "test"],
+            "design deleted, order = plan order"
+        );
         let build = second.iter().find(|t| t.title == "build").unwrap();
         assert_eq!(build.id, build_id, "agent row updated in place");
         assert_eq!(build.status, TaskStatus::Completed);
-        let fix = second.iter().find(|t| t.ext_id.as_deref() == Some("7")).unwrap();
+        let fix = second
+            .iter()
+            .find(|t| t.ext_id.as_deref() == Some("7"))
+            .unwrap();
         assert_eq!(fix.id, user.id, "user row adopted, id stable");
         assert_eq!(fix.source, "user");
         assert_eq!(fix.status, TaskStatus::InProgress);
         assert_eq!(fix.description.as_deref(), Some("see ticket"));
 
         // A plan that drops the adopted task keeps the user row (after the plan).
-        let third = repo.replace_tasks(&sid, &ws, &[nt("test", TaskStatus::Completed, None)]).await.unwrap();
+        let third = repo
+            .replace_tasks(&sid, &ws, &[nt("test", TaskStatus::Completed, None)])
+            .await
+            .unwrap();
         assert_eq!(third.len(), 2);
         assert_eq!(third[0].title, "test");
         assert_eq!(third[1].id, user.id);
@@ -925,14 +971,26 @@ mod tests {
         let sid = seed_session(&pool, "ws1", "alice").await;
         let repo = ActivityRepo::new(pool.clone());
         let ws: Id = "ws1".into();
-        let user = repo.insert_user_task(&sid, &ws, "Write docs", None).await.unwrap();
-        let l = repo.upsert_task(&sid, &ws, "1", Some("write docs"), None).await.unwrap();
+        let user = repo
+            .insert_user_task(&sid, &ws, "Write docs", None)
+            .await
+            .unwrap();
+        let l = repo
+            .upsert_task(&sid, &ws, "1", Some("write docs"), None)
+            .await
+            .unwrap();
         assert_eq!(l.len(), 1, "same-titled user row adopted");
         assert_eq!(l[0].id, user.id);
         assert_eq!(l[0].ext_id.as_deref(), Some("1"));
-        let l = repo.upsert_task(&sid, &ws, "1", None, Some(TaskStatus::Completed)).await.unwrap();
+        let l = repo
+            .upsert_task(&sid, &ws, "1", None, Some(TaskStatus::Completed))
+            .await
+            .unwrap();
         assert_eq!(l[0].status, TaskStatus::Completed);
-        let l = repo.upsert_task(&sid, &ws, "2", Some("Ship it"), None).await.unwrap();
+        let l = repo
+            .upsert_task(&sid, &ws, "2", Some("Ship it"), None)
+            .await
+            .unwrap();
         assert_eq!(l.len(), 2);
         assert_eq!(l[1].source, "agent");
         assert_eq!(l[1].position, 1);
