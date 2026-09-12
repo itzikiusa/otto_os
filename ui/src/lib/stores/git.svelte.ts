@@ -44,6 +44,22 @@ const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
 const DEFAULT_AUTO_FETCH_SEC = 10;
 const DEFAULT_SUB: GitSubTab = 'graph';
 
+/** May an auto-fetch round run right now?
+ *
+ *  `document.hidden` alone is not enough: Otto is multi-window, and a BACKGROUND
+ *  window is fully "visible" to the browser, so a second window parked on the
+ *  Git page kept firing a fetch per open repo every 10 s forever — each one a
+ *  `git fetch --prune` + `status` spawn plus a synchronous Keychain read on the
+ *  daemon's runtime, which is load the window in front pays for (investigation
+ *  H4/WP3). So we also require FOCUS: exactly the window the user is looking at
+ *  polls. `hasFocus` is absent in SSR/jsdom — treat that as "allowed" so tests
+ *  and headless renders behave as before. */
+function autoFetchAllowed(): boolean {
+  if (typeof document === 'undefined') return true;
+  if (document.hidden) return false;
+  return typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+}
+
 /** Read the persisted auto-fetch config, guarded for SSR/test environments with
  *  no localStorage. Defaults: enabled, every 10s. */
 function readAutoFetchConfig(): { enabled: boolean; intervalSec: number } {
@@ -141,12 +157,17 @@ class GitStore {
   // on/off toggle is persisted per-device. ──
   autoFetchEnabled = $state(INITIAL_AUTO_FETCH.enabled);
   autoFetchIntervalSec = $state(INITIAL_AUTO_FETCH.intervalSec);
-  /** Per-repo ref-refresh signal, bumped after every successful auto-fetch.
-   *  The daemon's fetch runs `--prune`, and `setStatus` deliberately skips
-   *  no-op status writes — so a branch deleted elsewhere (session terminal,
-   *  another machine, a merged PR) changes NO status field and a view caching
-   *  refs (GraphView) would stay stale until remount. Such views re-sync
-   *  quietly when this counter moves. */
+  /** Per-repo ref-refresh signal, bumped after EVERY successful auto-fetch.
+   *  `setStatus` deliberately skips no-op status writes, and `statusEq` only
+   *  compares HEAD and its one tracking ref — so a fetch that advances
+   *  `origin/feature-x`, adds a remote branch, moves a tag, or `--prune`s a
+   *  branch the current HEAD doesn't track changes NO status field. A view
+   *  caching refs (GraphView) would stay stale until remount, so it gets the
+   *  signal unconditionally and decides for itself whether anything actually
+   *  moved: it re-reads the cheap `/refs` and only replays the expensive
+   *  `log --all -n 10000` + stashes + worktrees fan-out when the ref
+   *  fingerprint differs (investigation H4/WP3). A pruned ref disappears from
+   *  `/refs`, so that case is covered too. */
   refsRev: Record<string, number> = $state({});
   private autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
   private autoFetchInFlight = false;
@@ -374,12 +395,16 @@ class GitStore {
   /** Write a repo's status, but ONLY when it actually changed, so a no-op fetch
    *  doesn't needlessly recompute the `$derived` status + re-render the toolbar
    *  and tab chips. Keeps `primaryStatus` in sync when this repo is the
-   *  right-panel primary. */
-  setStatus(repoId: string, s: RepoStatusResp): void {
+   *  right-panel primary. Returns whether anything actually changed, so a caller
+   *  that wants to do more work only on a real change can ask. (The auto-fetch
+   *  loop deliberately does NOT gate `refsRev` on it — `statusEq` compares only
+   *  HEAD and its upstream, so it cannot see most ref movement; see `refsRev`.) */
+  setStatus(repoId: string, s: RepoStatusResp): boolean {
     const prev = this.statusById[repoId];
-    if (prev && statusEq(prev, s)) return;
+    if (prev && statusEq(prev, s)) return false;
     this.statusById[repoId] = s;
     if (this.primary?.id === repoId) this.primaryStatus = s;
+    return true;
   }
 
   /** Fetch (cheap, local) status for a repo and store it. */
@@ -430,14 +455,14 @@ class GitStore {
   }
 
   /** One auto-fetch round: `git fetch` every OPEN repo (minus those in backoff),
-   *  quietly, then update its status. Skipped while the window is hidden or a
-   *  prior round is still running. setTimeout-chained (not setInterval) so rounds
-   *  never overlap; `gen` ties the chain to the current start, so a stop/restart
-   *  abandons stale chains instead of leaking parallel timers. */
+   *  quietly, then update its status. Skipped while the window is hidden OR
+   *  unfocused (see [`autoFetchAllowed`]) or while a prior round is still
+   *  running. setTimeout-chained (not setInterval) so rounds never overlap;
+   *  `gen` ties the chain to the current start, so a stop/restart abandons stale
+   *  chains instead of leaking parallel timers. */
   private async autoFetchTick(gen: number): Promise<void> {
     if (gen !== this.autoFetchGen) return; // superseded by a stop/restart
-    const hidden = typeof document !== 'undefined' && document.hidden;
-    if (!this.autoFetchInFlight && !hidden) {
+    if (!this.autoFetchInFlight && autoFetchAllowed()) {
       // Repos in backoff sit this round out (counting down toward 0).
       const ids = this.openRepoIds.filter((id) => {
         const skip = this.autoFetchBackoff[id] ?? 0;
@@ -455,6 +480,9 @@ class GitStore {
               try {
                 const s = await api.post<RepoStatusResp>(`/repos/${id}/fetch`);
                 this.setStatus(id, s); // QUIET — no toast; setStatus skips no-ops
+                // Unconditional: `statusEq` can't see a ref that moved outside
+                // HEAD's upstream. GraphView gates the expensive reload on a
+                // `/refs` fingerprint instead (see `refsRev`).
                 this.refsRev[id] = (this.refsRev[id] ?? 0) + 1;
                 this.autoFetchFailStreak[id] = 0;
                 this.autoFetchBackoff[id] = 0;

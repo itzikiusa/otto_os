@@ -42,6 +42,28 @@ use crate::http::SessionsCtx;
 /// Interval for server-initiated pings (keeps idle sockets alive).
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Cadence of the off-loop re-authorization pass for a PLAIN session.
+///
+/// The pass is a SQLite round-trip plus an auth lookup. It used to run on this
+/// socket's `select!` loop (and, worse, ahead of every client frame), so a
+/// congested pool was felt as 1–2 s of typing lag with no CPU to show for it.
+/// It now lives in [`reauth_loop`] and only publishes its verdict here.
+const REAUTH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Cadence for a RESOURCE-BOUND terminal (k8s / AWS / a connection). A revoked
+/// grant must drop those sockets promptly, so they keep the original 1 s beat.
+/// Which one applies is decided ONCE at attach (the binding lives in the
+/// session row's `meta`/`connection_id` and never changes mid-connection).
+const REAUTH_INTERVAL_RESOURCE: Duration = Duration::from_secs(1);
+
+/// A re-check slower than this means the state pool is congested — exactly the
+/// condition that used to surface as a frozen terminal.
+const REAUTH_SLOW: Duration = Duration::from_millis(100);
+
+/// A PTY write slower than this means the child stopped draining its tty (the
+/// write is a synchronous `write_all` under a mutex, so it parks this task).
+const INPUT_SLOW: Duration = Duration::from_millis(20);
+
 #[derive(Clone)]
 struct WsState<S> {
     auth: Arc<dyn TokenAuthenticator>,
@@ -388,6 +410,82 @@ async fn next_exit(rx: &mut Option<watch::Receiver<Option<i32>>>) -> i32 {
     }
 }
 
+/// Await the next capability verdict from the off-loop re-auth task.
+/// `Some(can_input)` is a fresh (monotonically narrowing) capability;
+/// `None` means the task returned — access was revoked or the session row is
+/// gone — and this viewer must be evicted. Mirrors the other `next_*` helpers:
+/// the receiver borrow stays INSIDE the future, so the `select!` arm may touch
+/// the receiver again in its handler.
+async fn next_can_input(rx: &mut watch::Receiver<bool>) -> Option<bool> {
+    match rx.changed().await {
+        Ok(()) => Some(*rx.borrow_and_update()),
+        Err(_) => None,
+    }
+}
+
+/// Periodic re-authorization for one attached terminal, run OFF the socket's
+/// `select!` loop so no arm of that loop ever awaits SQLite (investigation H2).
+///
+/// It owns the `can_input` watch: each pass narrows the capability
+/// monotonically (a share downgraded mid-connection loses input and can never
+/// regain it, exactly as the old inline check did) and publishes the new value.
+/// Revocation is signalled by RETURNING: dropping `can_tx` closes the channel,
+/// which the select loop reads as "evict this viewer". The task also stops the
+/// moment the socket goes away (`can_tx.closed()`), so a detached session never
+/// leaves a timer — or a DB query — behind.
+async fn reauth_loop<S: SessionsCtx>(
+    ctx: S,
+    session_id: Id,
+    live_auth: LiveTerminalAuth,
+    can_tx: watch::Sender<bool>,
+    period: Duration,
+) {
+    let mut tick = tokio::time::interval(period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // consume the immediate first tick — attach just authorized
+    loop {
+        tokio::select! {
+            _ = can_tx.closed() => return,
+            _ = tick.tick() => {}
+        }
+        let started = std::time::Instant::now();
+        let Ok(current) = ctx.manager().get(&session_id).await else {
+            return;
+        };
+        let get_ms = started.elapsed().as_millis() as u64;
+        let verdict = live_auth.check(&ctx, &current).await;
+        let elapsed = started.elapsed();
+        if elapsed > REAUTH_SLOW {
+            tracing::warn!(
+                session = %session_id,
+                elapsed_ms = elapsed.as_millis() as u64,
+                get_ms,
+                "terminal ws: auth re-check slow"
+            );
+        }
+        match verdict {
+            // Capability only ever narrows for a live connection.
+            Ok(allowed) => {
+                can_tx.send_if_modified(|cur| {
+                    let next = *cur && allowed;
+                    let changed = next != *cur;
+                    *cur = next;
+                    changed
+                });
+            }
+            Err(_) => {
+                // Access revoked mid-connection. Killing the session stays the
+                // owner-only path (unchanged): a guest losing a share must not
+                // take the owner's terminal down with it.
+                if current.created_by == live_auth.user.id {
+                    let _ = ctx.manager().kill_session(&session_id).await;
+                }
+                return;
+            }
+        }
+    }
+}
+
 /// Wait for the per-session forced-disconnect signal. `Ok` (fired) and `Lagged`
 /// both mean "evict"; `Closed` (the sender was dropped without ever firing,
 /// e.g. the session row was removed) clears the receiver and pends forever so
@@ -471,15 +569,37 @@ async fn serve_terminal<S: SessionsCtx>(
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ping.reset(); // skip the immediate first tick
 
-    let mut resource_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    // Re-authorization runs OFF this loop (investigation H2): every arm here
+    // must stay free of SQLite, or a slow statement elsewhere in the daemon
+    // freezes the terminal in BOTH directions. The task publishes `can_input`
+    // through the watch and signals revocation by dropping its sender. The
+    // resource binding is read once, from the session we already have in hand.
+    let (can_tx, mut can_rx) = watch::channel(can_input);
+    let reauth_period = if ctx.resource_bound(&current) {
+        REAUTH_INTERVAL_RESOURCE
+    } else {
+        REAUTH_INTERVAL
+    };
+    tokio::spawn(reauth_loop(
+        ctx.clone(),
+        session_id.clone(),
+        live_auth,
+        can_tx,
+        reauth_period,
+    ));
+
     loop {
         tokio::select! {
-            _ = resource_tick.tick() => {
-                let Ok(current) = ctx.manager().get(&session_id).await else { return; };
-                if live_auth.check(&ctx,&current).await.is_err() {
-                    if current.created_by == live_auth.user.id { let _ = ctx.manager().kill_session(&session_id).await; }
-                    let _ = socket.send(Message::Close(None)).await;
-                    return;
+            // Capability / revocation verdict from the re-auth task. `None` =
+            // the task returned: access was revoked (or the session row is
+            // gone) → tell the client and drop the socket.
+            update = next_can_input(&mut can_rx) => {
+                match update {
+                    Some(allowed) => can_input = allowed,
+                    None => {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
                 }
             }
 
@@ -602,9 +722,10 @@ async fn serve_terminal<S: SessionsCtx>(
                 return;
             }
             // Client control frames.
+            // NOTE: no auth work here. `can_input` is whatever the attach
+            // decided, narrowed by the re-auth task's watch above — a keystroke
+            // must never wait on the state DB (investigation H2).
             msg = socket.recv() => {
-                let Ok(current)=ctx.manager().get(&session_id).await else {return;};
-                match live_auth.check(&ctx,&current).await {Ok(allowed)=>can_input &= allowed,Err(_)=>return}
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else {
                     if matches!(msg, Message::Close(_)) { return; }
@@ -628,7 +749,16 @@ async fn serve_terminal<S: SessionsCtx>(
                         if let Ok(bytes) = B64.decode(data.as_bytes()) {
                             // Typing claims size authority for this viewer.
                             ctx.manager().note_input_authority(&session_id, conn_id);
+                            let started = std::time::Instant::now();
                             let _ = ctx.manager().input(&session_id, &bytes).await;
+                            let elapsed = started.elapsed();
+                            if elapsed > INPUT_SLOW {
+                                tracing::debug!(
+                                    session = %session_id,
+                                    elapsed_ms = elapsed.as_millis() as u64,
+                                    "terminal ws: slow PTY write (child not draining its tty?)"
+                                );
+                            }
                         }
                     }
                     ClientFrame::Resize { cols, rows } => {
@@ -1171,5 +1301,68 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A share token revoked MID-CONNECTION still evicts that viewer promptly.
+    ///
+    /// The re-auth used to run inline in the socket's `select!` loop (ahead of
+    /// every client frame); it now runs in [`reauth_loop`] and speaks to the
+    /// loop through a `watch`. Revocation is signalled by the task RETURNING —
+    /// the sender drops, the watch closes, and the loop sends `Close`. This
+    /// test drives that task directly with a short period, so "within one tick"
+    /// is measured, not assumed. (Share tokens are never auth-cached, so the
+    /// very next pass sees the revocation.)
+    #[tokio::test]
+    async fn revoked_share_is_evicted_within_a_tick() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let sid = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let st = build(&pool).await;
+        let token = mint_share(&pool, "alice", &sid, WorkspaceRole::Editor).await;
+        let user = st
+            .auth
+            .authenticate(&token)
+            .await
+            .expect("share token authenticates")
+            .effective_user;
+        let live_auth = LiveTerminalAuth {
+            user,
+            token: token.clone(),
+            auth: st.auth.clone(),
+        };
+
+        let (can_tx, mut can_rx) = watch::channel(true);
+        tokio::spawn(reauth_loop(
+            st.ctx.clone(),
+            sid.clone(),
+            live_auth,
+            can_tx,
+            Duration::from_millis(25),
+        ));
+
+        // While the share is valid: several ticks pass, the verdict never moves
+        // (an editor share keeps input) and the watch stays open.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), next_can_input(&mut can_rx))
+                .await
+                .is_err(),
+            "a valid editor share must not change the capability"
+        );
+        assert!(*can_rx.borrow(), "editor share still has input");
+
+        AuthRepo::new(pool.clone())
+            .revoke(&token)
+            .await
+            .expect("revoke the share");
+
+        // One tick later the task is gone and the loop learns it must evict.
+        let verdict = tokio::time::timeout(Duration::from_secs(2), next_can_input(&mut can_rx))
+            .await
+            .expect("the revoked viewer must be evicted within a tick");
+        assert_eq!(
+            verdict, None,
+            "a revoked share closes the capability watch (= evict this socket)"
+        );
     }
 }

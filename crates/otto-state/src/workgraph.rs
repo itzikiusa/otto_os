@@ -886,14 +886,24 @@ impl WorkGraphRepo {
 
     // --- artifacts ------------------------------------------------------
 
-    /// Attach an artifact (idempotent on `(work_item_id, kind, ref)`).
+    /// Attach an artifact (idempotent on `(work_item_id, kind, ref)` — and, since
+    /// migration 0126, on `(work_item_id, kind)` when `ref` is NULL: SQLite
+    /// treats NULLs as distinct in a UNIQUE constraint, so a NULL-ref row used
+    /// to be re-inserted by every reconcile sweep until the bucket held ~99k
+    /// rows).
     pub async fn add_artifact(&self, a: &NewArtifact) -> Result<WorkArtifact> {
         let id = new_id();
         let now = fmt(Utc::now());
         let payload = serde_json::to_string(&a.payload).unwrap_or_else(|_| "{}".to_string());
-        sqlx::query(
-            "INSERT OR IGNORE INTO work_artifacts (id, work_item_id, workspace_id, kind, title, \
-             \"ref\", payload_json, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        // `ON CONFLICT DO NOTHING` (no target) covers BOTH unique keys — the
+        // 0083 UNIQUE and the 0126 partial NULL-ref index — and `RETURNING`
+        // gives us the fresh row without a second statement on the create path.
+        let inserted = sqlx::query(
+            "INSERT INTO work_artifacts (id, work_item_id, workspace_id, kind, title, \
+             \"ref\", payload_json, created_at) VALUES (?,?,?,?,?,?,?,?) \
+             ON CONFLICT DO NOTHING \
+             RETURNING id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, \
+             created_at",
         )
         .bind(&id)
         .bind(&a.work_item_id)
@@ -903,23 +913,55 @@ impl WorkGraphRepo {
         .bind(&a.reference)
         .bind(&payload)
         .bind(&now)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(dberr("add work artifact"))?;
-        // Re-select the (new or pre-existing) row for this unique key.
+        if let Some(row) = inserted {
+            return row_to_artifact(&row);
+        }
+        // Conflict: re-select the pre-existing row for this unique key. An
+        // indexed seek on the `(work_item_id, kind, ref)` prefix — NO
+        // `ORDER BY created_at`, which forced a temp B-tree over the whole
+        // bucket and was the 1.2-2.5 s `slow statement` in the logs. `"ref" IS ?`
+        // is SQLite's NULL-safe equality: it matches BOTH unique keys exactly
+        // (a `''` ref is a different row from a NULL one, as the indexes say)
+        // and still uses the index — unlike `COALESCE(...) = COALESCE(...)`,
+        // which conflated the two.
         let row = sqlx::query(
             "SELECT id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, created_at \
              FROM work_artifacts WHERE work_item_id = ? AND kind = ? \
-             AND (\"ref\" = ? OR (\"ref\" IS NULL AND ? IS NULL)) ORDER BY created_at ASC LIMIT 1",
+             AND \"ref\" IS ? LIMIT 1",
         )
         .bind(&a.work_item_id)
         .bind(a.kind.as_str())
-        .bind(&a.reference)
         .bind(&a.reference)
         .fetch_one(&self.pool)
         .await
         .map_err(dberr("get work artifact"))?;
         row_to_artifact(&row)
+    }
+
+    /// Is this artifact already attached? The reconcile sweep re-derives every
+    /// item, so it asks first and only writes when absent — otherwise each sweep
+    /// pays an insert + an `artifact_added` audit event for a row that is
+    /// already there. Same indexed seek as the `add_artifact` read-back.
+    pub async fn has_artifact(
+        &self,
+        work_item_id: &Id,
+        kind: ArtifactKind,
+        reference: Option<&str>,
+    ) -> Result<bool> {
+        let hit: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM work_artifacts WHERE work_item_id = ? AND kind = ? \
+             AND \"ref\" IS ? LIMIT 1",
+        )
+        .bind(work_item_id)
+        .bind(kind.as_str())
+        .bind(reference)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("check work artifact"))?;
+        Ok(hit.is_some())
     }
 
     /// Artifacts for an item, newest-first.
@@ -1295,5 +1337,125 @@ mod tests {
         let g = repo.graph(&"w1".into(), &MissionFilter::default()).await.unwrap();
         assert_eq!(g.nodes.len(), 2);
         assert_eq!(g.edges.len(), 1);
+    }
+
+    /// A NULL `ref` must dedupe like every other ref. SQLite treats NULLs as
+    /// distinct inside UNIQUE(work_item_id, kind, ref), so before 0126 each
+    /// reconcile sweep appended ANOTHER copy of the review verdict / PR link
+    /// (one item reached ~99k rows, and the read-back went quadratic).
+    #[tokio::test]
+    async fn add_artifact_dedupes_null_refs() {
+        let repo = WorkGraphRepo::new(mem_pool().await);
+        let it = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "review", WorkStatus::Running)).await.unwrap().item;
+        let artifact = |title: &str, reference: Option<&str>| NewArtifact {
+            work_item_id: it.id.clone(),
+            workspace_id: "w1".into(),
+            kind: ArtifactKind::Report,
+            title: title.into(),
+            reference: reference.map(str::to_string),
+            payload: serde_json::json!({"verdict": "block"}),
+        };
+
+        let first = repo.add_artifact(&artifact("verdict", None)).await.unwrap();
+        let second = repo.add_artifact(&artifact("verdict again", None)).await.unwrap();
+        assert_eq!(first.id, second.id, "the second call must return the SAME row");
+        assert_eq!(second.title, "verdict", "the pre-existing row wins; the retry is a no-op");
+        assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 1);
+
+        // A non-NULL ref of the same kind is still an independent artifact.
+        let reffed = repo.add_artifact(&artifact("linked", Some("repo:42"))).await.unwrap();
+        assert_ne!(reffed.id, first.id);
+        repo.add_artifact(&artifact("linked", Some("repo:42"))).await.unwrap();
+        assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 2);
+
+        // The existence check the projector asks before writing.
+        assert!(repo.has_artifact(&it.id, ArtifactKind::Report, None).await.unwrap());
+        assert!(repo.has_artifact(&it.id, ArtifactKind::Report, Some("repo:42")).await.unwrap());
+        assert!(!repo.has_artifact(&it.id, ArtifactKind::Report, Some("repo:7")).await.unwrap());
+        assert!(!repo.has_artifact(&it.id, ArtifactKind::Pr, None).await.unwrap());
+    }
+
+    /// Migration 0126 itself: seed the duplicates a pre-0126 daemon accumulated
+    /// and assert the cleanup keeps exactly the OLDEST row per (item, kind).
+    /// The index is dropped first because the migrated schema already forbids
+    /// the fixture; the migration's own SQL (read from the shipped file) then
+    /// re-creates it, so the assertions run against the real statements.
+    #[tokio::test]
+    async fn migration_0126_collapses_null_ref_duplicates() {
+        let pool = mem_pool().await;
+        sqlx::raw_sql("DROP INDEX ux_work_artifacts_item_kind_nullref")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let repo = WorkGraphRepo::new(pool.clone());
+        let it = repo.upsert_item(&upsert("w1", WorkKind::Review, "r1", "review", WorkStatus::Running)).await.unwrap().item;
+
+        // 4 NULL-ref reports (the runaway), 1 NULL-ref pr (a different bucket),
+        // 2 rows with a real ref (untouched by the cleanup).
+        for (i, created) in ["2026-01-01T00:00:03Z", "2026-01-01T00:00:01Z", "2026-01-01T00:00:04Z", "2026-01-01T00:00:02Z"].iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO work_artifacts (id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, created_at) \
+                 VALUES (?,?,?,?,?,NULL,'{}',?)",
+            )
+            .bind(format!("a{i}"))
+            .bind(&it.id)
+            .bind("w1")
+            .bind(ArtifactKind::Report.as_str())
+            .bind(format!("verdict {i}"))
+            .bind(created)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (id, kind, reference) in [
+            ("b0", ArtifactKind::Pr, None),
+            ("b1", ArtifactKind::Pr, Some("repo:42")),
+            ("b2", ArtifactKind::Pr, Some("repo:43")),
+        ] {
+            sqlx::query(
+                "INSERT INTO work_artifacts (id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, created_at) \
+                 VALUES (?,?,?,?,?,?,'{}','2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(&it.id)
+            .bind("w1")
+            .bind(kind.as_str())
+            .bind("pr")
+            .bind(reference)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 7);
+
+        sqlx::raw_sql(include_str!("../migrations/0126_work_artifacts_nullref.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let left = repo.artifacts_for(&it.id).await.unwrap();
+        assert_eq!(left.len(), 4, "4 report rows collapse to 1; pr rows survive");
+        let report = left.iter().find(|a| a.kind == ArtifactKind::Report).unwrap();
+        assert_eq!(report.id, "a1", "the OLDEST created_at survives");
+        assert!(left.iter().any(|a| a.id == "b0" && a.reference.is_none()));
+        assert!(left.iter().any(|a| a.reference.as_deref() == Some("repo:42")));
+        assert!(left.iter().any(|a| a.reference.as_deref() == Some("repo:43")));
+
+        // And the re-created index holds the invariant from here on.
+        assert_eq!(
+            repo.add_artifact(&NewArtifact {
+                work_item_id: it.id.clone(),
+                workspace_id: "w1".into(),
+                kind: ArtifactKind::Report,
+                title: "verdict".into(),
+                reference: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap()
+            .id,
+            "a1"
+        );
+        assert_eq!(repo.artifacts_for(&it.id).await.unwrap().len(), 4);
     }
 }

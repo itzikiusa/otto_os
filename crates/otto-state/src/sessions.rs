@@ -62,6 +62,39 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<Session> {
     })
 }
 
+/// Test-only latency injection on the hot [`SessionsRepo::get`] path.
+///
+/// `OTTO_TEST_DB_SLEEP_MS=<ms>` makes every `get` sleep that long before it
+/// touches SQLite, so a test can prove a caller does NOT sit on this repo (see
+/// `otto-sessions/tests/terminal_latency.rs`, which types into a real PTY
+/// through the terminal WS while every session read costs 2 s). Read ONCE per
+/// process: with the variable unset — how the daemon always runs — this is a
+/// single `OnceLock` load and no sleep at all.
+///
+/// COMPILED OUT of release builds (`#[cfg(debug_assertions)]`): a shipped
+/// `ottod` must not honour the variable even if it somehow lands in the launchd
+/// environment. `cargo test` and the e2e daemon are dev-profile builds, so the
+/// hook is present exactly where tests need it.
+#[cfg(debug_assertions)]
+fn injected_delay() -> Option<std::time::Duration> {
+    static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("OTTO_TEST_DB_SLEEP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// Release twin of [`injected_delay`] — a strict no-op, so the hook cannot be
+/// reached in a shipped daemon.
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn injected_delay() -> Option<std::time::Duration> {
+    None
+}
+
 impl SessionsRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -95,6 +128,9 @@ impl SessionsRepo {
     }
 
     pub async fn get(&self, id: &Id) -> Result<Session> {
+        if let Some(d) = injected_delay() {
+            tokio::time::sleep(d).await;
+        }
         let r = sqlx::query("SELECT * FROM sessions WHERE id = ?")
             .bind(id)
             .fetch_one(&self.pool)

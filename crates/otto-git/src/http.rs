@@ -245,11 +245,24 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
     Ok((repo, git))
 }
 
+/// Read one secret OFF the runtime. `SecretStore::get` is a SYNCHRONOUS
+/// Keychain FFI call (an XPC round-trip to `securityd`, plus whatever an EDR
+/// agent adds); on a loaded box it parks a tokio worker for tens of
+/// milliseconds, and it sits on request paths as hot as the Git page's 10 s
+/// auto-fetch. The trait stays sync — we wrap at the call sites.
+async fn secret(store: &Arc<dyn SecretStore>, key: &str) -> Result<Option<String>> {
+    let store = store.clone();
+    let key = key.to_string();
+    tokio::task::spawn_blocking(move || store.get(&key))
+        .await
+        .map_err(|e| Error::Internal(format!("keychain read: {e}")))?
+}
+
 /// Resolve the push/pull token for a repo's bound account (None when no
 /// account is bound — ssh remotes work through the user's agent).
-fn account_token<S: GitCtx>(s: &S, account: &GitAccount) -> Result<String> {
-    s.secrets()
-        .get(&account.token_ref)?
+async fn account_token<S: GitCtx>(s: &S, account: &GitAccount) -> Result<String> {
+    secret(s.secrets(), &account.token_ref)
+        .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))
 }
 
@@ -277,7 +290,7 @@ async fn authorized_repo_account<S: GitCtx>(
 /// user's agent); `Forbidden` when the caller does not own the bound account.
 pub(crate) async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
     match authorized_repo_account(s, user, repo).await? {
-        Some(account) => Ok(s.secrets().get(&account.token_ref)?),
+        Some(account) => secret(s.secrets(), &account.token_ref).await,
         None => Ok(None),
     }
 }
@@ -320,7 +333,7 @@ pub(crate) async fn provider_ctx<S: GitCtx>(
         .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
     let (_, remote_ref) =
         detect(remote).ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote}")))?;
-    let token = account_token(s, &account)?;
+    let token = account_token(s, &account).await?;
     Ok((make_provider(&account, token), remote_ref))
 }
 
@@ -542,7 +555,7 @@ async fn test_account<S: GitCtx>(
 ) -> ApiResult<Json<GitAccountTestResp>> {
     let account = s.store().get_account(&id).await?;
     authorize_owner(&account, &user.0)?;
-    let token = account_token(&s, &account)?;
+    let token = account_token(&s, &account).await?;
     let provider = make_provider(&account, token);
     Ok(Json(test_resp(provider.verify_token().await)))
 }
@@ -667,7 +680,7 @@ async fn remote_repos<S: GitCtx>(
         .as_deref()
         .filter(|n| !n.is_empty())
         .ok_or_else(|| Error::Invalid("set a namespace on this account first".into()))?;
-    let token = account_token(&s, &account)?;
+    let token = account_token(&s, &account).await?;
     let provider = make_provider(&account, token);
     let query = q.q.as_deref().filter(|s| !s.is_empty());
     Ok(Json(provider.list_repos(namespace, query).await?))
@@ -909,7 +922,7 @@ async fn clone_into_workspace<S: GitCtx>(
     let token = match &account_id {
         Some(aid) => {
             let account = s.store().get_account(aid).await?;
-            s.secrets().get(&account.token_ref)?
+            secret(s.secrets(), &account.token_ref).await?
         }
         None => None,
     };

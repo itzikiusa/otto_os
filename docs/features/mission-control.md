@@ -122,7 +122,17 @@ last_event_at, created_at, updated_at }`, unique on `(workspace_id, kind, source
   `approval_decided`, `artifact_added`, `edge_added`, `note`; each carries an `actor` and a
   JSON `payload`.
 - **`work_artifacts`** — evidence/trace (`ArtifactKind`): `diff`, `commit`, `pr`, `test_run`,
-  `report`, `file`, `link`, `finding`, `session`. Idempotent on `(work_item_id, kind, ref)`.
+  `report`, `file`, `link`, `finding`, `session`. Idempotent on `(work_item_id, kind, ref)`
+  — **including a NULL `ref`**: SQLite treats NULLs as distinct inside a UNIQUE constraint,
+  so before migration `0126_work_artifacts_nullref.sql` every reconcile sweep appended
+  *another* copy of each NULL-ref row (one item reached ~99k artifacts, and the read-back
+  inside `add_artifact` grew into a 1–2 s statement that stalled the whole SQLite pool —
+  felt as terminal typing lag). 0126 collapses the duplicates (keeping the **oldest** row per
+  `(work_item_id, kind)` — these are derived projection rows the sweep re-creates) and adds
+  the partial unique index `ux_work_artifacts_item_kind_nullref … WHERE "ref" IS NULL`.
+  `add_artifact` inserts with `ON CONFLICT DO NOTHING RETURNING`, so one statement honours
+  both keys, and the projector asks `has_artifact` first so a re-derived row costs no write
+  and no `artifact_added` audit event.
 - **`work_approvals`** — human gates (`ApprovalStatus`): `pending` → `approved` | `rejected`.
 
 All enums are string-backed, snake_case on the wire and in SQLite (one `str_enum!` macro
@@ -140,7 +150,10 @@ M5 — the split is deliberate):
    `clickhouse local` process spawn), so it can't back the broadcast buffer up into `Lagged`.
 2. **Reconcile loop** — every **5 minutes** (`RECONCILE_SECS = 300`) re-derives every
    workspace's graph from the authoritative repos. Idempotent; **self-heals** missed/lagged
-   events. SQLite-only.
+   events. SQLite-only. The cadence is overridable with **`OTTO_WORKGRAPH_RECONCILE_SECS`**
+   (seconds; **`0` disables the periodic sweep entirely** — the live event loop and the boot
+   backfill still run, so the graph stays current, it just stops self-healing on a timer).
+   An escape hatch when you need to rule the sweep out of a daemon-wide slowdown.
 3. **Boot backfill** — a one-shot `backfill_all` is `tokio::spawn`ed so it never delays
    daemon startup.
 
@@ -154,7 +167,7 @@ M5 — the split is deliberate):
 | `SwarmRunUpdated` / `SwarmTaskUpdated` / `SwarmStatus` | upsert the affected swarm **project** item (cost = SUM of its runs) |
 | `GoalLoopUpdated` | upsert the `goal_loop` item + a branch `link` artifact |
 | `WorkflowRunUpdated` | upsert the `workflow` run item |
-| `ReviewChanged` | upsert the `review` item **and** a derived `pr` item, link `review --reviews--> pr`, attach a verdict report + PR-link artifact |
+| `ReviewChanged` | upsert the `review` item + a verdict report artifact (keyed by the review id) **and**, when the review has a pull request, a derived `pr` item keyed `repo:pr`, the `review --reviews--> pr` edge, and a PR-link artifact keyed the same way. A **LOCAL review** (`pr_number == 0`, no PR at all) stops after the review item — otherwise every PR-less review of a repo would collapse onto one synthetic "PR #0" item |
 | `ProductChanged` / `PlanRun` | upsert the `product_story` item |
 
 ### How sessions are classified (`classify`)
@@ -390,7 +403,8 @@ graph on a matching tick instead of polling.
 | **An item's status looks stale** | The bus may have lagged. Wait for the 5-minute reconcile or hit **Refresh** — the upsert is idempotent and self-heals. |
 | **Cost shows `$0.00`** | Workflow runs, PRs, and product stories don't model cost (MVP). For sessions/triggers, open the detail (refreshes on-demand) or **Refresh** the workspace; `$0` also means usage tracking is off / not flushed. |
 | **A review/swarm sub-agent session is missing** | Intended — internal sub-agent PTYs are *skipped* and represented by their parent item (the review, the swarm project). |
-| **Two items appear for one PR review** | Expected — a `review` item *and* the `pr` item it reviews, joined by a `reviews` edge. |
+| **Two items appear for one PR review** | Expected — a `review` item *and* the `pr` item it reviews, joined by a `reviews` edge. A **local** review (no PR) projects the review item only. |
+| **A "PR #0" item with a huge evidence list** | Pre-0126 daemons projected every PR-less review onto one `repo:0` item and re-inserted its NULL-ref artifacts on every reconcile. Migration `0126_work_artifacts_nullref.sql` collapses those duplicates on the next start; the item itself stops growing because local reviews no longer derive a `pr` item. |
 | **My manual edge didn't appear in the graph view** | The graph only draws an edge when **both** endpoints are in the current (filtered) node set. Clear filters or widen the limit. |
 | **Can't edit / approve** | Writes need workspace **Editor** plus `Feature::MissionControl` **Edit**; reads need **Viewer** / **View**. |
 | **Looking for needs-you / failed buckets** | That's the separate `/mission` work-queue endpoint (gated by `Agents`), not this page. |

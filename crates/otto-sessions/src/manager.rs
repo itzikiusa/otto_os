@@ -196,6 +196,17 @@ fn process_table() -> Vec<ProcRow> {
         .collect()
 }
 
+/// [`process_table`] OFF the runtime. The `ps` spawn + parse blocks for tens of
+/// milliseconds (far more under load or an EDR agent scanning every exec), and
+/// every caller sits on a tokio worker shared with the terminal sockets — so a
+/// sweep would stall whatever keystroke that worker was about to deliver.
+/// A join failure yields an empty table, exactly like a failed `ps`.
+async fn process_table_async() -> Vec<ProcRow> {
+    tokio::task::spawn_blocking(process_table)
+        .await
+        .unwrap_or_default()
+}
+
 /// Parse `ps` cumulative CPU time (`MM:SS.ss`, `HH:MM:SS`, or `D-HH:MM:SS`)
 /// into milliseconds.
 fn parse_ps_time_ms(s: &str) -> Option<u64> {
@@ -2614,7 +2625,10 @@ impl SessionManager {
             return 0;
         }
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        let table = crate::nested::process_table();
+        // `ps -axo …` for the whole box: off the runtime (see `process_table_async`).
+        let table = tokio::task::spawn_blocking(crate::nested::process_table)
+            .await
+            .unwrap_or_default();
         let mut captured = 0;
         for (id, pid) in live {
             let Some(pid) = pid else { continue };
@@ -2935,9 +2949,9 @@ impl SessionManager {
         let Some(pid) = self.live.get(id).and_then(|e| e.value().pid()) else {
             return false;
         };
-        let before = descendant_cpu_ms(pid, &process_table());
+        let before = descendant_cpu_ms(pid, &process_table_async().await);
         tokio::time::sleep(Duration::from_millis(750)).await;
-        let after = descendant_cpu_ms(pid, &process_table());
+        let after = descendant_cpu_ms(pid, &process_table_async().await);
         // ≥30ms over 750ms ≈ a real job burning CPU; idle MCP helpers accrue ~0.
         after > before.saturating_add(30)
     }
@@ -3130,7 +3144,7 @@ impl SessionManager {
         // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
         // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
         // servers) accrue ~none, so genuinely idle sessions still suspend.
-        let proc_table = process_table();
+        let proc_table = process_table_async().await;
 
         let mut suspended = 0;
         for (id, last_output, pid) in candidates {

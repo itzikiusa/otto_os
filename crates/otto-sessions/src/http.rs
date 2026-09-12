@@ -48,6 +48,18 @@ pub trait SessionsCtx: Clone + Send + Sync + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    /// True when this session's terminal is bound to an external resource
+    /// (k8s / AWS / a connection). Those re-authorize on a tight cadence — a
+    /// revoked grant must drop the socket promptly — while a plain agent/shell
+    /// terminal re-checks far less often (the check is a SQLite round-trip, and
+    /// it used to sit on the keystroke path). Cheap and synchronous: the
+    /// binding is entirely in the session row. Default `false` keeps test
+    /// contexts on the relaxed cadence; `otto-server` answers from
+    /// `resource_sessions::binding`.
+    fn resource_bound(&self, _session: &Session) -> bool {
+        false
+    }
+
     fn manager(&self) -> &Arc<SessionManager>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn workspaces(&self) -> &WorkspacesRepo;
