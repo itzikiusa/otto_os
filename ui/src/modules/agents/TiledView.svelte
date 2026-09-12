@@ -401,7 +401,10 @@
   {#if ordered.length > 1}
     <!-- Full per-pane control lives in the split tree: hand the tiles over in
          their current order as an equal grid, then every edge is its own
-         gutter and panes can be nested any way (presets in the pane ⋯ menu). -->
+         gutter and panes can be nested any way (presets in the pane ⋯ menu).
+         Its own slim bar above the grid — floating it over the first tile hid
+         that pane's header actions (reload / maximize / copy). -->
+    <div class="tiled-bar">
     <button
       class="btn small free-layout"
       onclick={() => {
@@ -411,6 +414,7 @@
       title="Turn these tiles into a free layout: every pane edge resizable, panes nestable, presets in the ⋯ menu"
       data-testid="tiled-free-layout"
     ><Icon name="split" size={11} /> Free layout</button>
+    </div>
   {/if}
   <div class="tiled" class:resizing bind:this={gridEl} style={gridStyle}>
     {#each tileRows as tiles, r (r)}
@@ -536,24 +540,27 @@
 
 <style>
   .tiled-wrap {
-    position: relative;
+    display: flex;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
   }
+  .tiled-bar {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 8px 0;
+  }
   .free-layout {
-    position: absolute;
-    top: 12px;
-    inset-inline-end: 22px;
-    z-index: 6;
     gap: 4px;
-    box-shadow: var(--shadow);
   }
   .tiled {
     display: grid;
     /* Rows only; each row lays out its own tiles (see .trow). No `gap`: the
        8px dividers are their own tracks. */
     grid-template-columns: minmax(0, 1fr);
-    height: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 8px;
     overflow: auto;
     grid-auto-rows: minmax(220px, 1fr);
