@@ -92,35 +92,45 @@
     ((session?.meta?.name_full as string | undefined) ?? '').trim(),
   );
 
-  // Live pane-header width, so the header can shed controls in the same order
-  // the CSS container queries hide them (below) — driving the JS-only fallback of
-  // folding the terminal font/copy toolbar into the ⋯ menu once it's too narrow
-  // to fit inline. Kept in lockstep with the `@container` breakpoints in the CSS.
+  // Live pane-header width + element, so the header can shed controls as the
+  // PANE shrinks (a tiled grid packs 15 of these side by side). ONE source of
+  // truth: `tier` drives both the markup below and the `.t1`–`.t7` style rules
+  // at the bottom of this stylesheet — the CSS used to key off `@container`,
+  // which silently never matched the rules targeting `.pane-head` itself (a
+  // container cannot query itself) and could not see the measured fold below.
   let headW = $state(0);
-  /** Fold tier, 0 (roomy) → 7 (status dot + ⋯ only). The thresholds are the SAME
-   *  numbers as the `@container` blocks at the bottom of this stylesheet — CSS
-   *  hides instantly, this decides what the ⋯ menu has to carry back. Everything
-   *  a tier drops is reachable as a MenuItem, never clipped (C1). */
-  const tier = $derived(
+  let headEl: HTMLElement | null = $state(null);
+  /** Fold tier by WIDTH, 0 (roomy) → 7 (status dot + ⋯ only). A starting point
+   *  only: the inline set that fits depends on the session (task chip, handover
+   *  crumb, themed name…), so `tier` below adds whatever the MEASURED header
+   *  still needs. Everything a tier drops is reachable as a MenuItem, never
+   *  clipped (C1). */
+  const widthTier = $derived(
     headW <= 0
       ? 0
       : headW <= 140
         ? 7
         : headW <= 200
           ? 6
-          : headW <= 260
+          : headW <= 270
             ? 5
-            : headW <= 300
+            : headW <= 400
               ? 4
-              : headW <= 340
+              : headW <= 520
                 ? 3
-                : headW <= 380
+                : headW <= 560
                   ? 2
-                  : headW <= 440
+                  : headW <= 620
                     ? 1
                     : 0,
   );
-  // Tier 4 (≤300px) is where `.term-ctl` goes; its actions move into the ⋯ menu.
+  /** Extra tiers the measured header asked for — a RATCHET: it only ever grows
+   *  for a given width+content, so the fold converges in at most 7 passes and
+   *  can never oscillate. Reset whenever either changes (see the $effect). */
+  let foldBump = $state(0);
+  /** Effective tier: what the markup and the `.t*` classes below both use. */
+  const tier = $derived(Math.min(7, widthTier + foldBump));
+  // Tier 4 is where `.term-ctl` goes; its actions move into the ⋯ menu.
   const termCtlFolded = $derived(tier >= 4 && !viewport.isPhone && ui.termToolbar);
   /** The drag grip is a mouse affordance — phones keep keyboard/palette moves. */
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
@@ -202,6 +212,53 @@
     return () => mq.removeEventListener('change', sync);
   });
   const effView = $derived<SessionViewMode>(view === 'split' && !wide ? 'chat' : view);
+
+  /** Everything that changes the header's intrinsic width. A change resets the
+   *  ratchet so a pane that got roomier (or a chip that went away) folds back. */
+  const fitSig = $derived(
+    [
+      headW,
+      session?.title ?? '',
+      nameFull,
+      session?.cwd ?? '',
+      session?.provider ?? '',
+      effView,
+      wide,
+      ui.termToolbar,
+      viewport.isPhone,
+      summary?.total ?? 0,
+      summary?.in_progress ?? '',
+      needsYou,
+      idleHint ?? '',
+      handoverFromId ?? '',
+      handoverPending,
+      showZoom,
+      showClose,
+      gripOn,
+      readOnly,
+      renaming,
+    ].join('|'),
+  );
+  let lastFitSig = '';
+  // C1: no control may EVER be clipped. `.pane-head` is `overflow: clip`, so an
+  // overflowing header silently pushes ✕/⋯ past its edge (they stay clickable
+  // in the pane NEXT to it — the bug this guard exists for). Measure after every
+  // render and fold one more tier until the inline set genuinely fits.
+  $effect(() => {
+    const el = headEl;
+    const sig = fitSig;
+    const t = tier; // track: re-measure once the fold we just asked for is applied
+    if (!el || headW <= 0) return;
+    if (sig !== lastFitSig) {
+      lastFitSig = sig;
+      // Re-runs with the reset tier; the measure below happens on that pass.
+      if (untrack(() => foldBump) !== 0) {
+        foldBump = 0;
+        return;
+      }
+    }
+    if (t < 7 && el.scrollWidth - el.clientWidth > 1) foldBump += 1;
+  });
   function setView(mode: SessionViewMode): void {
     transcript.setView(sessionId, mode);
   }
@@ -475,9 +532,9 @@
         ? [{ label: 'Preparing handover…', disabled: true } as MenuItem]
         : []),
       ...(tier >= 4 && session?.cwd ? [{ label: `cwd: ${session.cwd}`, disabled: true } as MenuItem] : []),
-      // In a narrow pane the inline terminal font/copy toolbar is hidden (see the
-      // `@container` rule on `.term-ctl`); surface its actions here so nothing is
-      // lost when tiling many sessions.
+      // In a narrow pane the inline terminal font/copy toolbar is hidden (the
+      // `.t4 .term-ctl` rule); surface its actions here so nothing is lost when
+      // tiling many sessions.
       ...(termCtlFolded
         ? [
             { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() } as MenuItem,
@@ -561,7 +618,20 @@
     onfocus();
   }}
 >
-  <header class="pane-head" bind:clientWidth={headW}>
+  <!-- `t1`–`t7` are CUMULATIVE fold classes (tier ≥ n), the style counterpart of
+       the `tier` the script folds the ⋯ menu by — one source of truth. -->
+  <header
+    class="pane-head"
+    class:t1={tier >= 1}
+    class:t2={tier >= 2}
+    class:t3={tier >= 3}
+    class:t4={tier >= 4}
+    class:t5={tier >= 5}
+    class:t6={tier >= 6}
+    class:t7={tier >= 7}
+    bind:this={headEl}
+    bind:clientWidth={headW}
+  >
     <StatusDot {status} {needsYou} />
     {#if renaming}
       <!-- svelte-ignore a11y_autofocus -->
@@ -818,15 +888,11 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    /* Belt and braces only: every tier below is sized so the inline set FITS
-       (sessions-mobile asserts scrollWidth − clientWidth ≤ 2, which `clip` does
-       NOT hide). This just stops a one-frame flash before the tier applies. */
+    /* Belt and braces only: the script MEASURES this header and folds another
+       tier until the inline set genuinely fits (sessions-mobile and the desktop
+       pane specs assert scrollWidth − clientWidth ≤ 2, which `clip` does NOT
+       hide). This just stops a one-frame flash before the tier applies. */
     overflow: clip;
-    /* Establish a query container on the header's inline size so the controls
-       below degrade with PANE width, not window width — the tiled view packs
-       10+ of these side by side and each shrinks independently. Breakpoints are
-       mirrored in the `@container` blocks at the bottom of this stylesheet. */
-    container-type: inline-size;
   }
   /* Provider label beside its brand icon — hidden (icon-only) in a narrow pane. */
   .provider-name {
@@ -1095,98 +1161,87 @@
   }
 
   /* ── Responsive pane header ──────────────────────────────────────────────
-     Queried against the header's own inline size (see `.pane-head`), so a pane
-     sheds chrome by its OWN width in a tiled/split grid. Degradation order,
-     widest→narrowest: cwd → provider text → themed full-name → font/copy
-     toolbar. The status dot, the (ellipsized) title, and the ⋯ menu never drop.
-     The toolbar removed at 300px re-appears as ⋯-menu entries (see script). */
+     Driven by the `t1`–`t7` classes the script puts on `.pane-head` (tier ≥ n),
+     NOT by `@container`: a container cannot query ITSELF, so the rules below
+     that size the header itself silently never applied, and a container query
+     can't see the measured fold the script adds when the inline set still
+     doesn't fit. Degradation order, widest→narrowest: cwd → provider text →
+     themed full-name → font/copy toolbar → segmented control (+ zoom/restart)
+     → grip → title + ✕. The status dot and ⋯ never drop; everything else comes
+     back as a ⋯ row (see the script's `paneMenuItems`). */
 
   /* 1. The cwd path is the first to go — longest, least critical inline. */
-  @container (max-width: 440px) {
-    .pane-cwd {
-      display: none;
-    }
+  .pane-head.t1 .pane-cwd {
+    display: none;
   }
 
   /* 2. Provider chip collapses to its brand icon (text-labelled providers with
         no icon keep their text — the chip would otherwise render empty). */
-  @container (max-width: 380px) {
-    .provider-chip.has-icon .provider-name {
-      display: none;
-    }
-    .provider-chip.has-icon {
-      padding: 0 4px;
-    }
+  .pane-head.t2 .provider-chip.has-icon .provider-name {
+    display: none;
+  }
+  .pane-head.t2 .provider-chip.has-icon {
+    padding: 0 4px;
   }
 
   /* 3. Drop the themed full-name in parens; the short handle title carries it. */
-  @container (max-width: 340px) {
-    .pane-fullname {
-      display: none;
-    }
-    /* Tidy the header up: shorter, slightly smaller, tighter gaps. */
-    .pane-head {
-      height: 26px;
-      gap: 6px;
-    }
-    .pane-title {
-      font-size: 11px;
-      max-width: 130px;
-    }
+  .pane-head.t3 .pane-fullname {
+    display: none;
+  }
+  /* Tidy the header up: shorter, slightly smaller, tighter gaps. */
+  .pane-head.t3 {
+    height: 26px;
+    gap: 6px;
+  }
+  .pane-head.t3 .pane-title {
+    font-size: 11px;
+    max-width: 130px;
   }
 
   /* 4. Fold the inline terminal font/copy toolbar away, plus the task/handover/
         idle chips — all of them come back as ⋯ rows (script, `tier >= 4`). */
-  @container (max-width: 300px) {
-    .term-ctl,
-    .now-task,
-    .idle-hint,
-    .handover-crumb,
-    .handover-pending {
-      display: none;
-    }
-    .view-seg > button {
-      padding: 0 5px;
-      font-size: 10px;
-    }
-    .pane-title {
-      max-width: 96px;
-    }
+  .pane-head.t4 .term-ctl,
+  .pane-head.t4 .now-task,
+  .pane-head.t4 .idle-hint,
+  .pane-head.t4 .handover-crumb,
+  .pane-head.t4 .handover-pending {
+    display: none;
+  }
+  .pane-head.t4 .view-seg > button {
+    padding: 0 5px;
+    font-size: 10px;
+  }
+  .pane-head.t4 .pane-title {
+    max-width: 96px;
   }
 
   /* 5. The segmented control becomes one view icon (script swaps the markup);
         zoom + restart and the task/needs-you chips move into ⋯. */
-  @container (max-width: 260px) {
-    .task-chip,
-    .needs-you-badge {
-      display: none;
-    }
-    .pane-title {
-      max-width: 80px;
-    }
+  .pane-head.t5 .task-chip,
+  .pane-head.t5 .needs-you-badge {
+    display: none;
+  }
+  .pane-head.t5 .pane-title {
+    max-width: 80px;
   }
 
   /* 6. The grip goes — dragging is a mouse gesture and ⌘⌥arrows / the palette
         still move the pane; the view icon folds into ⋯ (script). */
-  @container (max-width: 200px) {
-    .pane-grip {
-      display: none;
-    }
-    .pane-title {
-      max-width: 60px;
-    }
+  .pane-head.t6 .pane-grip {
+    display: none;
+  }
+  .pane-head.t6 .pane-title {
+    max-width: 60px;
   }
 
   /* 7. Required by the 15-pane cap (15 columns at 1280px ≈ 85px each): the
         title and ✕ move into ⋯, which is then the whole header beside the dot.
         The rename input stays — renaming must not need a wider pane. */
-  @container (max-width: 140px) {
-    .pane-title {
-      display: none;
-    }
-    .pane-head {
-      padding: 0 4px;
-      gap: 4px;
-    }
+  .pane-head.t7 .pane-title {
+    display: none;
+  }
+  .pane-head.t7 {
+    padding: 0 4px;
+    gap: 4px;
   }
 </style>

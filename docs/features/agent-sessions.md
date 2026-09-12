@@ -337,7 +337,10 @@ on `claude`/`codex` repaints.
   this order: cwd → provider text → themed full name → terminal font/copy toolbar
   → task / handover / idle chips → the view toggle becomes an icon menu and
   restart + zoom fold into ⋯ → the drag grip → the title and ✕ fold into ⋯. Every
-  control stays reachable through ⋯ — nothing is ever clipped.
+  control stays reachable through ⋯ — nothing is ever clipped: width picks the
+  starting fold, then the header is MEASURED and folded one tier further until
+  the inline set genuinely fits, so a session carrying extra chrome (a task
+  chip, a handover crumb, a themed name) can never push ✕ past the edge.
 - **Tiled view** (`TiledView.svelte`) — see every session at once in a grid (1→2
   →3→4 columns by count). Drag a tile onto another to reorder; the order is
   remembered per workspace (`otto_tile_order_<ws>`). To preserve the idle-suspend
