@@ -122,7 +122,12 @@
    *  unchanged step subtrees don't re-render on every merge. */
   function nodeSig(n: NodeRunState): string {
     const out = n.output === undefined || n.output === null ? 0 : 1;
-    return `${n.status}|${n.error ?? ''}|${n.started_at ?? ''}|${n.duration_ms ?? -1}|${n.attempts ?? 0}|${n.logs?.length ?? 0}|${(n.logs ?? [])[Math.max(0, (n.logs?.length ?? 0) - 1)] ?? ''}|${n.sessions?.length ?? 0}|${out}`;
+    // The engine stamps `updated_at` on every activity write, so phase text +
+    // stamp + sub-agent count catch a sub-agent flipping to done without
+    // walking the list.
+    const a = n.activity;
+    const act = a ? `${a.phase}|${a.updated_at}|${a.subagents?.length ?? 0}|${a.hold_reason ?? ''}` : '';
+    return `${n.status}|${n.error ?? ''}|${n.started_at ?? ''}|${n.duration_ms ?? -1}|${n.attempts ?? 0}|${n.logs?.length ?? 0}|${(n.logs ?? [])[Math.max(0, (n.logs?.length ?? 0) - 1)] ?? ''}|${n.sessions?.length ?? 0}|${out}|${act}`;
   }
 
   function mergeNode(into: NodeRunState, from: NodeRunState): void {
@@ -135,6 +140,8 @@
     into.logs = from.logs ?? [];
     into.sessions = from.sessions ?? [];
     into.output = from.output;
+    // Absent on a finished step (the engine clears it) — never sticky.
+    into.activity = from.activity ?? null;
   }
 
   /** Merge a full snapshot into the viewed run (id + rev guarded). */
