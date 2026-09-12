@@ -2813,7 +2813,7 @@ enforce the entity's workspace role.
 | # | Method + Path | Role | Body | Response |
 |---|---|---|---|---|
 | CP1 | GET /api/v1/workspaces/{wid}/mcp/servers | mcp:view + ws viewer | — | `McpServerDetail[]` |
-| CP2 | POST /api/v1/workspaces/{wid}/mcp/servers | mcp:edit + ws editor (stdio→mcp:admin) | CreateServerReq | McpServerDetail |
+| CP2 | POST /api/v1/workspaces/{wid}/mcp/servers | mcp:edit + ws editor; root in-handler (any transport) | CreateServerReq | McpServerDetail |
 | CP3 | GET /api/v1/mcp/servers/{id} | mcp:view + ws viewer | — | `{server, tools}` |
 | CP4 | PATCH /api/v1/mcp/servers/{id} | mcp:edit + ws editor | UpdateServerReq | McpServerDetail |
 | CP5 | DELETE /api/v1/mcp/servers/{id} | mcp:edit + ws editor | — | 204 |
@@ -2853,6 +2853,11 @@ enforce the entity's workspace role.
 | CP34 | GET /api/v1/mcp/tokens | mcp:admin | — | `{tokens: McpTokenInfo[]}` (all users, no secrets) |
 | CP35 | POST /api/v1/mcp/tokens | mcp:admin | `{user_id?, label?, scope?:{tools?, allow_writes?, workspace_id?}}` | `{token, info}` (raw token shown once) |
 | CP36 | DELETE /api/v1/mcp/tokens/{id} | mcp:admin | — | `204` (404 if not found) |
+| CP37 | POST /api/v1/mcp/tokens/{id}/rotate | mcp:admin (in-handler) | — | `{token, info: McpTokenInfo, revoked_id}` (raw token shown once; 404 unknown id) |
+| CP38 | GET /api/v1/workspaces/{wid}/mcp/session-attach | mcp:view + ws viewer | — | `{workspace_id, attached}` |
+| CP39 | PATCH /api/v1/workspaces/{wid}/mcp/session-attach | mcp:admin (in-handler) + ws editor | `{enabled}` | `{workspace_id, attached}` — writes the per-workspace map form of `otto_mcp_enabled` |
+
+**Per-token rotation (CP37)** replaces exactly one token (same owner, label, scope) and revokes only the old id. **CP25 `rotate_token`** now revokes only the caller's legacy `otto-mcp-server`-labelled tokens before minting; scoped tokens (CP35) are never touched. CP24's `has_token`/`token_prefix` describe that legacy token only. **Session attach (CP38/39)** reads/writes the per-workspace map form of `otto_mcp_enabled` (never the scalar), so other workspaces keep their setting.
 
 **MCP HTTP transport (CP32/CP33).** The outward "Otto as an MCP server" is reachable
 over the **Streamable HTTP** transport at `POST /api/v1/mcp/http` — external MCP clients

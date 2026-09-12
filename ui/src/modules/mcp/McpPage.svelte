@@ -1,96 +1,105 @@
 <script lang="ts">
-  // MCP Control Plane — Otto as the governed path between agents and MCP tools.
-  // A workspace-scoped registry of MCP servers (stdio/http), with health,
-  // discovery, per-tool permissions, allowlists, policy-as-code, an approval
-  // queue, an audit ledger, per-tool stats, and Otto's own outward MCP server.
-  //
-  // The active workspace comes from the shared workspace store (same as Brokers);
-  // Servers + Tools are workspace-scoped, the rest are governed globally and
-  // filtered server-side to the workspaces the caller can access.
+  // MCP Control Plane — three focused sections: Otto's built-in server,
+  // governed external servers, and approval/audit activity.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
-  import ToolsTab from './ToolsTab.svelte';
-  import AllowlistsTab from './AllowlistsTab.svelte';
-  import PoliciesTab from './PoliciesTab.svelte';
   import ApprovalsTab from './ApprovalsTab.svelte';
   import AuditTab from './AuditTab.svelte';
-  import StatsTab from './StatsTab.svelte';
-  import OttoServerTab from './OttoServerTab.svelte';
+  import OttoServerHome from './OttoServerHome.svelte';
 
-  type Tab =
-    | 'servers'
-    | 'tools'
-    | 'allowlists'
-    | 'policies'
-    | 'approvals'
-    | 'audit'
-    | 'stats'
-    | 'otto';
-  let tab = $state<Tab>('servers');
-
+  type Section = 'otto' | 'servers' | 'activity';
+  const section = $derived<Section>(
+    (['otto', 'servers', 'activity'] as const).includes(router.parts[1] as Section)
+      ? (router.parts[1] as Section)
+      : 'otto',
+  );
   const wsId = $derived(ws.currentId);
 
-  // The registry is shared between the Servers and Tools tabs (and feeds the
-  // server pickers in Allowlists / Policies / Audit), so it's loaded once here.
+  // The registry is shared by the external-server view and activity filters.
   let accessRevision = $state(0);
-  let loadGeneration=0;
-  $effect(()=>resourceAccess.subscribe(change=>{
-    if(change.type==='decision' && (change.kind!=='mcp_server' || !change.before || !Object.keys(change.before.operations).some(op=>change.before?.operations[op]?.allowed && !change.after?.operations[op]?.allowed)))return;
-    accessRevision++;loadGeneration++;servers=[];selectedServerId=null;void loadServers();
-  }));
+  let loadGeneration = 0;
+  $effect(() =>
+    resourceAccess.subscribe((change) => {
+      if (
+        change.type === 'decision' &&
+        (change.kind !== 'mcp_server' ||
+          !change.before ||
+          !Object.keys(change.before.operations).some(
+            (operation) =>
+              change.before?.operations[operation]?.allowed &&
+              !change.after?.operations[operation]?.allowed,
+          ))
+      )
+        return;
+      accessRevision++;
+      loadGeneration++;
+      servers = [];
+      selectedServerId = null;
+      void loadServers();
+    }),
+  );
   let servers = $state<McpServerDetail[]>([]);
   let loading = $state(false);
   let selectedServerId = $state<string | null>(null);
+  let pending = $state(0);
 
   async function loadServers(): Promise<void> {
-    const generation=++loadGeneration;
+    const generation = ++loadGeneration;
     const id = wsId;
     if (!id) {
       servers = [];
+      loading = false;
       return;
     }
     loading = true;
     try {
       const result = await mcpCpApi.cpList(id);
-      if(generation!==loadGeneration)return;
-      servers=result;
-      // Keep a sensible selection for the Tools tab.
-      if (selectedServerId && !servers.some((s) => s.id === selectedServerId)) {
+      if (generation !== loadGeneration) return;
+      servers = result;
+      if (selectedServerId && !servers.some((server) => server.id === selectedServerId)) {
         selectedServerId = null;
       }
       if (!selectedServerId && servers.length > 0) selectedServerId = servers[0].id;
     } catch (e) {
       toasts.error('Failed to load MCP servers', e instanceof Error ? e.message : String(e));
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
+    }
+  }
+
+  async function loadPending(): Promise<void> {
+    try {
+      pending = (await mcpCpApi.cpApprovals('pending')).length;
+    } catch {
+      pending = 0;
     }
   }
 
   $effect(() => {
-    void wsId; // re-load when the active workspace changes
+    void wsId;
     selectedServerId = null;
     void loadServers();
   });
 
+  $effect(() => {
+    void loadPending();
+    const interval = window.setInterval(() => void loadPending(), 15_000);
+    return () => window.clearInterval(interval);
+  });
+
   function patchServer(updated: McpServerDetail): void {
-    servers = servers.map((s) => (s.id === updated.id ? updated : s));
+    servers = servers.map((server) => (server.id === updated.id ? updated : server));
   }
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'servers', label: 'Servers' },
-    { id: 'tools', label: 'Tools' },
-    { id: 'allowlists', label: 'Allowlists' },
-    { id: 'policies', label: 'Policies' },
-    { id: 'approvals', label: 'Approvals' },
-    { id: 'audit', label: 'Audit' },
-    { id: 'stats', label: 'Stats' },
-    { id: 'otto', label: 'Otto Server' },
-  ];
+  function go(id: Section): void {
+    router.go('mcp/' + id);
+  }
 </script>
 
 <div class="mcp-page">
@@ -102,57 +111,57 @@
     </div>
   </header>
 
-  {#if !wsId}
-    <div class="empty">
-      <Icon name="plug" size={30} />
-      <h3>No workspace selected</h3>
-      <p>Select a workspace to manage its governed MCP servers and tools.</p>
-    </div>
-  {:else}
-    <nav class="tabs" aria-label="MCP sections">
-      {#each tabs as t (t.id)}
-        <button class:on={tab === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
-      {/each}
-    </nav>
+  <nav class="tabs" aria-label="MCP sections">
+    <button
+      class:on={section === 'otto'}
+      data-testid="mcp-nav-otto"
+      onclick={() => go('otto')}
+    >Otto server</button>
+    <button
+      class:on={section === 'servers'}
+      data-testid="mcp-nav-servers"
+      onclick={() => go('servers')}
+    >External servers{wsId ? ` (${servers.length})` : ''}</button>
+    <button
+      class:on={section === 'activity'}
+      data-testid="mcp-nav-activity"
+      onclick={() => go('activity')}
+    >
+      Activity
+      {#if pending > 0}<span class="badge" data-testid="mcp-pending-badge">{pending}</span>{/if}
+    </button>
+  </nav>
 
-    <div class="tab-body">
-      {#key accessRevision}
-      {#if tab === 'servers'}
-        <ServersTab
-          {wsId}
-          {servers}
-          {loading}
-          {selectedServerId}
-          onReload={loadServers}
-          onPatch={patchServer}
-          onSelect={(id) => {
-            selectedServerId = id;
-            tab = 'tools';
-          }}
-        />
-      {:else if tab === 'tools'}
-        <ToolsTab
-          {wsId}
-          {servers}
-          {selectedServerId}
-          onSelect={(id) => (selectedServerId = id)}
-        />
-      {:else if tab === 'allowlists'}
-        <AllowlistsTab {wsId} {servers} />
-      {:else if tab === 'policies'}
-        <PoliciesTab {wsId} {servers} />
-      {:else if tab === 'approvals'}
-        <ApprovalsTab />
-      {:else if tab === 'audit'}
-        <AuditTab {servers} />
-      {:else if tab === 'stats'}
-        <StatsTab />
-      {:else if tab === 'otto'}
-        <OttoServerTab />
+  <div class="tab-body">
+    {#key accessRevision}
+      {#if section === 'otto'}
+        <OttoServerHome {wsId} />
+      {:else if section === 'servers'}
+        {#if !wsId}
+          <div class="empty">
+            <Icon name="plug" size={30} />
+            <h3>No workspace selected</h3>
+            <p>Select a workspace to manage its governed MCP servers and tools.</p>
+          </div>
+        {:else}
+          <ServersTab
+            {wsId}
+            {servers}
+            {loading}
+            selectedServerId={null}
+            onReload={loadServers}
+            onPatch={patchServer}
+            onSelect={() => {}}
+          />
+        {/if}
+      {:else}
+        <div class="activity">
+          <ApprovalsTab />
+          <AuditTab {servers} />
+        </div>
       {/if}
-      {/key}
-    </div>
-  {/if}
+    {/key}
+  </div>
 </div>
 
 <style>
@@ -199,6 +208,9 @@
     -webkit-overflow-scrolling: touch;
   }
   .tabs button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -213,10 +225,25 @@
     color: var(--text);
     border-bottom-color: var(--accent);
   }
+  .badge {
+    min-width: 16px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: var(--danger, #c0392b);
+    color: white;
+    font-size: 10px;
+    line-height: 14px;
+    text-align: center;
+  }
   .tab-body {
     flex: 1;
     min-height: 0;
     overflow: auto;
+  }
+  .activity {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
   }
   .empty {
     height: 100%;

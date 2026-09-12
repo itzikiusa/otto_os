@@ -35,7 +35,7 @@
   }
 </script>
 
-<div class="stats">
+<div class="stats" data-testid="mcp-stats">
   <div class="bar">
     <span class="count">{stats.length} tool{stats.length === 1 ? '' : 's'}</span>
     <span class="muted small">Cost in USD is not metered — bytes are the available proxy.</span>
