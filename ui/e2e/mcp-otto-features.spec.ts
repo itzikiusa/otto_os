@@ -230,9 +230,6 @@ test('Otto Server tab lists the new tools, grouped + filterable', async ({ page 
   await page.goto('/#/mcp');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
 
-  // Open the Otto Server tab.
-  await page.locator('.tabs button', { hasText: 'Otto Server' }).click();
-
   // The filterable, grouped checklist renders the new feature tools.
   const filter = page.locator('.otto .filter');
   await expect(filter).toBeVisible({ timeout: 20_000 });

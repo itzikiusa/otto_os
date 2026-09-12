@@ -20,14 +20,31 @@
     servers: McpServerDetail[];
     selectedServerId: string | null;
     onSelect: (id: string) => void;
+    embedded?: boolean;
   }
-  let { wsId, servers, selectedServerId, onSelect }: Props = $props();
+  let { wsId, servers, selectedServerId, onSelect, embedded = false }: Props = $props();
 
   const can = (operation:string, child?:string) => !!selectedServerId && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
-  $effect(()=>{if(selectedServerId){void resourceAccess.load('mcp_server',selectedServerId);for(const tool of tools)void resourceAccess.load('mcp_server',selectedServerId,tool.name);}});
   let tools = $state<McpToolView[]>([]);
   let loading = $state(false);
   let busyTool = $state<Record<string, boolean>>({});
+  const loadedAccessIds = new Set<string>();
+
+  $effect(() => {
+    const serverId = selectedServerId;
+    if (!serverId) return;
+    const serverKey = `server:${serverId}`;
+    if (!embedded && !loadedAccessIds.has(serverKey)) {
+      loadedAccessIds.add(serverKey);
+      void resourceAccess.load('mcp_server', serverId);
+    }
+    for (const tool of tools) {
+      const toolKey = `${serverId}:${tool.id}`;
+      if (loadedAccessIds.has(toolKey)) continue;
+      loadedAccessIds.add(toolKey);
+      void resourceAccess.load('mcp_server', serverId, tool.name);
+    }
+  });
 
   const server = $derived(servers.find((s) => s.id === selectedServerId) ?? null);
 
@@ -94,6 +111,7 @@
   let running = $state(false);
   let result = $state<McpInvokeResp | null>(null);
   let argError = $state<string | null>(null);
+  let testerOpen = $state(false);
 
   // Default the tester to the first tool whenever the tool set changes.
   $effect(() => {
@@ -139,22 +157,24 @@
   }
 </script>
 
-<div class="tools">
+<div class="tools" class:embedded>
   <div class="bar">
-    <label class="picker">
-      <span>Server</span>
-      <select
-        value={selectedServerId ?? ''}
-        onchange={(e) => onSelect((e.currentTarget as HTMLSelectElement).value)}
-      >
-        {#if servers.length === 0}
-          <option value="">No servers</option>
-        {/if}
-        {#each servers as s (s.id)}
-          <option value={s.id}>{s.name}</option>
-        {/each}
-      </select>
-    </label>
+    {#if !embedded}
+      <label class="picker">
+        <span>Server</span>
+        <select
+          value={selectedServerId ?? ''}
+          onchange={(e) => onSelect((e.currentTarget as HTMLSelectElement).value)}
+        >
+          {#if servers.length === 0}
+            <option value="">No servers</option>
+          {/if}
+          {#each servers as s (s.id)}
+            <option value={s.id}>{s.name}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
     {#if server}
       <McpPill kind="injection" value={server.injection_risk} />
       <span class="grow"></span>
@@ -237,8 +257,20 @@
       {/each}
     </div>
 
+    {#if embedded}
+      <button
+        class="tester-disclose"
+        type="button"
+        aria-expanded={testerOpen}
+        onclick={() => (testerOpen = !testerOpen)}
+      >
+        <Icon name={testerOpen ? 'chevronDown' : 'chevronRight'} size={13} /> Test a tool
+      </button>
+    {/if}
+
     <!-- Tool tester -->
-    <div class="tester">
+    {#if !embedded || testerOpen}
+      <div class="tester">
       <div class="tester-head">
         <Icon name="play" size={13} />
         <span class="th">Tool tester</span>
@@ -292,7 +324,8 @@
           </div>
         {/if}
       </div>
-    </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -308,6 +341,11 @@
     gap: 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
+  }
+  .tools.embedded .bar,
+  .tools.embedded .thead,
+  .tools.embedded .trow {
+    padding-inline: 10px;
   }
   .grow {
     flex: 1;
@@ -414,6 +452,22 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
     background: var(--surface);
+  }
+  .tools.embedded .tester {
+    margin: 0 10px 10px;
+  }
+  .tester-disclose {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 8px 10px;
+    padding: 4px 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
   }
   .tester-head {
     display: flex;

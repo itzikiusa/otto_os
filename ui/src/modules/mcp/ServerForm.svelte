@@ -40,6 +40,7 @@
   let injectionRisk = $state<McpInjectionRisk>('medium');
   let defaultToolAccess = $state<McpToolAccess>('allow');
   let enabled = $state(false);
+  let advancedOpen = $state(false);
 
   let saving = $state(false);
 
@@ -208,23 +209,34 @@
       <input bind:value={description} placeholder="What this server provides (optional)" />
     </label>
 
-    <div class="row2">
-      <label class="field">
-        <span>Injection risk</span>
-        <select bind:value={injectionRisk}>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Default tool access</span>
-        <select bind:value={defaultToolAccess}>
-          <option value="allow">allow</option>
-          <option value="deny">deny</option>
-        </select>
-      </label>
-    </div>
+    <button
+      type="button"
+      class="disclose"
+      aria-expanded={advancedOpen}
+      onclick={() => (advancedOpen = !advancedOpen)}
+    >
+      <span>Advanced</span>
+      <span aria-hidden="true">{advancedOpen ? '▾' : '▸'}</span>
+    </button>
+    {#if advancedOpen}
+      <div class="row2">
+        <label class="field">
+          <span>Injection risk</span>
+          <select bind:value={injectionRisk}>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Default tool access</span>
+          <select bind:value={defaultToolAccess}>
+            <option value="allow">allow</option>
+            <option value="deny">deny</option>
+          </select>
+        </label>
+      </div>
+    {/if}
 
     <label class="check">
       <input type="checkbox" bind:checked={enabled} />
@@ -263,6 +275,18 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+  }
+  .disclose {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
   }
   input,
   select,

@@ -571,6 +571,26 @@ export interface CreateMcpTokenResp {
   info: McpTokenInfo;
 }
 
+/** `POST /mcp/tokens/{id}/rotate` — rotates ONE token in place (same owner, label and
+ * scope); the new raw secret is returned exactly once. Every other token is untouched. */
+export interface RotateMcpTokenResp {
+  token: string;
+  info: McpTokenInfo;
+  revoked_id: Id;
+}
+
+/** `GET` / `PATCH /workspaces/{wid}/mcp/session-attach` — whether sessions spawned in the
+ * workspace get Otto's built-in `otto` MCP tool server (`otto_mcp_enabled`, per-workspace). */
+export interface McpSessionAttach {
+  workspace_id: Id;
+  attached: boolean;
+}
+
+/** `PATCH /workspaces/{wid}/mcp/session-attach`. */
+export interface UpdateMcpSessionAttachReq {
+  enabled: boolean;
+}
+
 export type GitProviderKind = 'github' | 'bitbucket' | 'gitlab';
 
 export interface GitAccount {

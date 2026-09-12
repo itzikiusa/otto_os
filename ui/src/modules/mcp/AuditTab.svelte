@@ -8,6 +8,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { McpCallLogRow, McpServerDetail } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
+  import StatsTab from './StatsTab.svelte';
 
   interface Props {
     servers: McpServerDetail[];
@@ -19,6 +20,8 @@
   let fServer = $state('');
   let fTool = $state('');
   let fDecision = $state('');
+  let view = $state<'log' | 'stats'>('log');
+  let filtersOpen = $state(false);
 
   async function load(): Promise<void> {
     loading = true;
@@ -51,66 +54,105 @@
   }
 </script>
 
-<div class="audit">
-  <div class="bar">
-    <select bind:value={fServer}>
-      <option value="">All servers</option>
-      {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
-    </select>
-    <input
-      bind:value={fTool}
-      placeholder="Filter tool…"
-      class="mono"
-      onkeydown={(e) => e.key === 'Enter' && void load()}
-    />
-    <select bind:value={fDecision}>
-      <option value="">All decisions</option>
-      <option value="allowed">allowed</option>
-      <option value="approved">approved</option>
-      <option value="denied">denied</option>
-      <option value="dry_run">dry_run</option>
-      <option value="pending_approval">pending_approval</option>
-      <option value="error">error</option>
-    </select>
-    <button class="btn small" onclick={() => void load()}>Apply</button>
+<div class="audit" data-testid="mcp-audit">
+  <div class="head">
+    <h2>Audit</h2>
     <span class="grow"></span>
-    <span class="count">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
+    <div class="views" role="group" aria-label="Audit view">
+      <button
+        class:on={view === 'log'}
+        aria-pressed={view === 'log'}
+        onclick={() => (view = 'log')}
+      >
+        Log
+      </button>
+      <button
+        class:on={view === 'stats'}
+        data-testid="mcp-audit-bytool"
+        aria-pressed={view === 'stats'}
+        onclick={() => (view = 'stats')}
+      >
+        By tool
+      </button>
+    </div>
   </div>
 
-  {#if loading && rows.length === 0}
-    <p class="muted pad">Loading…</p>
-  {:else if rows.length === 0}
-    <div class="empty">
-      <Icon name="note" size={22} />
-      <p>No audit rows match. Run a tool from the Tools tester to populate it.</p>
-    </div>
+  {#if view === 'stats'}
+    <StatsTab />
   {:else}
-    <div class="grid">
-      <div class="thead">
-        <span>Time</span>
-        <span>Server</span>
-        <span>Tool</span>
-        <span>Decision</span>
-        <span>Dir</span>
-        <span class="num">OK</span>
-        <span class="num">Latency</span>
-        <span class="num">Bytes</span>
-      </div>
-      {#each rows as r (r.id)}
-        <div class="arow">
-          <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
-          <span class="cell">{r.server_name ?? '—'}</span>
-          <span class="cell mono">{r.tool}{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
-          <span class="cell"><McpPill kind="decision" value={r.decision} small /></span>
-          <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
-          <span class="cell num">
-            {#if r.ok}<Icon name="check" size={13} />{:else}<span class="bad" title={r.error ?? 'error'}><Icon name="x" size={13} /></span>{/if}
-          </span>
-          <span class="cell num">{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
-          <span class="cell num">{fmtBytes(r.bytes)}</span>
+    <div class="filters">
+      <button
+        class="filter-toggle"
+        aria-expanded={filtersOpen}
+        onclick={() => (filtersOpen = !filtersOpen)}
+      >
+        Filters
+        <span aria-hidden="true">{filtersOpen ? '▾' : '▸'}</span>
+      </button>
+      {#if filtersOpen}
+        <div class="bar">
+          <select bind:value={fServer}>
+            <option value="">All servers</option>
+            {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+          </select>
+          <input
+            bind:value={fTool}
+            placeholder="Filter tool…"
+            class="mono"
+            onkeydown={(e) => e.key === 'Enter' && void load()}
+          />
+          <select bind:value={fDecision}>
+            <option value="">All decisions</option>
+            <option value="allowed">allowed</option>
+            <option value="approved">approved</option>
+            <option value="denied">denied</option>
+            <option value="dry_run">dry_run</option>
+            <option value="pending_approval">pending_approval</option>
+            <option value="error">error</option>
+          </select>
+          <button class="btn small" onclick={() => void load()}>Apply</button>
+          <span class="grow"></span>
+          <span class="count">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
         </div>
-      {/each}
+      {/if}
     </div>
+    {#if loading && rows.length === 0}
+      <p class="muted pad">Loading…</p>
+    {:else if rows.length === 0}
+      <div class="empty">
+        <Icon name="note" size={22} />
+        <p>
+          No calls yet. Calls made by external MCP clients and by sessions through the gateway appear here.
+        </p>
+      </div>
+    {:else}
+      <div class="grid">
+        <div class="thead">
+          <span>Time</span>
+          <span>Server</span>
+          <span>Tool</span>
+          <span>Decision</span>
+          <span>Dir</span>
+          <span class="num">OK</span>
+          <span class="num">Latency</span>
+          <span class="num">Bytes</span>
+        </div>
+        {#each rows as r (r.id)}
+          <div class="arow">
+            <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
+            <span class="cell">{r.server_name ?? '—'}</span>
+            <span class="cell mono">{r.tool}{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
+            <span class="cell"><McpPill kind="decision" value={r.decision} small /></span>
+            <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
+            <span class="cell num">
+              {#if r.ok}<Icon name="check" size={13} />{:else}<span class="bad" title={r.error ?? 'error'}><Icon name="x" size={13} /></span>{/if}
+            </span>
+            <span class="cell num">{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
+            <span class="cell num">{fmtBytes(r.bytes)}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -120,12 +162,58 @@
     flex-direction: column;
     min-height: 0;
   }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .views {
+    display: inline-flex;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s, 6px);
+    background: var(--bg);
+  }
+  .views button {
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 4px 9px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .views button.on {
+    background: var(--surface);
+    color: var(--text);
+  }
+  .filters {
+    border-bottom: 1px solid var(--border);
+  }
+  .filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 8px 14px;
+    font-size: 12px;
+    cursor: pointer;
+  }
   .bar {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
     flex-wrap: wrap;
   }
   .grow {

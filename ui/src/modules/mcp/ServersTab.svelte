@@ -12,7 +12,9 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
+  import RulesDrawer from './RulesDrawer.svelte';
   import ServerForm from './ServerForm.svelte';
+  import ToolsTab from './ToolsTab.svelte';
 
   interface Props {
     wsId: string;
@@ -23,12 +25,21 @@
     onPatch: (s: McpServerDetail) => void;
     onSelect: (id: string) => void;
   }
-  let { wsId, servers, loading, onReload, onPatch, onSelect }: Props = $props();
+  let { wsId, servers, loading, onReload, onPatch }: Props = $props();
 
   let accessId = $state<string | null>(null);
   const can = (id: string, op: string) => resourceAccess.can('mcp_server',id,op,'mcp','admin');
-  $effect(() => {for(const server of servers) void resourceAccess.load('mcp_server',server.id);});
+  const loadedAccessIds = new Set<string>();
+  $effect(() => {
+    for (const server of servers) {
+      if (loadedAccessIds.has(server.id)) continue;
+      loadedAccessIds.add(server.id);
+      void resourceAccess.load('mcp_server', server.id);
+    }
+  });
   let formOpen = $state(false);
+  let rulesOpen = $state(false);
+  let expandedId = $state<string | null>(null);
   /** Per-server in-flight action so the right buttons spin without blocking others. */
   let busy = $state<Record<string, string>>({});
 
@@ -101,16 +112,21 @@
       setBusy(s.id, null);
     }
   }
+
+  function toggleExpanded(id: string): void {
+    expandedId = expandedId === id ? null : id;
+  }
 </script>
 
 <div class="servers">
   <div class="bar">
     <span class="count">{servers.length} server{servers.length === 1 ? '' : 's'}</span>
     <span class="grow"></span>
+    <button class="btn small" data-testid="mcp-rules-btn" onclick={() => (rulesOpen = true)}>Rules</button>
     <button class="btn small" onclick={() => void onReload()} title="Refresh">
-      <Icon name="refresh" size={13} />
+      <Icon name="refresh" size={13} /> Refresh
     </button>
-    <button class="btn primary small" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>
+    <button class="btn primary small" data-testid="mcp-add-server" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>
       <Icon name="plus" size={13} /> Add server
     </button>
   </div>
@@ -120,7 +136,7 @@
   {:else if servers.length === 0}
     <div class="empty">
       <Icon name="plug" size={26} />
-      <p>No MCP servers registered in this workspace yet.</p>
+      <p>No external servers yet. Otto's built-in server is on the Otto server tab; add an external MCP server here to govern it.</p>
       <button class="btn primary" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>Add a server</button>
     </div>
   {:else}
@@ -136,7 +152,12 @@
       </div>
       {#each servers as s (s.id)}
         <div class="srow">
-          <button class="name" onclick={() => onSelect(s.id)} title="View tools">
+          <button
+            class="name"
+            onclick={() => toggleExpanded(s.id)}
+            title={expandedId === s.id ? 'Hide tools' : 'View tools'}
+            aria-expanded={expandedId === s.id}
+          >
             <span class="nm">{s.name}</span>
             {#if s.has_secret}<Icon name="key" size={11} />{/if}
             {#if s.description}<span class="desc">{s.description}</span>{/if}
@@ -174,6 +195,11 @@
               {busy[s.id] === 'delete' ? '…' : 'Delete'}
             </button>
           </span>
+          {#if expandedId === s.id}
+            <div class="row-body" data-testid="mcp-server-tools">
+              <ToolsTab {wsId} {servers} selectedServerId={s.id} onSelect={() => {}} embedded />
+            </div>
+          {/if}
         </div>
       {/each}
     </div>
@@ -184,6 +210,10 @@
 
 {#if formOpen}
   <ServerForm {wsId} onclose={() => (formOpen = false)} onsaved={() => void onReload()} />
+{/if}
+
+{#if rulesOpen}
+  <RulesDrawer {wsId} {servers} onClose={() => (rulesOpen = false)} />
 {/if}
 
 <style>
@@ -299,6 +329,13 @@
   }
   .actions-h {
     text-align: start;
+  }
+  .row-body {
+    grid-column: 1 / -1;
+    min-width: 0;
+    margin: 4px -14px -8px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
   }
   .switch {
     width: 30px;

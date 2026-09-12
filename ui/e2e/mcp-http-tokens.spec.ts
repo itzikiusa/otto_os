@@ -238,7 +238,7 @@ test('Otto Server tab surfaces the HTTP URL + a tokens panel', async ({ page }) 
 
   await page.goto('/#/mcp');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
-  await page.locator('.tabs button', { hasText: 'Otto Server' }).click();
+  await page.locator('[data-testid="mcp-expose-toggle"]').click();
 
   // The HTTP transport URL is shown.
   const url = page.locator('[data-testid="mcp-http-url"]');
@@ -249,7 +249,7 @@ test('Otto Server tab surfaces the HTTP URL + a tokens panel', async ({ page }) 
   await expect(page.locator('[data-testid="mcp-tokens"]')).toBeVisible();
 
   // Create a token through the UI and see the one-time secret banner.
-  await page.locator('.otto .tools-head button', { hasText: 'New token' }).click();
+  await page.locator('[data-testid="mcp-new-token"]').click();
   await page.locator('.otto .create .fld input').first().fill('ui-made');
   await page.locator('[data-testid="mcp-create-token"]').click();
   await expect(page.locator('[data-testid="mcp-created-token"]')).toBeVisible({ timeout: 20_000 });

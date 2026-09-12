@@ -233,14 +233,19 @@ test('MCP Control Plane page renders and lists the seeded server', async ({ page
     localStorage.setItem('otto_rail_expanded', '0');
   }, wsId);
 
-  await page.goto('/#/mcp');
+  await page.goto('/#/mcp/servers');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
   // Scope to the page header (.mcp-page .h) — the sidebar nav also has a
   // "MCP Control Plane" label, which would make a bare getByText ambiguous.
   await expect(page.locator('.mcp-page .mcp-head .h')).toHaveText('MCP Control Plane');
 
-  // The Servers tab is the default; the seeded "mock" server name should render.
+  // The Servers section lists the seeded "mock" server.
   await expect(page.locator('.srow .nm', { hasText: 'mock' }).first()).toBeVisible({
     timeout: 25_000,
   });
+
+  // The bare module route lands on Otto's built-in server.
+  await page.goto('/#/mcp');
+  await expect(page.locator('.otto')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('nav.tabs button[data-testid="mcp-nav-otto"]')).toHaveClass(/\bon\b/);
 });
