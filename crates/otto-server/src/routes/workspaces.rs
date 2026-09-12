@@ -67,6 +67,21 @@ pub async fn get_scratch(
     ))
 }
 
+/// `PATCH`/`DELETE /api/v1/workspaces/scratch` — always `409`.
+///
+/// `/workspaces/scratch` is a STATIC route, so axum matches it ahead of
+/// `/workspaces/{id}` for this exact path and would answer `405 Method Not
+/// Allowed` for any method the static route does not register — never reaching
+/// {@link update}/{@link archive} and their `reject_system_workspace` guard.
+/// Registering both methods here keeps the documented answer (api.md #16a:
+/// "PATCH/DELETE /workspaces/scratch and member edits → 409") true, from the
+/// same single source: the guard itself. The body, if any, is ignored.
+pub async fn reject_scratch_edit(CurrentUser(_user): CurrentUser) -> ApiResult<StatusCode> {
+    reject_system_workspace(&SCRATCH_WORKSPACE_ID.to_string())?;
+    // Unreachable — the guard above always rejects the scratch id.
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /api/v1/workspaces` — creator becomes admin member.
 pub async fn create(
     State(ctx): State<ServerCtx>,

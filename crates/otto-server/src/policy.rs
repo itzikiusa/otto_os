@@ -1218,6 +1218,17 @@ mod tests {
             pol(Method::GET, "/api/v1/workspaces/scratch"),
             Require(Agents, View)
         );
+        // The static path also carries PATCH/DELETE (they only ever answer 409 —
+        // `workspaces::reject_scratch_edit`), so the policy must let them through
+        // to the handler rather than deny by default.
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/workspaces/scratch"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/workspaces/scratch"),
+            Require(Agents, View)
+        );
         // The `{id}` CRUD routes stay handler-gated (409 for scratch there).
         assert_eq!(pol(Method::PATCH, "/api/v1/workspaces/{id}"), Exempt);
         assert_eq!(pol(Method::DELETE, "/api/v1/workspaces/{id}"), Exempt);

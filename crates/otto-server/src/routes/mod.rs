@@ -219,9 +219,18 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         // The system-owned scratch workspace (workspace-less sessions). A
         // static segment, so it ranks above `/workspaces/{id}` regardless of
-        // order; kept adjacent for readability. Read-only — the `{id}` PATCH /
-        // DELETE / members handlers answer 409 for it.
-        .route("/workspaces/scratch", get(workspaces::get_scratch))
+        // order; kept adjacent for readability. Read-only — and because that
+        // static match SHADOWS `/workspaces/{id}` for this exact path, the
+        // edit methods must be registered here too or axum answers 405 instead
+        // of the 409 the contract promises (the `{id}` handlers are never
+        // reached). `/workspaces/scratch/members` is a different path and still
+        // lands on the `{id}` handler's own `reject_system_workspace`.
+        .route(
+            "/workspaces/scratch",
+            get(workspaces::get_scratch)
+                .patch(workspaces::reject_scratch_edit)
+                .delete(workspaces::reject_scratch_edit),
+        )
         .route(
             "/workspaces/{id}",
             patch(workspaces::update).delete(workspaces::archive),
