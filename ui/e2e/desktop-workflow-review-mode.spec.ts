@@ -220,16 +220,22 @@ test('run dialog override wins over the node', async ({ page }) => {
     'review_run: mode fan_out (run override)',
   );
 
-  // 4. The wire contract's two 400s (exact messages).
+  // 4. The wire contract's two 400s (exact messages). The body is the app's JSON
+  // problem document, so the message is read from `message` — the raw text
+  // escapes the quotes around the two mode names.
   const bogus = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, {
     data: { review_mode: 'bogus' },
   });
   expect(bogus.status()).toBe(400);
-  expect(await bogus.text()).toContain('review_mode must be "fan_out" or "orchestrator"');
+  expect(((await bogus.json()) as { message: string }).message).toContain(
+    'review_mode must be "fan_out" or "orchestrator"',
+  );
 
   const badInput = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, {
     data: { input: 5, review_mode: 'fan_out' },
   });
   expect(badInput.status()).toBe(400);
-  expect(await badInput.text()).toContain('input must be a JSON object when review_mode is set');
+  expect(((await badInput.json()) as { message: string }).message).toContain(
+    'input must be a JSON object when review_mode is set',
+  );
 });

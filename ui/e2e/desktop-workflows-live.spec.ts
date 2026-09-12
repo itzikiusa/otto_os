@@ -134,7 +134,8 @@ test('expanded step survives live step transitions — same DOM node, no reset',
   });
 
   // Let the run finish (several node start/finish events + polls flow through).
-  const label = page.locator('.timeline .tl-label');
+  // The run's status label lives in the run BAR above the timeline (`.insp-bar`).
+  const label = page.locator('.insp-bar .tl-label');
   await expect(label).toContainText('success', { timeout: 30_000 });
 
   // The user's view was never reset: still expanded, same DOM element, same
@@ -177,7 +178,7 @@ test('viewing another run is not stomped by an in-flight run started from the pa
   await page.getByRole('button', { name: 'Run…' }).click();
   await page.locator('.ri-text').fill('{ "fail": true }');
   await page.locator('.ri-actions').getByRole('button', { name: 'Run' }).click();
-  const label = page.locator('.timeline .tl-label');
+  const label = page.locator('.insp-bar .tl-label');
   await expect(label).toContainText('running', { timeout: 10_000 });
 
   // Now open the OLD, completed run from the Runs dropdown — the user wants to
@@ -252,7 +253,7 @@ test('human-approval pause is announced promptly; approve resumes to success', a
   await banner.getByRole('button', { name: 'Approve' }).click();
 
   // The run resumes and completes IN PLACE (no re-navigation), the banner drops.
-  const label = page.locator('.timeline .tl-label');
+  const label = page.locator('.insp-bar .tl-label');
   await expect(label).toContainText('success', { timeout: 20_000 });
   await expect(banner).toHaveCount(0);
   const run = await getRun(runId);
@@ -291,7 +292,7 @@ test('error step auto-expands once; a user collapse is never fought by updates',
   // …the user collapses it — and later transitions must not re-expand it.
   await badStep.locator('summary').click();
   await expect(badStep).not.toHaveAttribute('open', '');
-  const label = page.locator('.timeline .tl-label');
+  const label = page.locator('.insp-bar .tl-label');
   await expect(label).toContainText('error', { timeout: 25_000 }); // run terminal (bad branch failed)
   await expect(badStep).not.toHaveAttribute('open', '');
 });
