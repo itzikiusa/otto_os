@@ -63,9 +63,9 @@ bridges so an agent can work a ticket from a chat thread.
   **rebase, cherry-pick, revert and stash-pop conflicts** alike — conflicted
   files get their own WIP section with ours/theirs quick-resolves, and a dirty
   tree blocking a pull or branch switch offers a one-click
-  **stash → pull/switch → restore** instead of a raw git error — branch checkout
-  straight from the graph (stash · pull · pop), **worktrees & submodules** as
-  first-class tabs, auto-fetch, and a **Focus tab** (your PRs across repos +
+  **stash → pull/switch → restore** instead of a raw git error — check out any
+  branch from the graph (Pull is a separate, explicit action),
+  **worktrees & submodules** as first-class tabs, auto-fetch, and a **Focus tab** (your PRs across repos +
   your Jira work). **Create PRs** (draft toggle, reviewers at creation) with an
   **agent-drafted title + description** (it reads your branch diff — watch
   the drafting agent live inside the PR dialog), pushing the branch

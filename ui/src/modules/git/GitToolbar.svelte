@@ -1,10 +1,11 @@
 <script lang="ts">
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
-  import { api, isDirtyGitRefusal } from '../../lib/api/client';
-  import type { PullResp, RepoStatusResp } from '../../lib/api/types';
+  import { api } from '../../lib/api/client';
+  import type { PullMode, PullModeResp, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { runPull } from './pullFlow';
 
   interface Props {
     repoId: string;
@@ -40,50 +41,46 @@
     }
   }
 
-  function reportPull(r: PullResp): void {
-    onstatus(r.status);
-    onrefresh?.();
-    // A pull whose merge conflicted comes back 200 with unmerged paths in the
-    // status (the daemon leaves the merge in progress). Say so — otherwise the
-    // incoming files just appear as WIP changes with no explanation. RepoView
-    // watches the same status and raises the "Resolve conflicts" banner.
-    const conflicts = r.status.changes.filter((c) => c.kind === 'conflicted').length;
-    if (conflicts > 0) {
-      toasts.warn(
-        'Pulled with conflicts',
-        r.note ??
-          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
-      );
-    } else {
-      toasts.success('Pulled', r.note ?? undefined);
-    }
-  }
+  // The repo's EFFECTIVE pull mode (its `pull.rebase`/`pull.ff` config), loaded
+  // once per repo so the button says what it will actually do. A failure here is
+  // cosmetic — fall back to the git default.
+  let pullMode = $state<PullMode>('merge');
+  let pullModeFor = '';
+  $effect(() => {
+    const id = repoId;
+    if (pullModeFor === id) return;
+    pullModeFor = id;
+    pullMode = 'merge';
+    void api
+      .get<PullModeResp>(`/repos/${id}/pull-mode`)
+      .then((r) => {
+        if (pullModeFor === id) pullMode = r.mode;
+      })
+      .catch(() => {});
+  });
 
-  async function doPull(): Promise<void> {
+  const MODE_LABEL: Record<PullMode, string> = {
+    merge: 'merge',
+    rebase: 'rebase',
+    ff_only: 'ff-only',
+  };
+
+  async function doPull(mode?: PullMode): Promise<void> {
     busy = 'pull';
     try {
-      reportPull(await api.post<PullResp>(`/repos/${repoId}/pull`));
-    } catch (e) {
-      // Dirty-tree refusal (409) → offer the stash → pull → restore retry
-      // instead of dead-ending on git's message.
-      if (isDirtyGitRefusal(e)) {
-        const ok = await confirmer.ask(
-          'Your uncommitted changes are in the way of the pull. Stash them, pull, then restore them?',
-          { title: 'Stash, pull & restore', confirmLabel: 'Stash & pull' },
-        );
-        if (ok) {
-          try {
-            reportPull(await api.post<PullResp>(`/repos/${repoId}/pull`, { auto_stash: true }));
-          } catch (e2) {
-            toasts.error('Pull failed', e2 instanceof Error ? e2.message : String(e2));
-          }
-        }
-      } else {
-        toasts.error('Pull failed', e instanceof Error ? e.message : String(e));
-      }
+      await runPull(repoId, onstatus, { mode });
+      onrefresh?.();
     } finally {
       busy = '';
     }
+  }
+
+  function pullMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Pull (merge)', icon: 'arrowDown', action: () => void doPull('merge') },
+      { label: 'Pull (rebase)', icon: 'arrowDown', action: () => void doPull('rebase') },
+      { label: 'Pull (fast-forward only)', icon: 'arrowDown', action: () => void doPull('ff_only') },
+    ]);
   }
 
   async function doPush(): Promise<void> {
@@ -172,11 +169,25 @@
     {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
   </button>
 
-  <!-- Pull -->
-  <button class="tbtn" disabled={busy !== ''} onclick={doPull} title="Pull from upstream">
-    <Icon name="arrowDown" size={13} />
-    {busy === 'pull' ? 'Pulling…' : 'Pull'}
-  </button>
+  <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
+  <span class="split">
+    <button
+      class="tbtn"
+      disabled={busy !== ''}
+      onclick={() => void doPull()}
+      title="Pull from upstream using the repo's configured mode"
+    >
+      <Icon name="arrowDown" size={13} />
+      {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
+    </button>
+    <button
+      class="tbtn caret"
+      disabled={busy !== ''}
+      onclick={pullMenu}
+      title="Pull with a different mode"
+      aria-label="Pull options"
+    >▾</button>
+  </span>
 
   <!-- Push -->
   <button class="tbtn" disabled={busy !== ''} onclick={doPush} title="Push to upstream">
@@ -297,6 +308,19 @@
   .tbtn:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+  /* Pull split button: one visual unit, the caret sharing its left edge. */
+  .split {
+    display: inline-flex;
+    align-items: center;
+  }
+  .split .tbtn:first-child {
+    padding-inline-end: 6px;
+  }
+  .split .caret {
+    padding: 0 6px;
+    font-size: 10px;
+    line-height: 1;
   }
   .branch-wrap {
     position: relative;

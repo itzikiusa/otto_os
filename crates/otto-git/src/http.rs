@@ -131,7 +131,6 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/push", post(repo_push::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
-        .route("/repos/{id}/checkout-update", post(repo_checkout_update::<S>))
         // graph context-menu ops (commit / branch / tag)
         .route("/repos/{id}/cherry-pick", post(repo_cherry_pick::<S>))
         .route("/repos/{id}/revert", post(repo_revert::<S>))
@@ -852,6 +851,9 @@ async fn clone_into_workspace<S: GitCtx>(
     url: &str,
     req: &AddRepoReq,
 ) -> Result<Repo> {
+    // Before anything else: a clone URL is caller input that reaches `git
+    // clone` as a positional argument.
+    crate::local::validate_remote_url(url)?;
     let ws = s.workspaces().get(ws_id).await?;
     let name = req
         .name
@@ -1250,6 +1252,8 @@ async fn repo_stage<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StagePathsReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.stage(&req.paths).await?;
     Ok(Json(git.status().await?))
@@ -1261,6 +1265,8 @@ async fn repo_unstage<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StagePathsReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.unstage(&req.paths).await?;
     Ok(Json(git.status().await?))
@@ -1320,6 +1326,8 @@ async fn repo_push<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PushReq>>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let branch = body.as_ref().and_then(|b| b.branch.clone());
@@ -1459,48 +1467,29 @@ async fn repo_collections_push<S: GitCtx>(
     Ok(Json(serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() })))
 }
 
+/// `POST /repos/{id}/checkout` — switch branches. NEVER pulls, fetches or
+/// merges: `auto_stash:true` only wraps the switch in stash -u → checkout →
+/// pop so a dirty tree isn't a dead end. A conflicting pop comes back as a
+/// normal 200 whose status carries `kind:"conflicted"` rows.
 async fn repo_checkout<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<CheckoutReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
-    let lock = repo_lock(&id);
-    let _g = lock.lock().await;
-    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    git.checkout(&req.branch, req.create).await?;
-    Ok(Json(git.status().await?))
-}
-
-#[derive(Deserialize)]
-struct CheckoutUpdateReq {
-    branch: String,
-}
-
-/// `POST /repos/{id}/checkout-update` — the graph's "check out branch" gesture:
-/// stash local changes if the tree is dirty, check the branch out (creating a
-/// tracking branch from origin when it only exists remotely), pull its
-/// upstream, then pop the stash. Returns the fresh status plus a human summary
-/// of the steps taken, for the UI toast.
-async fn repo_checkout_update<S: GitCtx>(
-    State(s): State<S>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Id>,
-    Json(req): Json<CheckoutUpdateReq>,
-) -> ApiResult<Json<serde_json::Value>> {
     let branch = req.branch.trim();
     if branch.is_empty() {
         return Err(Error::Invalid("branch must not be empty".into()).into());
     }
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
-    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &user, &repo).await?;
-    let summary = git.checkout_update(branch, token).await?;
-    Ok(Json(serde_json::json!({
-        "status": git.status().await?,
-        "summary": summary,
-    })))
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    if req.auto_stash {
+        git.checkout_autostash(branch, req.create).await?;
+    } else {
+        git.checkout(branch, req.create).await?;
+    }
+    Ok(Json(git.status().await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -2809,4 +2798,98 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
+
+    /// R0: the switch endpoint NEVER pulls — `auto_stash` only clears a dirty
+    /// tree around it. A repo with a second branch and an uncommitted change
+    /// lands on that branch with the change restored, and no stash left over.
+    #[tokio::test]
+    async fn checkout_handler_honours_auto_stash() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let sh = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        sh(&["config", "user.email", "otto@test.local"]);
+        sh(&["config", "user.name", "Otto Test"]);
+        sh(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "shared\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "base\n").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "init"]);
+        sh(&["checkout", "-q", "-b", "develop"]);
+        std::fs::write(dir.join("b.txt"), "develop\n").unwrap();
+        sh(&["commit", "-q", "-am", "develop edits b"]);
+        sh(&["checkout", "-q", "-"]);
+        // Uncommitted work the user must not lose across the switch.
+        std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
+
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "switch".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+
+        let st = repo_checkout(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(CheckoutReq {
+                branch: "develop".into(),
+                create: false,
+                auto_stash: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(st.branch, "develop");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "work in progress\n",
+            "the stashed change is restored on the new branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "develop\n",
+            "the switch actually happened"
+        );
+        assert!(
+            LocalGit::new(&dir).stash_list().await.unwrap().is_empty(),
+            "a clean pop leaves no stash entry"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// The route that pulled during a switch is GONE, not merely unused by the
+    /// UI: asserted against the real router so a stray client gets a 404 rather
+    /// than an unadvertised merge.
+    #[tokio::test]
+    async fn checkout_update_route_is_gone() {
+        use tower::ServiceExt;
+        let (_pool, ctx, _user, _ws) = fixture().await;
+        let app = router::<TestCtx>().with_state(ctx);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/repos/any/checkout-update")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
 }

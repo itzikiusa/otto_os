@@ -300,8 +300,9 @@ The **Changes** tab is the working-tree view, backed by `git status`:
   message, and the UI offers **"Stash, pull & restore"** — a retry with
   `{auto_stash:true}` that stashes (untracked included), pulls, and pops,
   reporting what happened to the stash in the response `note`. The same offer
-  appears when a dirty tree blocks a branch **switch** ("Stash & switch", via
-  `/checkout-update`).
+  appears when a dirty tree blocks a branch **switch** (**"Stash, switch &
+  restore"** — `POST /checkout {auto_stash:true}`: stash, switch, restore;
+  nothing is pulled — Pull is its own action).
 
 ### Diffs
 
@@ -604,6 +605,9 @@ in **[code-review.md](./code-review.md)**.
 - **Token never on disk or in URLs during push.** HTTPS auth goes through a
   temporary `GIT_ASKPASS` script + the `OTTO_GIT_TOKEN` env var; any
   `user:pass@` embedded in a URL is stripped from logs/notices.
+- **`OTTO_GIT_TOKEN` is visible to child processes** of the askpass'd git for the
+  duration of the push/pull (env, not disk). On a single-user Mac this is
+  acceptable; a future fd-passed secret is tracked as deferred.
 - **Credential-use ownership (S4).** A repo's bound token is usable only by its
   owner or root — workspace membership alone does not grant push/PR rights through
   someone else's credential.
@@ -628,6 +632,7 @@ in **[code-review.md](./code-review.md)**.
 | **PRs/clone work but "Browse remote" is empty** | Set the account's **Organisation / Workspace / Group** namespace; the picker needs it. |
 | **Expiry shows "expired" but I rotated the token** | GitHub/GitLab auto-detect expiry; if a header isn't present (e.g. classic PAT without expiry) set/clear the date manually on the account. |
 | **Self-hosted GitLab not recognized** | Ensure the host name contains `gitlab`, or set the account's **API base URL** to the instance API root. |
+| **"git … timed out after Ns"** | The spawn exceeded its budget (30 s local, 180 s remote — env-overridable via `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`). Check VPN/SSH agent for remote ops; for a local write, remove a leftover `.git/index.lock` once no git process is running. |
 
 ---
 

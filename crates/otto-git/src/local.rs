@@ -25,6 +25,14 @@ pub struct PullOutcome {
     pub conflicted_files: Vec<String>,
 }
 
+/// Outcome of an auto-stashed switch: whether a stash was needed, and whether
+/// restoring it left conflicts (git keeps the entry; the tree shows them).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckoutOutcome {
+    pub stashed: bool,
+    pub pop_conflicted: bool,
+}
+
 /// What to diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffTarget {
@@ -55,11 +63,22 @@ impl DiffTarget {
                     if sha.is_empty() {
                         return Err(Error::Invalid("empty commit sha".into()));
                     }
+                    // The rev reaches `git show` as a positional argument: an
+                    // option-looking one (`--output=/tmp/x`) would be a file-write
+                    // primitive handed to every Viewer.
+                    LocalGit::guard_ref(sha)?;
                     return Ok(Self::Commit(sha.to_string()));
                 }
                 if let Some(range) = s.strip_prefix("range:") {
                     if let Some((a, b)) = range.split_once("..") {
                         if !a.is_empty() && !b.is_empty() {
+                            LocalGit::guard_ref(a)?;
+                            LocalGit::guard_ref(b)?;
+                            // A space would split one argv slot into two once the
+                            // range is re-assembled as `<a>..<b>`.
+                            if a.chars().chain(b.chars()).any(char::is_whitespace) {
+                                return Err(Error::Invalid(format!("bad range: {range}")));
+                            }
                             return Ok(Self::Range(a.to_string(), b.to_string()));
                         }
                     }
@@ -79,16 +98,110 @@ pub struct ResolvedBase {
     pub branch: String,
 }
 
+/// How long a spawn may run and whether the REQUEST may cancel it.
+///
+/// `LocalRead` (log/diff/status/refs/blame…) writes nothing, so it stays tied
+/// to the handler future: a client disconnect kills it and frees the work.
+/// `LocalWrite` (commit/checkout/stash/merge…) and `Remote` (fetch/push/pull/
+/// ls-remote) are DETACHED from the request — hyper drops the handler future on
+/// a client abort, and a SIGKILL there would leave `.git/index.lock` (git only
+/// cleans it up on SIGTERM/INT/HUP/QUIT) or a half-written `FETCH_HEAD.lock`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnClass {
+    LocalRead,
+    LocalWrite,
+    Remote,
+}
+
+/// Seconds a local spawn may run before it is signalled. `OTTO_GIT_TIMEOUT_SECS`
+/// overrides it; `0`/unparsable → the default (a budget is never disabled).
+fn local_budget_secs() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_secs("OTTO_GIT_TIMEOUT_SECS", 30))
+}
+
+/// Same for remote spawns (`OTTO_GIT_REMOTE_TIMEOUT_SECS`, default 180 s) —
+/// a fetch over a slow VPN legitimately takes minutes.
+fn remote_budget_secs() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_secs("OTTO_GIT_REMOTE_TIMEOUT_SECS", 180))
+}
+
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn budget_for(class: SpawnClass) -> std::time::Duration {
+    let secs = match class {
+        SpawnClass::Remote => remote_budget_secs(),
+        SpawnClass::LocalRead | SpawnClass::LocalWrite => local_budget_secs(),
+    };
+    std::time::Duration::from_secs(secs)
+}
+
+fn io_err(e: std::io::Error) -> Error {
+    Error::Internal(format!("git io: {e}"))
+}
+
+/// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
+/// the call is prefixed with `-c <key=value>` (the diff family does that).
+fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
+    match args.first() {
+        Some(&"-c") => args.get(2).copied().unwrap_or("command"),
+        Some(v) => v,
+        None => "command",
+    }
+}
+
+/// SIGTERM the whole process group (git plus the `ssh` / `git-remote-https`
+/// children it forked), give it 2 s to unwind — git removes `index.lock` on
+/// SIGTERM — then SIGKILL whatever is left.
+async fn kill_group(pid: libc::pid_t) {
+    // SAFETY: signalling a process group we created ourselves with
+    // `process_group(0)`; ESRCH (already gone and reaped) is ignored.
+    unsafe {
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
 /// A handle on one local repository; every method spawns `git -C <path> …`.
 pub struct LocalGit {
     repo_path: PathBuf,
+    /// The git binary to spawn. Overridable so tests can point at a shim
+    /// without touching the process `PATH`.
+    git_bin: PathBuf,
+    /// Test-only override of BOTH spawn budgets.
+    budget_override: Option<std::time::Duration>,
 }
 
 impl LocalGit {
     pub fn new(repo_path: impl Into<PathBuf>) -> Self {
         Self {
             repo_path: repo_path.into(),
+            git_bin: PathBuf::from("git"),
+            budget_override: None,
         }
+    }
+
+    /// Spawn `bin` instead of `git` (tests: a shim that sleeps/traps signals).
+    pub fn with_git_bin(mut self, bin: impl Into<PathBuf>) -> Self {
+        self.git_bin = bin.into();
+        self
+    }
+
+    /// Override both spawn budgets (tests: a sub-second timeout).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_budget(mut self, d: std::time::Duration) -> Self {
+        self.budget_override = Some(d);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -98,7 +211,7 @@ impl LocalGit {
     // -- plumbing -----------------------------------------------------------
 
     pub(crate) fn base_cmd(&self) -> Command {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(&self.git_bin);
         cmd.current_dir(&self.repo_path)
             .env("GIT_TERMINAL_PROMPT", "0")
             // Force English output: every error classification here
@@ -161,18 +274,32 @@ impl LocalGit {
         self.run_env(args, &[]).await.map(|(out, _)| out)
     }
 
+    /// Run a READ-ONLY git command (log/diff/status/refs/…): bounded by the
+    /// local budget and cancelled with the request, since nothing is written.
+    pub(crate) async fn run_read(&self, args: &[&str]) -> Result<String> {
+        self.run_env_class(args, &[], SpawnClass::LocalRead)
+            .await
+            .map(|(out, _)| out)
+    }
+
     /// Run git with extra env vars; returns (stdout, stderr).
     async fn run_env(&self, args: &[&str], envs: &[(String, String)]) -> Result<(String, String)> {
+        self.run_env_class(args, envs, SpawnClass::LocalWrite).await
+    }
+
+    async fn run_env_class(
+        &self,
+        args: &[&str],
+        envs: &[(String, String)],
+        class: SpawnClass,
+    ) -> Result<(String, String)> {
         self.check_repo().await?;
         let mut cmd = self.base_cmd();
         cmd.args(args);
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        let out = cmd
-            .output()
-            .await
-            .map_err(|e| Error::Internal(format!("spawn git: {e}")))?;
+        let out = self.spawn_output(cmd, class, verb_of(args), None).await?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
@@ -198,19 +325,104 @@ impl LocalGit {
         args: &[&str],
         envs: &[(String, String)],
     ) -> Result<(bool, String, String, Option<i32>)> {
+        self.run_raw_class(args, envs, SpawnClass::LocalWrite).await
+    }
+
+    pub(crate) async fn run_raw_class(
+        &self,
+        args: &[&str],
+        envs: &[(String, String)],
+        class: SpawnClass,
+    ) -> Result<(bool, String, String, Option<i32>)> {
         self.check_repo().await?;
         let mut cmd = self.base_cmd();
         cmd.args(args);
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        let out = cmd
-            .output()
-            .await
-            .map_err(|e| Error::Internal(format!("spawn git: {e}")))?;
+        let out = self.spawn_output(cmd, class, verb_of(args), None).await?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         Ok((out.status.success(), stdout, stderr, out.status.code()))
+    }
+
+    /// Like [`Self::run_raw`] but feeds `stdin` to git (a patch for `git
+    /// apply`). Index-writing, so it takes the `LocalWrite` class.
+    #[allow(dead_code)] // consumed by patch.rs (git batch)
+    pub(crate) async fn run_raw_stdin(
+        &self,
+        args: &[&str],
+        stdin: &[u8],
+    ) -> Result<(bool, String, String, Option<i32>)> {
+        self.check_repo().await?;
+        let mut cmd = self.base_cmd();
+        cmd.args(args);
+        let out = self
+            .spawn_output(cmd, SpawnClass::LocalWrite, verb_of(args), Some(stdin))
+            .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        Ok((out.status.success(), stdout, stderr, out.status.code()))
+    }
+
+    /// The one place a git process is created. Every spawn gets its own process
+    /// GROUP (`setpgid(0,0)`) so a timeout can signal git AND the `ssh` /
+    /// `git-remote-https` helpers it forked with a single `kill(-pid)`.
+    ///
+    /// `LocalWrite`/`Remote` run inside a detached task: dropping the request
+    /// future (client disconnect — the UI passes an `AbortSignal` on every
+    /// call) then stops the WAIT, not the git. `kill_on_drop` stays armed as a
+    /// last-resort guard for runtime shutdown.
+    async fn spawn_output(
+        &self,
+        mut cmd: Command,
+        class: SpawnClass,
+        verb: &str,
+        stdin: Option<&[u8]>,
+    ) -> Result<std::process::Output> {
+        cmd.process_group(0).kill_on_drop(true);
+        if stdin.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::Internal(format!("spawn git: {e}")))?;
+        if let Some(bytes) = stdin {
+            use tokio::io::AsyncWriteExt;
+            let mut si = child.stdin.take().expect("piped stdin");
+            si.write_all(bytes)
+                .await
+                .map_err(|e| Error::Internal(format!("git stdin: {e}")))?;
+            drop(si); // EOF — git blocks reading otherwise
+        }
+        let pid = child.id().expect("spawned") as libc::pid_t;
+        let budget = self.budget_override.unwrap_or_else(|| budget_for(class));
+        let secs = budget.as_secs();
+        let waited = match class {
+            SpawnClass::LocalRead => tokio::time::timeout(budget, child.wait_with_output())
+                .await
+                .map(|r| r.map_err(io_err)),
+            SpawnClass::LocalWrite | SpawnClass::Remote => {
+                let jh = tokio::spawn(async move { child.wait_with_output().await });
+                tokio::time::timeout(budget, async move {
+                    jh.await
+                        .map_err(|e| Error::Internal(format!("git task: {e}")))?
+                        .map_err(io_err)
+                })
+                .await
+            }
+        };
+        match waited {
+            Ok(r) => r,
+            Err(_) => {
+                kill_group(pid).await;
+                Err(Error::Upstream(format!(
+                    "git {verb} timed out after {secs}s — if it was writing, \
+                     `.git/index.lock` may be left behind; remove it once no git \
+                     process is running"
+                )))
+            }
+        }
     }
 
     // -- queries ------------------------------------------------------------
@@ -242,7 +454,7 @@ impl LocalGit {
         // 80+ files) into a single entry — so the Changes view can show/stage
         // them per-file. Gitignored paths are still excluded.
         let out = self
-            .run(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"])
+            .run_read(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"])
             .await?;
         let mut st = crate::parse::parse_status(&out);
         st.op_in_progress = self.op_in_progress().await.map(str::to_string);
@@ -304,7 +516,7 @@ impl LocalGit {
 
     pub async fn branches(&self) -> Result<Vec<BranchInfo>> {
         let out = self
-            .run(&[
+            .run_read(&[
                 "branch",
                 "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)",
             ])
@@ -313,7 +525,7 @@ impl LocalGit {
     }
 
     pub async fn current_branch(&self) -> Result<String> {
-        let out = self.run(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let out = self.run_read(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
         Ok(out.trim().to_string())
     }
 
@@ -321,7 +533,7 @@ impl LocalGit {
     /// Loops to capture the launch HEAD as the diff base for the loop's branch.
     pub async fn rev_parse(&self, reference: &str) -> Result<String> {
         Self::guard_ref(reference)?;
-        let out = self.run(&["rev-parse", reference]).await?;
+        let out = self.run_read(&["rev-parse", reference]).await?;
         Ok(out.trim().to_string())
     }
 
@@ -331,7 +543,7 @@ impl LocalGit {
     pub async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
         Self::guard_ref(base)?;
         let range = format!("{base}...HEAD");
-        let out = self.run(&["diff", "--name-only", &range]).await?;
+        let out = self.run_read(&["diff", "--name-only", &range]).await?;
         Ok(out
             .lines()
             .map(str::trim)
@@ -596,7 +808,7 @@ impl LocalGit {
     /// probed for uncommitted changes (best-effort; prunable entries are
     /// skipped — their directory is gone). The first entry is the main worktree.
     pub async fn worktree_list(&self) -> Result<Vec<WorktreeInfo>> {
-        let out = self.run(&["worktree", "list", "--porcelain"]).await?;
+        let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
         let mut wts = crate::parse::parse_worktree_list(&out);
         for wt in wts.iter_mut().filter(|w| !w.prunable) {
             wt.dirty = self.path_has_changes(&wt.path).await;
@@ -649,7 +861,7 @@ impl LocalGit {
     /// `git submodule status` → parsed entries enriched with `.gitmodules`
     /// url/branch. Empty list when the repo has no submodules.
     pub async fn submodule_list(&self) -> Result<Vec<SubmoduleInfo>> {
-        let out = self.run(&["submodule", "status"]).await?;
+        let out = self.run_read(&["submodule", "status"]).await?;
         let mut subs = crate::parse::parse_submodule_status(&out);
         if subs.is_empty() {
             return Ok(subs);
@@ -696,7 +908,7 @@ impl LocalGit {
         if all {
             args.insert(1, "--all");
         }
-        let out = self.run(&args).await?;
+        let out = self.run_read(&args).await?;
         crate::parse::parse_log(&out)
     }
 
@@ -713,7 +925,7 @@ impl LocalGit {
     pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
         // Local branches: name TAB upstream TAB HEAD-marker TAB sha
         let local_out = self
-            .run(&[
+            .run_read(&[
                 "for-each-ref",
                 "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)\t%(objectname)",
                 "refs/heads",
@@ -754,7 +966,7 @@ impl LocalGit {
 
         // Remote branches: name TAB sha; skip entries ending in "/HEAD"
         let remote_out = self
-            .run(&[
+            .run_read(&[
                 "for-each-ref",
                 "--format=%(refname:short)\t%(objectname)",
                 "refs/remotes",
@@ -791,7 +1003,7 @@ impl LocalGit {
         // non-empty only for ANNOTATED tags, so fall back to `%(objectname)` for
         // lightweight ones — either way `sha` names a commit, never a tag object.
         let tags_out = self
-            .run(&[
+            .run_read(&[
                 "for-each-ref",
                 "--sort=-creatordate",
                 "--format=%(refname:short)\t%(objectname)\t%(*objectname)",
@@ -853,12 +1065,12 @@ impl LocalGit {
                 .collect::<std::collections::HashSet<String>>()
         };
         let local = self
-            .run(&["branch", "--merged", base, "--format=%(refname:short)"])
+            .run_read(&["branch", "--merged", base, "--format=%(refname:short)"])
             .await
             .map(parse)
             .unwrap_or_default();
         let remote = self
-            .run(&["branch", "-r", "--merged", base, "--format=%(refname:short)"])
+            .run_read(&["branch", "-r", "--merged", base, "--format=%(refname:short)"])
             .await
             .map(parse)
             .unwrap_or_default();
@@ -892,11 +1104,11 @@ impl LocalGit {
         };
         let run_v = |args: Vec<String>| async move {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.run(&refs).await
+            self.run_read(&refs).await
         };
         let run_raw_v = |args: Vec<String>| async move {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.run_raw(&refs, &[]).await
+            self.run_raw_class(&refs, &[], SpawnClass::LocalRead).await
         };
         let out = match &target {
             DiffTarget::Worktree => run_v(with_path(&["diff", "--no-color", "-U3", "-M"])).await?,
@@ -926,12 +1138,13 @@ impl LocalGit {
                     run_raw_v(with_path(&["ls-files", "--others", "--exclude-standard"])).await?;
                 for f in untracked.lines().filter(|l| !l.trim().is_empty()) {
                     let (_, stdout, _, _) = self
-                        .run_raw(
+                        .run_raw_class(
                             &[
                                 "-c", "core.quotePath=false", "diff", "--no-color", "-U3",
                                 "--no-index", "--", "/dev/null", f,
                             ],
                             &[],
+                            SpawnClass::LocalRead,
                         )
                         .await?;
                     out.push_str(&stdout);
@@ -949,13 +1162,29 @@ impl LocalGit {
                 // the first parent yields the reviewable "what this merge
                 // brought in" diff; non-merge commits are unaffected.
                 run_v(with_path(&[
-                    "show", "-m", "--first-parent", "--no-color", "-U3", "-M", "--format=", sha,
+                    "show",
+                    "-m",
+                    "--first-parent",
+                    "--no-color",
+                    "-U3",
+                    "-M",
+                    "--format=",
+                    "--end-of-options",
+                    sha,
                 ]))
                 .await?
             }
             DiffTarget::Range(a, b) => {
                 let range = format!("{a}..{b}");
-                run_v(with_path(&["diff", "--no-color", "-U3", "-M", &range])).await?
+                run_v(with_path(&[
+                    "diff",
+                    "--no-color",
+                    "-U3",
+                    "-M",
+                    "--end-of-options",
+                    &range,
+                ]))
+                .await?
             }
         };
         Ok(crate::parse::parse_diff(&out))
@@ -982,7 +1211,7 @@ impl LocalGit {
 
     /// `git remote get-url origin`, best-effort.
     pub async fn remote_url(&self) -> Option<String> {
-        self.run(&["remote", "get-url", "origin"])
+        self.run_read(&["remote", "get-url", "origin"])
             .await
             .ok()
             .map(|s| s.trim().to_string())
@@ -992,7 +1221,7 @@ impl LocalGit {
     /// Absolute path of the work-tree root containing `repo_path` (walks up to
     /// the enclosing `.git`), or an error if the path is not inside a repo.
     pub async fn toplevel(&self) -> Result<String> {
-        let out = self.run(&["rev-parse", "--show-toplevel"]).await?;
+        let out = self.run_read(&["rev-parse", "--show-toplevel"]).await?;
         let top = out.trim().to_string();
         if top.is_empty() {
             return Err(Error::Invalid("not a git repository".into()));
@@ -1023,87 +1252,68 @@ impl LocalGit {
         Ok(())
     }
 
-    /// Check out `branch` and bring it up to date in one gesture (the graph's
-    /// "check out branch" action): stash local changes when the tree is dirty,
-    /// switch (creating a tracking branch from origin when the name only exists
-    /// remotely), pull the upstream (merge, never rebase), then pop the stash.
-    /// Returns a short human summary of the steps taken.
+    /// Switch with an automatic stash around a dirty tree: stash -u → checkout
+    /// → pop. NEVER pulls, fetches or merges — a branch switch is a switch (the
+    /// removed stash·pull·pop gesture pulled here, which turned "go look at
+    /// develop" into an unasked-for merge commit).
     ///
-    /// Failure contract: a failed switch pops the stash back so the tree is as
-    /// it was; a failed pull leaves the changes STASHED (popping onto a
-    /// half-merged tree would bury them) and says so in the error; a pop that
-    /// hits conflicts is reported in the summary — git keeps the stash entry,
-    /// nothing is lost.
-    pub async fn checkout_update(&self, branch: &str, token: Option<String>) -> Result<String> {
+    /// Failure contract: a failed switch pops the stash back (tree exactly as
+    /// it was); a CONFLICTING pop is a normal outcome (git keeps the entry and
+    /// `status()` reports `kind:"conflicted"` rows); a pop that fails for any
+    /// other reason keeps the stash and is a 409 telling the user to
+    /// `git stash pop`.
+    pub async fn checkout_autostash(&self, branch: &str, create: bool) -> Result<CheckoutOutcome> {
         Self::guard_ref(branch)?;
-        let mut steps: Vec<String> = Vec::new();
         let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
         if dirty {
-            // `--include-untracked`: without it new files survive the stash and
-            // the pull below can still die with "untracked working tree files
-            // would be overwritten by merge" — the exact failure this stash
-            // exists to prevent.
-            self.run(&[
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                "otto: auto-stash for branch switch",
-            ])
-            .await?;
-            steps.push("stashed local changes".to_string());
+            // `--include-untracked`: without it a new file survives the stash and
+            // the checkout still dies with "untracked working tree files would be
+            // overwritten" — the exact refusal this stash exists to clear.
+            let (ok, out, err, code) = self
+                .run_raw_retry_lock(&[
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "-m",
+                    "otto: auto-stash for branch switch",
+                ])
+                .await?;
+            if !ok {
+                return Err(upstream_err(&err, &out, code));
+            }
         }
-        let local = self
-            .verify_commit_ref(&format!("refs/heads/{branch}"))
-            .await;
-        if let Err(e) = self.checkout(branch, !local).await {
+        if let Err(e) = self.checkout(branch, create).await {
             if dirty {
                 let _ = self.run(&["stash", "pop"]).await;
             }
             return Err(e);
         }
-        steps.push(format!("checked out {branch}"));
-        // Pull only when the branch tracks an upstream — a local-only branch has
-        // nothing to pull. `run_raw`: no upstream exits non-zero and that's a
-        // normal outcome here, not an error worth a log line.
-        let has_upstream = self
-            .run_raw(&["rev-parse", "--abbrev-ref", "@{u}"], &[])
-            .await
-            .map(|(ok, ..)| ok)
-            .unwrap_or(false);
-        if has_upstream {
-            match self.pull(token).await {
-                Ok(_) => steps.push("pulled upstream".to_string()),
-                Err(e) => {
-                    let kept = if dirty {
-                        " — your local changes remain stashed (git stash pop to restore)"
-                    } else {
-                        ""
-                    };
-                    // Preserve the classification `pull()` already computed: a
-                    // 409-able local refusal or conflicted merge must NOT come
-                    // back as Upstream/502 — the UI reads a 502 as a provider
-                    // outage and raises the global banner (the original
-                    // "pull failed → 502" bug lived exactly here).
-                    let msg = format!("pull failed: {e}{kept}");
-                    return Err(match e {
-                        Error::Conflict(_) => Error::Conflict(msg),
-                        Error::Invalid(_) => Error::Invalid(msg),
-                        Error::NotFound(_) => Error::NotFound(msg),
-                        _ => Error::Upstream(msg),
-                    });
-                }
-            }
+        if !dirty {
+            return Ok(CheckoutOutcome::default());
         }
-        if dirty {
-            match self.run(&["stash", "pop"]).await {
-                Ok(_) => steps.push("restored local changes".to_string()),
-                Err(_) => steps.push(
-                    "stash pop hit conflicts — resolve them; the stash entry was kept".to_string(),
-                ),
-            }
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop"]).await?;
+        if ok {
+            return Ok(CheckoutOutcome {
+                stashed: true,
+                pop_conflicted: false,
+            });
         }
-        Ok(steps.join(", "))
+        if out.contains("CONFLICT") || err.contains("CONFLICT") {
+            return Ok(CheckoutOutcome {
+                stashed: true,
+                pop_conflicted: true,
+            });
+        }
+        // Not a conflict: git restores untracked files BEFORE applying tracked
+        // changes, so the stash entry is still intact and the tree is clean on
+        // `branch`. Say exactly that instead of a bare 502.
+        let line = match upstream_err(&err, &out, code) {
+            Error::Conflict(m) | Error::Upstream(m) => m,
+            e => e.to_string(),
+        };
+        Err(Error::Conflict(format!(
+            "switched to {branch}, but restoring your stashed changes failed: {line} — run `git stash pop`"
+        )))
     }
 
     pub async fn stage(&self, paths: &[String]) -> Result<()> {
@@ -1112,8 +1322,7 @@ impl LocalGit {
         }
         let mut args = vec!["add", "--"];
         args.extend(paths.iter().map(String::as_str));
-        self.run(&args).await?;
-        Ok(())
+        self.run_locked(&args).await
     }
 
     pub async fn unstage(&self, paths: &[String]) -> Result<()> {
@@ -1122,8 +1331,7 @@ impl LocalGit {
         }
         let mut args = vec!["restore", "--staged", "--"];
         args.extend(paths.iter().map(String::as_str));
-        self.run(&args).await?;
-        Ok(())
+        self.run_locked(&args).await
     }
 
     /// Discard all working-tree + staged changes for `paths`, reverting them to
@@ -1162,17 +1370,17 @@ impl LocalGit {
         if !restore.is_empty() {
             let mut args = vec!["restore", "--staged", "--worktree", "--source=HEAD", "--"];
             args.extend(restore.iter().map(String::as_str));
-            self.run(&args).await?;
+            self.run_locked(&args).await?;
         }
         if !remove.is_empty() {
             // Unstage first (a staged-new file → untracked), then `clean` removes
             // the untracked files/dirs. `reset` is a no-op for already-untracked.
             let mut reset = vec!["reset", "-q", "--"];
             reset.extend(remove.iter().map(String::as_str));
-            let _ = self.run(&reset).await;
+            let _ = self.run_raw_retry_lock(&reset).await;
             let mut clean = vec!["clean", "-fdq", "--"];
             clean.extend(remove.iter().map(String::as_str));
-            self.run(&clean).await?;
+            self.run_locked(&clean).await?;
         }
         Ok(())
     }
@@ -1187,15 +1395,15 @@ impl LocalGit {
             if !amend {
                 return Err(Error::Invalid("empty commit message".into()));
             }
-            self.run(&["commit", "--amend", "--no-edit"]).await?;
+            self.run_locked(&["commit", "--amend", "--no-edit"]).await?;
         } else {
             let mut args = vec!["commit", "-m", message];
             if amend {
                 args.push("--amend");
             }
-            self.run(&args).await?;
+            self.run_locked(&args).await?;
         }
-        let sha = self.run(&["rev-parse", "HEAD"]).await?;
+        let sha = self.run_read(&["rev-parse", "HEAD"]).await?;
         Ok(sha.trim().to_string())
     }
 
@@ -1250,14 +1458,14 @@ impl LocalGit {
                 };
                 let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
                 let (ok, stdout, stderr, code) =
-                    self.run_raw(&["push", "origin", b], &envs).await?;
+                    self.run_raw_class(&["push", "origin", b], &envs, SpawnClass::Remote).await?;
                 if ok {
                     return Ok(combine_push_output(&stdout, &stderr));
                 }
                 // First push of a fresh branch: set the upstream explicitly.
                 if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
                     let (ok2, stdout2, stderr2, code2) = self
-                        .run_raw(&["push", "--set-upstream", "origin", b], &envs)
+                        .run_raw_class(&["push", "--set-upstream", "origin", b], &envs, SpawnClass::Remote)
                         .await?;
                     if ok2 {
                         return Ok(combine_push_output(&stdout2, &stderr2));
@@ -1276,14 +1484,16 @@ impl LocalGit {
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
 
-        let (ok, stdout, stderr, code) = self.run_raw(&["push"], &envs).await?;
+        let (ok, stdout, stderr, code) = self
+            .run_raw_class(&["push"], &envs, SpawnClass::Remote)
+            .await?;
         if ok {
             return Ok(combine_push_output(&stdout, &stderr));
         }
         if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
             let branch = self.current_branch().await?;
             let (ok2, stdout2, stderr2, code2) = self
-                .run_raw(&["push", "--set-upstream", "origin", &branch], &envs)
+                .run_raw_class(&["push", "--set-upstream", "origin", &branch], &envs, SpawnClass::Remote)
                 .await?;
             if ok2 {
                 return Ok(combine_push_output(&stdout2, &stderr2));
@@ -1337,8 +1547,8 @@ impl LocalGit {
     }
 
     /// `git pull --no-rebase` where a conflict IS a failure — callers that
-    /// continue mutating the tree afterwards (e.g. [`checkout_update`], which
-    /// pops a stash) must not proceed onto a half-merged working tree.
+    /// continue mutating the tree afterwards (popping a stash, say) must not
+    /// proceed onto a half-merged working tree.
     pub async fn pull(&self, token: Option<String>) -> Result<String> {
         let out = self.pull_outcome(token).await?;
         if !out.conflicted_files.is_empty() {
@@ -1397,7 +1607,7 @@ impl LocalGit {
             None => None,
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-        let (stdout, stderr) = self.run_env(args, &envs).await?;
+        let (stdout, stderr) = self.run_env_class(args, &envs, SpawnClass::Remote).await?;
         // git writes progress/summary to stderr; surface both (minus benign
         // SSH noise like the post-quantum warning).
         let mut combined = strip_noise(&stdout);
@@ -1425,7 +1635,7 @@ impl LocalGit {
             None => None,
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-        self.run_raw(args, &envs).await
+        self.run_raw_class(args, &envs, SpawnClass::Remote).await
     }
 
     // -- graph context-menu ops (commit / branch / tag) ---------------------
@@ -1622,6 +1832,25 @@ impl LocalGit {
         unreachable!("loop returns on its final attempt")
     }
 
+    /// [`Self::run_raw_retry_lock`] for a command whose only interesting result
+    /// is success: a non-zero exit is classified through `upstream_err` exactly
+    /// as [`Self::run`] would, but a concurrent agent's `index.lock` costs a
+    /// 300/600 ms retry instead of a spurious 409.
+    pub(crate) async fn run_locked(&self, args: &[&str]) -> Result<()> {
+        let (ok, out, err, code) = self.run_raw_retry_lock(args).await?;
+        if !ok {
+            let e = upstream_err(&err, &out, code);
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?args,
+                code = code,
+                "git failed: {e}"
+            );
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// `git stash push --include-untracked`: stash tracked changes AND
     /// untracked files. Without `-u` a tree whose only changes were NEW files
     /// "stashed" successfully while stashing nothing — the button looked dead.
@@ -1659,7 +1888,7 @@ impl LocalGit {
     /// no stashes (`git` exits 0 with empty output).
     pub async fn stash_list(&self) -> Result<Vec<StashInfo>> {
         let out = self
-            .run(&[
+            .run_read(&[
                 "stash",
                 "list",
                 "--pretty=format:%gd%x1f%H%x1f%P%x1f%aI%x1f%gs",
@@ -1762,9 +1991,10 @@ impl LocalGit {
             });
         }
         let (ok, stdout, _stderr, code) = self
-            .run_raw(
+            .run_raw_class(
                 &["merge-tree", "--write-tree", "--name-only", target, source],
                 &[],
+                SpawnClass::LocalRead,
             )
             .await?;
         if ok {
@@ -2197,6 +2427,63 @@ impl LocalGit {
 /// prints the post-quantum warning to stderr on every non-PQ connection and it
 /// does NOT affect the exit status — yet it sorts first, so the old "first
 /// non-empty line" logic reported it as the failure.
+/// Accept only URLs `git clone` / `git remote add` should ever receive:
+/// `https?://`, `ssh://`, `git://` with a host and a path, or scp-like
+/// `user@host:path`. Refuses empty, whitespace, control characters, a leading
+/// `-` (git would read it as an option), and local paths / `file://` — cloning
+/// a local path is a REGISTRATION, and the UI registers those via
+/// `POST /repos {path}` instead.
+pub fn validate_remote_url(url: &str) -> Result<()> {
+    let bad = |why: &str| Err(Error::Invalid(format!("invalid remote url: {why}")));
+    let u = url.trim();
+    if u.is_empty() {
+        return bad("must not be empty");
+    }
+    if u.starts_with('-') {
+        return bad("must not start with '-'");
+    }
+    if u.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return bad("contains whitespace or a control character");
+    }
+    if let Some((scheme, rest)) = u.split_once("://") {
+        if !matches!(scheme, "http" | "https" | "ssh" | "git") {
+            return bad("scheme must be http, https, ssh or git");
+        }
+        let (host, path) = match rest.split_once('/') {
+            Some(p) => p,
+            None => return bad("missing path"),
+        };
+        // `user[:pass]@host[:port]` — only the host half has to be non-empty.
+        let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+        if host.is_empty() {
+            return bad("missing host");
+        }
+        if path.is_empty() {
+            return bad("missing path");
+        }
+        return Ok(());
+    }
+    // scp-like `user@host:path`.
+    let ok_ident = |v: &str| {
+        !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    let Some((user, rest)) = u.split_once('@') else {
+        return bad("expected a URL with a scheme or a user@host:path remote");
+    };
+    let Some((host, path)) = rest.split_once(':') else {
+        return bad("expected a URL with a scheme or a user@host:path remote");
+    };
+    if !ok_ident(user) || !ok_ident(host) {
+        return bad("bad user or host");
+    }
+    if path.is_empty() || path.starts_with('-') {
+        return bad("missing path");
+    }
+    Ok(())
+}
+
 /// Remove any `user:password@` userinfo from a URL so a credentialed remote a
 /// user may have pasted isn't echoed into notices/logs. Best-effort string op;
 /// returns non-URL strings unchanged. The real (credentialed) URL is still used
@@ -2429,6 +2716,7 @@ pub async fn clone_repo(
     token: Option<&str>,
     mut progress: impl FnMut(String) + Send,
 ) -> Result<()> {
+    validate_remote_url(url)?;
     let askpass = match token {
         Some(t) => Some(AskPass::new(t)?),
         None => None,
@@ -2436,9 +2724,13 @@ pub async fn clone_repo(
     let mut cmd = Command::new("git");
     cmd.arg("clone")
         .arg("--progress")
+        // `--` so a URL can never be read as an option, and `LC_ALL=C` so the
+        // progress/error lines parsed below stay English.
+        .arg("--")
         .arg(url)
         .arg(dest)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -2913,19 +3205,27 @@ mod tests {
         }
     }
 
+    /// `clone_repo` only ever receives a REMOTE url: a local path is a
+    /// registration (`POST /repos {path}`), and letting one through would make
+    /// the clone route an arbitrary-path reader. Nothing is spawned — the guard
+    /// fires before git.
     #[tokio::test]
-    async fn clone_local_repo_with_progress() {
+    async fn clone_refuses_local_paths_and_option_like_urls() {
         let (_tmp, dir) = fixture();
         let dest_tmp = tempfile::tempdir().unwrap();
         let dest = dest_tmp.path().join("cloned");
-        let mut lines = Vec::new();
-        clone_repo(dir.to_str().unwrap(), &dest, None, |l| lines.push(l))
-            .await
-            .unwrap();
-        assert!(dest.join(".git").exists());
-        assert!(!lines.is_empty(), "expected progress output");
-        let cloned = LocalGit::new(&dest);
-        assert_eq!(cloned.log(10, 0, false).await.unwrap().len(), 2);
+        for url in [
+            dir.to_str().unwrap(),
+            "file:///tmp/x",
+            "--upload-pack=touch /tmp/pwn",
+        ] {
+            let err = clone_repo(url, &dest, None, |_| {}).await.unwrap_err();
+            assert!(
+                matches!(&err, Error::Invalid(m) if m.contains("invalid remote url")),
+                "{url:?} → {err:?}"
+            );
+        }
+        assert!(!dest.exists(), "a refused clone creates nothing");
     }
 
     /// D1 regression: a worktree provisioned with `worktree_add_if_absent` must
@@ -3344,7 +3644,7 @@ mod tests {
     /// A pull whose merge conflicts is an OUTCOME, not a failure: `pull_outcome`
     /// returns Ok with the unmerged paths (so the UI can open the resolver),
     /// while the strict `pull` still errors — callers that keep mutating the
-    /// tree afterwards (checkout_update's stash pop) must not run on a
+    /// tree afterwards (an auto-stash pull's pop) must not run on a
     /// half-merged tree.
     #[tokio::test]
     async fn conflicting_pull_reports_conflicts_instead_of_failing() {
@@ -3719,4 +4019,483 @@ mod tests {
             assert_eq!(t.sha, root, "tag {name} resolves to the tagged COMMIT");
         }
     }
+
+    // ── R0: a branch switch never pulls ─────────────────────────────────────
+
+    /// Bare origin + a clone whose `develop` is BOTH ahead of and behind
+    /// `origin/develop`, with a dirty overlapping file. The user's bug: this is
+    /// exactly the shape where `pull --no-rebase` created an unasked-for merge
+    /// commit during a plain switch.
+    fn diverged_fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir(&origin).unwrap();
+        sh_git(&origin, &["init", "--bare", "-b", "main"]);
+
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        sh_git(&seed, &["init", "-b", "main"]);
+        sh_git(&seed, &["config", "user.email", "otto@test.local"]);
+        sh_git(&seed, &["config", "user.name", "Otto Test"]);
+        sh_git(&seed, &["config", "commit.gpgsign", "false"]);
+        write(&seed, "shared.txt", "line1\nline2\nline3\n");
+        sh_git(&seed, &["add", "."]);
+        sh_git(&seed, &["commit", "-m", "init"]);
+        sh_git(&seed, &["branch", "develop"]);
+        sh_git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        sh_git(&seed, &["push", "-u", "origin", "main", "develop"]);
+
+        let dir = tmp.path().join("work");
+        sh_git(
+            tmp.path(),
+            &["clone", origin.to_str().unwrap(), dir.to_str().unwrap()],
+        );
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+
+        // Local `develop` gets a commit of its own, then we go back to main.
+        sh_git(&dir, &["checkout", "-q", "develop"]);
+        write(&dir, "local_only.txt", "mine\n");
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "local develop work"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+
+        // …and origin/develop moves on, so the branch is behind too.
+        sh_git(&seed, &["checkout", "-q", "develop"]);
+        write(&seed, "upstream_only.txt", "theirs\n");
+        sh_git(&seed, &["add", "-A"]);
+        sh_git(&seed, &["commit", "-m", "upstream develop work"]);
+        sh_git(&seed, &["push", "origin", "develop"]);
+        sh_git(&dir, &["fetch", "-q", "origin"]);
+
+        (tmp, dir)
+    }
+
+    fn rev(dir: &Path, spec: &str) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", spec])
+            .output()
+            .expect("spawn git rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn count(dir: &Path, range: &str) -> u32 {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["rev-list", "--count", range])
+            .output()
+            .expect("spawn git rev-list");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_never_pulls() {
+        let (_tmp, dir) = diverged_fixture();
+        let git = LocalGit::new(&dir);
+        let develop_before = rev(&dir, "refs/heads/develop");
+        let behind_before = count(&dir, "develop..origin/develop");
+        assert!(behind_before > 0, "fixture: develop must start behind");
+
+        // Dirty the file that DIFFERS across the switch so git itself would
+        // refuse the plain checkout.
+        write(&dir, "shared.txt", "line1\nDIRTY\nline3\n");
+
+        let outcome = git.checkout_autostash("develop", false).await.unwrap();
+        assert!(outcome.stashed, "a dirty tree must be stashed");
+        assert!(!outcome.pop_conflicted);
+
+        assert_eq!(git.current_branch().await.unwrap(), "develop");
+        assert_eq!(
+            rev(&dir, "HEAD"),
+            develop_before,
+            "the switch must not move develop — nothing was pulled or merged"
+        );
+        assert_eq!(
+            count(&dir, "develop..origin/develop"),
+            behind_before,
+            "still behind origin/develop: a switch never fetches"
+        );
+        assert!(!dir.join(".git/MERGE_HEAD").exists(), "no merge started");
+        assert!(git.op_in_progress().await.is_none());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
+            "line1\nDIRTY\nline3\n",
+            "the stashed change is restored on the new branch"
+        );
+        assert!(
+            git.stash_list().await.unwrap().is_empty(),
+            "a clean pop leaves no stash entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_creates_tracking_branch_when_remote_only() {
+        let (_tmp, dir) = diverged_fixture();
+        // A branch that exists ONLY on origin.
+        sh_git(&dir, &["update-ref", "refs/remotes/origin/feature", "origin/develop"]);
+        write(&dir, "shared.txt", "line1\nDIRTY\nline3\n");
+
+        let git = LocalGit::new(&dir);
+        let outcome = git.checkout_autostash("feature", true).await.unwrap();
+        assert!(outcome.stashed);
+        assert_eq!(git.current_branch().await.unwrap(), "feature");
+
+        let upstream = git
+            .run(&["rev-parse", "--abbrev-ref", "feature@{u}"])
+            .await
+            .unwrap();
+        assert_eq!(upstream.trim(), "origin/feature", "created branch tracks origin");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
+            "line1\nDIRTY\nline3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_restores_stash_when_switch_fails() {
+        let (_tmp, dir) = diverged_fixture();
+        write(&dir, "shared.txt", "line1\nDIRTY\nline3\n");
+        let git = LocalGit::new(&dir);
+
+        let err = git
+            .checkout_autostash("no-such-branch", false)
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, Error::Invalid(_)), "git's own refusal: {err:?}");
+
+        assert_eq!(git.current_branch().await.unwrap(), "main", "tree untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
+            "line1\nDIRTY\nline3\n",
+            "a failed switch pops the stash back"
+        );
+        assert!(git.stash_list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_pop_conflict_is_ok() {
+        let (_tmp, dir) = diverged_fixture();
+        // develop changes the same line the user is editing → the pop conflicts.
+        sh_git(&dir, &["checkout", "-q", "develop"]);
+        write(&dir, "shared.txt", "line1\nDEVELOP\nline3\n");
+        sh_git(&dir, &["commit", "-am", "develop edits the shared line"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, "shared.txt", "line1\nDIRTY\nline3\n");
+
+        let git = LocalGit::new(&dir);
+        let outcome = git.checkout_autostash("develop", false).await.unwrap();
+        assert!(outcome.stashed && outcome.pop_conflicted, "{outcome:?}");
+
+        let st = git.status().await.unwrap();
+        assert!(
+            st.changes.iter().any(|c| c.path == "shared.txt" && c.kind == "conflicted"),
+            "the conflicted pop is visible in the status: {:?}",
+            st.changes
+        );
+        assert!(
+            st.op_in_progress.is_none(),
+            "a stash pop is not a merge/rebase — no op to abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_autostash_untracked_collision_is_409_and_keeps_stash() {
+        let (_tmp, dir) = diverged_fixture();
+        // `develop` TRACKS a file the user has as an untracked local file: the
+        // switch works, the pop refuses to clobber it.
+        sh_git(&dir, &["checkout", "-q", "develop"]);
+        write(&dir, "collide.txt", "tracked on develop\n");
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "develop adds collide.txt"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, "collide.txt", "untracked locally\n");
+
+        let git = LocalGit::new(&dir);
+        let err = git.checkout_autostash("develop", false).await.unwrap_err();
+        match &err {
+            Error::Conflict(m) => {
+                assert!(m.contains("switched to develop"), "{m}");
+                assert!(m.contains("git stash pop"), "{m}");
+            }
+            other => panic!("expected a 409 Conflict, got {other:?}"),
+        }
+        assert_eq!(git.current_branch().await.unwrap(), "develop");
+        assert_eq!(
+            git.stash_list().await.unwrap().len(),
+            1,
+            "the stash entry is kept so nothing is lost"
+        );
+    }
+
+    // ── R1: hardening ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn diff_target_refuses_option_like_revs() {
+        assert!(matches!(
+            DiffTarget::parse("commit:--output=/tmp/pwn"),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            DiffTarget::parse("range:--upload-pack=x..HEAD"),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            DiffTarget::parse("range:HEAD..--x"),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            DiffTarget::parse("range:a b..HEAD"),
+            Err(Error::Invalid(_))
+        ));
+
+        // A real sha still parses AND still diffs.
+        let (_tmp, dir) = fixture_n_commits(2);
+        let git = LocalGit::new(&dir);
+        let sha = git.log(1, 0, false).await.unwrap()[0].sha.clone();
+        let target = DiffTarget::parse(&format!("commit:{sha}")).unwrap();
+        assert_eq!(target, DiffTarget::Commit(sha));
+        assert!(!git.diff(target, None).await.unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn clone_url_validation() {
+        for ok in [
+            "https://h/o/r.git",
+            "http://h/o/r",
+            "ssh://git@h/o/r",
+            "git://h/o/r.git",
+            "git@h:o/r.git",
+            "git@github.com:otto/otto_os.git",
+        ] {
+            assert!(validate_remote_url(ok).is_ok(), "should accept {ok}");
+        }
+        for bad in [
+            "",
+            "   ",
+            "-c",
+            "--upload-pack=x",
+            "file:///tmp/x",
+            "/tmp/x",
+            "https://h/o r",
+            "a\nb",
+            "https://h",
+            "https://h/",
+            "ssh://",
+            "ftp://h/o/r",
+            "git@h:",
+            "git@h:-x",
+        ] {
+            assert!(
+                validate_remote_url(bad).is_err(),
+                "should refuse {bad:?}"
+            );
+        }
+    }
+
+    /// Write an executable `sh` shim and return its path. `body` runs with the
+    /// repo as cwd (`base_cmd` sets `current_dir`).
+    fn shim(tmp: &Path, name: &str, body: &str) -> PathBuf {
+        let p = tmp.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// Budget for the two shim tests. Generous on purpose: the whole suite
+    /// spawns git in parallel, and a tight budget occasionally SIGTERMed the
+    /// shim's process group before `sh` had even recorded its pids — a flake
+    /// that looks exactly like a broken group kill.
+    const SHIM_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Read the pids a shim recorded, with a message that names the real cause
+    /// if it never got that far.
+    fn shim_pids(path: &Path) -> Vec<libc::pid_t> {
+        let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "shim never recorded its pids ({e}) — the {SHIM_BUDGET:?} budget \
+                 beat its own startup; raise SHIM_BUDGET"
+            )
+        });
+        raw.lines().filter_map(|l| l.trim().parse().ok()).collect()
+    }
+
+    fn alive(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only probes for the process's existence.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    async fn wait_dead(pids: &[libc::pid_t], within: std::time::Duration) {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if pids.iter().all(|p| !alive(*p)) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let left: Vec<_> = pids.iter().filter(|p| alive(**p)).collect();
+                panic!("still alive after {within:?}: {left:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A spawn that overruns its budget is SIGTERMed as a GROUP, so the helper
+    /// processes git forked (`ssh`, `git-remote-https`) die with it — a plain
+    /// `kill(pid)` would leave them holding the network connection.
+    #[tokio::test]
+    async fn spawn_timeout_terminates_group_then_kills() {
+        let (tmp, dir) = fixture_n_commits(1);
+        let sh = shim(
+            tmp.path(),
+            "slow-git",
+            "sleep 30 &\necho $! > shim-pids\necho $$ >> shim-pids\nsleep 30",
+        );
+        let git = LocalGit::new(&dir)
+            .with_git_bin(&sh)
+            .with_budget(SHIM_BUDGET);
+
+        let started = std::time::Instant::now();
+        let err = git.run(&["status"]).await.unwrap_err();
+        assert!(
+            started.elapsed() < SHIM_BUDGET + std::time::Duration::from_secs(6),
+            "the timeout must not wait for the process: {:?}",
+            started.elapsed()
+        );
+        match &err {
+            Error::Upstream(m) => {
+                assert!(m.contains("timed out"), "{m}");
+                assert!(m.contains("index.lock"), "the text names the leftover: {m}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+
+        let pids = shim_pids(&dir.join("shim-pids"));
+        assert_eq!(pids.len(), 2, "shim recorded its own pid and its child's");
+        wait_dead(&pids, std::time::Duration::from_secs(5)).await;
+    }
+
+    /// A process that IGNORES SIGTERM (git never does, but a hung helper might)
+    /// is escalated to SIGKILL 2 s later — the budget is a real bound.
+    #[tokio::test]
+    async fn spawn_timeout_escalates_to_sigkill() {
+        let (tmp, dir) = fixture_n_commits(1);
+        // `trap '' TERM` BEFORE forking `sleep`: an ignored disposition is
+        // inherited, so neither process dies until the SIGKILL.
+        let sh = shim(
+            tmp.path(),
+            "stubborn-git",
+            "trap '' TERM\necho $$ > shim-pid\nsleep 30",
+        );
+        let git = LocalGit::new(&dir)
+            .with_git_bin(&sh)
+            .with_budget(SHIM_BUDGET);
+
+        let started = std::time::Instant::now();
+        let err = git.run(&["status"]).await.unwrap_err();
+        assert!(matches!(&err, Error::Upstream(m) if m.contains("timed out")), "{err:?}");
+        assert!(
+            started.elapsed() < SHIM_BUDGET + std::time::Duration::from_secs(6),
+            "elapsed {:?}",
+            started.elapsed()
+        );
+        let pids = shim_pids(&dir.join("shim-pid"));
+        assert_eq!(pids.len(), 1, "shim recorded its pid");
+        wait_dead(&pids, std::time::Duration::from_secs(5)).await;
+    }
+
+    /// The reason `LocalWrite` is detached: the UI aborts in-flight requests, and
+    /// hyper drops the handler future with them. A commit that is already writing
+    /// the index must survive that, or the repo is left with `index.lock`.
+    #[tokio::test]
+    async fn mutating_spawn_survives_request_drop() {
+        let (_tmp, dir) = fixture_n_commits(1);
+        let hooks = dir.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 0.4\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write(&dir, "late.txt", "committed under a dropped request\n");
+        sh_git(&dir, &["add", "-A"]);
+
+        let git = LocalGit::new(&dir);
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            git.commit("survives the drop", false),
+        )
+        .await;
+        assert!(dropped.is_err(), "the caller future must be dropped mid-commit");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let subject = LocalGit::new(&dir)
+            .run(&["log", "-1", "--format=%s"])
+            .await
+            .unwrap();
+        assert_eq!(subject.trim(), "survives the drop");
+        assert!(
+            !dir.join(".git/index.lock").exists(),
+            "a SIGKILLed git would have left index.lock behind"
+        );
+    }
+
+    /// Same contract for the `Remote` class: a dropped request must not abort a
+    /// fetch mid-write (`FETCH_HEAD.lock` / `refs/remotes/*.lock`).
+    #[tokio::test]
+    async fn remote_class_survives_request_drop() {
+        let (tmp, dir) = diverged_fixture();
+        // Advance origin/main so the fetch has something to do.
+        let seed = tmp.path().join("seed");
+        sh_git(&seed, &["checkout", "-q", "main"]);
+        write(&seed, "fetched.txt", "after\n");
+        sh_git(&seed, &["add", "-A"]);
+        sh_git(&seed, &["commit", "-m", "advance main"]);
+        sh_git(&seed, &["push", "origin", "main"]);
+        let origin_tip = rev(&tmp.path().join("origin.git"), "refs/heads/main");
+
+        let sh = shim(tmp.path(), "slow-fetch-git", "sleep 0.4\nexec git \"$@\"");
+        let git = LocalGit::new(&dir).with_git_bin(&sh);
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            git.fetch(None),
+        )
+        .await;
+        assert!(dropped.is_err(), "the caller future must be dropped mid-fetch");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(
+            rev(&dir, "refs/remotes/origin/main"),
+            origin_tip,
+            "the detached fetch finished after the request was dropped"
+        );
+    }
+
+    /// An agent's concurrent git holding `index.lock` is transient — staging
+    /// retries instead of surfacing a bogus failure.
+    #[tokio::test]
+    async fn stage_retries_transient_index_lock() {
+        let (_tmp, dir) = fixture_n_commits(1);
+        write(&dir, "staged.txt", "one\n");
+        let lock = dir.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+
+        let unlock = lock.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = std::fs::remove_file(&unlock);
+        });
+
+        let git = LocalGit::new(&dir);
+        git.stage(&["staged.txt".to_string()]).await.unwrap();
+        let st = git.status().await.unwrap();
+        assert!(st.changes.iter().any(|c| c.path == "staged.txt" && c.staged));
+    }
+
 }

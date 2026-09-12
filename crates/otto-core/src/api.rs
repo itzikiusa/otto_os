@@ -1461,6 +1461,10 @@ pub struct CheckoutReq {
     pub branch: String,
     #[serde(default)]
     pub create: bool,
+    /// Wrap the switch in stash -u → checkout → pop when the tree is dirty.
+    /// Nothing is ever pulled or merged — that is `POST /pull`.
+    #[serde(default)]
+    pub auto_stash: bool,
 }
 
 // ---------------------------------------------------------------------------
