@@ -103,7 +103,7 @@ test('rotating one token leaves every other scoped token working', async ({ page
     await expect(confirm).toBeVisible();
     await confirm.getByRole('button', { name: 'Rotate', exact: true }).click();
 
-    const rotatedCode = page.locator('[data-testid="mcp-rotated-token"] code.token');
+    const rotatedCode = page.locator('[data-testid="mcp-rotated-token"] code.token:not(.cmd)');
     await expect(rotatedCode).toBeVisible({ timeout: 20_000 });
     const rotatedSecret = (await rotatedCode.innerText()).trim();
     expect(rotatedSecret).toBeTruthy();
