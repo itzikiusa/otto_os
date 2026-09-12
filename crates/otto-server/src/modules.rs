@@ -2155,7 +2155,6 @@ async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -> ReviewCon
 /// input nor the node set one: the repo's effective stored config (or the
 /// global one when `repo_id` is `None`), tagged with its source for the
 /// step log.
-#[allow(dead_code)] // until WP1's review_run arm calls this (workflows batch)
 pub(crate) async fn effective_review_mode(
     ctx: &ServerCtx,
     repo_id: Option<&Id>,

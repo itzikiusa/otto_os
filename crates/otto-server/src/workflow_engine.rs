@@ -5663,7 +5663,7 @@ fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> o
          no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
     );
     otto_core::domain::ReviewAgentCfg {
-        name: "Required checks".to_string(),
+        name: crate::modules::CHECKS_REVIEWER_NAME.to_string(),
         provider: default_provider.to_string(),
         providers: vec![default_provider.to_string()],
         model: String::new(),
