@@ -95,6 +95,23 @@ class McpStdio {
   }
 }
 
+/** Environment for the inward `ottod mcp-tools` bridge.
+ *
+ * Playwright itself is usually launched from INSIDE an Otto agent session, whose
+ * `OTTO_MCP_BASE` / `OTTO_MCP_TOKEN` / `OTTO_WORKSPACE_ID` point at the developer's
+ * REAL daemon on 7700. Inheriting them (`...process.env`) silently drives the
+ * bridge against that daemon instead of this run's isolated one — it then answers
+ * out of the developer's own workspace (or 404s on routes added in this tree). So
+ * drop every inherited `OTTO_*` var and hand the bridge only OUR routing.
+ */
+function bridgeEnv(routing: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('OTTO_')) env[key] = value;
+  }
+  return { ...env, OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file', ...routing };
+}
+
 test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.project.name !== 'iphone-portrait', 'otto-features MCP runs once');
 });
@@ -156,7 +173,7 @@ test('governed outward: a feature read executes, a feature write needs approval'
 
 test('per-session mcp-tools advertises + returns the new feature reads', async () => {
   test.setTimeout(120_000);
-  const { ctx, base } = await apiCtx();
+  const { ctx, base, token } = await apiCtx();
   const { dataDir } = daemonMeta();
 
   const root = mkdtempSync(join(tmpdir(), 'otto-feat-ps-'));
@@ -172,6 +189,7 @@ test('per-session mcp-tools advertises + returns the new feature reads', async (
     data: { kind: 'agent', provider: 'shell', title: 'psfeat', cwd: root, meta: {} },
   });
   expect(sess.ok(), `create session → ${sess.status()} ${await sess.text()}`).toBeTruthy();
+  const sessionId = ((await sess.json()) as { id: string }).id;
 
   const mcpDoc = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf8')) as {
     mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
@@ -179,11 +197,21 @@ test('per-session mcp-tools advertises + returns the new feature reads', async (
   const otto = mcpDoc.mcpServers?.otto;
   expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
 
-  const mcp = new McpStdio(otto!.command, otto!.args, {
-    ...process.env,
-    ...otto!.env,
-    OTTO_DATA_DIR: dataDir,
-  });
+  // `.mcp.json` is deliberately identity-neutral (command/args only — the daemon
+  // never persists a session token into a file several sessions share), so the
+  // routing env is ours to supply. Run the binary under test and point it at the
+  // isolated e2e daemon with a token/workspace that exist THERE.
+  const mcp = new McpStdio(
+    process.env.OTTO_E2E_BIN ?? otto!.command,
+    ['mcp-tools'],
+    bridgeEnv({
+      OTTO_MCP_BASE: base,
+      OTTO_MCP_TOKEN: token,
+      OTTO_SESSION_ID: sessionId,
+      OTTO_WORKSPACE_ID: ws,
+      OTTO_DATA_DIR: dataDir,
+    }),
+  );
   try {
     await mcp.request('initialize', {
       protocolVersion: '2024-11-05',
