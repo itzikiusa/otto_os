@@ -52,6 +52,8 @@ const HISTORY_MAX: i64 = 500;
 const HISTORY_DEFAULT: i64 = 100;
 /// Agent-facing request/response body cap.
 const AGENT_BODY_MAX: usize = 64 * 1024;
+/// In-band marker appended to an agent-shaped request body that hit the cap.
+const AGENT_BODY_TRUNCATED: &str = "\n…[truncated]";
 /// Execution timeout for outbound requests.
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -558,11 +560,16 @@ pub async fn get_request(
 }
 
 /// Apply the bounded, credential-masked request shape used by agents.
+/// `ApiRequest` has no `truncated` flag, so a capped body says so in-band —
+/// otherwise the model reads a silently clipped payload as the whole thing.
 pub(crate) fn shape_request_agent(mut request: ApiRequest) -> ApiRequest {
     request.auth = api_secrets::redact_auth(&request.auth);
     request.headers = api_secrets::mask_kv_rows(&request.headers);
     request.query = api_secrets::mask_kv_rows(&request.query);
-    truncate_string(&mut request.body, AGENT_BODY_MAX);
+    if request.body.len() > AGENT_BODY_MAX {
+        truncate_string(&mut request.body, AGENT_BODY_MAX);
+        request.body.push_str(AGENT_BODY_TRUNCATED);
+    }
     request
 }
 
@@ -579,9 +586,9 @@ pub async fn create_request(
         return Err(Error::Invalid("request name must not be empty".into()).into());
     }
     let mut extras = validate_extras(req.extras.clone())?;
-    let (_, session_id) = caller_source(&headers);
-    if let Some(session_id) = session_id.as_deref() {
-        extras = Some(stamp_agent(extras, session_id));
+    let (source, session_id) = caller_source(&headers);
+    if source["kind"] == "agent" {
+        extras = Some(stamp_agent(extras, session_id.as_deref()));
     }
     let position = repo(&ctx)
         .list_requests(&wid, req.collection_id.as_ref())
@@ -622,14 +629,14 @@ pub async fn update_request(
     } else {
         incoming_extras
     };
-    let (_, session_id) = caller_source(&headers);
-    if let Some(session_id) = session_id.as_deref() {
-        extras = Some(stamp_agent(extras, session_id));
+    let (source, session_id) = caller_source(&headers);
+    if source["kind"] == "agent" {
+        extras = Some(stamp_agent(extras, session_id.as_deref()));
     }
 
     // Lazy secret migration: plaintext secret members move to the Keychain;
     // markers sent back unchanged keep their stored values.
-    let auth_row = if let Some(incoming) = merged_auth_for_update(&existing.auth, &req.auth) {
+    let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
         let own_ref = api_secrets::request_ref(&id);
         let existing_blob = api_secrets::load_blob(ctx.secrets.as_ref(), &own_ref);
         let (auth_row, blob) = api_secrets::split_auth_secrets(
@@ -652,8 +659,7 @@ pub async fn update_request(
 }
 
 /// `None` means an absent/null PATCH auth keeps the stored row and Keychain blob.
-pub(crate) fn merged_auth_for_update(existing: &Value, incoming: &Value) -> Option<Value> {
-    let _ = existing;
+pub(crate) fn merged_auth_for_update(incoming: &Value) -> Option<Value> {
     (!incoming.is_null()).then(|| incoming.clone())
 }
 
@@ -1649,7 +1655,18 @@ pub async fn run_saved_request(
     let jwt_claims = if req.decode_jwt == Some(false) {
         None
     } else {
-        api_secrets::jwt_claims(&response.body)
+        let claims = api_secrets::jwt_claims(&response.body);
+        if claims.is_some() {
+            response.body = api_secrets::mask_jwts(&response.body);
+            if let Some(headers) = response.headers.as_array_mut() {
+                for header in headers {
+                    if let Some(Value::String(value)) = header.get_mut("value") {
+                        *value = api_secrets::mask_jwts(value);
+                    }
+                }
+            }
+        }
+        claims
     };
     let mut history_response = response.clone();
     history_response.body_base64.clear();
@@ -2926,25 +2943,31 @@ async fn secure_all_sweep(
 // shared helpers
 // ===========================================================================
 
-/// Audit source derived from the inward bridge's session header.
+/// Audit source derived from the inward bridge's session header, or — for an
+/// outward MCP client, which has no Otto session — the executor's `X-Otto-Agent`
+/// marker. Either way the caller is an agent, and the new-host rule applies.
 pub(crate) fn caller_source(headers: &HeaderMap) -> (Value, Option<Id>) {
-    let session_id = headers
-        .get("x-otto-session")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    match session_id {
-        Some(session_id) => (
+    let hdr = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    match (hdr("x-otto-session"), hdr("x-otto-agent")) {
+        (Some(session_id), _) => (
             json!({"kind": "agent", "session_id": session_id}),
             Some(session_id),
         ),
-        None => (json!({"kind": "human", "session_id": null}), None),
+        (None, Some(via)) => (json!({"kind": "agent", "session_id": null, "via": via}), None),
+        (None, None) => (json!({"kind": "human", "session_id": null}), None),
     }
 }
 
 /// Merge the server-owned agent authorship stamp into request extras.
-pub(crate) fn stamp_agent(extras: Option<Value>, session_id: &str) -> Value {
+/// `session_id` is `None` for an outward MCP caller (no Otto session).
+pub(crate) fn stamp_agent(extras: Option<Value>, session_id: Option<&str>) -> Value {
     let mut extras = extras
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_else(|| serde_json::Map::from_iter([("v".into(), json!(1))]));
@@ -3544,7 +3567,11 @@ mod tests {
         assert_eq!(shaped.headers[0]["value"], api_secrets::MASK);
         assert_eq!(shaped.headers[1]["value"], "application/json");
         assert_eq!(shaped.query[0]["value"], api_secrets::MASK);
-        assert_eq!(shaped.body.len(), AGENT_BODY_MAX);
+        assert_eq!(
+            shaped.body.len(),
+            AGENT_BODY_MAX + AGENT_BODY_TRUNCATED.len()
+        );
+        assert!(shaped.body.ends_with(AGENT_BODY_TRUNCATED));
     }
 
     #[test]
@@ -3611,12 +3638,16 @@ mod tests {
 
     #[test]
     fn stamp_agent_merges_into_existing_extras() {
-        let stamped = stamp_agent(Some(json!({"v":2,"docs_md":"hello"})), "s1");
+        let stamped = stamp_agent(Some(json!({"v":2,"docs_md":"hello"})), Some("s1"));
         assert_eq!(stamped["v"], 2);
         assert_eq!(stamped["docs_md"], "hello");
         assert_eq!(stamped["agent"]["session_id"], "s1");
         assert!(stamped["agent"]["at"].as_str().is_some());
-        assert_eq!(stamp_agent(None, "s2")["v"], 1);
+        assert_eq!(stamp_agent(None, Some("s2"))["v"], 1);
+        // Outward MCP: no session, still agent-authored.
+        let outward = stamp_agent(None, None);
+        assert_eq!(outward["agent"]["session_id"], Value::Null);
+        assert!(outward["agent"].is_object());
     }
 
     #[test]
@@ -3631,13 +3662,27 @@ mod tests {
         let (source, session_id) = caller_source(&headers);
         assert_eq!(source, json!({"kind":"human","session_id":null}));
         assert!(session_id.is_none());
+
+        // Outward MCP stamps only `X-Otto-Agent` — still an agent caller.
+        headers.insert("x-otto-agent", "mcp-outward".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(
+            source,
+            json!({"kind":"agent","session_id":null,"via":"mcp-outward"})
+        );
+        assert!(session_id.is_none());
+
+        // A session header wins over the agent marker.
+        headers.insert("x-otto-session", "session-2".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(source, json!({"kind":"agent","session_id":"session-2"}));
+        assert_eq!(session_id.as_deref(), Some("session-2"));
     }
 
     #[test]
     fn merged_auth_for_update_keeps_when_absent() {
-        let existing = json!({"type":"bearer","token":{"$secret":"otto.api.request.r1"}});
-        assert!(merged_auth_for_update(&existing, &Value::Null).is_none());
+        assert!(merged_auth_for_update(&Value::Null).is_none());
         let incoming = json!({"type":"none"});
-        assert_eq!(merged_auth_for_update(&existing, &incoming), Some(incoming));
+        assert_eq!(merged_auth_for_update(&incoming), Some(incoming));
     }
 }

@@ -876,7 +876,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_api_get_request",
-                "description": "READ-ONLY: one saved request in full (headers/query/body/docs/scripts) with every secret masked. Pass `request_id` or a unique `name`.",
+                "description": "READ-ONLY: one saved request in full (headers/query/body/docs/scripts) with every secret masked. Pass `request_id` or a unique `name`. A body over 64 KiB is capped and ends with `…[truncated]`.",
                 "inputSchema": { "type": "object", "properties": {
                     "request_id": { "type": "string", "description": "Saved request id." },
                     "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." }

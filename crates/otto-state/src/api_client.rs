@@ -587,12 +587,18 @@ impl ApiClientRepo {
         let mut qb = QueryBuilder::<Sqlite>::new("SELECT * FROM api_history WHERE workspace_id = ");
         qb.push_bind(ws);
         if let Some(q) = &f.q {
-            let pattern = format!("%{q}%");
+            // Escape the LIKE metacharacters so `a_b` matches `a_b`, not `a-b`.
+            let pattern = format!(
+                "%{}%",
+                q.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
             qb.push(" AND (url LIKE ")
                 .push_bind(pattern.clone())
-                .push(" OR method LIKE ")
+                .push(" ESCAPE '\\' OR method LIKE ")
                 .push_bind(pattern)
-                .push(")");
+                .push(" ESCAPE '\\')");
         }
         if let Some(status) = f.status {
             qb.push(" AND status = ").push_bind(status);

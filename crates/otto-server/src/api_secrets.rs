@@ -394,6 +394,29 @@ pub fn jwt_claims(body: &str) -> Option<Value> {
     (!found.is_empty()).then_some(Value::Object(found))
 }
 
+/// Replace every JWT-shaped token (header.payload.signature, header starting `eyJ`)
+/// in `input` with [`MASK`]. Used after `jwt_claims` has captured the safe claims.
+pub fn mask_jwts(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find("eyJ") {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end];
+        if jwt_parts(candidate).is_some() {
+            out.push_str(MASK);
+        } else {
+            out.push_str(candidate);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Read a Keychain blob (`member → value`); absent/corrupt → empty.
 pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String> {
     secrets
@@ -626,6 +649,15 @@ mod tests {
         let claims = jwt_claims(&format!("first={first}; second: {second}")).unwrap();
         assert_eq!(claims["text#1"]["scope"], "read");
         assert_eq!(claims["text#2"]["aud"], json!(["otto"]));
+    }
+
+    #[test]
+    fn mask_jwts_replaces_tokens_and_keeps_other_text() {
+        let token = test_jwt(&json!({"exp": 1_893_456_000_i64}));
+        assert_eq!(
+            mask_jwts(&format!("a={token}; b=eyJnot-a-jwt")),
+            "a=***; b=eyJnot-a-jwt"
+        );
     }
 
     #[test]

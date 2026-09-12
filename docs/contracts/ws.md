@@ -719,7 +719,8 @@ secret values.
 
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - `session_id` is present for an agent call identified by `X-Otto-Session`;
-  human sends use null. `request_id` is set for saved-request execution and
+  human sends use null, and so do outward MCP calls (`source: "agent"` with a
+  null `session_id`). `request_id` is set for saved-request execution and
   null for the ad-hoc `/api-client/execute` route.
 - TypeScript mirror: `{ type: 'api_history_appended'; workspace_id: Id;
   entry_id: Id; source: 'agent' | 'human'; session_id: Id | null;

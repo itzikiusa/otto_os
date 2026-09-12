@@ -4130,6 +4130,8 @@ export interface RunSavedRequestResp {
 export interface ApiHistorySource {
   kind: 'agent' | 'human';
   session_id?: Id | null;
+  /** How an agent without an Otto session reached the route (e.g. `mcp-outward`). */
+  via?: string;
 }
 
 export interface UpsertApiCollectionReq {

@@ -293,7 +293,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "workspace_id":{"type":"string"},"q":{"type":"string","description":"optional substring filter"},
                 "collection_id":{"type":"string"},"kind":{"type":"string","enum":["all","requests","environments","automations"]}}}}),
         json!({"name":"otto.api_get_request","mutating":false,"category":"API Client",
-            "description":"READ-ONLY: get one saved API request by id, including its agent-facing body and extras. Auth and sensitive header/query values are masked; the body is capped at 64 KiB.",
+            "description":"READ-ONLY: get one saved API request by id, including its agent-facing body and extras. Auth and sensitive header/query values are masked; a body over 64 KiB is capped and ends with `…[truncated]`.",
             "inputSchema":{"type":"object","required":["workspace_id","request_id"],"properties":{
                 "workspace_id":{"type":"string"},"request_id":{"type":"string"}}}}),
         json!({"name":"otto.api_history","mutating":false,"category":"API Client",
@@ -2411,27 +2411,27 @@ async fn run_tool(
 }
 
 async fn self_get(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.get(url).bearer_auth(token).send().await
+    let resp = client.get(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
 async fn self_post(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.post(url).bearer_auth(token).json(body).send().await
+    let resp = client.post(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
 async fn self_put(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.put(url).bearer_auth(token).json(body).send().await
+    let resp = client.put(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
 async fn self_patch(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.patch(url).bearer_auth(token).json(body).send().await
+    let resp = client.patch(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
 async fn self_delete(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.delete(url).bearer_auth(token).send().await
+    let resp = client.delete(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
@@ -2448,7 +2448,7 @@ async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
 /// keeping the newest [`MAX_TEXT_CHARS`] — `parse_self` would turn a non-JSON
 /// body into `null`.
 async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.get(url).bearer_auth(token).send().await
+    let resp = client.get(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();

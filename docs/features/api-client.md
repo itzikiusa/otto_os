@@ -605,7 +605,8 @@ sensitive data your endpoints returned; clear history when appropriate.
 - **Agent-authored new-host rule.** A request stamped as agent-authored cannot be
   sent to a host that has not appeared in a human-authored saved request or run
   until `confirm_new_host:true` is supplied. This is an agent-side speed bump;
-  outward MCP execution additionally passes through human approval.
+  outward MCP execution is approval-gated unless the token carries an explicit
+  write grant (`mcp_trust_token_write_grant`, default on).
 
 ### Roles
 

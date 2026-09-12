@@ -1834,8 +1834,10 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
 
 On request PATCH, absent/null `auth` keeps the stored auth row and Keychain blob,
-and absent `extras` keeps the stored extras. A non-empty `X-Otto-Session` header on
-request POST/PATCH stamps `extras.agent = {session_id, at}`. Every history request
+and absent `extras` keeps the stored extras. A non-empty `X-Otto-Session` or
+`X-Otto-Agent` header on request POST/PATCH stamps `extras.agent = {session_id, at}`
+(`session_id` is null when only `X-Otto-Agent` is present — an outward MCP client
+has no Otto session). Every history request
 snapshot carries `request_id`, `name`, and `source: {kind: "agent"|"human",
 session_id}`; response bodies, history, and `api_history_appended` events never
 carry resolved secret values.
