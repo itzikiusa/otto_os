@@ -75,7 +75,7 @@ connection library unusable for every non-root account.)
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | `{auto_stash?}` (optional) | `{status: RepoStatusResp, note?}` — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `status.changes[].kind="conflicted"` (clients route to the conflict resolver). `auto_stash:true` wraps a dirty tree in stash → pull → pop (`note` says what happened to the stash: restored, kept because the pull conflicted, or pop conflicted); a refused auto-stash pull pops the stash back. Local refusals (dirty tree, no upstream, divergent branches, unfinished merge) are 409 with git's own line; only genuine network/auth failures are 502. |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
-| 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
+| 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all&page=1&per_page=50 | ws viewer | — | `PrListResp {items: PrSummary[], has_more, page, per_page}` (`per_page` 1..=100) |
 | 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq (optional `draft` — GitHub native flag, GitLab `Draft:` title prefix, Bitbucket Cloud draft field; optional `reviewers: string[]` of provider-native handles) | PrSummary (`reviewer_warnings: string[]` — reviewer requests/lookups that failed after the PR opened; never fails the creation) |
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
 | 51 | GET /api/v1/repos/{id}/prs/{number}/diff | ws viewer | — | DiffResp |
@@ -904,6 +904,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 ("Save as new" instead POSTs a fresh one).
 
 ## Git — repos & PR extras (beyond #34–#56)
+
+> Provider rate limits: a 429, or a 403 with `x-ratelimit-remaining: 0` / `retry-after`, is retried once when the wait is ≤ 30 s, otherwise it is a 502 "GitHub rate limited — retry in Ns".
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|

@@ -10,6 +10,7 @@ import type {
   MergeConflictStatus,
   MergePreview,
   MergeResult,
+  PrListResp,
   PrSummary,
   PullResp,
   Repo,
@@ -323,7 +324,7 @@ class GitStore {
     this.prsLoading = true;
     this.prError = null;
     try {
-      this.prs = await api.get<PrSummary[]>(`/repos/${repoId}/prs?state=open`);
+      this.prs = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
     } catch (e) {
       this.prs = [];
       // Surface the upstream reason (e.g. a 401 bad token) instead of a

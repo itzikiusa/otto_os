@@ -1613,7 +1613,15 @@ const routes: Route[] = [
       const state = q.get('state') ?? 'open';
       let list = prs.filter((p) => p.repo_id === m[1]);
       if (state !== 'all') list = list.filter((p) => p.summary.state === state);
-      return { json: list.map((p) => p.summary) };
+      // One page, always the last one — the fixture set never overflows.
+      return {
+        json: {
+          items: list.map((p) => p.summary),
+          has_more: false,
+          page: Number(q.get('page') ?? 1),
+          per_page: Number(q.get('per_page') ?? 50),
+        },
+      };
     },
   },
   {

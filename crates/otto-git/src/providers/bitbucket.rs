@@ -43,19 +43,60 @@ pub struct Bitbucket {
     http: Http,
     username: String,
     token: String,
+    /// API root. Always [`BASE`] in production; overridden only by tests
+    /// (`with_base`) so every hop can be pointed at a local stub.
+    base: String,
 }
 
 impl Bitbucket {
     pub fn new(username: String, token: String) -> Self {
+        Self::with_base(username, token, BASE.to_string())
+    }
+
+    /// Same client against a different API root — the wiremock tests' entry
+    /// point. Bitbucket Cloud is the only supported deployment.
+    pub(crate) fn with_base(username: String, token: String, base: String) -> Self {
         Self {
             http: Http::new("bitbucket"),
             username,
             token,
+            base: base.trim_end_matches('/').to_string(),
         }
     }
 
     fn pr_path(r: &RemoteRef, tail: &str) -> String {
         format!("/repositories/{}/{}/pullrequests{tail}", r.owner, r.repo)
+    }
+
+    /// Resolve a path against the API root. Bitbucket's `next` cursor is an
+    /// ABSOLUTE url, so anything already absolute is passed through — that is
+    /// what lets `paginate_values` reuse the normal auth/retry path.
+    fn url(&self, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("{}{path}", self.base)
+        }
+    }
+
+    /// Follow Bitbucket's `next` cursor, concatenating each page's `values`.
+    /// Capped at the same 20 pages as `Http::paginate_json`: a PR's comments
+    /// must be whole, but a runaway cursor must not hang the request.
+    async fn paginate_values(&self, path: &str) -> Result<Vec<Value>> {
+        const MAX_PAGES: usize = 20;
+        let mut all: Vec<Value> = Vec::new();
+        let mut page = self.send_json(reqwest::Method::GET, path, None).await?;
+        let mut fetched = 1usize;
+        loop {
+            all.extend_from_slice(varr(&page, &["values"]));
+            let next = page.get("next").and_then(Value::as_str).map(str::to_string);
+            let Some(next) = next.filter(|_| fetched < MAX_PAGES) else {
+                break;
+            };
+            page = self.send_json(reqwest::Method::GET, &next, None).await?;
+            fetched += 1;
+        }
+        Ok(all)
     }
 
     /// Build a request with either Basic or Bearer auth.
@@ -69,7 +110,7 @@ impl Bitbucket {
         let mut rb = self
             .http
             .client()
-            .request(method, format!("{BASE}{path}"))
+            .request(method, self.url(path))
             .header("Accept", "application/json");
         rb = if bearer {
             rb.bearer_auth(&self.token)
@@ -289,7 +330,13 @@ fn comment_from(v: &Value) -> PrComment {
 
 #[async_trait]
 impl super::GitProvider for Bitbucket {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>> {
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
         let states: &[&str] = match state {
             PrState::Open => &["OPEN"],
             PrState::Merged => &["MERGED"],
@@ -299,12 +346,16 @@ impl super::GitProvider for Bitbucket {
         // Build the path with query params manually because we need to add
         // multiple `state` values and we no longer have a raw RequestBuilder
         // at this layer. Encode them directly into the URL.
-        let mut path = format!("{}?pagelen=50", Self::pr_path(r, ""));
+        let mut path = format!("{}?pagelen={per_page}&page={page}", Self::pr_path(r, ""));
         for s in states {
             path.push_str(&format!("&state={s}"));
         }
         let v = self.send_json(reqwest::Method::GET, &path, None).await?;
-        Ok(varr(&v, &["values"]).iter().map(summary_from).collect())
+        Ok(super::PrPage {
+            items: varr(&v, &["values"]).iter().map(summary_from).collect(),
+            // Bitbucket's cursor: present iff another page exists.
+            has_more: v.get("next").and_then(Value::as_str).is_some(),
+        })
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
@@ -315,21 +366,19 @@ impl super::GitProvider for Bitbucket {
                 None,
             )
             .await?;
+        // A PR detail must be WHOLE — follow the `next` cursor instead of
+        // stopping at the first 100 comments.
         let comments_v = self
-            .send_json(
-                reqwest::Method::GET,
-                &format!(
-                    "{}?pagelen=100",
-                    Self::pr_path(r, &format!("/{number}/comments"))
-                ),
-                None,
-            )
+            .paginate_values(&format!(
+                "{}?pagelen=100",
+                Self::pr_path(r, &format!("/{number}/comments"))
+            ))
             .await?;
 
         // Thread by parent.id.
         let mut top: Vec<PrComment> = Vec::new();
         let mut replies: Vec<(String, PrComment)> = Vec::new();
-        for c in varr(&comments_v, &["values"]) {
+        for c in &comments_v {
             if c.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
                 continue;
             }
@@ -550,7 +599,23 @@ impl super::GitProvider for Bitbucket {
         .map(|_| ())
     }
 
-    async fn request_changes(&self, r: &RemoteRef, number: u64, _body: Option<&str>) -> Result<()> {
+    async fn request_changes(&self, r: &RemoteRef, number: u64, body: Option<&str>) -> Result<()> {
+        // Bitbucket's request-changes endpoint takes no body, so the reviewer's
+        // reasoning would be dropped on the floor. Post it as a PR comment
+        // first — the comment is what the author actually reads.
+        if let Some(b) = body.map(str::trim).filter(|b| !b.is_empty()) {
+            self.comment(
+                r,
+                number,
+                &NewPrCommentReq {
+                    body: b.to_string(),
+                    path: None,
+                    line: None,
+                    in_reply_to: None,
+                },
+            )
+            .await?;
+        }
         let path = Self::pr_path(r, &format!("/{number}/request-changes"));
         self.send(reqwest::Method::POST, &path, None)
             .await

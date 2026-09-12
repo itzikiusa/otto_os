@@ -286,7 +286,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Get a repo's git status (current branch, staged/unstaged/untracked files). Read-only.",
             "inputSchema":{"type":"object","required":["repo_id"],"properties":{"repo_id":{"type":"string"}}}}),
         json!({"name":"otto.list_prs","mutating":false,"category":"Git",
-            "description":"List a repo's pull requests. Optional `state` filter (open|merged|declined|all). Read-only.",
+            "description":"List a repo's pull requests as `{items, has_more, page, per_page}`. Optional `state` filter (open|merged|declined|all). Read-only.",
             "inputSchema":{"type":"object","required":["repo_id"],"properties":{
                 "repo_id":{"type":"string"},"state":{"type":"string"}}}}),
         json!({"name":"otto.get_pr","mutating":false,"category":"Git",
@@ -2843,6 +2843,17 @@ mod tests {
         assert_eq!(c.path, "/api/v1/repos/r1/prs");
         assert_eq!(c.body.unwrap(), json!({"title":"T","description":"D","source_branch":"feat","target_branch":"main"}));
         assert_eq!(route_for("list_prs", &json!({"repo_id":"r1","state":"open"})).unwrap().path, "/api/v1/repos/r1/prs?state=open");
+        // The route returns a PAGE, not a bare array — a caller that doesn't
+        // know that reads `items` off an array and gets nothing.
+        let spec = otto_tool_specs()
+            .into_iter()
+            .find(|t| t["name"] == "otto.list_prs")
+            .expect("list_prs spec");
+        assert!(
+            spec["description"].as_str().unwrap_or_default().contains("has_more"),
+            "list_prs description must describe the page shape: {}",
+            spec["description"]
+        );
 
         let c = route_for("search_issues", &json!({"account_id":"a1","query":"a = b","project":"X"})).unwrap();
         assert!(c.path.starts_with("/api/v1/issue/search?account_id=a1"));

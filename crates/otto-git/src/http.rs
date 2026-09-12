@@ -1955,6 +1955,8 @@ async fn repo_conflict_resolve<S: GitCtx>(
 #[derive(Deserialize)]
 struct PrListQuery {
     state: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
 }
 
 async fn pr_list<S: GitCtx>(
@@ -1962,7 +1964,7 @@ async fn pr_list<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<PrListQuery>,
-) -> ApiResult<Json<Vec<PrSummary>>> {
+) -> ApiResult<Json<otto_core::api::PrListResp>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let state = match q.state.as_deref() {
         None | Some("open") => PrState::Open,
@@ -1971,8 +1973,18 @@ async fn pr_list<S: GitCtx>(
         Some("all") => PrState::All,
         Some(other) => return Err(Error::Invalid(format!("bad pr state: {other}")).into()),
     };
+    // Clamp rather than reject: paging bounds are a UI detail, and a silly
+    // `per_page=100000` must never become a URL we hand to a forge.
+    let page = q.page.unwrap_or(1).clamp(1, 10_000);
+    let per_page = q.per_page.unwrap_or(50).clamp(1, 100);
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    Ok(Json(provider.list_prs(&remote, state).await?))
+    let p = provider.list_prs(&remote, state, page, per_page).await?;
+    Ok(Json(otto_core::api::PrListResp {
+        items: p.items,
+        has_more: p.has_more,
+        page,
+        per_page,
+    }))
 }
 
 async fn pr_create<S: GitCtx>(
