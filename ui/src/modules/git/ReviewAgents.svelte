@@ -159,8 +159,10 @@
       </div>
       {#if agent.note && (view === 'running' || agent.status !== 'done' || i === lastRetryable)}
         <!-- The summarizer's note ("N final comments" / fallback) stays visible
-             when done — it's the only trace of what the summary stage did. -->
-        <p class="rp-agent-note">{agent.note}</p>
+             when done — it's the only trace of what the summary stage did. An
+             orchestrator row's note is long ("lenses 3/6 done · correctness ✓
+             …"), so it doubles as the tooltip in a narrow panel. -->
+        <p class="rp-agent-note" title={agent.note}>{agent.note}</p>
       {/if}
       {#if agent.status === 'waiting'}
         <p class="rp-agent-waiting">

@@ -21,14 +21,50 @@
   }
   let { run, nodeName = (id) => id, focusSid = null }: Props = $props();
 
-  // Only steps that actually spawned sessions, in run order.
+  // Steps that spawned sessions OR are running sub-agents, in run order. An
+  // agent step reports its sub-agents (from the parent transcript) before its
+  // own session id lands, so an activity-only step is still a group — the
+  // sub-agent rows must not wait for the session.
   const groups = $derived(
     (run.nodes ?? [])
-      .filter((n) => (n.sessions?.length ?? 0) > 0)
-      .map((n) => ({ id: n.node_id, status: n.status, sessions: n.sessions ?? [] })),
+      .filter((n) => (n.sessions?.length ?? 0) > 0 || (n.activity?.subagents?.length ?? 0) > 0)
+      .map((n) => ({
+        id: n.node_id,
+        status: n.status,
+        sessions: n.sessions ?? [],
+        activity: n.activity ?? null,
+      })),
   );
-  const total = $derived(groups.reduce((a, g) => a + g.sessions.length, 0));
   const runActive = $derived(run.status === 'running' || run.status === 'pending');
+
+  // Live "running 3m40s" on sub-agent rows: the same 1s client-side ticker
+  // RunSteps uses, alive only while a step actually runs (no network).
+  let now = $state(Date.now());
+  $effect(() => {
+    if (!(run.nodes ?? []).some((n) => n.status === 'running')) return;
+    const iv = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(iv);
+  });
+  function fmtDur(ms: number): string {
+    const s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`;
+  }
+  function stamp(v?: string | null): number | null {
+    if (!v) return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  /** Elapsed since a sub-agent was launched (ticks every second). */
+  function fmtSince(from?: string | null): string {
+    const t = stamp(from);
+    return t == null ? '' : fmtDur(now - t);
+  }
+  /** How long a finished sub-agent took (both stamps come from the parent). */
+  function fmtBetween(from?: string | null, to?: string | null): string {
+    const a = stamp(from);
+    const b = stamp(to);
+    return a == null || b == null ? '' : fmtDur(b - a);
+  }
 
   // Which session terminals are mounted (collapsed by default so we don't attach
   // dozens of PTYs at once). id-keyed, reset when the viewed run changes.
@@ -72,7 +108,7 @@
   }
 </script>
 
-{#if total === 0}
+{#if groups.length === 0}
   <div class="empty">
     No agent sessions for this run yet.{#if runActive}
       <br />They’ll appear here as steps spawn them.
@@ -108,6 +144,16 @@
             {/if}
           </div>
         {/each}
+        <!-- Sub-agents / background tasks the step launched. Display only —
+             they have no PTY of their own, so there is nothing to attach. -->
+        {#if g.activity && g.activity.subagents.length}
+          {@const subs = g.activity.subagents}
+          <div class="subs" data-testid="subagent-rows">
+            {#each subs as sa (sa.id)}
+              <div class="sub" data-status={sa.status} title={sa.description}>└ {sa.description} — {sa.status === 'running' ? `running ${fmtSince(sa.started_at)}` : sa.status === 'done' ? `done${sa.started_at && sa.finished_at ? ' in ' + fmtBetween(sa.started_at, sa.finished_at) : ''}` : 'failed'}</div>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -204,6 +250,22 @@
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--text-dim);
+  }
+  .subs {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-inline-start: 18px;
+  }
+  .sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sub[data-status='failed'] {
+    color: var(--status-exited);
   }
   .term {
     height: 320px;
