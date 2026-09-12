@@ -113,12 +113,19 @@ test("dropping a grip on a pane's centre swaps the two sessions", async ({ page 
   await threePanes(page);
   const before = await sessionOrderOf(page);
   const keysBefore = await keyOrderOf(page);
+  // Work in pane 0, then drag it away — focus must travel with it.
+  await focusPane(page, 0);
+  await expect(page.locator('[data-pane-key] >> nth=0 >> .pane.focused')).toHaveCount(1);
 
   await dragOnto(page, '[data-pane-key] >> nth=0 >> [data-testid="pane-grip"]', '[data-pane-key] >> nth=1 >> .drop-veil', { x: 0.5, y: 0.5 });
 
   await expect.poll(() => sessionOrderOf(page)).toEqual([before[1], before[0], before[2]]);
   // A swap moves SESSIONS, never slots — the keys stay exactly where they were.
   expect(await keyOrderOf(page)).toEqual(keysBefore);
+  // Focus follows the SESSION that was dragged: the outline (and ⌘W / the
+  // route) must sit on the slot that now holds it, not on the slot it left.
+  await expect(page.locator('[data-pane-key] >> nth=1 >> .pane.focused')).toHaveCount(1);
+  await expect(page.locator('[data-pane-key] >> nth=0 >> .pane.focused')).toHaveCount(0);
 });
 
 test('dropping on the right edge moves the pane beside it', async ({ page }) => {

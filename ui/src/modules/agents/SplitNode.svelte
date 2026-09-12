@@ -275,10 +275,25 @@
   .db-pane-close:hover {
     color: var(--text);
   }
-  /* The gutter is its own 8px grid track, so it never overlaps a pane. */
+  /* The gutter is its own 8px grid track, so it never overlaps a pane — but
+     its HIT AREA does: `::before` reaches 6px into each neighbour's edge, so
+     the frame between two panes grabs like a window border (a 20px target),
+     while the drawn line stays thin. Pseudo-element areas hit-test as the
+     gutter itself, and z-index 10 keeps it above both pane frames. */
   .gutter {
     position: relative;
     z-index: 10;
+  }
+  .gutter::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .split-node[data-axis='col'] > .gutter::before {
+    inset: 0 -6px;
+  }
+  .split-node[data-axis='row'] > .gutter::before {
+    inset: -6px 0;
   }
   .split-node[data-axis='col'] > .gutter {
     cursor: col-resize;
@@ -289,14 +304,20 @@
   .gutter:focus-visible {
     outline: none;
   }
-  .gutter:hover::after,
-  .gutter:focus-visible::after {
+  /* Always drawn, faintly, so the resize handle is discoverable without
+     hovering; hover / focus brighten it. */
+  .gutter::after {
     content: '';
     position: absolute;
     inset: 0;
     margin: auto;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--border);
     border-radius: 2px;
+    transition: background 120ms ease-out;
+  }
+  .gutter:hover::after,
+  .gutter:focus-visible::after {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .gutter:focus-visible::after {
     background: color-mix(in srgb, var(--accent) 65%, transparent);

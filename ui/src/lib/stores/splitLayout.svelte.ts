@@ -327,9 +327,15 @@ class SplitLayoutStore {
   }
 
   /** Swap the SESSIONS of two slots; the focused SLOT keeps focus. */
+  /** Swap the SESSIONS of two leaves; focus follows the session, not the slot —
+   *  after dragging the pane you were working in onto another, the outline
+   *  (and ⌘W, the route, the navigator highlight) must land where that session
+   *  now lives, not stay on the slot it left. */
   swap(k1: string, k2: string): void {
     if (!this.tree) return;
     this.tree = swapLeaves(this.tree, k1, k2);
+    if (this.focusedKey === k1) this.focusedKey = k2;
+    else if (this.focusedKey === k2) this.focusedKey = k1;
     this.persist();
   }
 
