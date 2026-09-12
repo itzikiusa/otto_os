@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, ApiResult, GitCtx};
-use crate::local::LocalGit;
+use crate::local::{LocalGit, SpawnClass};
 
 /// Everything `GET /repos/{id}/log` can ask for. `limit == 0` means NO `-n` at
 /// all (the whole reachable history) — same contract as [`LocalGit::log`].
@@ -108,7 +108,7 @@ impl LocalGit {
             args.push("--");
             args.push(p);
         }
-        let out = self.run(&args).await?;
+        let out = self.run_read(&args).await?;
         crate::parse::parse_log(&out)
     }
 
@@ -125,7 +125,11 @@ impl LocalGit {
         Self::guard_ref(rev)?;
         Self::guard_path(path)?;
         let (ok, stdout, stderr, code) = self
-            .run_raw(&["blame", "--porcelain", rev, "--", path], &[])
+            .run_raw_class(
+                &["blame", "--porcelain", rev, "--", path],
+                &[],
+                SpawnClass::LocalRead,
+            )
             .await?;
         if !ok {
             return Err(crate::local::upstream_err(&stderr, &stdout, code));

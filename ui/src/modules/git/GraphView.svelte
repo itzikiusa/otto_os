@@ -1312,7 +1312,7 @@
       // Preview is advisory — a repo whose daemon predates it still rebases.
     }
     const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commits will be replayed; conflicts open the resolver.`,
+      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commits will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
       { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
     );
     if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);

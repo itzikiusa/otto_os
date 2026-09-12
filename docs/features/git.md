@@ -262,7 +262,7 @@ always rides after `--`).
 **Remotes** in the repo header lists the repo's remotes (`git remote -v`) with
 **Add**, **Edit URL** and **Remove**. URLs are shown with any `user:password@`
 userinfo stripped, and a new URL must be `https`/`http`/`ssh`/`git` or scp-like
-(`git@host:owner/repo.git`). Removing a remote keeps every local branch. Push
+`user@host:path` (`git@host:owner/repo.git` — the user part is required). Removing a remote keeps every local branch. Push
 and checkout still address `origin` by name — re-pointing another remote does
 not redirect them.
 
