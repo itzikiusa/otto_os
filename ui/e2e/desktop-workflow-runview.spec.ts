@@ -193,3 +193,35 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
     )
     .toBe('canceled');
 });
+
+// R5.5 (workflows batch): `NodeRunState.activity` is a LIVE field — the engine
+// publishes a phase + sub-agent snapshot while an agent step runs and clears it
+// the moment the step settles. A finished run must therefore carry no `activity`
+// key at all on any node (serde skips `None`), so the run view's sub-agent chip
+// and phase line can never linger on a settled step.
+test('a finished step carries no activity', async () => {
+  const wfId = await createWorkflow(
+    'E2E RunView Activity',
+    [
+      node('trigger', 'manual_trigger'),
+      node('set', 'transform', { json: { note: 'settled' } }),
+      node('tail', 'log'),
+    ],
+    [edge('trigger', 'set'), edge('set', 'tail')],
+  );
+  const runId = await startRun(wfId);
+  expect((await waitRun(runId)).status).toBe('success');
+
+  const g = await ctx.get(`${base}${V1}/workflow-runs/${runId}`);
+  expect(g.ok(), await g.text()).toBeTruthy();
+  const nodes = ((await g.json()).nodes ?? []) as Array<Record<string, unknown>>;
+
+  expect(nodes.map((n) => n.node_id)).toEqual(['trigger', 'set', 'tail']);
+  for (const n of nodes) {
+    expect(n.status, `node ${n.node_id}`).toBe('success');
+    expect(
+      Object.prototype.hasOwnProperty.call(n, 'activity'),
+      `node ${n.node_id} still carries activity`,
+    ).toBe(false);
+  }
+});
