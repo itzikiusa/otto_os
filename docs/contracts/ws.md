@@ -26,6 +26,21 @@ Role: workspace **viewer** may attach (read-only); **editor**+ may send input/re
 Input frames from viewers are silently dropped server-side (and a single JSON
 `{"type":"error","code":"forbidden"}` is sent once).
 
+**Re-authorization cadence (no wire change).** The write capability is decided
+once, at the upgrade, and then re-validated **periodically off the socket's own
+loop** — never per frame: an `input` frame is written to the PTY without waiting
+on the state DB, so an unrelated slow SQLite statement can no longer freeze a
+terminal in either direction. The re-check runs every **5 s** for a plain
+agent/shell session and every **1 s** for a resource-bound one (k8s / AWS / a
+connection session, where a revoked grant must drop the socket promptly). The
+capability only ever **narrows** for a live connection: a share downgraded from
+editor to viewer stops accepting input within one interval and never regains it
+without reconnecting. Revocation (share token revoked/expired, session access
+withdrawn) closes the socket within one interval — and immediately, regardless of
+cadence, when the server force-terminates the session (`{"type":"terminated"}`,
+below). Clients need no change: keep sending, and treat a dropped socket or a
+`forbidden` error frame as the authoritative answer.
+
 ### Client → server (JSON text frames)
 
 ```json

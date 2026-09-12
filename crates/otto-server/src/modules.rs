@@ -160,6 +160,10 @@ impl otto_sessions::SessionsCtx for ServerCtx {
         Box::pin(crate::resource_sessions::check(self,user,session))
     }
 
+    fn resource_bound(&self, session: &otto_core::domain::Session) -> bool {
+        crate::resource_sessions::binding(session).is_some()
+    }
+
     fn manager(&self) -> &Arc<SessionManager> {
         &self.manager
     }
