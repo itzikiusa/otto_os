@@ -435,9 +435,11 @@
 
   // Auto-fetch runs `fetch --prune` on the daemon but deliberately doesn't
   // remount the graph — re-sync QUIETLY (no loading flags, no flicker) when a
-  // round completes, so a branch deleted outside this view (session terminal,
-  // remote) disappears without a manual Fetch. Plain (non-$state) bookkeeping:
-  // writing tracked state here would re-trigger the effect.
+  // round completes, so a ref that moved outside this view (a teammate's branch,
+  // a new tag, a branch deleted in a session terminal) shows up without a manual
+  // Fetch. `resyncRefs` pays only the cheap `/refs` call unless something
+  // actually moved. Plain (non-$state) bookkeeping: writing tracked state here
+  // would re-trigger the effect.
   let refsSyncSeen: { id: string; rev: number } | null = null;
   $effect(() => {
     const id = repoId;
@@ -449,9 +451,41 @@
     }
     if (refsSyncSeen.rev !== rev) {
       refsSyncSeen = { id, rev };
-      void refreshAfter().catch(() => {});
+      void resyncRefs().catch(() => {});
     }
   });
+
+  /** Fingerprint of a refs response: every local/remote branch as
+   *  `l|r:name@sha`, plus the tag names and the base branch. `null` means "can't
+   *  tell" — nothing held yet, or a daemon predating `RefBranch.sha` — and is
+   *  never considered equal, so such a response degrades to an unconditional
+   *  re-sync (today's behaviour). */
+  function refsFingerprint(r: RefsResp | null): string | null {
+    if (!r) return null;
+    const branches = [...r.local, ...r.remote];
+    if (branches.some((b) => !b.sha)) return null;
+    return JSON.stringify([
+      branches.map((b) => `${b.remote ? 'r' : 'l'}:${b.name}@${b.sha ?? ''}`),
+      r.tags.map((t) => t.name),
+      r.base_branch ?? null,
+    ]);
+  }
+
+  /** Quiet post-auto-fetch re-sync: read the CHEAP `/refs` first and replay the
+   *  EXPENSIVE fan-out (`log --all -n 10000` + stashes + worktrees) only when the
+   *  ref fingerprint actually moved. `refsRev` is bumped after every successful
+   *  auto-fetch — the store can't tell whether anything changed (`statusEq` sees
+   *  only HEAD and its upstream), so the decision lives here, where the
+   *  cheap-vs-expensive split is visible (investigation H4/WP3). */
+  async function resyncRefs(): Promise<void> {
+    const next = await api.get<RefsResp>(`/repos/${repoId}/refs`).catch(() => null);
+    if (!next) return; // transient failure — keep what we have, try next round
+    const before = refsFingerprint(refs);
+    const after = refsFingerprint(next);
+    if (before !== null && after !== null && before === after) return; // nothing moved
+    refs = next;
+    await reloadGraph();
+  }
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
   /** Copy `text` to the clipboard and toast success/failure with `label`. */
@@ -468,6 +502,17 @@
    *  parent and re-query refs + log so the graph reflects the change. */
   async function refreshAfter(status?: RepoStatusResp): Promise<void> {
     if (status) onstatus(status);
+    const refsCall = api
+      .get<RefsResp>(`/repos/${repoId}/refs`)
+      .then((r) => (refs = r))
+      .catch(() => {});
+    await Promise.all([refsCall, reloadGraph()]);
+  }
+
+  /** The EXPENSIVE half of a refresh: the `log --all` page plus stashes and
+   *  worktrees. Split out of [`refreshAfter`] so the auto-fetch path
+   *  ([`resyncRefs`]) can skip it when `/refs` says nothing moved. */
+  async function reloadGraph(): Promise<void> {
     // Re-read AT LEAST as much history as the user had already paged in, so a
     // refresh after a commit/pull doesn't yank the graph back to the first page
     // and lose their place. Rounded up to a whole page.
@@ -476,7 +521,6 @@
     loadingMore = false;
     inflight = null;
     await Promise.all([
-      api.get<RefsResp>(`/repos/${repoId}/refs`).then((r) => (refs = r)).catch(() => {}),
       api
         .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${want}`)
         .then((c) => {

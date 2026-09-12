@@ -70,6 +70,12 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<Session> {
 /// through the terminal WS while every session read costs 2 s). Read ONCE per
 /// process: with the variable unset — how the daemon always runs — this is a
 /// single `OnceLock` load and no sleep at all.
+///
+/// COMPILED OUT of release builds (`#[cfg(debug_assertions)]`): a shipped
+/// `ottod` must not honour the variable even if it somehow lands in the launchd
+/// environment. `cargo test` and the e2e daemon are dev-profile builds, so the
+/// hook is present exactly where tests need it.
+#[cfg(debug_assertions)]
 fn injected_delay() -> Option<std::time::Duration> {
     static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
     *DELAY.get_or_init(|| {
@@ -79,6 +85,14 @@ fn injected_delay() -> Option<std::time::Duration> {
             .filter(|ms| *ms > 0)
             .map(std::time::Duration::from_millis)
     })
+}
+
+/// Release twin of [`injected_delay`] — a strict no-op, so the hook cannot be
+/// reached in a shipped daemon.
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn injected_delay() -> Option<std::time::Duration> {
+    None
 }
 
 impl SessionsRepo {

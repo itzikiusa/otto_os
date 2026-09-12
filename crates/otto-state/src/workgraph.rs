@@ -922,11 +922,15 @@ impl WorkGraphRepo {
         // Conflict: re-select the pre-existing row for this unique key. An
         // indexed seek on the `(work_item_id, kind, ref)` prefix — NO
         // `ORDER BY created_at`, which forced a temp B-tree over the whole
-        // bucket and was the 1.2-2.5 s `slow statement` in the logs.
+        // bucket and was the 1.2-2.5 s `slow statement` in the logs. `"ref" IS ?`
+        // is SQLite's NULL-safe equality: it matches BOTH unique keys exactly
+        // (a `''` ref is a different row from a NULL one, as the indexes say)
+        // and still uses the index — unlike `COALESCE(...) = COALESCE(...)`,
+        // which conflated the two.
         let row = sqlx::query(
             "SELECT id, work_item_id, workspace_id, kind, title, \"ref\", payload_json, created_at \
              FROM work_artifacts WHERE work_item_id = ? AND kind = ? \
-             AND COALESCE(\"ref\", '') = COALESCE(?, '') LIMIT 1",
+             AND \"ref\" IS ? LIMIT 1",
         )
         .bind(&a.work_item_id)
         .bind(a.kind.as_str())
@@ -949,7 +953,7 @@ impl WorkGraphRepo {
     ) -> Result<bool> {
         let hit: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM work_artifacts WHERE work_item_id = ? AND kind = ? \
-             AND COALESCE(\"ref\", '') = COALESCE(?, '') LIMIT 1",
+             AND \"ref\" IS ? LIMIT 1",
         )
         .bind(work_item_id)
         .bind(kind.as_str())

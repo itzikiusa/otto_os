@@ -157,15 +157,17 @@ class GitStore {
   // on/off toggle is persisted per-device. ──
   autoFetchEnabled = $state(INITIAL_AUTO_FETCH.enabled);
   autoFetchIntervalSec = $state(INITIAL_AUTO_FETCH.intervalSec);
-  /** Per-repo ref-refresh signal, bumped after an auto-fetch that CHANGED the
-   *  repo's status. Views caching refs (GraphView) re-sync quietly when it
-   *  moves — and a GraphView re-sync is expensive (`refs` + `log --all -n
-   *  10000` + stashes + worktrees), so bumping it unconditionally meant every
-   *  open Git tab replayed that every 10 s even when the fetch brought nothing
-   *  (investigation H4/WP3). The price of the `statusEq` guard: a `--prune` that
-   *  removes a branch the current HEAD doesn't track moves no status field, so
-   *  the graph carries that stale ref until the next status-changing fetch, a
-   *  manual refresh, or a remount. */
+  /** Per-repo ref-refresh signal, bumped after EVERY successful auto-fetch.
+   *  `setStatus` deliberately skips no-op status writes, and `statusEq` only
+   *  compares HEAD and its one tracking ref — so a fetch that advances
+   *  `origin/feature-x`, adds a remote branch, moves a tag, or `--prune`s a
+   *  branch the current HEAD doesn't track changes NO status field. A view
+   *  caching refs (GraphView) would stay stale until remount, so it gets the
+   *  signal unconditionally and decides for itself whether anything actually
+   *  moved: it re-reads the cheap `/refs` and only replays the expensive
+   *  `log --all -n 10000` + stashes + worktrees fan-out when the ref
+   *  fingerprint differs (investigation H4/WP3). A pruned ref disappears from
+   *  `/refs`, so that case is covered too. */
   refsRev: Record<string, number> = $state({});
   private autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
   private autoFetchInFlight = false;
@@ -393,8 +395,10 @@ class GitStore {
   /** Write a repo's status, but ONLY when it actually changed, so a no-op fetch
    *  doesn't needlessly recompute the `$derived` status + re-render the toolbar
    *  and tab chips. Keeps `primaryStatus` in sync when this repo is the
-   *  right-panel primary. Returns whether anything changed, so the auto-fetch
-   *  loop can keep `refsRev` (and the GraphView reload it triggers) quiet too. */
+   *  right-panel primary. Returns whether anything actually changed, so a caller
+   *  that wants to do more work only on a real change can ask. (The auto-fetch
+   *  loop deliberately does NOT gate `refsRev` on it — `statusEq` compares only
+   *  HEAD and its upstream, so it cannot see most ref movement; see `refsRev`.) */
   setStatus(repoId: string, s: RepoStatusResp): boolean {
     const prev = this.statusById[repoId];
     if (prev && statusEq(prev, s)) return false;
@@ -475,10 +479,11 @@ class GitStore {
             ids.map(async (id) => {
               try {
                 const s = await api.post<RepoStatusResp>(`/repos/${id}/fetch`);
-                // QUIET — no toast; `setStatus` skips no-ops and tells us so:
-                // a fetch that brought nothing must NOT bump `refsRev`, or every
-                // mounted GraphView re-pulls `log --all -n 10000` every round.
-                if (this.setStatus(id, s)) this.refsRev[id] = (this.refsRev[id] ?? 0) + 1;
+                this.setStatus(id, s); // QUIET — no toast; setStatus skips no-ops
+                // Unconditional: `statusEq` can't see a ref that moved outside
+                // HEAD's upstream. GraphView gates the expensive reload on a
+                // `/refs` fingerprint instead (see `refsRev`).
+                this.refsRev[id] = (this.refsRev[id] ?? 0) + 1;
                 this.autoFetchFailStreak[id] = 0;
                 this.autoFetchBackoff[id] = 0;
               } catch {
