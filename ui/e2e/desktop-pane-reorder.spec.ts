@@ -209,6 +209,36 @@ test('tiled view: "Free layout" turns the tiles into an equal split grid with a 
   await expect(page.locator('.gutter')).toHaveCount(2);
 });
 
+test('tiled view: the corner grip resizes one tile (width vs its row neighbour, height vs the row below)', async ({ page }) => {
+  await openSession(page, 'Costacurta');
+  await page.locator('button[aria-label="Tiled view"]').click();
+  await expect(page.locator('[data-tile-id]')).toHaveCount(3, { timeout: 20_000 });
+  const box = (r: number, c: number) =>
+    page.locator(`[data-tile-id][data-row="${r}"][data-col="${c}"]`).first().evaluate((el) => {
+      const b = el.getBoundingClientRect();
+      return { w: b.width, h: b.height };
+    });
+  const a0 = await box(0, 0);
+  const b0 = await box(0, 1);
+  const c0 = await box(1, 0);
+  const grip = page.locator('[data-tile-id][data-row="0"][data-col="0"] [data-testid="tile-corner"]');
+  const g = (await grip.boundingBox())!;
+  const x = g.x + g.width / 2;
+  const y = g.y + g.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 120, y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await box(0, 0)).w).toBeGreaterThan(a0.w + 80);
+  const a1 = await box(0, 0);
+  const b1 = await box(0, 1);
+  const c1 = await box(1, 0);
+  // Its row neighbour gave up exactly that width; the row below got shorter.
+  expect(b1.w).toBeLessThan(b0.w - 80);
+  expect(a1.h).toBeGreaterThan(a0.h + 30);
+  expect(c1.h).toBeLessThan(c0.h - 30);
+});
+
 test('tiled view: drag a tile onto another reorders and a reload keeps it', async ({ page }) => {
   await openSession(page, 'Costacurta');
   await page.locator('button[aria-label="Tiled view"]').click();
