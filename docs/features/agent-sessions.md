@@ -499,28 +499,41 @@ when **all** of these hold:
 3. **Unattached** — no WS viewer is currently watching (tracked by an
    `AttachGuard` reference count that decrements on every WS teardown path).
 4. **Not pinned** — `meta.keep_alive` is not `true`.
-5. **Engine-owned** — the session was started by a background origin
-   (`meta.work.origin` = `workflow` / `channel` / `review` / `swarm` /
-   `delegation` / …, or a background `meta.source`). **Sessions you started
+5. **Engine-owned** — the session was started by a background origin: a
+   `meta.work.origin` of `workflow` / `review` / `swarm` / `delegation` /
+   `product` / `personal_agent` / …, **or** a background `meta.source` such as
+   `channel` (the `BACKGROUND_SESSION_SOURCES` list). **Sessions you started
    yourself from the Agents page are never auto-suspended** — `work.origin` is
    `manual`, or the row pre-dates that stamp and carries no work ref at all.
 6. **No open agent turn** — the provider's own on-disk record says the last
    turn finished. For `claude` the tail of the transcript JSONL must end in an
    assistant message with `stop_reason: "end_turn"` and carry no later
    `<task-notification>` line (a pending harness wake-up means the agent is
-   about to speak again); for `codex` the rollout's latest `task_started` must
-   have its matching `task_complete` / `turn_aborted`. Only the last ~256 KiB
-   is read, and an unreadable or unparseable file is "unknown" — never
-   "suspend".
+   about to speak again) — except one riding an `attachment` line, which claude
+   staples onto your *next* prompt rather than waking the agent, and which is
+   the normal tail of a finished session that used sub-agents. For `codex` the
+   rollout's latest `task_started` must have its matching `task_complete` /
+   `turn_aborted`. Only the last ~256 KiB is read, and an unreadable or
+   unparseable file is "unknown" — never "suspend".
+
+   **The open-turn hold is bounded by transcript freshness.** It only applies
+   while the artifact's mtime is younger than `REAP_UNRESUMABLE_GRACE`
+   (**30 minutes**). A turn that has looked "open" for longer is stuck, not
+   live — every engine watcher gives up inside 3 minutes, and an agent really
+   polling a background watcher appends a `tool_result` on every poll. Without
+   the bound, one un-answered notification tail would pin an engine session's
+   PTY, agent process and MCP sidecar forever, re-opening the exact fd leak
+   that grace exists to close.
 
 > **Why 5 and 6 exist.** "Idle" here means *no PTY output*, which is not the
 > same as *done*. An agent that hands work to background watchers and
 > `sleep`-polls them prints nothing, burns no descendant CPU and is squarely
 > mid-turn; the sweep used to suspend exactly that, yanking the PTY out from
 > under a live interactive session three times in one afternoon. Every guard
-> that holds a session now logs at `info` with its name — `keep_alive`,
-> `origin=manual`, `turn open`, `descendant CPU` — so the daemon log says why
-> a session was spared.
+> that holds a session names itself in the daemon log — `keep_alive`,
+> `origin=manual`, `turn open`, `descendant CPU` — at `info` the first time it
+> applies and on every later change of guard, `debug` while it simply persists
+> (a held session is re-held every 60 s, for as long as it lives).
 
 One older guard rides alongside those: the sweep compares each candidate's
 **descendant-process CPU** against the previous pass and skips any session

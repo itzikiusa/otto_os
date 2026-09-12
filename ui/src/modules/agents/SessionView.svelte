@@ -8,7 +8,7 @@
   import AttachIssue from './AttachIssue.svelte';
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -63,10 +63,16 @@
     if (status !== 'idle') return null;
     if (!session?.kind || session.kind !== 'agent') return null;
     if (session.meta?.keep_alive === true) return null; // pinned — won't be suspended
-    // Sessions the user started from the Agents page (manual origin, no engine
-    // `source`) are exempt from the daemon's idle sweep — no countdown to show.
+    // Sessions the user started from the Agents page are exempt from the
+    // daemon's idle sweep — no countdown to show. This MUST mirror
+    // `is_user_started` in crates/otto-sessions/src/manager.rs: a background
+    // `meta.source` (`isForeground`, the store's BACKGROUND_SOURCES mirror of
+    // `BACKGROUND_SESSION_SOURCES`) OR a non-`manual` `meta.work.origin` makes
+    // it engine-owned. Testing `!meta.source` instead would diverge for any
+    // source outside that list (e.g. `personal_agent`) and count down to a
+    // suspend that never comes.
     const origin = (session.meta?.work as { origin?: string } | undefined)?.origin;
-    if ((origin === undefined || origin === 'manual') && !session.meta?.source) return null;
+    if ((origin === undefined || origin === 'manual') && isForeground(session)) return null;
     const _tick = now(); // reactive dependency: re-computes every second
     const idleMs = Date.now() - Date.parse(session.last_active_at);
     if (idleMs < 0) return null;
