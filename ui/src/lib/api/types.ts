@@ -2413,9 +2413,45 @@ export interface StagePathsReq {
   paths: string[];
 }
 
+/** What `POST /repos/{id}/stage-hunk` does with the addressed hunk. */
+export type HunkOp = 'stage' | 'unstage' | 'discard';
+
+/**
+ * Stage / unstage / discard ONE hunk — or a line selection inside it.
+ * `hunk_header` is the `@@ … @@` line that was rendered: the server rebuilds
+ * the patch from its OWN fresh diff, so a stale `hunk_index` would silently
+ * act on a different hunk; a header mismatch is a 409 with nothing applied.
+ * `lines` indexes `Hunk.lines` (markers excluded); absent = the whole hunk.
+ */
+export interface StageHunkReq {
+  path: string;
+  hunk_index: number;
+  hunk_header: string;
+  lines?: number[];
+  op: HunkOp;
+  /** Required for `discard` — it rewrites the working file. */
+  confirm?: boolean;
+}
+
+export interface StageHunkResp {
+  status: RepoStatusResp;
+  diff: DiffResp;
+  /** `discard` only: the stash the pre-discard snapshot was stored under. */
+  backup_stash?: string | null;
+}
+
+/** `GET /repos/{id}/commit-config` — the repo's signing defaults. */
+export interface CommitConfig {
+  gpgsign: boolean;
+  format: 'openpgp' | 'ssh' | 'x509' | null;
+  signing_key: string | null;
+}
+
 export interface CommitReq {
   message: string;
   amend: boolean;
+  /** `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. */
+  sign?: boolean | null;
 }
 
 export interface CheckoutReq {

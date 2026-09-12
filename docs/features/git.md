@@ -280,6 +280,22 @@ The **Changes** tab is the working-tree view, backed by `git status`:
 
 The diff is parsed into a structured `DiffResp` and rendered by `DiffViewer`.
 
+**Hunk and line staging.** Every hunk header in the WIP panel's diff carries
+**Stage hunk** / **Unstage hunk** / **Discard hunk**; clicking line numbers in
+the gutter (shift-click for a range) narrows those to **Stage 4 lines**. Each
+posts `POST /repos/{id}/stage-hunk` with the hunk's `@@` header, and the daemon
+rebuilds the patch from its OWN fresh `git diff` — never from the rendered
+`DiffResp`, whose parser drops `\r` and the `\ No newline at end of file`
+markers, so CRLF and newline-less files stage byte-exact with no phantom
+follow-up diff. If the file changed since the diff was drawn the header no
+longer matches and the call is a 409 with nothing applied ("The hunk no longer
+applies — …; refresh and retry"); renamed and binary files can only be staged
+whole. **Discard** confirms first and records a backup stash
+(`otto: backup before hunk discard`, visible under Stashes) before rewriting the
+file. A path that ends up in both trees shows a **partial** badge, and its diff
+gets an *Unstaged | Staged* toggle so the hunk buttons act on the side you are
+looking at.
+
 ---
 
 ## 6. Merge-conflict resolution

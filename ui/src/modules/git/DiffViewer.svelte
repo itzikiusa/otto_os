@@ -4,8 +4,21 @@
   // collapsed — only expanded files render, which keeps huge diffs cheap),
   // syntax highlight, and (PR mode) line-gutter comment affordance.
   // PR mode adds: inline comment rendering, file-navigator sidebar, search.
-  import type { DiffResp, FileDiff, DiffLine, PrComment } from '../../lib/api/types';
+  import type {
+    DiffResp,
+    FileDiff,
+    DiffLine,
+    Hunk,
+    HunkOp,
+    PrComment,
+    StageHunkResp,
+  } from '../../lib/api/types';
   import { langFromPath, highlightLine, ensureHljs } from '../../lib/hl';
+  import { api, ApiError } from '../../lib/api/client';
+  import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { gitBridge } from './gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CommentThread from './CommentThread.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
@@ -20,6 +33,17 @@
     onReplyComment?: (parentId: string, body: string) => Promise<void>;
     /** Resolve/reopen a thread on the provider. */
     onResolveComment?: (threadId: string, resolved: boolean) => Promise<void>;
+    /** Repo this diff belongs to — enables the per-file ⋯ History/Blame menu. */
+    repoId?: string;
+    /**
+     * WIP mode: per-hunk Stage/Unstage/Discard + line selection. `target` is the
+     * diff this viewer is rendering, so the hunk indices the buttons send match
+     * the raw diff the server rebuilds the patch from. Requires `repoId`.
+     */
+    wip?: {
+      target: 'worktree' | 'staged';
+      onapplied: (r: StageHunkResp) => void;
+    };
   }
   let {
     diff,
@@ -29,6 +53,8 @@
     onAddComment,
     onReplyComment,
     onResolveComment,
+    repoId,
+    wip,
   }: Props = $props();
 
   let mode: 'unified' | 'split' = $state('unified');
@@ -304,6 +330,114 @@
       composer.newLine === line.new_line;
     composer = same ? null : { path, oldLine: line.old_line, newLine: line.new_line, line: n };
     composerText = '';
+  }
+
+  // ── Hunk / line staging (WIP mode) ─────────────────────────────────────────
+  // One selection at a time, scoped to a single hunk: a patch is rebuilt from
+  // ONE hunk server-side, so a cross-hunk selection has nowhere to go. Indices
+  // are positions in `hunk.lines`, which is exactly how the server indexes the
+  // raw diff body (markers excluded).
+  let sel = $state<{ path: string; hunk: number; lines: Set<number>; anchor: number } | null>(null);
+  let applying = $state(false);
+
+  /** Clear a selection that no longer exists in the freshly loaded diff. */
+  $effect(() => {
+    const s = sel;
+    if (!s) return;
+    const f = diff.files.find((x) => x.path === s.path);
+    if (!f || !f.hunks[s.hunk]) sel = null;
+  });
+
+  function isSelected(path: string, hi: number, li: number): boolean {
+    return sel !== null && sel.path === path && sel.hunk === hi && sel.lines.has(li);
+  }
+
+  /** Click = toggle one line; shift-click = the range from the last anchor. */
+  function selectLine(e: MouseEvent, path: string, hi: number, li: number, line: DiffLine): void {
+    if (!wip || line.origin === 'context') return;
+    const cur = sel !== null && sel.path === path && sel.hunk === hi ? sel : null;
+    if (e.shiftKey && cur) {
+      const [a, b] = cur.anchor <= li ? [cur.anchor, li] : [li, cur.anchor];
+      const lines = new Set(cur.lines);
+      for (let i = a; i <= b; i++) lines.add(i);
+      sel = { path, hunk: hi, lines, anchor: cur.anchor };
+      return;
+    }
+    const lines = cur ? new Set(cur.lines) : new Set<number>();
+    if (lines.has(li)) lines.delete(li);
+    else lines.add(li);
+    sel = lines.size === 0 ? null : { path, hunk: hi, lines, anchor: li };
+  }
+
+  /** "Stage hunk" → "Stage 4 lines" once lines inside THIS hunk are picked. */
+  function selLabel(verb: string, path: string, hi: number): string {
+    const n = sel !== null && sel.path === path && sel.hunk === hi ? sel.lines.size : 0;
+    return n > 0 ? `${verb} ${n} line${n === 1 ? '' : 's'}` : `${verb} hunk`;
+  }
+
+  async function applyHunk(file: FileDiff, hi: number, hunk: Hunk, op: HunkOp): Promise<void> {
+    if (!wip || !repoId || applying) return;
+    if (op === 'discard') {
+      const ok = await confirmer.ask(
+        'Discard these changes? This rewrites the working file and cannot be undone from the file — a backup stash `otto: backup before hunk discard` is kept.',
+        { title: 'Discard hunk', confirmLabel: 'Discard' },
+      );
+      if (!ok) return;
+    }
+    const picked =
+      sel !== null && sel.path === file.path && sel.hunk === hi && sel.lines.size > 0
+        ? [...sel.lines].sort((a, b) => a - b)
+        : undefined;
+    applying = true;
+    try {
+      const r = await api.post<StageHunkResp>(`/repos/${repoId}/stage-hunk`, {
+        path: file.path,
+        hunk_index: hi,
+        hunk_header: hunk.header,
+        lines: picked,
+        op,
+        confirm: op === 'discard' ? true : undefined,
+      });
+      sel = null;
+      wip.onapplied(r);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const status = e instanceof ApiError ? e.status : 0;
+      if (status === 400 && msg.includes('stage the whole file')) {
+        toasts.error(
+          'Partial staging unavailable',
+          "This hunk can't be staged partially (renamed/binary file) — stage the whole file.",
+        );
+      } else if (status === 409 && msg.includes('changed since the diff')) {
+        toasts.error(
+          'Hunk out of date',
+          'The hunk no longer applies — the file changed since the diff was shown; refresh and retry.',
+        );
+      } else {
+        toasts.error('Stage failed', msg);
+      }
+    } finally {
+      applying = false;
+    }
+  }
+
+  /** File header ⋯ — the diff is the only place a path is at hand, so this is
+   *  where History / Blame hang off. The panels live in RepoView; `gitBridge`
+   *  carries the request there without prop-drilling the whole graph. */
+  function fileToolsMenu(e: MouseEvent, file: FileDiff): void {
+    if (!repoId) return;
+    ctxMenu.show(e, [
+      {
+        label: 'History',
+        icon: 'note',
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path }),
+      },
+      {
+        label: 'Blame',
+        icon: 'note',
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path }),
+      },
+    ]);
   }
 
   async function submitComment(): Promise<void> {
@@ -679,25 +813,40 @@
       {@const fc = fileComments(file.path)}
       {@const cCount = commentCountForFile(file.path)}
       <section class="dfile" id="dfile-{file.path}">
-        <button
-          class="dfile-head"
-          onclick={() => (collapsed = { ...collapsed, [file.path]: !collapsed[file.path] })}
-        >
-          <span class="dfile-chevron">
-            <Icon name={collapsed[file.path] ? 'chevronRight' : 'chevronDown'} size={11} />
-          </span>
-          <span class="dfile-path mono">
-            {#if file.old_path}{file.old_path}<span class="rename-arrow"> → </span>{/if}{file.path}
-          </span>
-          <span class="grow"></span>
-          {#if prMode && cCount > 0}
-            <span class="file-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
-              💬 {cCount}
+        <!-- Row, not a single button: the ⋯ menu can't nest inside the collapse
+             button (nested <button> is invalid HTML and swallows the click). -->
+        <div class="dfile-headrow">
+          <button
+            class="dfile-head"
+            onclick={() => (collapsed = { ...collapsed, [file.path]: !collapsed[file.path] })}
+          >
+            <span class="dfile-chevron">
+              <Icon name={collapsed[file.path] ? 'chevronRight' : 'chevronDown'} size={11} />
             </span>
+            <span class="dfile-path mono">
+              {#if file.old_path}{file.old_path}<span class="rename-arrow"> → </span>{/if}{file.path}
+            </span>
+            <span class="grow"></span>
+            {#if prMode && cCount > 0}
+              <span class="file-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
+                💬 {cCount}
+              </span>
+            {/if}
+            <span class="add">+{stats.add}</span>
+            <span class="del">−{stats.del}</span>
+          </button>
+          {#if repoId}
+            <button
+              class="dfile-tools"
+              title="File history / blame"
+              aria-label="File tools for {file.path}"
+              onclick={(e) => {
+                e.stopPropagation();
+                fileToolsMenu(e, file);
+              }}
+            >⋯</button>
           {/if}
-          <span class="add">+{stats.add}</span>
-          <span class="del">−{stats.del}</span>
-        </button>
+        </div>
 
         {#if !collapsed[file.path]}
           {#if file.is_binary}
@@ -714,7 +863,25 @@
             {/if}
 
             {#each file.hunks as hunk, hi (hi)}
-              <div class="hunk-header mono">{hunk.header}</div>
+              <div class="hunk-header mono">
+                <span>{hunk.header}</span>
+                {#if wip && repoId}
+                  <span class="grow"></span>
+                  <button
+                    class="hunk-btn"
+                    disabled={applying}
+                    onclick={() =>
+                      void applyHunk(file, hi, hunk, wip.target === 'staged' ? 'unstage' : 'stage')}
+                  >{selLabel(wip.target === 'staged' ? 'Unstage' : 'Stage', file.path, hi)}</button>
+                  {#if wip.target === 'worktree'}
+                    <button
+                      class="hunk-btn danger"
+                      disabled={applying}
+                      onclick={() => void applyHunk(file, hi, hunk, 'discard')}
+                    >{selLabel('Discard', file.path, hi)}</button>
+                  {/if}
+                {/if}
+              </div>
 
               {#if effMode === 'unified'}
                 {#if !prMode && hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
@@ -752,17 +919,21 @@
                   <table class="dtable">
                     <tbody>
                       {#each visibleLines as line, li (li)}
-                        <tr class="dline {line.origin}">
+                        <tr class="dline {line.origin}" class:selected={isSelected(file.path, hi, li)}>
                           <td
                             class="gut old"
                             class:commentable={prMode}
-                            onclick={() => gutterClick(file.path, line)}
+                            class:selectable={wip && line.origin !== 'context'}
+                            onclick={(e) =>
+                              wip ? selectLine(e, file.path, hi, li, line) : gutterClick(file.path, line)}
                             >{line.old_line ?? ''}</td
                           >
                           <td
                             class="gut new"
                             class:commentable={prMode}
-                            onclick={() => gutterClick(file.path, line)}
+                            class:selectable={wip && line.origin !== 'context'}
+                            onclick={(e) =>
+                              wip ? selectLine(e, file.path, hi, li, line) : gutterClick(file.path, line)}
                             >{line.new_line ?? ''}</td
                           >
                           <td class="sign">{line.origin === 'add' ? '+' : line.origin === 'del' ? '−' : ''}</td>
@@ -1248,7 +1419,31 @@
     margin-bottom: 4px;
   }
 
+  .dfile-headrow {
+    display: flex;
+    align-items: stretch;
+    background: var(--surface-2);
+  }
+  .dfile-headrow .dfile-head {
+    min-width: 0;
+  }
+  .dfile-tools {
+    flex-shrink: 0;
+    padding: 0 10px;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .dfile-tools:hover {
+    color: var(--accent);
+  }
   .hunk-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     position: sticky;
     top: 0;
     /* Sit above the scrolling code rows so a wrapped line never shows through
@@ -1279,12 +1474,45 @@
     vertical-align: top;
     border-inline-end: 1px solid var(--border);
   }
-  .gut.commentable {
+  .gut.commentable,
+  .gut.selectable {
     cursor: pointer;
   }
-  .gut.commentable:hover {
+  .gut.commentable:hover,
+  .gut.selectable:hover {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
     color: var(--accent);
+  }
+  /* Small ghost actions in the sticky hunk header — accent, never louder than
+     the code they sit above. */
+  .hunk-btn {
+    flex-shrink: 0;
+    padding: 1px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius-s);
+    background: none;
+    color: var(--accent);
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .hunk-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .hunk-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .hunk-btn.danger {
+    border-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
+    color: var(--status-exited);
+  }
+  .hunk-btn.danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
+  }
+  /* Line selection wins over the add/del row tints below it. */
+  tr.dline.selected td {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
   .sign {
     width: 16px;

@@ -5,6 +5,7 @@
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
   import { api } from '../../lib/api/client';
   import type {
+    CommitConfig,
     CommitInfo,
     DiffResp,
     DraftCommitMessageResp,
@@ -39,6 +40,17 @@
   const unstaged = $derived(status.changes.filter((c) => !c.staged && c.kind !== 'conflicted'));
   const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
 
+  /** Partially staged: porcelain `MM` — the index and the worktree BOTH differ.
+   *  One `FileChange` carries both flags (`parse.rs` emits a single row per
+   *  path), so this is a flag test, not a two-tree intersection. */
+  const partial = $derived(
+    new Set(
+      status.changes
+        .filter((c) => c.staged && c.unstaged && c.kind !== 'conflicted')
+        .map((c) => c.path),
+    ),
+  );
+
   /** Resolve one conflicted file by taking a whole side (`git checkout
    *  --ours/--theirs` + stage). Confirmed — it discards the other side. */
   async function takeSide(path: string, side: 'ours' | 'theirs'): Promise<void> {
@@ -64,6 +76,10 @@
   let subject = $state('');
   let body = $state('');
   let amend = $state(false);
+  /** Sign this commit. Seeded from the repo's `commit.gpgsign`, then per-commit
+   *  — an explicit `sign` overrides the config without writing it. */
+  let signOn = $state(false);
+  let signCfg = $state<CommitConfig | null>(null);
   let committing = $state(false);
   let drafting = $state(false);
   /** Same watch-the-agent affordance as the PR dialog: drafting runs as a REAL
@@ -96,8 +112,31 @@
    *  "no textual diff" empty state (an error masquerading as emptiness). */
   let diffError = $state<string | null>(null);
 
+  /** Which side to show when a path is staged AND unstaged (default unstaged). */
+  let stagedView = $state(false);
+  /**
+   * Hunk actions rebuild their patch from the server's own `git diff` /
+   * `git diff --cached`, so the diff on screen must be exactly one of those or
+   * the hunk indices don't line up. `working` (staged + unstaged vs HEAD, plus
+   * synthesised untracked diffs) is neither — untracked files keep it and
+   * simply get no hunk buttons.
+   */
+  const selTarget: 'working' | 'worktree' | 'staged' = $derived.by(() => {
+    const p = selectedPath;
+    if (p === null) return 'working';
+    const ch = status.changes.find((c) => c.path === p);
+    // Untracked has no index/worktree pair to diff, conflicted is the
+    // resolver's business — both keep `working` and get no hunk buttons.
+    if (!ch || ch.kind === 'untracked' || ch.kind === 'conflicted') return 'working';
+    if (ch.staged && ch.unstaged) return stagedView ? 'staged' : 'worktree';
+    if (ch.unstaged) return 'worktree';
+    if (ch.staged) return 'staged';
+    return 'working';
+  });
+
   $effect(() => {
     const path = selectedPath;
+    const target = selTarget;
     if (path === null) {
       diff = null;
       diffError = null;
@@ -106,7 +145,7 @@
     diffLoading = true;
     diffError = null;
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=working&path=${encodeURIComponent(path)}`)
+      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`)
       .then((d) => (diff = d))
       .catch((e) => {
         diff = { files: [] };
@@ -263,6 +302,18 @@
   let unstagedOpen = $state(true);
   let stagedOpen = $state(true);
 
+  // Repo signing defaults. Best-effort: a daemon without the route (or a repo
+  // with no config) just leaves the toggle off.
+  $effect(() => {
+    void api
+      .get<CommitConfig>(`/repos/${repoId}/commit-config`)
+      .then((c) => {
+        signCfg = c;
+        signOn = c.gpgsign;
+      })
+      .catch(() => {});
+  });
+
   // Amend prefill: ticking Amend with an empty subject pulls HEAD's message in.
   $effect(() => {
     if (!amend || subject.trim() !== '') return;
@@ -319,6 +370,7 @@
       const r = await api.post<{ sha: string }>(`/repos/${repoId}/commit`, {
         message,
         amend,
+        sign: signOn,
       });
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
@@ -353,11 +405,18 @@
     />
     <button
       class="wp-name"
-      onclick={() => (selectedPath = selectedPath === file.change.path ? null : file.change.path)}
+      onclick={() => {
+        stagedView = false;
+        selectedPath = selectedPath === file.change.path ? null : file.change.path;
+      }}
       title={file.change.path}
     >
       <span class="kind k-{file.change.kind}">{kindBadge[file.change.kind]}</span>
       <span class="mono wp-fname">{file.name}</span>
+      {#if partial.has(file.change.path)}
+        <!-- Same path in both trees: some hunks staged, some not. -->
+        <span class="chip partial" title="Partially staged">partial</span>
+      {/if}
     </button>
     <button
       class="wp-discard"
@@ -597,13 +656,34 @@
         <Icon name="file" size={12} />
         <span class="mono wp-diff-path" title={selectedPath}>{selectedPath}</span>
         <span class="grow"></span>
+        {#if partial.has(selectedPath)}
+          <!-- Both sides exist: pick which one the hunk actions operate on. -->
+          <div class="segmented wp-target">
+            <button class:active={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+            <button class:active={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+          </div>
+        {/if}
         <button class="wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff">✕</button>
       </div>
       <div class="wp-diff-body">
         {#if diffLoading && !diff}
           <div style="padding: 10px"><Skeleton rows={5} height={20} /></div>
         {:else if diff && diff.files.length > 0}
-          <DiffViewer {diff} />
+          <DiffViewer
+            {diff}
+            {repoId}
+            wip={selTarget === 'working'
+              ? undefined
+              : {
+                  target: selTarget,
+                  onapplied: (r) => {
+                    onstatus(r.status);
+                    diff = r.diff;
+                    if (r.backup_stash)
+                      toasts.info('Backup stash kept', r.backup_stash.slice(0, 8));
+                  },
+                }}
+          />
         {:else if diffError}
           <div class="dim wp-empty">Couldn't load the diff: {diffError}</div>
         {:else}
@@ -663,6 +743,15 @@
       <label class="checkbox-row">
         <input type="checkbox" bind:checked={amend} />
         Amend
+      </label>
+      <label
+        class="checkbox-row"
+        title={signCfg?.signing_key
+          ? `Sign with ${signCfg.format ?? 'gpg'} key ${signCfg.signing_key}`
+          : 'Sign this commit'}
+      >
+        <input type="checkbox" bind:checked={signOn} />
+        Sign
       </label>
       <span class="grow"></span>
       <button
@@ -1025,6 +1114,21 @@
     font-size: 12px;
     color: var(--text-dim);
     cursor: pointer;
+  }
+  /* "partial" = the path sits in BOTH trees (some hunks staged). Quiet — it
+     annotates a row that is already busy with a kind badge and a name. */
+  .chip.partial {
+    height: 15px;
+    padding: 0 5px;
+    font-size: 9px;
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    flex-shrink: 0;
+  }
+  .wp-target > button {
+    height: 18px;
+    padding: 0 7px;
+    font-size: 10.5px;
   }
   .dim {
     color: var(--text-dim);
