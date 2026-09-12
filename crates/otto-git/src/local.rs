@@ -4307,6 +4307,24 @@ mod tests {
         p
     }
 
+    /// Budget for the two shim tests. Generous on purpose: the whole suite
+    /// spawns git in parallel, and a tight budget occasionally SIGTERMed the
+    /// shim's process group before `sh` had even recorded its pids — a flake
+    /// that looks exactly like a broken group kill.
+    const SHIM_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Read the pids a shim recorded, with a message that names the real cause
+    /// if it never got that far.
+    fn shim_pids(path: &Path) -> Vec<libc::pid_t> {
+        let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "shim never recorded its pids ({e}) — the {SHIM_BUDGET:?} budget \
+                 beat its own startup; raise SHIM_BUDGET"
+            )
+        });
+        raw.lines().filter_map(|l| l.trim().parse().ok()).collect()
+    }
+
     fn alive(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 only probes for the process's existence.
         unsafe { libc::kill(pid, 0) == 0 }
@@ -4339,12 +4357,12 @@ mod tests {
         );
         let git = LocalGit::new(&dir)
             .with_git_bin(&sh)
-            .with_budget(std::time::Duration::from_secs(1));
+            .with_budget(SHIM_BUDGET);
 
         let started = std::time::Instant::now();
         let err = git.run(&["status"]).await.unwrap_err();
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(6),
+            started.elapsed() < SHIM_BUDGET + std::time::Duration::from_secs(6),
             "the timeout must not wait for the process: {:?}",
             started.elapsed()
         );
@@ -4356,13 +4374,9 @@ mod tests {
             other => panic!("expected Upstream, got {other:?}"),
         }
 
-        let pids: Vec<libc::pid_t> = std::fs::read_to_string(dir.join("shim-pids"))
-            .unwrap()
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect();
+        let pids = shim_pids(&dir.join("shim-pids"));
         assert_eq!(pids.len(), 2, "shim recorded its own pid and its child's");
-        wait_dead(&pids, std::time::Duration::from_secs(3)).await;
+        wait_dead(&pids, std::time::Duration::from_secs(5)).await;
     }
 
     /// A process that IGNORES SIGTERM (git never does, but a hung helper might)
@@ -4379,22 +4393,19 @@ mod tests {
         );
         let git = LocalGit::new(&dir)
             .with_git_bin(&sh)
-            .with_budget(std::time::Duration::from_secs(1));
+            .with_budget(SHIM_BUDGET);
 
         let started = std::time::Instant::now();
         let err = git.run(&["status"]).await.unwrap_err();
         assert!(matches!(&err, Error::Upstream(m) if m.contains("timed out")), "{err:?}");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(6),
+            started.elapsed() < SHIM_BUDGET + std::time::Duration::from_secs(6),
             "elapsed {:?}",
             started.elapsed()
         );
-        let pid: libc::pid_t = std::fs::read_to_string(dir.join("shim-pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        wait_dead(&[pid], std::time::Duration::from_secs(3)).await;
+        let pids = shim_pids(&dir.join("shim-pid"));
+        assert_eq!(pids.len(), 1, "shim recorded its pid");
+        wait_dead(&pids, std::time::Duration::from_secs(5)).await;
     }
 
     /// The reason `LocalWrite` is detached: the UI aborts in-flight requests, and
