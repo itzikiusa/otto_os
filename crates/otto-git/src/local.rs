@@ -97,7 +97,7 @@ impl LocalGit {
 
     // -- plumbing -----------------------------------------------------------
 
-    fn base_cmd(&self) -> Command {
+    pub(crate) fn base_cmd(&self) -> Command {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.repo_path)
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -127,13 +127,28 @@ impl LocalGit {
     /// into an argv changes what git does instead of what it operates on.
     /// Refs can never legitimately start with `-` (`git check-ref-format`), and
     /// the few commands here that take a free-form path already pass `--`.
-    fn guard_ref(value: &str) -> Result<()> {
+    pub(crate) fn guard_ref(value: &str) -> Result<()> {
         let v = value.trim_start();
         if v.starts_with('-') {
             return Err(Error::Invalid(format!("refusing option-like git argument '{value}'")));
         }
         if value.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
             return Err(Error::Invalid("git argument contains a control character".into()));
+        }
+        Ok(())
+    }
+
+    /// Refuse a caller-supplied PATH that could smuggle a second argument or
+    /// break the argv (empty, or a control character). Unlike [`guard_ref`]
+    /// a leading `-` is allowed — `-notes.md` is a legal filename — because
+    /// every path argument in this crate is emitted after `--`.
+    #[allow(dead_code)] // consumed by the patch/history/ops modules (git batch)
+    pub(crate) fn guard_path(value: &str) -> Result<()> {
+        if value.is_empty() {
+            return Err(Error::Invalid("path must not be empty".into()));
+        }
+        if value.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+            return Err(Error::Invalid("path contains a control character".into()));
         }
         Ok(())
     }
@@ -178,7 +193,7 @@ impl LocalGit {
     /// Run git but DON'T error on a non-zero exit — return the raw outcome so
     /// the caller can interpret it (used by merge, where conflicts exit non-zero
     /// yet are a normal result). Returns (success, stdout, stderr, exit code).
-    async fn run_raw(
+    pub(crate) async fn run_raw(
         &self,
         args: &[&str],
         envs: &[(String, String)],
@@ -345,7 +360,7 @@ impl LocalGit {
     /// stops an option-looking "ref" (e.g. `--output=…` arriving from untrusted
     /// run input) from being parsed as a flag — here and, because callers only
     /// diff refs this verified, downstream in `git diff` too.
-    async fn verify_commit_ref(&self, r: &str) -> bool {
+    pub(crate) async fn verify_commit_ref(&self, r: &str) -> bool {
         let spec = format!("{r}^{{commit}}");
         match self
             .run_raw(
@@ -1400,7 +1415,7 @@ impl LocalGit {
     /// outcome `(success, stdout, stderr, code)` so the caller can interpret an
     /// *expected* failure (e.g. deleting a remote ref that's already absent)
     /// instead of bubbling it up. Mirrors [`run_remote`]'s askpass setup.
-    async fn run_remote_raw(
+    pub(crate) async fn run_remote_raw(
         &self,
         args: &[&str],
         token: Option<String>,
@@ -1436,7 +1451,7 @@ impl LocalGit {
     /// Run a sequencer op (cherry-pick/revert) treating a conflict as success —
     /// the caller returns the fresh status, which now carries the op + the
     /// conflicted paths. Anything else non-zero is a classified error.
-    async fn op_conflict_as_result(&self, args: &[&str]) -> Result<()> {
+    pub(crate) async fn op_conflict_as_result(&self, args: &[&str]) -> Result<()> {
         let (ok, stdout, stderr, code) = self.run_raw(args, &[]).await?;
         if ok {
             return Ok(());
@@ -1593,7 +1608,7 @@ impl LocalGit {
     /// repos the user clicks around in, so "Unable to create '….git/index.lock':
     /// File exists" is a transient collision, not a real failure — it surfaced
     /// as stash/stage buttons "sometimes erroring" for no visible reason.
-    async fn run_raw_retry_lock(
+    pub(crate) async fn run_raw_retry_lock(
         &self,
         args: &[&str],
     ) -> Result<(bool, String, String, Option<i32>)> {
@@ -1688,7 +1703,7 @@ impl LocalGit {
     // -- merge + conflict resolution ----------------------------------------
 
     /// True when a merge is in progress (`MERGE_HEAD` exists).
-    async fn is_merging(&self) -> bool {
+    pub(crate) async fn is_merging(&self) -> bool {
         let (ok, _, _, _) = self
             .run_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], &[])
             .await
@@ -1697,7 +1712,7 @@ impl LocalGit {
     }
 
     /// Conflicted paths from a fresh status (porcelain v2 `u` entries).
-    async fn conflicted_paths(&self) -> Result<Vec<String>> {
+    pub(crate) async fn conflicted_paths(&self) -> Result<Vec<String>> {
         let st = self.status().await?;
         Ok(st
             .changes
@@ -1709,7 +1724,7 @@ impl LocalGit {
 
     /// True if the working tree has staged/unstaged TRACKED changes (untracked
     /// files don't block a merge and aren't stashed by a plain `git stash`).
-    async fn working_dirty(&self) -> Result<bool> {
+    pub(crate) async fn working_dirty(&self) -> Result<bool> {
         let st = self.status().await?;
         Ok(st
             .changes
@@ -1720,7 +1735,7 @@ impl LocalGit {
     /// Pop the stash after a clean merge. Returns a human note: a confirmation on
     /// a clean pop, or a warning if the pop conflicted (git KEEPS the stash in
     /// that case, so the user's work is never lost).
-    async fn pop_after_merge(&self) -> Option<String> {
+    pub(crate) async fn pop_after_merge(&self) -> Option<String> {
         match self.stash_pop().await {
             Ok(_) => Some("Your stashed changes were restored.".into()),
             Err(_) => Some(
@@ -2210,7 +2225,7 @@ fn is_noise_line(l: &str) -> bool {
 /// Drop benign SSH/git noise lines from combined command output (used for the
 /// success path so a successful push/pull doesn't surface the post-quantum
 /// warning).
-fn strip_noise(s: &str) -> String {
+pub(crate) fn strip_noise(s: &str) -> String {
     s.lines()
         .filter(|l| !is_noise_line(l))
         .collect::<Vec<_>>()
@@ -2250,8 +2265,8 @@ fn remote_ref_absent(stderr: &str) -> bool {
 ///
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
-fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 22] = [
+pub(crate) fn local_refusal(msg: &str) -> bool {
+    const MARKERS: [&str; 23] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -2279,12 +2294,15 @@ fn local_refusal(msg: &str) -> bool {
         // A concurrent git process holds the index lock — transient, retryable.
         "index.lock",
         "another git process seems to be running",
+        // `pull --ff-only` on a diverged branch — the caller's choice of mode,
+        // not an outage.
+        "not possible to fast-forward",
     ];
     let lc = msg.to_ascii_lowercase();
     MARKERS.iter().any(|m| lc.contains(m))
 }
 
-fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
+pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
     // Among the meaningful (non-noise) lines, prefer one that actually names the
     // failure — git scatters the real reason ("! [remote rejected] …", "error:
     // failed to push …") after benign chatter like "To <url>".

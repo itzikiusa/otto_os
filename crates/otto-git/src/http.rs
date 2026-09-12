@@ -176,6 +176,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
             post(pr_request_changes::<S>),
         )
         .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
+        .merge(crate::patch::router::<S>())
+        .merge(crate::pr_checks::router::<S>())
+        .merge(crate::history::router::<S>())
+        .merge(crate::ops::router::<S>())
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +217,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,7 +234,7 @@ fn fill_forge(repo: &mut Repo) {
 }
 
 /// Load a repo, check the caller's workspace role, return a LocalGit handle.
-async fn repo_ctx<S: GitCtx>(
+pub(crate) async fn repo_ctx<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo_id: &Id,
@@ -272,7 +276,7 @@ async fn authorized_repo_account<S: GitCtx>(
 /// Resolve the push/pull token for a repo's bound account, enforcing the S4
 /// ownership guard. `None` when no account is bound (ssh remotes work through the
 /// user's agent); `Forbidden` when the caller does not own the bound account.
-async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
+pub(crate) async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
     match authorized_repo_account(s, user, repo).await? {
         Some(account) => Ok(s.secrets().get(&account.token_ref)?),
         None => Ok(None),
@@ -281,7 +285,7 @@ async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Resul
 
 /// Resolve provider client + remote ref for PR routes (400 when not bound).
 /// Enforces the S4 ownership guard: the caller must own the repo's bound account.
-async fn provider_ctx<S: GitCtx>(
+pub(crate) async fn provider_ctx<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo: &Repo,
@@ -360,7 +364,7 @@ async fn adopt_account<S: GitCtx>(
     Ok(account)
 }
 
-fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
+pub(crate) fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
     let _ = s.events().send(Event::Notice {
         level: level.to_string(),
         title: title.to_string(),
@@ -379,7 +383,7 @@ fn repo_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>
 }
 
 /// Return (creating if needed) the async mutex guarding repo `id`.
-fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
     let mut map = repo_locks().lock().expect("repo_locks poisoned");
     map.entry(id.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

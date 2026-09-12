@@ -2,9 +2,13 @@
 //! provider clients (GitHub / Bitbucket Cloud / GitLab) plus the axum router
 //! implementing contract endpoints #31–#56.
 
+pub mod history;
 pub mod http;
 pub mod local;
+pub mod ops;
 pub mod parse;
+pub mod patch;
+pub mod pr_checks;
 pub mod providers;
 pub mod types;
 
