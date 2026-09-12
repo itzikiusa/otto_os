@@ -37,6 +37,18 @@
     if (e.key === 'Escape') ctxMenu.close();
   }
 
+  // Neither the backdrop nor the (optional) search box holds focus after a
+  // right-click — focus stays wherever it was, so `onkeydown` on the backdrop
+  // never sees Escape. Listen on the window (capture phase, so a focused
+  // terminal cannot swallow it) and swallow the key so the underlying pane
+  // does not also react to it.
+  function onWindowKey(e: KeyboardEvent): void {
+    if (!ctxMenu.open || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    ctxMenu.close();
+  }
+
   function clickItem(item: typeof ctxMenu.items[number]): void {
     if (item.disabled) return;
     item.action?.();
@@ -92,6 +104,8 @@
     if (first) clickItem(first);
   }
 </script>
+
+<svelte:window onkeydowncapture={onWindowKey} />
 
 {#if ctxMenu.open}
   <!-- Backdrop: transparent, full-screen, closes menu on any interaction -->
