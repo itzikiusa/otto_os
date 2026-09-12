@@ -279,6 +279,13 @@ pub fn completed_turn_text(jsonl: &str) -> Option<String> {
         let Some(msg) = v.get("message") else {
             continue;
         };
+        // Legacy in-file sub-agent lines (older Claude Code wrote them into the
+        // MAIN transcript with a top-level `isSidechain:true`). Their end_turns
+        // are the CHILD's, never the parent's — counting them completes a step
+        // the moment its first sub-agent finishes.
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
         if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
             continue;
         }
@@ -320,6 +327,10 @@ pub fn completed_turn_count(jsonl: &str) -> usize {
             continue;
         };
         let Some(msg) = v.get("message") else { continue };
+        // Legacy in-file sub-agent lines — see `completed_turn_text`.
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
         if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
             continue;
         }
@@ -485,6 +496,17 @@ mod tests {
         assert_eq!(completed_turn_count(""), 0);
         assert_eq!(completed_turn_count(one), 1);
         assert_eq!(completed_turn_count(&format!("{one}\n{mid}\n{one}")), 2); // mid_turn not counted
+    }
+
+    #[test]
+    fn sidechain_lines_never_count() {
+        // Older Claude Code recorded sub-agent turns in the MAIN transcript with
+        // a top-level `isSidechain:true`. A child's end_turn is not the parent's.
+        let parent = r#"{"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"parent reply"}]}}"#;
+        let child = r#"{"isSidechain":true,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"child reply"}]}}"#;
+        let jsonl = format!("{parent}\n{child}\n");
+        assert_eq!(completed_turn_count(&jsonl), 1);
+        assert_eq!(completed_turn_text(&jsonl).as_deref(), Some("parent reply"));
     }
 
     #[test]
