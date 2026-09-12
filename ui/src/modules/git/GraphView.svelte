@@ -16,6 +16,7 @@
     FileDiff,
     DiffLine,
     CleanupBaseResp,
+    RebasePreview,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -28,6 +29,8 @@
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { runPull } from './pullFlow';
+  import { gitBridge } from './gitBridge.svelte';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -592,20 +595,31 @@
   function commitMenu(e: MouseEvent, c: CommitInfo): void {
     const { currentBranch } = refKnowledge;
     const items: MenuItem[] = [];
-    // Branches on this commit → one-click "check out + update" entries. The
-    // server stashes local changes if needed, checks out (tracking origin when
-    // the branch is remote-only), pulls, and pops the stash — so a branch
-    // that's easy to SPOT on the graph but hard to find in a crowded refs tree
-    // is one click from being current and up to date.
+    // Branches on this commit → a one-click plain SWITCH (a branch that's easy
+    // to spot on the graph but hard to find in a crowded refs tree). Nothing
+    // here pulls: the current branch instead gets an explicit `Pull`, and a
+    // branch held by another worktree routes to that worktree (git refuses to
+    // check it out twice — same rule as `branchMenu`).
     for (const name of commitBranchNames(c)) {
-      items.push({
-        label:
-          name === currentBranch
-            ? `Update ${name} (stash · pull · pop)`
-            : `Check out ${name} (stash · pull · pop)`,
-        icon: 'branch',
-        action: () => void checkoutBranchUpdate(name),
-      });
+      const wt = worktreeByBranch.get(name);
+      if (name === currentBranch) {
+        items.push({ label: `Pull ${name}`, icon: 'arrowDown', action: () => void pullCurrent() });
+      } else if (wt) {
+        items.push({
+          label: `Open worktree (${name})`,
+          icon: 'worktree',
+          action: () => void openWorktree(wt),
+        });
+      } else {
+        items.push({
+          label: `Check out ${name}`,
+          icon: 'branch',
+          // A remote-only decoration (`origin/x` → `x`) must take the
+          // `-b x --track origin/x` path, not git's `checkout.guess` DWIM
+          // (which fails outright with several remotes).
+          action: () => void checkout(name, !refKnowledge.localNames.has(name)),
+        });
+      }
     }
     if (items.length > 0) items.push({ separator: true });
     items.push(
@@ -733,6 +747,14 @@
       // Remote ref row: checkout as a local tracking branch; delete on origin.
       const localName = b.name.replace(/^[^/]+\//, '');
       items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
+      // Rebasing onto a remote ref is the common "catch up with origin" move.
+      if (currentBranch && b.name !== currentBranch) {
+        items.push({
+          label: `Rebase ${currentBranch} onto ${b.name}…`,
+          icon: 'merge',
+          action: () => void rebaseOnto(b.name),
+        });
+      }
       items.push({ separator: true });
       items.push({
         label: 'Create branch from here…',
@@ -794,6 +816,17 @@
           icon: 'branch',
           disabled: isCurrent,
           action: () => !isCurrent && void checkout(b.name, false),
+        });
+      }
+      // Updating the branch is its own entry — only the CHECKED-OUT branch can
+      // be pulled; any other one is a rebase target.
+      if (isCurrent) {
+        items.push({ label: `Pull ${b.name}`, icon: 'arrowDown', action: () => void pullCurrent() });
+      } else if (currentBranch) {
+        items.push({
+          label: `Rebase ${currentBranch} onto ${b.name}…`,
+          icon: 'merge',
+          action: () => void rebaseOnto(b.name),
         });
       }
       items.push({ separator: true });
@@ -1181,26 +1214,47 @@
     ctxMenu.show(e, items);
   }
 
+  /** Switch branches. NEVER pulls, fetches or merges — a dirty tree is cleared
+   *  with stash → switch → restore (for both `create` values; the remote-row
+   *  double-click used to dead-end on it), and bringing the branch up to date
+   *  is the separate, explicit Pull action. */
   async function checkout(branch: string, create: boolean): Promise<void> {
     checkoutBusy = branch;
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, { branch, create });
-      onstatus(s);
-      toasts.success(create ? 'Branch created' : 'Switched branch', branch);
-      // Refresh refs after checkout
-      refs = await api.get<RefsResp>(`/repos/${repoId}/refs`);
+      toasts.success(create ? 'Branch created' : `Switched to ${branch}`, create ? branch : undefined);
+      await refreshAfter(s);
     } catch (e) {
-      // A dirty tree blocked the plain switch — offer the stash → switch →
-      // pull → pop gesture (the daemon's checkout-update) instead of a dead end.
-      if (!create && isDirtyGitRefusal(e)) {
+      if (isDirtyGitRefusal(e)) {
         const ok = await confirmer.ask(
-          `Your uncommitted changes are in the way of switching to "${branch}". Stash them, switch (pulling the upstream), then restore them?`,
-          { title: 'Stash & switch', confirmLabel: 'Stash & switch' },
+          `Your uncommitted changes overlap files that differ on "${branch}". Otto will stash them, switch, and restore them on "${branch}". Nothing is pulled or merged.`,
+          { title: 'Stash, switch & restore', confirmLabel: 'Stash & switch', danger: false },
         );
         if (ok) {
-          checkoutBusy = '';
-          await checkoutBranchUpdate(branch);
-          return;
+          try {
+            const s = await api.post<RepoStatusResp>(`/repos/${repoId}/checkout`, {
+              branch,
+              create,
+              auto_stash: true,
+            });
+            if (s.changes.some((c) => c.kind === 'conflicted')) {
+              toasts.warn(
+                `Switched to ${branch} — restoring your changes hit conflicts`,
+                'Open "Resolve conflicts".',
+              );
+            } else {
+              toasts.success(`Switched to ${branch}`);
+            }
+            await refreshAfter(s);
+          } catch (e2) {
+            // The switch landed but the restore didn't — the daemon's message
+            // already ends with "run `git stash pop`".
+            toasts.error(
+              'Switch finished, restore failed',
+              e2 instanceof Error ? e2.message : String(e2),
+            );
+            await refreshAfter().catch(() => {});
+          }
         }
       } else {
         toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
@@ -1216,28 +1270,52 @@
     void checkout(localName, true);
   }
 
-  /** The graph's "check out branch" gesture: the server stashes local changes
-   *  when the tree is dirty, checks the branch out (tracking origin when it
-   *  only exists remotely), pulls its upstream, then pops the stash. The
-   *  returned summary says exactly which of those steps ran. */
-  async function checkoutBranchUpdate(branch: string): Promise<void> {
-    checkoutBusy = branch;
+  /** ⋯ on a file row of the commit diff: the file-scoped history/blame tools.
+   *  Routed through `gitBridge` because the panels that render them live in
+   *  RepoView, above this component. */
+  function fileToolsMenu(e: MouseEvent, path: string): void {
+    const rev = selectedCommit?.sha;
+    ctxMenu.show(e, [
+      {
+        label: 'History',
+        icon: 'note',
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path }),
+      },
+      {
+        label: 'Blame',
+        icon: 'note',
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path, rev }),
+      },
+    ]);
+  }
+
+  /** Pull the CURRENT branch (the only branch a pull can target) and re-read the
+   *  graph — new commits are exactly what a pull produces. */
+  async function pullCurrent(): Promise<void> {
+    await runPull(repoId, onstatus);
+    await refreshAfter().catch(() => {});
+  }
+
+  /** Replay the current branch onto `onto`, after saying how much will move.
+   *  A conflicting rebase comes back 200 with `op_in_progress` — `mutate`
+   *  already routes that to the resolver. */
+  async function rebaseOnto(onto: string): Promise<void> {
+    const { currentBranch } = refKnowledge;
+    if (!currentBranch) return;
+    let commits: number | string = '?';
     try {
-      const resp = await api.post<{ status: RepoStatusResp; summary: string }>(
-        `/repos/${repoId}/checkout-update`,
-        { branch },
+      const p = await api.get<RebasePreview>(
+        `/repos/${repoId}/rebase-preview?onto=${encodeURIComponent(onto)}`,
       );
-      toasts.success(`Switched to ${branch}`, resp.summary);
-      // Pull may have added commits — refresh refs AND the log, not just refs.
-      await refreshAfter(resp.status);
-    } catch (e) {
-      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
-      // The stash/pull may have partially landed — resync so the graph tells
-      // the truth about where the tree actually is.
-      await refreshAfter().catch(() => {});
-    } finally {
-      checkoutBusy = '';
+      commits = p.commits;
+    } catch {
+      // Preview is advisory — a repo whose daemon predates it still rebases.
     }
+    const ok = await confirmer.ask(
+      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commits will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
+      { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
+    );
+    if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
   }
 
   async function selectCommit(commit: CommitInfo): Promise<void> {
@@ -1770,6 +1848,23 @@
       revealBusy = '';
     }
   }
+
+  // A panel with no prop path to the graph (blame gutter, file history) asks it
+  // to select a commit through `gitBridge`. `nonce` makes re-selecting the same
+  // sha re-fire; a sha outside this repo's loaded history is a no-op with a
+  // note, never a jump into the wrong repo's graph.
+  let focusSeen = 0;
+  $effect(() => {
+    const req = gitBridge.focus;
+    if (!req || req.nonce === focusSeen) return;
+    focusSeen = req.nonce;
+    if (req.repoId !== repoId) return;
+    if (commits.some((c) => c.sha === req.sha)) {
+      void revealSha(req.sha, req.sha.slice(0, 8));
+    } else {
+      toasts.info('Commit not in loaded history', req.sha.slice(0, 8));
+    }
+  });
 
   /** Branch row SINGLE-click: JUMP to the branch's tip in the graph — scroll it
    *  into view, light its spine and open the commit detail — paging history in
@@ -2973,19 +3068,27 @@
               {@const isCollapsed = fileCollapsed[file.path] ?? false}
               <div class="df-block">
                 <!-- File header -->
-                <button
-                  class="df-head"
-                  onclick={() => toggleFileCollapse(file.path)}
-                  title={file.path}
-                >
-                  <span class="df-chevron dim" class:collapsed={isCollapsed} aria-hidden="true"></span>
-                  <span class="mono df-path">
-                    {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
-                  </span>
-                  <span class="grow"></span>
-                  <span class="ds-add">+{stats.add}</span>
-                  <span class="ds-del">−{stats.del}</span>
-                </button>
+                <div class="df-head-row">
+                  <button
+                    class="df-head"
+                    onclick={() => toggleFileCollapse(file.path)}
+                    title={file.path}
+                  >
+                    <span class="df-chevron dim" class:collapsed={isCollapsed} aria-hidden="true"></span>
+                    <span class="mono df-path">
+                      {#if file.old_path}<span class="df-rename-from">{file.old_path}</span><span class="df-rename-arrow"> → </span>{/if}{file.path}
+                    </span>
+                    <span class="grow"></span>
+                    <span class="ds-add">+{stats.add}</span>
+                    <span class="ds-del">−{stats.del}</span>
+                  </button>
+                  <button
+                    class="df-tools"
+                    title="File actions"
+                    aria-label="File actions"
+                    onclick={(e) => { e.stopPropagation(); fileToolsMenu(e, file.path); }}
+                  >⋯</button>
+                </div>
 
                 {#if !isCollapsed}
                   {#if file.is_binary}
@@ -4068,10 +4171,34 @@
   .df-block {
     border-bottom: 1px solid var(--border);
   }
+  /* The header is a ROW, not a single button: the ⋯ file-tools button can't be
+     nested inside the collapse button (invalid HTML, and the click would fold
+     the file instead of opening the menu). */
+  .df-head-row {
+    display: flex;
+    align-items: stretch;
+    background: var(--surface-2);
+  }
+  .df-tools {
+    flex-shrink: 0;
+    padding: 0 9px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .df-tools:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  }
   .df-head {
     display: flex;
     align-items: center;
     gap: 7px;
+    flex: 1;
+    min-width: 0;
     width: 100%;
     padding: 5px 10px;
     border: none;

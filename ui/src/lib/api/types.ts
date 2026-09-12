@@ -2272,6 +2272,34 @@ export interface PullResp {
   note?: string | null;
 }
 
+/** How `POST /repos/{id}/pull` reconciles: merge, rebase, or refuse anything
+ *  that isn't a fast-forward. Absent on the request → the repo's own
+ *  `pull.rebase` / `pull.ff` config decides. */
+export type PullMode = 'merge' | 'rebase' | 'ff_only';
+
+/** `POST /repos/{id}/pull` body (all optional — an empty body is a plain pull). */
+export interface PullReq {
+  auto_stash?: boolean;
+  mode?: PullMode;
+}
+
+/** `GET /repos/{id}/pull-mode` — the mode a plain pull would use. */
+export interface PullModeResp {
+  mode: PullMode;
+}
+
+/** `POST /repos/{id}/rebase` — replay the current branch onto `onto`. */
+export interface RebaseReq {
+  onto: string;
+  auto_stash?: boolean;
+}
+
+/** `GET /repos/{id}/rebase-preview?onto=` — what a rebase would replay. */
+export interface RebasePreview {
+  commits: number;
+  onto_sha: string;
+}
+
 export interface BranchInfo {
   name: string;
   is_current: boolean;
@@ -2286,6 +2314,40 @@ export interface CommitInfo {
   subject: string;
   parents: string[];
   refs: string[];
+}
+
+/** One RUN of consecutive lines attributed to the same commit
+ *  (`GET /repos/{id}/blame`) — `count` lines starting at `line_start`. */
+export interface BlameLine {
+  sha: string;
+  short_sha: string;
+  author: string;
+  /** RFC3339 UTC. */
+  at: string;
+  orig_line: number;
+  line_start: number;
+  count: number;
+  summary: string;
+}
+
+export interface BlameResp {
+  path: string;
+  rev: string;
+  lines: BlameLine[];
+}
+
+/** `GET /repos/{id}/remotes` row — URLs come back with any `user:password@`
+ *  userinfo stripped. */
+export interface RemoteInfo {
+  name: string;
+  fetch_url: string;
+  push_url: string;
+}
+
+export interface RemoteOpReq {
+  op: 'add' | 'set_url' | 'remove';
+  name: string;
+  url?: string;
 }
 
 export interface RefBranch {
@@ -2413,14 +2475,52 @@ export interface StagePathsReq {
   paths: string[];
 }
 
+/** What `POST /repos/{id}/stage-hunk` does with the addressed hunk. */
+export type HunkOp = 'stage' | 'unstage' | 'discard';
+
+/**
+ * Stage / unstage / discard ONE hunk — or a line selection inside it.
+ * `hunk_header` is the `@@ … @@` line that was rendered: the server rebuilds
+ * the patch from its OWN fresh diff, so a stale `hunk_index` would silently
+ * act on a different hunk; a header mismatch is a 409 with nothing applied.
+ * `lines` indexes `Hunk.lines` (markers excluded); absent = the whole hunk.
+ */
+export interface StageHunkReq {
+  path: string;
+  hunk_index: number;
+  hunk_header: string;
+  lines?: number[];
+  op: HunkOp;
+  /** Required for `discard` — it rewrites the working file. */
+  confirm?: boolean;
+}
+
+export interface StageHunkResp {
+  status: RepoStatusResp;
+  diff: DiffResp;
+  /** `discard` only: the stash the pre-discard snapshot was stored under. */
+  backup_stash?: string | null;
+}
+
+/** `GET /repos/{id}/commit-config` — the repo's signing defaults. */
+export interface CommitConfig {
+  gpgsign: boolean;
+  format: 'openpgp' | 'ssh' | 'x509' | null;
+  signing_key: string | null;
+}
+
 export interface CommitReq {
   message: string;
   amend: boolean;
+  /** `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. */
+  sign?: boolean | null;
 }
 
 export interface CheckoutReq {
   branch: string;
-  create: boolean;
+  create?: boolean;
+  /** Stash -u → checkout → pop around a dirty tree. NEVER pulls or merges. */
+  auto_stash?: boolean;
 }
 
 // --- Local merge + conflict resolution (#4) ---
@@ -2515,6 +2615,16 @@ export interface PrSummary {
   reviewer_warnings?: string[];
 }
 
+/** `GET /repos/{id}/prs?state=&page=&per_page=` — one page. `has_more` is the
+ *  provider's own next-page signal; `page`/`per_page` echo the clamped request
+ *  (`per_page` 1..=100, `page` 1..=10000). */
+export interface PrListResp {
+  items: PrSummary[];
+  has_more: boolean;
+  page: number;
+  per_page: number;
+}
+
 export interface PrComment {
   id: string;
   author: string;
@@ -2605,6 +2715,41 @@ export type MergeStrategy = 'merge' | 'squash' | 'rebase';
 
 export interface MergePrReq {
   strategy: MergeStrategy;
+  /** Ask the provider to delete the PR's source branch as part of the merge. */
+  delete_source_branch?: boolean;
+}
+
+/** One CI check / job / commit-status row behind the PR's aggregate status
+ *  (GET /repos/{id}/prs/{number}/checks). */
+export interface PrCheck {
+  name: string;
+  state: 'success' | 'failure' | 'pending' | 'skipped' | 'neutral';
+  url?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface PrChecksResp {
+  ci: { state: string; total: number; passed: number; failed: number; url: string | null };
+  checks: PrCheck[];
+}
+
+/** GET /repos/{id}/prs/{number}/readiness — PR-keyed twin of
+ *  /reviews/{id}/merge-readiness. `review` is null when no review ever ran;
+ *  `unpushed`/`branch_freshness` come from the local checkout. */
+export interface PrReadiness {
+  ci_status: string;
+  approvals: number;
+  mergeable: boolean | null;
+  conflicts: boolean;
+  review: {
+    review_id: string;
+    unresolved_total: number;
+    unresolved_blocker_count: number;
+    total_findings: number;
+  } | null;
+  unpushed: number | null;
+  branch_freshness: 'fresh' | 'behind' | 'unknown';
 }
 
 export interface Problem {

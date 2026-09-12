@@ -388,6 +388,43 @@ function mkLog(repo: string): CommitInfo[] {
 }
 const logs: Record<Id, CommitInfo[]> = { rep_otto: mkLog('aotto'), rep_wallet: mkLog('bwall') };
 
+// Remotes are mutated by the Remotes panel (add / set-url / remove), so each
+// repo gets its own copy of the defaults on first touch.
+const defaultRemotes = [
+  {
+    name: 'origin',
+    fetch_url: 'https://github.com/otto-os/otto.git',
+    push_url: 'https://github.com/otto-os/otto.git',
+  },
+];
+const gitRemotes: Record<Id, { name: string; fetch_url: string; push_url: string }[]> = {};
+
+/** Five blamed lines over two commits, with one run longer than a line. */
+function mockBlame(repo: string): {
+  sha: string;
+  short_sha: string;
+  author: string;
+  at: string;
+  orig_line: number;
+  line_start: number;
+  count: number;
+  summary: string;
+}[] {
+  const rows = logs[repo] ?? mkLog('aotto');
+  const [first, second] = [rows[0], rows[1] ?? rows[0]];
+  const run = (c: CommitInfo, orig: number, start: number, count: number) => ({
+    sha: c.sha,
+    short_sha: c.short_sha,
+    author: c.author,
+    at: c.date,
+    orig_line: orig,
+    line_start: start,
+    count,
+    summary: c.subject,
+  });
+  return [run(first, 1, 1, 2), run(second, 1, 3, 1), run(first, 4, 4, 2)];
+}
+
 function fdiff(path: string, oldPath: string | null, startOld: number, startNew: number, body: [('context' | 'add' | 'del'), string][]): FileDiff {
   let o = startOld;
   let n = startNew;
@@ -471,6 +508,8 @@ const prs: MockPr[] = [
       target_branch: 'main',
       updated_at: ago(45),
       url: 'https://github.com/dev-otto/otto/pull/42',
+      // Failing CI so the merge modal has a real blocker to render.
+      ci_status: 'failing',
     },
     description_md:
       '## What\n\nRewrites the diff viewer to only render expanded files and adds a **side-by-side** mode.\n\n## Why\n\nLarge PRs (>5k lines) froze the old renderer.\n\n- virtualized file sections\n- `highlight.js` per-line\n- collapse files over 400 changed lines',
@@ -1522,11 +1561,63 @@ const routes: Route[] = [
   { method: 'GET', re: /^\/repos\/([^/]+)\/branches$/, handle: (m) => ({ json: branches[m[1]] ?? [] }) },
   {
     method: 'GET',
+    re: /^\/repos\/([^/]+)\/blame$/,
+    handle: (m, _b, q) => ({
+      json: {
+        path: q.get('path') ?? 'src/app.ts',
+        rev: q.get('rev') || 'HEAD',
+        lines: mockBlame(m[1]),
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/remotes$/,
+    handle: (m) => ({ json: (gitRemotes[m[1]] ??= [...defaultRemotes]) }),
+  },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/remotes$/,
+    handle: (m, body) => {
+      const list = (gitRemotes[m[1]] ??= [...defaultRemotes]);
+      const { op, name, url } = body as { op: string; name: string; url?: string };
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name ?? '')) {
+        return problem(400, 'invalid', `invalid remote name '${name}'`);
+      }
+      const i = list.findIndex((r) => r.name === name);
+      if (op === 'remove') {
+        if (i < 0) return problem(404, 'not_found', `no such remote '${name}'`);
+        list.splice(i, 1);
+      } else {
+        if (!url) return problem(400, 'invalid', 'a url is required to add or re-point a remote');
+        const row = { name, fetch_url: url, push_url: url };
+        if (op === 'add') {
+          if (i >= 0) return problem(409, 'conflict', `remote '${name}' already exists`);
+          list.push(row);
+        } else {
+          if (i < 0) return problem(404, 'not_found', `no such remote '${name}'`);
+          list[i] = row;
+        }
+      }
+      return { json: list };
+    },
+  },
+  {
+    method: 'GET',
     re: /^\/repos\/([^/]+)\/log$/,
     handle: (m, _b, q) => {
       const limit = Number(q.get('limit') ?? 50);
       const skip = Number(q.get('skip') ?? 0);
-      return { json: (logs[m[1]] ?? []).slice(skip, skip + limit) };
+      // Server-side search: `grep` matches the subject, `author` the author —
+      // both literal + case-insensitive, exactly like `--fixed-strings -i`.
+      const grep = (q.get('grep') ?? '').toLowerCase();
+      const author = (q.get('author') ?? '').toLowerCase();
+      let rows = logs[m[1]] ?? [];
+      if (grep) rows = rows.filter((c) => c.subject.toLowerCase().includes(grep));
+      if (author) rows = rows.filter((c) => c.author.toLowerCase().includes(author));
+      // `path` narrows history to one file; the fixture log has no per-file
+      // provenance, so it stays a no-op filter (the panel still renders).
+      return { json: rows.slice(skip, skip + limit) };
     },
   },
   { method: 'GET', re: /^\/repos\/([^/]+)\/diff$/, handle: () => ({ json: sampleDiff }) },
@@ -1545,6 +1636,42 @@ const routes: Route[] = [
       }
       return { json: st };
     },
+  },
+  {
+    // Hunk / line staging. The real server rebuilds the patch from its own
+    // fresh diff and refuses a header that no longer matches; the mock echoes
+    // exactly that check against `sampleDiff` so the UI's 409 path is demoable.
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/stage-hunk$/,
+    handle: (m, body) => {
+      const st = repoStatus[m[1]];
+      if (!st) return problem(404, 'not_found', 'repo');
+      if (body.op === 'discard' && body.confirm !== true) {
+        return problem(400, 'invalid', 'discard requires confirm:true');
+      }
+      const file = sampleDiff.files.find((f) => f.path === body.path);
+      if (!file) return problem(404, 'not_found', `no diff for ${body.path}`);
+      const hunk = file.hunks[body.hunk_index as number];
+      if (!hunk || hunk.header.trim() !== String(body.hunk_header).trim()) {
+        return problem(
+          409,
+          'conflict',
+          'the file changed since the diff was shown — refresh and retry',
+        );
+      }
+      return {
+        json: {
+          status: st,
+          diff: sampleDiff,
+          backup_stash: body.op === 'discard' ? 'deadbeef' : null,
+        },
+      };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/commit-config$/,
+    handle: () => ({ json: { gpgsign: false, format: null, signing_key: null } }),
   },
   {
     method: 'POST',
@@ -1601,8 +1728,27 @@ const routes: Route[] = [
       for (const b of br) b.is_current = b.name === body.branch;
       st.branch = body.branch;
       st.upstream = br.find((b) => b.is_current)?.upstream ?? null;
+      // `auto_stash` only changes HOW the switch clears a dirty tree; the mock
+      // tree is never dirty, so the response shape is identical either way.
+      void body.auto_stash;
       return { json: st };
     },
+  },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/pull-mode$/, handle: () => ({ json: { mode: 'merge' } }) },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/rebase$/,
+    handle: (m) => {
+      const st = repoStatus[m[1]];
+      if (!st) return problem(404, 'not_found', 'repo');
+      st.behind = 0;
+      return { json: st };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/rebase-preview$/,
+    handle: () => ({ json: { commits: 3, onto_sha: 'abc123' } }),
   },
   { method: 'POST', re: /^\/repos\/([^/]+)\/stash$/, handle: (m) => ({ json: repoStatus[m[1]] }) },
 
@@ -1613,7 +1759,15 @@ const routes: Route[] = [
       const state = q.get('state') ?? 'open';
       let list = prs.filter((p) => p.repo_id === m[1]);
       if (state !== 'all') list = list.filter((p) => p.summary.state === state);
-      return { json: list.map((p) => p.summary) };
+      // One page, always the last one — the fixture set never overflows.
+      return {
+        json: {
+          items: list.map((p) => p.summary),
+          has_more: false,
+          page: Number(q.get('page') ?? 1),
+          per_page: Number(q.get('per_page') ?? 50),
+        },
+      };
     },
   },
   {
@@ -1660,6 +1814,56 @@ const routes: Route[] = [
     },
   },
   { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: () => ({ json: sampleDiff }) },
+  // The Git page is workspace-independent and reads every repo from here; the
+  // mock had no handler, so a PR deep-link found no repo to render.
+  { method: 'GET', re: /^\/git\/repos$/, handle: () => ({ json: repos }) },
+  // Merge-modal fixtures: one passing + one failing check, so the modal's
+  // "CI failing" reason and the "Merge anyway" override are both exercised.
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/checks$/,
+    handle: () => ({
+      json: {
+        ci: { state: 'failure', total: 2, passed: 1, failed: 1, url: 'https://ci.example.com/run/9' },
+        checks: [
+          {
+            name: 'build',
+            state: 'success',
+            url: 'https://ci.example.com/run/9/build',
+            started_at: ago(30),
+            completed_at: ago(28),
+          },
+          {
+            name: 'lint',
+            state: 'failure',
+            url: 'https://ci.example.com/run/9/lint',
+            started_at: ago(30),
+            completed_at: ago(29),
+          },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/readiness$/,
+    handle: () => ({
+      json: {
+        ci_status: 'failing',
+        approvals: 1,
+        mergeable: true,
+        conflicts: false,
+        review: {
+          review_id: 'rev_mock_1',
+          unresolved_total: 3,
+          unresolved_blocker_count: 2,
+          total_findings: 7,
+        },
+        unpushed: 0,
+        branch_freshness: 'fresh',
+      },
+    }),
+  },
   {
     method: 'PATCH',
     re: /^\/repos\/([^/]+)\/prs\/(\d+)$/,

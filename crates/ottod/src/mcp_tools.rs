@@ -721,7 +721,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_prs",
-                "description": "Read-only: list a repo's pull requests (number, title, state, source/destination branches, author, url). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
+                "description": "Read-only: list a repo's pull requests as `{items, has_more, page, per_page}` (each item: number, title, state, source/destination branches, author, url). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
                 "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } }, "required": ["repo_id"] }
             },
             {

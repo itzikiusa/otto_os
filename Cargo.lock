@@ -3570,6 +3570,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "libc",
  "otto-core",
  "otto-state",
  "reqwest",
@@ -3579,8 +3580,10 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "urlencoding",
+ "wiremock",
 ]
 
 [[package]]

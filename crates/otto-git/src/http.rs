@@ -131,7 +131,6 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/push", post(repo_push::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
-        .route("/repos/{id}/checkout-update", post(repo_checkout_update::<S>))
         // graph context-menu ops (commit / branch / tag)
         .route("/repos/{id}/cherry-pick", post(repo_cherry_pick::<S>))
         .route("/repos/{id}/revert", post(repo_revert::<S>))
@@ -176,6 +175,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
             post(pr_request_changes::<S>),
         )
         .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
+        .merge(crate::patch::router::<S>())
+        .merge(crate::pr_checks::router::<S>())
+        .merge(crate::history::router::<S>())
+        .merge(crate::ops::router::<S>())
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +216,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,7 +233,7 @@ fn fill_forge(repo: &mut Repo) {
 }
 
 /// Load a repo, check the caller's workspace role, return a LocalGit handle.
-async fn repo_ctx<S: GitCtx>(
+pub(crate) async fn repo_ctx<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo_id: &Id,
@@ -272,7 +275,7 @@ async fn authorized_repo_account<S: GitCtx>(
 /// Resolve the push/pull token for a repo's bound account, enforcing the S4
 /// ownership guard. `None` when no account is bound (ssh remotes work through the
 /// user's agent); `Forbidden` when the caller does not own the bound account.
-async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
+pub(crate) async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Result<Option<String>> {
     match authorized_repo_account(s, user, repo).await? {
         Some(account) => Ok(s.secrets().get(&account.token_ref)?),
         None => Ok(None),
@@ -281,7 +284,7 @@ async fn optional_token<S: GitCtx>(s: &S, user: &AuthUser, repo: &Repo) -> Resul
 
 /// Resolve provider client + remote ref for PR routes (400 when not bound).
 /// Enforces the S4 ownership guard: the caller must own the repo's bound account.
-async fn provider_ctx<S: GitCtx>(
+pub(crate) async fn provider_ctx<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo: &Repo,
@@ -360,7 +363,7 @@ async fn adopt_account<S: GitCtx>(
     Ok(account)
 }
 
-fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
+pub(crate) fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
     let _ = s.events().send(Event::Notice {
         level: level.to_string(),
         title: title.to_string(),
@@ -379,7 +382,7 @@ fn repo_locks() -> &'static StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>
 }
 
 /// Return (creating if needed) the async mutex guarding repo `id`.
-fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn repo_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
     let mut map = repo_locks().lock().expect("repo_locks poisoned");
     map.entry(id.to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -848,6 +851,9 @@ async fn clone_into_workspace<S: GitCtx>(
     url: &str,
     req: &AddRepoReq,
 ) -> Result<Repo> {
+    // Before anything else: a clone URL is caller input that reaches `git
+    // clone` as a positional argument.
+    crate::local::validate_remote_url(url)?;
     let ws = s.workspaces().get(ws_id).await?;
     let name = req
         .name
@@ -1183,6 +1189,13 @@ struct LogQuery {
     limit: Option<u32>,
     skip: Option<u32>,
     all: Option<bool>,
+    /// Scope history to one path (file history); `follow` walks it across
+    /// renames (git requires exactly one pathspec for that → 400 without one).
+    path: Option<String>,
+    follow: Option<bool>,
+    /// Server-side search (`--grep` / `--author`): literal, case-insensitive.
+    grep: Option<String>,
+    author: Option<String>,
 }
 
 async fn repo_log<S: GitCtx>(
@@ -1197,10 +1210,17 @@ async fn repo_log<S: GitCtx>(
     // must be able to walk back to the ROOT commit — a silent .min(500) here made
     // older commits unreachable no matter what the client asked for.
     let limit = q.limit.unwrap_or(50);
-    Ok(Json(
-        git.log(limit, q.skip.unwrap_or(0), q.all.unwrap_or(false))
-            .await?,
-    ))
+    let blank = |s: &Option<String>| s.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let opts = crate::history::LogOpts {
+        limit,
+        skip: q.skip.unwrap_or(0),
+        all: q.all.unwrap_or(false),
+        path: blank(&q.path),
+        follow: q.follow.unwrap_or(false),
+        grep: blank(&q.grep),
+        author: blank(&q.author),
+    };
+    Ok(Json(git.log_with(&opts).await?))
 }
 
 #[derive(Deserialize)]
@@ -1232,6 +1252,8 @@ async fn repo_stage<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StagePathsReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.stage(&req.paths).await?;
     Ok(Json(git.status().await?))
@@ -1243,6 +1265,8 @@ async fn repo_unstage<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StagePathsReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.unstage(&req.paths).await?;
     Ok(Json(git.status().await?))
@@ -1270,7 +1294,9 @@ async fn repo_commit<S: GitCtx>(
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let sha = git.commit(&req.message, req.amend).await?;
+    let sha = git
+        .commit_signed(&req.message, req.amend, req.sign)
+        .await?;
     Ok(Json(serde_json::json!({ "sha": sha })))
 }
 
@@ -1289,6 +1315,8 @@ async fn repo_push<S: GitCtx>(
     Path(id): Path<Id>,
     body: Option<Json<PushReq>>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let branch = body.as_ref().and_then(|b| b.branch.clone());
@@ -1300,11 +1328,15 @@ async fn repo_push<S: GitCtx>(
 
 /// Optional pull body: `auto_stash` wraps the pull in stash → pull → pop when
 /// the tree is dirty (the retry the UI offers after a 409 "commit or stash
-/// first" refusal). Absent/empty body keeps the plain-pull behavior.
+/// first" refusal). `mode` overrides how the pull reconciles for this call
+/// only; absent, the repo's own git config decides (`pull.rebase` / `pull.ff`)
+/// instead of a silent `--no-rebase`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct PullReq {
     #[serde(default)]
     auto_stash: bool,
+    #[serde(default)]
+    mode: Option<crate::ops::PullMode>,
 }
 
 async fn repo_pull<S: GitCtx>(
@@ -1327,11 +1359,16 @@ async fn repo_pull<S: GitCtx>(
     // unmerged paths are in `changes` as kind="conflicted") so the UI can route
     // the user into the conflict resolver instead of showing "Pull failed" and
     // leaving the incoming files looking like mystery WIP changes.
-    let note = if body.map(|Json(b)| b.auto_stash).unwrap_or(false) {
-        let (_, note) = git.pull_autostash(token).await?;
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let mode = match body.mode {
+        Some(m) => m,
+        None => git.pull_mode_default().await,
+    };
+    let note = if body.auto_stash {
+        let (_, note) = git.pull_autostash_mode(token, mode).await?;
         note
     } else {
-        git.pull_outcome(token).await?;
+        git.pull_outcome_mode(token, mode).await?;
         None
     };
     Ok(Json(serde_json::json!({
@@ -1419,48 +1456,29 @@ async fn repo_collections_push<S: GitCtx>(
     Ok(Json(serde_json::json!({ "commit": sha, "push": push_out, "files": staged.len() })))
 }
 
+/// `POST /repos/{id}/checkout` — switch branches. NEVER pulls, fetches or
+/// merges: `auto_stash:true` only wraps the switch in stash -u → checkout →
+/// pop so a dirty tree isn't a dead end. A conflicting pop comes back as a
+/// normal 200 whose status carries `kind:"conflicted"` rows.
 async fn repo_checkout<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<CheckoutReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
-    let lock = repo_lock(&id);
-    let _g = lock.lock().await;
-    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    git.checkout(&req.branch, req.create).await?;
-    Ok(Json(git.status().await?))
-}
-
-#[derive(Deserialize)]
-struct CheckoutUpdateReq {
-    branch: String,
-}
-
-/// `POST /repos/{id}/checkout-update` — the graph's "check out branch" gesture:
-/// stash local changes if the tree is dirty, check the branch out (creating a
-/// tracking branch from origin when it only exists remotely), pull its
-/// upstream, then pop the stash. Returns the fresh status plus a human summary
-/// of the steps taken, for the UI toast.
-async fn repo_checkout_update<S: GitCtx>(
-    State(s): State<S>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Id>,
-    Json(req): Json<CheckoutUpdateReq>,
-) -> ApiResult<Json<serde_json::Value>> {
     let branch = req.branch.trim();
     if branch.is_empty() {
         return Err(Error::Invalid("branch must not be empty".into()).into());
     }
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
-    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let token = optional_token(&s, &user, &repo).await?;
-    let summary = git.checkout_update(branch, token).await?;
-    Ok(Json(serde_json::json!({
-        "status": git.status().await?,
-        "summary": summary,
-    })))
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    if req.auto_stash {
+        git.checkout_autostash(branch, req.create).await?;
+    } else {
+        git.checkout(branch, req.create).await?;
+    }
+    Ok(Json(git.status().await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1951,6 +1969,8 @@ async fn repo_conflict_resolve<S: GitCtx>(
 #[derive(Deserialize)]
 struct PrListQuery {
     state: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
 }
 
 async fn pr_list<S: GitCtx>(
@@ -1958,7 +1978,7 @@ async fn pr_list<S: GitCtx>(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<PrListQuery>,
-) -> ApiResult<Json<Vec<PrSummary>>> {
+) -> ApiResult<Json<otto_core::api::PrListResp>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let state = match q.state.as_deref() {
         None | Some("open") => PrState::Open,
@@ -1967,8 +1987,18 @@ async fn pr_list<S: GitCtx>(
         Some("all") => PrState::All,
         Some(other) => return Err(Error::Invalid(format!("bad pr state: {other}")).into()),
     };
+    // Clamp rather than reject: paging bounds are a UI detail, and a silly
+    // `per_page=100000` must never become a URL we hand to a forge.
+    let page = q.page.unwrap_or(1).clamp(1, 10_000);
+    let per_page = q.per_page.unwrap_or(50).clamp(1, 100);
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    Ok(Json(provider.list_prs(&remote, state).await?))
+    let p = provider.list_prs(&remote, state, page, per_page).await?;
+    Ok(Json(otto_core::api::PrListResp {
+        items: p.items,
+        has_more: p.has_more,
+        page,
+        per_page,
+    }))
 }
 
 async fn pr_create<S: GitCtx>(
@@ -2090,7 +2120,9 @@ async fn pr_merge<S: GitCtx>(
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    provider.merge(&remote, number, req.strategy).await?;
+    provider
+        .merge(&remote, number, req.strategy, req.delete_source_branch)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2755,4 +2787,98 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
+
+    /// R0: the switch endpoint NEVER pulls — `auto_stash` only clears a dirty
+    /// tree around it. A repo with a second branch and an uncommitted change
+    /// lands on that branch with the change restored, and no stash left over.
+    #[tokio::test]
+    async fn checkout_handler_honours_auto_stash() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let sh = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        sh(&["config", "user.email", "otto@test.local"]);
+        sh(&["config", "user.name", "Otto Test"]);
+        sh(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "shared\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "base\n").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "init"]);
+        sh(&["checkout", "-q", "-b", "develop"]);
+        std::fs::write(dir.join("b.txt"), "develop\n").unwrap();
+        sh(&["commit", "-q", "-am", "develop edits b"]);
+        sh(&["checkout", "-q", "-"]);
+        // Uncommitted work the user must not lose across the switch.
+        std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
+
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "switch".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+
+        let st = repo_checkout(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(CheckoutReq {
+                branch: "develop".into(),
+                create: false,
+                auto_stash: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(st.branch, "develop");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "work in progress\n",
+            "the stashed change is restored on the new branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "develop\n",
+            "the switch actually happened"
+        );
+        assert!(
+            LocalGit::new(&dir).stash_list().await.unwrap().is_empty(),
+            "a clean pop leaves no stash entry"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// The route that pulled during a switch is GONE, not merely unused by the
+    /// UI: asserted against the real router so a stray client gets a 404 rather
+    /// than an unadvertised merge.
+    #[tokio::test]
+    async fn checkout_update_route_is_gone() {
+        use tower::ServiceExt;
+        let (_pool, ctx, _user, _ws) = fixture().await;
+        let app = router::<TestCtx>().with_state(ctx);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/repos/any/checkout-update")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
 }

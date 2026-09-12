@@ -41,23 +41,38 @@ fn percent_encode_query(s: &str) -> String {
 pub struct Github {
     http: Http,
     token: String,
+    /// API root. Always [`BASE`] in production; overridden only by tests
+    /// (`with_base`) so every hop can be pointed at a local stub.
+    base: String,
 }
 
 impl Github {
     pub fn new(token: String) -> Self {
+        Self::with_base(token, BASE.to_string())
+    }
+
+    /// Same client against a different API root — the wiremock tests' entry
+    /// point. Not a user-facing setting: GitHub Enterprise is out of scope.
+    pub(crate) fn with_base(token: String, base: String) -> Self {
         Self {
             http: Http::new("github"),
             token,
+            base: base.trim_end_matches('/').to_string(),
         }
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .client()
-            .request(method, format!("{BASE}{path}"))
+            .request(method, format!("{}{path}", self.base))
             .bearer_auth(&self.token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
+    }
+
+    /// `Authorization` pair for the raw-`reqwest` pagination helper.
+    fn auth_header(&self) -> (&'static str, String) {
+        ("Authorization", format!("Bearer {}", self.token))
     }
 
     fn prs_path(r: &RemoteRef) -> String {
@@ -85,7 +100,7 @@ impl Github {
             .json(
                 self.http
                     .client()
-                    .post(format!("{BASE}/graphql"))
+                    .post(format!("{}/graphql", self.base))
                     .bearer_auth(&self.token)
                     .json(&json!({ "query": query, "variables": variables })),
             )
@@ -214,6 +229,66 @@ impl Github {
     }
 }
 
+use super::PrCheck;
+
+/// `check_runs[]` → one [`PrCheck`] per run. The state mapping mirrors
+/// [`Github::fetch_ci_status`]'s aggregate walk, but keeps each row's own
+/// verdict instead of folding it: `success`/`neutral`/`skipped` survive
+/// verbatim, the four failing conclusions collapse to `failure`, and anything
+/// not yet concluded is `pending`.
+pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
+    varr(v, &["check_runs"])
+        .iter()
+        .map(|run| {
+            let status = vstr(run, &["status"]);
+            let conclusion = vstr(run, &["conclusion"]);
+            let state = match (status.as_str(), conclusion.as_str()) {
+                (_, "success") => "success",
+                (_, "neutral") => "neutral",
+                (_, "skipped") => "skipped",
+                (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
+                    "failure"
+                }
+                _ => "pending",
+            };
+            PrCheck {
+                name: vstr(run, &["name"]),
+                state: state.to_string(),
+                url: vstr_opt(run, &["html_url"]),
+                started_at: vstr_opt(run, &["started_at"]),
+                completed_at: vstr_opt(run, &["completed_at"]),
+            }
+        })
+        .collect()
+}
+
+/// Legacy Statuses API → one [`PrCheck`] per `context`. Statuses are
+/// newest-first and repeat per context, so only the first row of each wins
+/// (same de-dup as [`Github::fetch_commit_status`]).
+pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut out = Vec::new();
+    for item in varr(v, &[]) {
+        let ctx = vstr(item, &["context"]);
+        if !seen.insert(ctx.clone()) {
+            continue;
+        }
+        let state = match vstr(item, &["state"]).as_str() {
+            "success" => "success",
+            "failure" | "error" => "failure",
+            _ => "pending",
+        };
+        out.push(PrCheck {
+            name: ctx,
+            state: state.to_string(),
+            url: vstr_opt(item, &["target_url"]),
+            started_at: None,
+            completed_at: None,
+        });
+    }
+    out
+}
+
 fn summary_from(v: &Value) -> PrSummary {
     let state = if vstr_opt(v, &["merged_at"]).is_some() {
         PrState::Merged
@@ -299,66 +374,92 @@ fn apply_thread_resolution(top: &mut [PrComment], thread_nodes: &[Value]) {
 
 #[async_trait]
 impl super::GitProvider for Github {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>> {
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
         let gh_state = match state {
             PrState::Open => "open",
             PrState::Merged | PrState::Declined => "closed",
             PrState::All => "all",
         };
-        let items = self
+        // ONE request per page — the client pages, not the daemon.
+        let resp = self
             .http
-            .paginate_json(
-                self.req(reqwest::Method::GET, &Self::prs_path(r))
-                    .query(&[("state", gh_state), ("per_page", "100")]),
-                self.http.client(),
-                ("Authorization", format!("Bearer {}", self.token)),
-            )
+            .send(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
+                ("state", gh_state.to_string()),
+                ("per_page", per_page.to_string()),
+                ("page", page.to_string()),
+            ]))
             .await?;
-        let mut prs: Vec<PrSummary> = items.iter().map(summary_from).collect();
+        let has_more = super::client::parse_next_link(resp.headers()).is_some();
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("github: bad json: {e}")))?;
+        let mut items: Vec<PrSummary> = varr(&v, &[]).iter().map(summary_from).collect();
+        // GitHub has no "merged"/"declined" filter — both are `closed`; the
+        // split is ours, so this page may be shorter than `per_page`.
         if matches!(state, PrState::Merged | PrState::Declined) {
-            prs.retain(|p| p.state == state);
+            items.retain(|p| p.state == state);
         }
-        Ok(prs)
+        Ok(super::PrPage { items, has_more })
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         let pr = self.pr_raw(r, number).await?;
 
+        // A PR detail must be WHOLE, so every comment list follows `Link
+        // rel="next"` (capped at 20 pages inside `paginate_json`) instead of
+        // silently stopping at 100.
+        //
         // General (issue) comments — flat thread.
-        let issue_comments = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/comments", Self::issues_path(r)),
+        let issue_comments = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/comments", Self::issues_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         // Inline review comments — threaded via in_reply_to_id.
-        let review_comments = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/comments", Self::prs_path(r)),
+        let review_comments = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/comments", Self::prs_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         // Reviews → approvals.
-        let reviews = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/reviews", Self::prs_path(r)),
+        let reviews = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/reviews", Self::prs_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         let mut comments: Vec<PrComment> = varr(&issue_comments, &[])
             .iter()
@@ -608,11 +709,25 @@ impl super::GitProvider for Github {
             .await
     }
 
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()> {
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()> {
         let method = match strategy {
             MergeStrategy::Merge => "merge",
             MergeStrategy::Squash => "squash",
             MergeStrategy::Rebase => "rebase",
+        };
+        // Read the head ref BEFORE the merge: GitHub has no merge-body flag for
+        // deleting the source branch, and the PR payload is the only place the
+        // ref name is available.
+        let head_ref = if delete_source_branch {
+            vstr(&self.pr_raw(r, number).await?, &["head", "ref"])
+        } else {
+            String::new()
         };
         self.http
             .ok(self
@@ -621,7 +736,22 @@ impl super::GitProvider for Github {
                     &format!("{}/{number}/merge", Self::prs_path(r)),
                 )
                 .json(&json!({ "merge_method": method })))
-            .await
+            .await?;
+        if !head_ref.is_empty() {
+            let path = format!("/repos/{}/{}/git/refs/heads/{head_ref}", r.owner, r.repo);
+            if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
+                // The merge is the operation the caller asked for; the delete
+                // is best-effort. The repo's "automatically delete head
+                // branches" setting may have got there first (422 "Reference
+                // does not exist" = the wanted end state), and a protected
+                // branch or a token without delete rights must not turn a merge
+                // that ALREADY LANDED into a failure the user retries.
+                if !e.to_string().contains("Reference does not exist") {
+                    tracing::warn!(pr = number, branch = %head_ref, "merged, but the source branch could not be deleted: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -765,6 +895,31 @@ impl super::GitProvider for Github {
 
     async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         self.fetch_ci_status(r, number).await
+    }
+
+    /// Check-runs for the PR head sha, falling back to the legacy Statuses API
+    /// when the commit has no check-runs — the same two-step walk
+    /// [`Github::fetch_ci_status`] does, kept per row.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let sha = vstr(&self.pr_raw(r, number).await?, &["head", "sha"]);
+        if sha.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
+            r.owner, r.repo
+        );
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let rows = checks_from_check_runs(&v);
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
+            r.owner, r.repo
+        );
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        Ok(checks_from_statuses(&v))
     }
 
     /// GitHub returns `github-authentication-token-expiration` on any
@@ -1048,5 +1203,68 @@ mod tests {
         let ci = parse_check_runs_fixture(fixture);
         assert_eq!(ci.state, "none");
         assert_eq!(ci.total, 0);
+    }
+
+    // --- per-check rows (merge modal) ---------------------------------------
+
+    #[test]
+    fn checks_rows_from_check_runs() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"check_runs":[
+                {"name":"build","status":"completed","conclusion":"success",
+                 "html_url":"https://ci.example.com/1",
+                 "started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:04:00Z"},
+                {"name":"lint","status":"completed","conclusion":"timed_out","html_url":null},
+                {"name":"docs","status":"completed","conclusion":"skipped","html_url":null},
+                {"name":"e2e","status":"in_progress","conclusion":"","html_url":null}
+            ]}"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_check_runs(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("build", "success"),
+                ("lint", "failure"),
+                ("docs", "skipped"),
+                ("e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/1"));
+        assert_eq!(rows[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(rows[0].completed_at.as_deref(), Some("2026-01-01T00:04:00Z"));
+        assert!(rows[1].url.is_none());
+    }
+
+    #[test]
+    fn checks_rows_from_statuses() {
+        // Newest-first with a repeated context: only the newest row survives.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"context":"ci/build","state":"success","target_url":"https://ci.example.com/b"},
+                {"context":"ci/build","state":"failure","target_url":"https://ci.example.com/old"},
+                {"context":"ci/lint","state":"error","target_url":null},
+                {"context":"ci/e2e","state":"pending","target_url":null}
+            ]"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_statuses(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("ci/build", "success"),
+                ("ci/lint", "failure"),
+                ("ci/e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
     }
 }

@@ -43,19 +43,60 @@ pub struct Bitbucket {
     http: Http,
     username: String,
     token: String,
+    /// API root. Always [`BASE`] in production; overridden only by tests
+    /// (`with_base`) so every hop can be pointed at a local stub.
+    base: String,
 }
 
 impl Bitbucket {
     pub fn new(username: String, token: String) -> Self {
+        Self::with_base(username, token, BASE.to_string())
+    }
+
+    /// Same client against a different API root — the wiremock tests' entry
+    /// point. Bitbucket Cloud is the only supported deployment.
+    pub(crate) fn with_base(username: String, token: String, base: String) -> Self {
         Self {
             http: Http::new("bitbucket"),
             username,
             token,
+            base: base.trim_end_matches('/').to_string(),
         }
     }
 
     fn pr_path(r: &RemoteRef, tail: &str) -> String {
         format!("/repositories/{}/{}/pullrequests{tail}", r.owner, r.repo)
+    }
+
+    /// Resolve a path against the API root. Bitbucket's `next` cursor is an
+    /// ABSOLUTE url, so anything already absolute is passed through — that is
+    /// what lets `paginate_values` reuse the normal auth/retry path.
+    fn url(&self, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            format!("{}{path}", self.base)
+        }
+    }
+
+    /// Follow Bitbucket's `next` cursor, concatenating each page's `values`.
+    /// Capped at the same 20 pages as `Http::paginate_json`: a PR's comments
+    /// must be whole, but a runaway cursor must not hang the request.
+    async fn paginate_values(&self, path: &str) -> Result<Vec<Value>> {
+        const MAX_PAGES: usize = 20;
+        let mut all: Vec<Value> = Vec::new();
+        let mut page = self.send_json(reqwest::Method::GET, path, None).await?;
+        let mut fetched = 1usize;
+        loop {
+            all.extend_from_slice(varr(&page, &["values"]));
+            let next = page.get("next").and_then(Value::as_str).map(str::to_string);
+            let Some(next) = next.filter(|_| fetched < MAX_PAGES) else {
+                break;
+            };
+            page = self.send_json(reqwest::Method::GET, &next, None).await?;
+            fetched += 1;
+        }
+        Ok(all)
     }
 
     /// Build a request with either Basic or Bearer auth.
@@ -69,7 +110,7 @@ impl Bitbucket {
         let mut rb = self
             .http
             .client()
-            .request(method, format!("{BASE}{path}"))
+            .request(method, self.url(path))
             .header("Accept", "application/json");
         rb = if bearer {
             rb.bearer_auth(&self.token)
@@ -289,7 +330,13 @@ fn comment_from(v: &Value) -> PrComment {
 
 #[async_trait]
 impl super::GitProvider for Bitbucket {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>> {
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
         let states: &[&str] = match state {
             PrState::Open => &["OPEN"],
             PrState::Merged => &["MERGED"],
@@ -299,12 +346,16 @@ impl super::GitProvider for Bitbucket {
         // Build the path with query params manually because we need to add
         // multiple `state` values and we no longer have a raw RequestBuilder
         // at this layer. Encode them directly into the URL.
-        let mut path = format!("{}?pagelen=50", Self::pr_path(r, ""));
+        let mut path = format!("{}?pagelen={per_page}&page={page}", Self::pr_path(r, ""));
         for s in states {
             path.push_str(&format!("&state={s}"));
         }
         let v = self.send_json(reqwest::Method::GET, &path, None).await?;
-        Ok(varr(&v, &["values"]).iter().map(summary_from).collect())
+        Ok(super::PrPage {
+            items: varr(&v, &["values"]).iter().map(summary_from).collect(),
+            // Bitbucket's cursor: present iff another page exists.
+            has_more: v.get("next").and_then(Value::as_str).is_some(),
+        })
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
@@ -315,21 +366,19 @@ impl super::GitProvider for Bitbucket {
                 None,
             )
             .await?;
+        // A PR detail must be WHOLE — follow the `next` cursor instead of
+        // stopping at the first 100 comments.
         let comments_v = self
-            .send_json(
-                reqwest::Method::GET,
-                &format!(
-                    "{}?pagelen=100",
-                    Self::pr_path(r, &format!("/{number}/comments"))
-                ),
-                None,
-            )
+            .paginate_values(&format!(
+                "{}?pagelen=100",
+                Self::pr_path(r, &format!("/{number}/comments"))
+            ))
             .await?;
 
         // Thread by parent.id.
         let mut top: Vec<PrComment> = Vec::new();
         let mut replies: Vec<(String, PrComment)> = Vec::new();
-        for c in varr(&comments_v, &["values"]) {
+        for c in &comments_v {
             if c.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
                 continue;
             }
@@ -523,14 +572,14 @@ impl super::GitProvider for Bitbucket {
         .map(|_| ())
     }
 
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()> {
-        let strat = match strategy {
-            MergeStrategy::Merge => "merge_commit",
-            MergeStrategy::Squash => "squash",
-            // Bitbucket has no rebase-merge; fast_forward is the closest.
-            MergeStrategy::Rebase => "fast_forward",
-        };
-        let body = json!({ "merge_strategy": strat });
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()> {
+        let body = merge_body(strategy, delete_source_branch);
         self.send(
             reqwest::Method::POST,
             &Self::pr_path(r, &format!("/{number}/merge")),
@@ -550,7 +599,23 @@ impl super::GitProvider for Bitbucket {
         .map(|_| ())
     }
 
-    async fn request_changes(&self, r: &RemoteRef, number: u64, _body: Option<&str>) -> Result<()> {
+    async fn request_changes(&self, r: &RemoteRef, number: u64, body: Option<&str>) -> Result<()> {
+        // Bitbucket's request-changes endpoint takes no body, so the reviewer's
+        // reasoning would be dropped on the floor. Post it as a PR comment
+        // first — the comment is what the author actually reads.
+        if let Some(b) = body.map(str::trim).filter(|b| !b.is_empty()) {
+            self.comment(
+                r,
+                number,
+                &NewPrCommentReq {
+                    body: b.to_string(),
+                    path: None,
+                    line: None,
+                    in_reply_to: None,
+                },
+            )
+            .await?;
+        }
         let path = Self::pr_path(r, &format!("/{number}/request-changes"));
         self.send(reqwest::Method::POST, &path, None)
             .await
@@ -679,6 +744,17 @@ impl super::GitProvider for Bitbucket {
     async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         self.fetch_ci_status(r, number).await
     }
+
+    /// The PR's commit build statuses, one row per status — the same endpoint
+    /// [`Bitbucket::fetch_ci_status`] aggregates, kept unfolded.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let path = format!(
+            "{}?pagelen=50",
+            Self::pr_path(r, &format!("/{number}/statuses"))
+        );
+        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
+        Ok(checks_from_statuses(&v))
+    }
 }
 
 /// Parse a small inline build-statuses JSON fixture into a CiStatus aggregate.
@@ -715,6 +791,45 @@ fn parse_statuses_fixture(json_str: &str) -> CiStatus {
         "none"
     };
     CiStatus { state: state.to_string(), total, passed, failed, url }
+}
+
+use super::PrCheck;
+
+/// `values[]` of the PR statuses endpoint → one [`PrCheck`] per status.
+/// Bitbucket build states: `SUCCESSFUL` → success, `FAILED`/`STOPPED` →
+/// failure, everything else (`INPROGRESS`, …) → pending. `name` falls back to
+/// the integration `key` when the status carries no display name.
+pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
+    varr(v, &["values"])
+        .iter()
+        .map(|item| {
+            let state = match vstr(item, &["state"]).as_str() {
+                "SUCCESSFUL" => "success",
+                "FAILED" | "STOPPED" => "failure",
+                _ => "pending",
+            };
+            let name = vstr(item, &["name"]);
+            PrCheck {
+                name: if name.is_empty() { vstr(item, &["key"]) } else { name },
+                state: state.to_string(),
+                url: vstr_opt(item, &["url"]),
+                started_at: vstr_opt(item, &["created_on"]),
+                completed_at: vstr_opt(item, &["updated_on"]),
+            }
+        })
+        .collect()
+}
+
+/// Pull-request merge body. `close_source_branch` is Bitbucket's spelling of
+/// "delete the source branch"; kept pure so the flag is test-assertable.
+pub(crate) fn merge_body(strategy: MergeStrategy, delete_source_branch: bool) -> Value {
+    let strat = match strategy {
+        MergeStrategy::Merge => "merge_commit",
+        MergeStrategy::Squash => "squash",
+        // Bitbucket has no rebase-merge; fast_forward is the closest.
+        MergeStrategy::Rebase => "fast_forward",
+    };
+    json!({ "merge_strategy": strat, "close_source_branch": delete_source_branch })
 }
 
 #[cfg(test)]
@@ -821,5 +936,50 @@ mod tests {
     fn bb_ci_status_empty_is_none() {
         let ci = parse_statuses_fixture(r#"{"values":[]}"#);
         assert_eq!(ci.state, "none");
+    }
+
+    // --- per-check rows (merge modal) ---------------------------------------
+
+    #[test]
+    fn checks_rows_from_statuses() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"values":[
+                {"name":"build","key":"BUILD","state":"SUCCESSFUL",
+                 "url":"https://ci.example.com/b","created_on":"2026-01-01T00:00:00Z",
+                 "updated_on":"2026-01-01T00:03:00Z"},
+                {"name":"","key":"LINT","state":"FAILED","url":null},
+                {"name":"deploy","key":"DEPLOY","state":"STOPPED","url":null},
+                {"name":"e2e","key":"E2E","state":"INPROGRESS","url":null}
+            ]}"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_statuses(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("build", "success"),
+                // No display name → the integration key stands in.
+                ("LINT", "failure"),
+                ("deploy", "failure"),
+                ("e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
+        assert_eq!(rows[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn merge_body_carries_delete_flag() {
+        use otto_core::api::MergeStrategy;
+        let b = super::merge_body(MergeStrategy::Rebase, true);
+        assert_eq!(b["merge_strategy"], "fast_forward");
+        assert_eq!(b["close_source_branch"], true);
+        let b = super::merge_body(MergeStrategy::Merge, false);
+        assert_eq!(b["merge_strategy"], "merge_commit");
+        assert_eq!(b["close_source_branch"], false);
     }
 }

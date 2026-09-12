@@ -230,6 +230,42 @@ context menu (see §[Context menus](#context-menus)). Removing a repo
 - The **WORKTREES** section lists `git worktree list` entries; click opens,
   right-click removes/prunes.
 
+### Searching the graph
+
+Above the graph sits a **search box** (⌘F / Ctrl+F focuses it). Typing runs the
+query **on the daemon** — `git log --all --grep=<text> --fixed-strings
+--regexp-ignore-case` — rather than filtering the rows already on screen, so a
+match is found even when it is thousands of commits back. The **Author** chip
+switches the query from the subject to `--author=`. A banner reports
+`N matches for "…"` with a **Clear**; clicking a result selects that commit in
+the graph. Patterns are literal (a `*` or `(` matches itself, and no regex can
+stall the search) and case-insensitive for ASCII — every git spawn runs under
+`LC_ALL=C`, so non-ASCII case folding is not applied.
+
+### File history & blame
+
+The ⋯ menu on any diff's file header opens:
+
+- **History** — that file's commits (`log --follow --all -- <path>`), walking
+  **through renames**; clicking a commit selects it in the graph.
+- **Blame** — `git blame --porcelain <rev> -- <path>`, grouped into runs: one
+  row per consecutive block of lines from the same commit, showing
+  `author · short sha · date` and the commit's subject. Clicking a row selects
+  that commit in the graph.
+
+Both open as a right-side drawer over the graph and close with the ✕. The
+revision blamed defaults to `HEAD`; a `-`-leading filename is handled (the path
+always rides after `--`).
+
+### Remotes
+
+**Remotes** in the repo header lists the repo's remotes (`git remote -v`) with
+**Add**, **Edit URL** and **Remove**. URLs are shown with any `user:password@`
+userinfo stripped, and a new URL must be `https`/`http`/`ssh`/`git` or scp-like
+`user@host:path` (`git@host:owner/repo.git` — the user part is required). Removing a remote keeps every local branch. Push
+and checkout still address `origin` by name — re-pointing another remote does
+not redirect them.
+
 ---
 
 ## 5. Stage / commit / discard / diff
@@ -264,8 +300,9 @@ The **Changes** tab is the working-tree view, backed by `git status`:
   message, and the UI offers **"Stash, pull & restore"** — a retry with
   `{auto_stash:true}` that stashes (untracked included), pulls, and pops,
   reporting what happened to the stash in the response `note`. The same offer
-  appears when a dirty tree blocks a branch **switch** ("Stash & switch", via
-  `/checkout-update`).
+  appears when a dirty tree blocks a branch **switch** (**"Stash, switch &
+  restore"** — `POST /checkout {auto_stash:true}`: stash, switch, restore;
+  nothing is pulled — Pull is its own action).
 
 ### Diffs
 
@@ -279,6 +316,22 @@ The **Changes** tab is the working-tree view, backed by `git status`:
 | `range:<a>..<b>` | A commit range |
 
 The diff is parsed into a structured `DiffResp` and rendered by `DiffViewer`.
+
+**Hunk and line staging.** Every hunk header in the WIP panel's diff carries
+**Stage hunk** / **Unstage hunk** / **Discard hunk**; clicking line numbers in
+the gutter (shift-click for a range) narrows those to **Stage 4 lines**. Each
+posts `POST /repos/{id}/stage-hunk` with the hunk's `@@` header, and the daemon
+rebuilds the patch from its OWN fresh `git diff` — never from the rendered
+`DiffResp`, whose parser drops `\r` and the `\ No newline at end of file`
+markers, so CRLF and newline-less files stage byte-exact with no phantom
+follow-up diff. If the file changed since the diff was drawn the header no
+longer matches and the call is a 409 with nothing applied ("The hunk no longer
+applies — …; refresh and retry"); renamed and binary files can only be staged
+whole. **Discard** confirms first and records a backup stash
+(`otto: backup before hunk discard`, visible under Stashes) before rewriting the
+file. A path that ends up in both trees shows a **partial** badge, and its diff
+gets an *Unstaged | Staged* toggle so the hunk buttons act on the side you are
+looking at.
 
 ---
 
@@ -469,13 +522,21 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/merge` · `/merge/preview` · `/merge/abort` · `/merge/commit` | ws editor/viewer | Local merge + conflict lifecycle |
 | `GET /repos/{id}/merge/status` · `/conflict` | ws viewer | Merge state / one file's conflict |
 | `POST /repos/{id}/conflict/resolve` | ws editor | `ResolveConflictReq` |
+| `POST /repos/{id}/rebase` | ws editor | `{onto, auto_stash?}` → `RepoStatusResp`; a conflicting rebase is a normal 200 with `op_in_progress:"rebase"` (continue/abort through the merge lifecycle routes) |
+| `GET /repos/{id}/rebase-preview?onto=` | ws viewer | `{commits, onto_sha}` — what a rebase would replay, before anything moves |
+| `GET /repos/{id}/pull-mode` | ws viewer | `{mode}` — the effective pull mode from the repo's own `pull.rebase` / `pull.ff` |
+| `GET` · `POST /repos/{id}/remotes` | ws viewer / editor | `RemoteInfo[]`; POST `{op: add\|set_url\|remove, name, url?}`. URLs come back with userinfo stripped |
+| `GET /repos/{id}/commit-config` | ws viewer | `{gpgsign, format, signing_key}` — what the repo's config says about signing |
+| `GET /repos/{id}/blame?path=&rev=HEAD` | ws viewer | `BlameResp` — one row per RUN of lines sharing a commit |
 
 ### Pull requests (#48–#56 + extras)
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `GET /repos/{id}/prs?state=open\|merged\|declined\|all` | ws viewer | `PrSummary[]` |
+| `GET /repos/{id}/prs?state=open\|merged\|declined\|all&page=&per_page=` | ws viewer | `PrListResp {items, has_more, page, per_page}` (`per_page` 1..=100, default 50) |
 | `POST /repos/{id}/prs` | ws editor | `CreatePrReq` → `PrSummary` |
+| `GET /repos/{id}/prs/{number}/checks` | ws viewer | `PrChecksResp` — the aggregate plus one row per check-run / pipeline job / commit status |
+| `GET /repos/{id}/prs/{number}/readiness` | ws viewer | `PrReadiness` — CI, approvals, mergeability, open blocker findings, and the local checkout's unpushed-commit count / branch freshness |
 | `GET /repos/{id}/prs/{number}` | ws viewer | `PrDetail` (comments, reviewers, CI, mergeable) |
 | `GET /repos/{id}/prs/{number}/diff` | ws viewer | `DiffResp` |
 | `PATCH /repos/{id}/prs/{number}` | ws editor | `UpdatePrReq` (title/description) |
@@ -507,8 +568,10 @@ in **[code-review.md](./code-review.md)**.
   member list).
 - **Test a git account's credentials** from Settings → Git Accounts (row button
   for the stored token, form button for a not-yet-saved one).
-- List/read/comment/approve/request-changes/merge/decline PRs across all three
-  forges, with CI status and mergeability shown.
+- List/read/comment/approve/request-changes/merge (with a confirmation modal:
+  per-check CI, approvals, mergeability, open blockers, unpushed commits;
+  optional delete-source-branch)/decline PRs across all three forges, with CI
+  status and mergeability shown.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
 
 **You cannot (by design / current behavior):**
@@ -542,6 +605,9 @@ in **[code-review.md](./code-review.md)**.
 - **Token never on disk or in URLs during push.** HTTPS auth goes through a
   temporary `GIT_ASKPASS` script + the `OTTO_GIT_TOKEN` env var; any
   `user:pass@` embedded in a URL is stripped from logs/notices.
+- **`OTTO_GIT_TOKEN` is visible to child processes** of the askpass'd git for the
+  duration of the push/pull (env, not disk). On a single-user Mac this is
+  acceptable; a future fd-passed secret is tracked as deferred.
 - **Credential-use ownership (S4).** A repo's bound token is usable only by its
   owner or root — workspace membership alone does not grant push/PR rights through
   someone else's credential.
@@ -556,6 +622,7 @@ in **[code-review.md](./code-review.md)**.
 |---|---|
 | **Not sure a token works at all** | Use **Test** on the account row (or **Test connection** in the form) — it runs `GET /user` with the token and shows who you authenticated as + scopes, or the provider's exact error. |
 | **403 / "Bad credentials" creating or listing a PR** | Token missing the right scope. GitHub: `repo` (classic) or Contents+Pull-requests read/write (fine-grained). Bitbucket: Pull-requests read/write. GitLab: `api`. Re-add/edit the account with a fresh token. |
+| **"rate limited — retry in Ns"** | The forge throttled the token. Wait the stated time; the daemon already retried once for short waits. |
 | **"repo has no git account" (400) on PR routes** | The repo isn't bound to an account, or its provider doesn't match the account's. Bind a matching account (Add-Repository sheet or re-detect). |
 | **403 even though the token is fine** | You're not the account **owner**. A repo's credential is usable only by the owner or root (S4). Have the owner act, or bind your own account. |
 | **Push rejected / auth failed** | HTTPS token lacks write/Contents scope, or the token expired (check the expiry chip on the account). For SSH remotes, fix your SSH agent — no token is used. |
@@ -565,6 +632,7 @@ in **[code-review.md](./code-review.md)**.
 | **PRs/clone work but "Browse remote" is empty** | Set the account's **Organisation / Workspace / Group** namespace; the picker needs it. |
 | **Expiry shows "expired" but I rotated the token** | GitHub/GitLab auto-detect expiry; if a header isn't present (e.g. classic PAT without expiry) set/clear the date manually on the account. |
 | **Self-hosted GitLab not recognized** | Ensure the host name contains `gitlab`, or set the account's **API base URL** to the instance API root. |
+| **"git … timed out after Ns"** | The spawn exceeded its budget (30 s local, 180 s remote — env-overridable via `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`). Check VPN/SSH agent for remote ops; for a local write, remove a leftover `.git/index.lock` once no git process is running. |
 
 ---
 

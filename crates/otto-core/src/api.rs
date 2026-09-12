@@ -1449,6 +1449,11 @@ pub struct CommitReq {
     pub message: String,
     #[serde(default)]
     pub amend: bool,
+    /// `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config
+    /// (`commit.gpgsign`). Lets the composer's Sign toggle override the repo
+    /// default per commit without writing config.
+    #[serde(default)]
+    pub sign: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1456,6 +1461,10 @@ pub struct CheckoutReq {
     pub branch: String,
     #[serde(default)]
     pub create: bool,
+    /// Wrap the switch in stash -u → checkout → pop when the tree is dirty.
+    /// Nothing is ever pulled or merged — that is `POST /pull`.
+    #[serde(default)]
+    pub auto_stash: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,6 +1647,18 @@ pub struct PrSummary {
     /// omitted from JSON) everywhere else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_warnings: Vec<String>,
+}
+
+/// One page of `GET /repos/{id}/prs`. `has_more` is the provider's own
+/// next-page signal (never `items.len() == per_page`, which lies on a full last
+/// page); `page`/`per_page` echo the CLAMPED request so a client can build the
+/// next call without re-deriving the bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrListResp {
+    pub items: Vec<PrSummary>,
+    pub has_more: bool,
+    pub page: u32,
+    pub per_page: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1861,6 +1882,11 @@ pub enum MergeStrategy {
 pub struct MergePrReq {
     #[serde(default = "default_merge_strategy")]
     pub strategy: MergeStrategy,
+    /// Ask the provider to delete the PR's source branch as part of the merge
+    /// (GitHub: a follow-up ref delete; GitLab: `should_remove_source_branch`;
+    /// Bitbucket: `close_source_branch`). Additive — absent means "keep it".
+    #[serde(default)]
+    pub delete_source_branch: bool,
 }
 
 fn default_merge_strategy() -> MergeStrategy {
