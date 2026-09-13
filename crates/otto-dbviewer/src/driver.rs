@@ -134,6 +134,14 @@ pub trait Driver: Send + Sync {
     /// for engines that cache nothing.
     async fn close(&self, _cache_key: &str) {}
 
+    /// Synchronously detach ready ownership for close cleanup. The returned
+    /// private driver contains only captured old resources; it must never be
+    /// registered for normal work. Cancellation can use those resources before
+    /// shutdown without looking up a newly admitted generation.
+    fn detach(&self, _cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        None
+    }
+
     /// Produce a normalized [`DbQueryPlan`] for `statement` by running the engine's
     /// native EXPLAIN (the statement is EXPLAIN-wrapped, **never executed raw** —
     /// read-only by construction). `node` scopes the active database (same
@@ -276,6 +284,7 @@ mod tests {
 
     fn cfg() -> ResolvedConfig {
         ResolvedConfig {
+            lifecycle: None,
             engine: Engine::Mysql,
             host: "127.0.0.1".into(),
             port: 3306,

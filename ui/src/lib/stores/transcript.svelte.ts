@@ -8,6 +8,7 @@
 // the rest of the pane layout state).
 import { api } from '../api/client';
 import { winKey } from '../win';
+import { TranscriptLifecycle } from './transcriptLifecycle';
 import type { Transcript, Turn, Artifact, OttoEvent } from '../api/types';
 
 // ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ export interface TranscriptPage {
 
 /** Stable identity of a source — the store keys its per-conversation state by it. */
 export function sourceKey(src: TranscriptSource): string {
-  return 'sessionId' in src ? `s:${src.sessionId}` : `p:${src.transcriptPath}`;
+  return 'sessionId' in src ? `s:${src.sessionId}` : `p:${src.workspaceId}:${src.transcriptPath}`;
 }
 
 function qs(page: TranscriptPage, extra: Record<string, string | undefined> = {}): string {
@@ -100,8 +101,24 @@ export class Conversation {
   /** Index of the last record the client has folded (from the WS delta). */
   private tailCursor: string | null = null;
 
-  constructor(src: TranscriptSource) {
+  retainedBytes = 4096;
+  private retain(value: unknown): void {
+    this.retainedBytes = Math.min(32 * 1024 * 1024 + 1,
+      this.retainedBytes + TranscriptLifecycle.payloadCharge(value));
+  }
+  private readEpoch = 0;
+  private reads = new AbortController();
+  private isActive: () => boolean;
+  private requestRead: () => void;
+
+  constructor(src: TranscriptSource, isActive: () => boolean, requestRead: () => void) {
     this.src = src;
+    this.isActive = isActive;
+    this.requestRead = requestRead;
+  }
+
+  activate(): void {
+    if (this.reads.signal.aborted) this.reads = new AbortController();
   }
 
   get key(): string {
@@ -117,27 +134,43 @@ export class Conversation {
     return this.transcript?.unavailable_reason ?? null;
   }
 
-  /** (Re)load the newest page, replacing what is shown. */
+  requestRefresh(): void { this.requestRead(); }
+
+  /** Explicit retry; ordinary mounted/reconnect reads use the lease scheduler. */
   async load(): Promise<void> {
+    await this.readTail(undefined, true);
+  }
+
+  private async readTail(signal?: AbortSignal, replace = false): Promise<boolean> {
+    if (!this.isActive() || signal?.aborted) return false;
     this.inflight?.abort();
     const ac = new AbortController();
+    const abort = () => ac.abort();
+    signal?.addEventListener('abort', abort, {once: true});
     this.inflight = ac;
-    this.loading = true;
+    this.loading = this.transcript == null;
     this.error = null;
     try {
-      const t = await fetchTranscript(this.src, { limit: PAGE_TURNS }, ac.signal);
-      if (ac.signal.aborted) return;
-      this.transcript = t;
-      this.turns = t.turns;
-      this.tailCursor = null;
-    } catch (e) {
-      if (ac.signal.aborted) return;
-      this.error = e instanceof Error ? e.message : String(e);
-    } finally {
-      if (this.inflight === ac) {
-        this.inflight = null;
-        this.loading = false;
+      const t = await fetchTranscript(this.src, {limit: PAGE_TURNS}, ac.signal);
+      if (ac.signal.aborted || !this.isActive()) return false;
+      this.retain(t);
+      if (replace || this.transcript == null || this.transcript.unavailable_reason) {
+        this.turns = t.turns;
+        this.transcript = t;
+      } else {
+        const ids = new Set(t.turns.map(turn => turn.id));
+        this.turns = [...this.turns.filter(turn => !ids.has(turn.id)), ...t.turns];
+        this.transcript = {...t, cursor: this.transcript.cursor, has_earlier: this.transcript.has_earlier};
       }
+      this.tailCursor = null;
+      this.tailTick++;
+      return true;
+    } catch (e) {
+      if (!ac.signal.aborted && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      if (this.inflight === ac) {this.inflight = null; this.loading = false;}
     }
   }
 
@@ -145,16 +178,20 @@ export class Conversation {
   async loadEarlier(): Promise<void> {
     const t = this.transcript;
     if (!t || !t.has_earlier || this.loadingEarlier) return;
+    if (!this.isActive()) return;
+    const epoch = this.readEpoch;
     this.loadingEarlier = true;
     try {
-      const page = await fetchTranscript(this.src, { before: t.cursor, limit: PAGE_TURNS });
+      const page = await fetchTranscript(this.src, { before: t.cursor, limit: PAGE_TURNS }, this.reads.signal);
+      if (epoch !== this.readEpoch || !this.isActive()) return;
+      this.retain(page);
       const known = new Set(this.turns.map((x) => x.id));
       this.turns = [...page.turns.filter((x) => !known.has(x.id)), ...this.turns];
       this.transcript = { ...t, cursor: page.cursor, has_earlier: page.has_earlier };
     } catch (e) {
-      this.error = e instanceof Error ? e.message : String(e);
+      if (epoch === this.readEpoch && this.isActive()) this.error = e instanceof Error ? e.message : String(e);
     } finally {
-      this.loadingEarlier = false;
+      if (epoch === this.readEpoch) this.loadingEarlier = false;
     }
   }
 
@@ -165,13 +202,13 @@ export class Conversation {
   applyDelta(cursor: string, turns: Turn[]): void {
     if (this.transcript == null || this.transcript.unavailable_reason) {
       // First signs of life for a session that had no transcript yet.
-      void this.load();
+      this.requestRead();
       return;
     }
     const moved = this.tailCursor == null || Number(cursor) > Number(this.tailCursor);
     const backwards = this.tailCursor != null && Number(cursor) < Number(this.tailCursor);
     if (backwards || (turns.length === 0 && moved) || JSON.stringify(turns).length > DELTA_CAP_BYTES) {
-      void this.refetchTail();
+      this.requestRead();
       return;
     }
     if (!moved && turns.length === 0) return;
@@ -185,6 +222,7 @@ export class Conversation {
     // `stats.turns` stays the SERVER total (the loaded page is a window of it);
     // bump it only by the genuinely new turns.
     const added = next.length - this.turns.length;
+    this.retain(turns);
     this.turns = next;
     if (added > 0) {
       this.transcript = {
@@ -210,7 +248,7 @@ export class Conversation {
    *  (it stops on its own a few minutes after the last touch). Cheap: no fold. */
   async touch(): Promise<void> {
     const sid = this.sessionId;
-    if (!sid) return;
+    if (!sid || !this.isActive()) return;
     try {
       await api.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch`, {});
     } catch {
@@ -220,47 +258,31 @@ export class Conversation {
 
   /** Catch up after a gap (tab was hidden, socket reconnected): re-arm the
    *  tail and re-read the newest page so anything missed lands now. */
-  async resync(): Promise<void> {
-    if (this.transcript == null || this.transcript.unavailable_reason) {
-      await this.load();
-    } else {
-      await this.refetchTail();
-    }
-    void this.touch();
-  }
-
-  /** Re-read the newest page and merge it over what we hold (keeps earlier pages). */
-  private async refetchTail(): Promise<void> {
-    try {
-      const t = await fetchTranscript(this.src, { limit: PAGE_TURNS });
-      // Earlier pages we already hold (not in the fresh window) stay in front.
-      const older = this.turns.filter((x) => !t.turns.some((n) => n.id === x.id));
-      this.turns = [...older, ...t.turns];
-      this.transcript = {
-        ...t,
-        cursor: this.transcript?.cursor ?? t.cursor,
-        has_earlier: this.transcript?.has_earlier ?? t.has_earlier,
-      };
-      this.tailCursor = null;
-      this.tailTick += 1;
-    } catch (e) {
-      this.error = e instanceof Error ? e.message : String(e);
+  async resync(signal?: AbortSignal): Promise<void> {
+    if (await this.readTail(signal)) {
+      if (!signal?.aborted && this.isActive()) await this.touch();
     }
   }
 
   addArtifact(a: Artifact): void {
     if (this.liveArtifacts.some((x) => x.id === a.id)) return;
+    this.retain(a);
     this.liveArtifacts = [...this.liveArtifacts, a];
   }
 
   /** Fetch a subagent's body once (nested card expand). */
   async loadSubagent(agentId: string): Promise<void> {
+    if (!this.isActive()) return;
+    const epoch = this.readEpoch;
     if (this.subagents[agentId]?.turns.length || this.subagents[agentId]?.loading) return;
     this.subagents[agentId] = { turns: [], loading: true, error: null, has_earlier: false, cursor: '' };
     try {
-      const t = await fetchTranscript(this.src, { sub: agentId, limit: PAGE_TURNS });
+      const t = await fetchTranscript(this.src, { sub: agentId, limit: PAGE_TURNS }, this.reads.signal);
+      if (epoch !== this.readEpoch || !this.isActive()) return;
+      this.retain(t);
       this.subagents[agentId] = { turns: t.turns, loading: false, error: null, has_earlier: t.has_earlier, cursor: t.cursor };
     } catch (e) {
+      if (epoch !== this.readEpoch || !this.isActive()) return;
       this.subagents[agentId] = {
         turns: [],
         loading: false,
@@ -272,11 +294,15 @@ export class Conversation {
   }
 
   async loadSubagentEarlier(agentId: string): Promise<void> {
+    if (!this.isActive()) return;
+    const epoch = this.readEpoch;
     const cur = this.subagents[agentId];
     if (!cur || !cur.has_earlier || cur.loading) return;
     this.subagents[agentId] = { ...cur, loading: true };
     try {
-      const t = await fetchTranscript(this.src, { sub: agentId, before: cur.cursor, limit: PAGE_TURNS });
+      const t = await fetchTranscript(this.src, { sub: agentId, before: cur.cursor, limit: PAGE_TURNS }, this.reads.signal);
+      if (epoch !== this.readEpoch || !this.isActive()) return;
+      this.retain(t);
       this.subagents[agentId] = {
         turns: [...t.turns, ...cur.turns],
         loading: false,
@@ -285,12 +311,19 @@ export class Conversation {
         cursor: t.cursor,
       };
     } catch (e) {
+      if (epoch !== this.readEpoch || !this.isActive()) return;
       this.subagents[agentId] = { ...cur, loading: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
 
   dispose(): void {
+    this.readEpoch++;
+    this.reads.abort();
     this.inflight?.abort();
+    this.loadingEarlier = false;
+    for (const [id, state] of Object.entries(this.subagents)) {
+      if (state.loading) this.subagents[id] = { ...state, loading: false };
+    }
   }
 }
 
@@ -325,6 +358,12 @@ class TranscriptStore {
   // may not write $state), and each Conversation carries its own $state fields
   // so reactivity lives on the instance, not on the registry.
   private convs = new Map<string, Conversation>();
+  private lifecycle = new TranscriptLifecycle();
+  private identity = '';
+  private identityEpoch = $state(0);
+  private inactive = new Map<string, number>();
+  private retries = new Map<string, ReturnType<typeof setTimeout>>();
+  private retryAttempts = new Map<string, number>();
   /** Global "Show system" — reveals reminders / hooks / injected queue items. */
   showSystem = $state(lsGet(LS_SHOW_SYSTEM) === '1');
   /** Per-session view choice, mirrored from localStorage so panes react. */
@@ -332,21 +371,89 @@ class TranscriptStore {
 
   /** Get-or-create the conversation for a source (never fetches by itself). */
   conversation(src: TranscriptSource): Conversation {
+    void this.identityEpoch;
     const k = sourceKey(src);
     let c = this.convs.get(k);
     if (!c) {
-      c = new Conversation(src);
+      c = new Conversation(src, () => this.lifecycle.active(k) && (typeof document === 'undefined' || !document.hidden), () => this.lifecycle.request(k));
       this.convs.set(k, c);
     }
     return c;
   }
 
-  /** Get-or-create AND load once — the cheap "does this session have a
-   *  transcript?" probe SessionView uses to pick the default view. */
-  ensure(src: TranscriptSource): Conversation {
+  acquireView(src: TranscriptSource): () => void {
     const c = this.conversation(src);
-    if (c.transcript == null && !c.loading && c.error == null) void c.load();
-    return c;
+    c.activate();
+    this.inactive.delete(c.key);
+    this.lifecycle.setVisible(typeof document === 'undefined' || !document.hidden);
+    const release = this.lifecycle.acquire(c.key, async signal => {
+      await c.resync(signal);
+      const previous = this.retries.get(c.key);
+      if (previous) clearTimeout(previous);
+      this.retries.delete(c.key);
+      if (!signal.aborted && this.lifecycle.active(c.key) && c.error?.includes('transcript busy')) {
+        const attempt = this.retryAttempts.get(c.key) ?? 0;
+        if (attempt < 3) {
+          this.retryAttempts.set(c.key,attempt+1);
+          this.retries.set(c.key,setTimeout(() => {
+            this.retries.delete(c.key);
+            if (this.lifecycle.active(c.key)) this.lifecycle.request(c.key);
+          }, 1000 * (attempt+1)));
+        }
+      } else this.retryAttempts.delete(c.key);
+    });
+    return () => {
+      release();
+      if (!this.lifecycle.held(c.key)) {
+        c.dispose();
+        const retry = this.retries.get(c.key);
+        if (retry) clearTimeout(retry);
+        this.retries.delete(c.key); this.retryAttempts.delete(c.key);
+        // Incoming bounded pages/deltas carry the charge; navigation scans no body.
+        this.inactive.set(c.key, c.retainedBytes);
+        this.evictInactive();
+      }
+    };
+  }
+
+  private evictInactive(): void {
+    let bytes = [...this.inactive.values()].reduce((a, b) => a + b, 0);
+    for (const [key, charge] of this.inactive) {
+      if (this.inactive.size <= 24 && bytes <= 32 * 1024 * 1024) break;
+      const c = this.convs.get(key);
+      if (c?.sessionId && this.sending(c.sessionId)) continue;
+      c?.dispose();
+      this.convs.delete(key);
+      this.inactive.delete(key);
+      bytes -= charge;
+    }
+  }
+
+  setVisible(visible: boolean): void {
+    if (visible) for (const c of this.convs.values()) c.activate();
+    else {
+      for (const c of this.convs.values()) c.dispose();
+      for (const retry of this.retries.values()) clearTimeout(retry);
+      this.retries.clear(); this.retryAttempts.clear();
+    }
+    this.lifecycle.setVisible(visible);
+  }
+
+  setIdentity(identity: string): void {
+    if (this.identity === identity) return;
+    const previous = this.identity;
+    this.identity = identity;
+    if (previous) this.reset();
+  }
+
+  reset(): void {
+    this.identityEpoch++;
+    for (const retry of this.retries.values()) clearTimeout(retry);
+    this.retries.clear(); this.retryAttempts.clear();
+    this.lifecycle.clear();
+    for (const c of this.convs.values()) c.dispose();
+    this.convs.clear();
+    this.inactive.clear();
   }
 
   peek(sessionId: string): Conversation | null {
@@ -357,6 +464,7 @@ class TranscriptStore {
     const k = sourceKey(src);
     this.convs.get(k)?.dispose();
     this.convs.delete(k);
+    this.inactive.delete(k);
   }
 
   setShowSystem(on: boolean): void {
@@ -388,38 +496,25 @@ class TranscriptStore {
     lsSet(winKey(LS_SPLIT_PREFIX + sessionId), String(Math.min(0.8, Math.max(0.3, frac))));
   }
 
-  /** Keep every live session's tail in `wid` armed (`POST /workspaces/{wid}/transcript/touch`). */
-  async touchWorkspace(wid: string | null): Promise<void> {
-    if (!wid) return;
-    try {
-      await api.post<{ armed: number }>(`/workspaces/${encodeURIComponent(wid)}/transcript/touch`, {});
-    } catch {
-      /* transient */
-    }
-  }
-
-  /** After a WS reconnect: every open conversation catches up, and the
-   *  current workspace's tails are re-armed. */
-  resyncAll(wid: string | null): void {
-    for (const c of this.convs.values()) {
-      if (c.sessionId) void c.resync();
-    }
-    void this.touchWorkspace(wid);
+  /** Recover only mounted, document-visible conversations. */
+  resyncVisible(): void {
+    this.setVisible(typeof document === 'undefined' || !document.hidden);
+    this.lifecycle.request();
   }
 
   /** Route the three transcript WS events (called from events.svelte.ts). */
   applyEvent(ev: OttoEvent): boolean {
     switch (ev.type) {
       case 'transcript_appended': {
-        this.convs.get(`s:${ev.session_id}`)?.applyDelta(ev.cursor, ev.turns);
+        (this.lifecycle.active(`s:${ev.session_id}`) ? this.convs.get(`s:${ev.session_id}`) : undefined)?.applyDelta(ev.cursor, ev.turns);
         return true;
       }
       case 'transcript_live': {
-        this.convs.get(`s:${ev.session_id}`)?.applyLive(ev.text, ev.input, ev.status, ev.branch);
+        (this.lifecycle.active(`s:${ev.session_id}`) ? this.convs.get(`s:${ev.session_id}`) : undefined)?.applyLive(ev.text, ev.input, ev.status, ev.branch);
         return true;
       }
       case 'artifact_added': {
-        this.convs.get(`s:${ev.session_id}`)?.addArtifact(ev.artifact);
+        (this.lifecycle.active(`s:${ev.session_id}`) ? this.convs.get(`s:${ev.session_id}`) : undefined)?.addArtifact(ev.artifact);
         return true;
       }
       case 'history_index_progress':
@@ -451,23 +546,35 @@ class TranscriptStore {
   setAttachments(sessionId: string, images: { path: string; name: string; url: string }[]): void {
     this.draftImages[sessionId] = images;
   }
+  private draftKey(sessionId: string): string {
+    return winKey(LS_DRAFT_PREFIX + JSON.stringify([this.identity, sessionId]));
+  }
   draft(sessionId: string): string {
-    const mem = this.drafts[sessionId];
+    const key = this.draftKey(sessionId);
+    const mem = this.drafts[key];
     if (mem !== undefined) return mem;
     try {
-      return sessionStorage.getItem(LS_DRAFT_PREFIX + sessionId) ?? '';
-    } catch {
+      const saved = sessionStorage.getItem(key);
+      if (saved !== null) return saved;
+      // Adopt a pre-namespace draft once; do not erase a user's unsent text
+      // during the upgrade, or expose it to later identity switches.
+      const legacy = sessionStorage.getItem(LS_DRAFT_PREFIX + sessionId);
+      if (legacy !== null) {
+        sessionStorage.setItem(key,legacy);
+        sessionStorage.removeItem(LS_DRAFT_PREFIX + sessionId);
+        return legacy;
+      }
       return '';
-    }
+    } catch {return '';}
+
   }
   setDraft(sessionId: string, text: string): void {
-    this.drafts[sessionId] = text;
+    const key = this.draftKey(sessionId);
+    this.drafts[key] = text;
     try {
-      if (text) sessionStorage.setItem(LS_DRAFT_PREFIX + sessionId, text);
-      else sessionStorage.removeItem(LS_DRAFT_PREFIX + sessionId);
-    } catch {
-      /* private mode / quota — the in-memory copy still works within the session */
-    }
+      if (text) sessionStorage.setItem(key,text);
+      else sessionStorage.removeItem(key);
+    } catch { /* In-memory drafts remain available. */ }
   }
 
   /** Latest `history_index_progress` (null until the first event). */

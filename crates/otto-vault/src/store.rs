@@ -34,16 +34,27 @@ pub struct NoteRow {
     pub reserved: bool,
     pub has_frontmatter: bool,
     pub parse_error: bool,
+    pub content_index_status: ContentIndexStatus,
 }
 
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    #[cfg(test)]
+    pub(crate) all_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) link_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            all_reads: Default::default(),
+            #[cfg(test)]
+            link_reads: Default::default(),
+        }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -262,18 +273,31 @@ impl Store {
     }
 
     pub async fn upsert_note(&self, vault: i64, n: &NoteRow) -> Result<()> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(dberr("vault.note.acquire"))?;
+        Self::upsert_note_conn(&mut conn, vault, n).await
+    }
+
+    async fn upsert_note_conn(
+        conn: &mut sqlx::SqliteConnection,
+        vault: i64,
+        n: &NoteRow,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO vault_notes (vault_id, path, title, okf_type, description, \
              frontmatter_json, tags_json, aliases_json, headings_json, word_count, size, \
-             mtime_ns, hash, reserved, has_frontmatter, parse_error) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+             mtime_ns, hash, reserved, has_frontmatter, parse_error, content_index_status) \
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
              ON CONFLICT(vault_id, path) DO UPDATE SET \
              title=excluded.title, okf_type=excluded.okf_type, description=excluded.description, \
              frontmatter_json=excluded.frontmatter_json, tags_json=excluded.tags_json, \
              aliases_json=excluded.aliases_json, headings_json=excluded.headings_json, \
              word_count=excluded.word_count, size=excluded.size, mtime_ns=excluded.mtime_ns, \
              hash=excluded.hash, reserved=excluded.reserved, \
-             has_frontmatter=excluded.has_frontmatter, parse_error=excluded.parse_error",
+             has_frontmatter=excluded.has_frontmatter, parse_error=excluded.parse_error, content_index_status=excluded.content_index_status",
         )
         .bind(vault)
         .bind(&n.path)
@@ -291,13 +315,109 @@ impl Store {
         .bind(n.reserved as i64)
         .bind(n.has_frontmatter as i64)
         .bind(n.parse_error as i64)
-        .execute(&self.pool)
+        .bind(n.content_index_status.as_str())
+        .execute(&mut *conn)
         .await
         .map_err(dberr("vault.upsert_note"))?;
         Ok(())
     }
 
+    /// Publish one complete derived note atomically. No per-link auto-commits.
+    pub(crate) async fn index_note(
+        &self,
+        vault: i64,
+        note: &crate::prepare::PreparedNote,
+        incoming: &[(i64, Option<String>)],
+        fts: bool,
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.index.begin"))?;
+        Self::upsert_note_conn(&mut tx, vault, &note.row).await?;
+        for sql in [
+            "DELETE FROM vault_tags WHERE vault_id=? AND path=?",
+            "DELETE FROM vault_links WHERE vault_id=? AND src_path=?",
+        ] {
+            sqlx::query(sql)
+                .bind(vault)
+                .bind(&note.row.path)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.clear"))?;
+        }
+        let tags: Vec<String> = serde_json::from_str(&note.row.tags_json).unwrap_or_default();
+        for tag in tags {
+            sqlx::query("INSERT INTO vault_tags(vault_id,tag,path) VALUES(?,?,?)")
+                .bind(vault)
+                .bind(tag)
+                .bind(&note.row.path)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.tags"))?;
+        }
+        for (pos, link) in note.links.iter().enumerate() {
+            sqlx::query("INSERT INTO vault_links(vault_id,src_path,raw_target,dst_path,kind,anchor,alias,pos) VALUES(?,?,?,?,?,?,?,?)").bind(vault).bind(&note.row.path).bind(&link.raw_target).bind(&link.dst_path).bind(&link.kind).bind(&link.anchor).bind(&link.alias).bind(pos as i64).execute(&mut *tx).await.map_err(dberr("vault.index.links"))?;
+        }
+        for (rowid, dst) in incoming {
+            sqlx::query("UPDATE vault_links SET dst_path=? WHERE rowid=? AND vault_id=?")
+                .bind(dst)
+                .bind(rowid)
+                .bind(vault)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.incoming"))?;
+        }
+        if fts {
+            sqlx::query("DELETE FROM vault_fts WHERE vault_id=? AND path=?")
+                .bind(vault)
+                .bind(&note.row.path)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.fts"))?;
+            sqlx::query("INSERT INTO vault_fts(vault_id,path,title,body) VALUES(?,?,?,?)")
+                .bind(vault)
+                .bind(&note.row.path)
+                .bind(&note.row.title)
+                .bind(&note.body)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.fts"))?;
+        }
+        tx.commit().await.map_err(dberr("vault.index.commit"))?;
+        Ok(())
+    }
+
+    pub(crate) async fn update_link_destinations(
+        &self,
+        vault: i64,
+        changed: &[(i64, Option<String>)],
+    ) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.links.begin"))?;
+        for (rowid, dst) in changed {
+            sqlx::query("UPDATE vault_links SET dst_path=? WHERE rowid=? AND vault_id=?")
+                .bind(dst)
+                .bind(rowid)
+                .bind(vault)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.links.resolve"))?;
+        }
+        tx.commit().await.map_err(dberr("vault.links.commit"))?;
+        Ok(())
+    }
+
     pub async fn remove_note(&self, vault: i64, path: &str) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.remove.begin"))?;
         for sql in [
             "DELETE FROM vault_notes WHERE vault_id = ? AND path = ?",
             "DELETE FROM vault_links WHERE vault_id = ? AND src_path = ?",
@@ -306,11 +426,25 @@ impl Store {
             sqlx::query(sql)
                 .bind(vault)
                 .bind(path)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("vault.remove_note"))?;
         }
-        self.fts_remove(vault, path).await;
+        let fts: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='vault_fts' AND type='table')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(dberr("vault.remove.fts_check"))?;
+        if fts {
+            sqlx::query("DELETE FROM vault_fts WHERE vault_id=? AND path=?")
+                .bind(vault)
+                .bind(path)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.remove.fts"))?;
+        }
+        tx.commit().await.map_err(dberr("vault.remove.commit"))?;
         Ok(())
     }
 
@@ -375,6 +509,11 @@ impl Store {
             reserved: r.get::<i64, _>("reserved") != 0,
             has_frontmatter: r.get::<i64, _>("has_frontmatter") != 0,
             parse_error: r.get::<i64, _>("parse_error") != 0,
+            content_index_status: if r.get::<String, _>("content_index_status") == "size_limited" {
+                ContentIndexStatus::SizeLimited
+            } else {
+                ContentIndexStatus::Full
+            },
         }
     }
 
@@ -497,6 +636,9 @@ impl Store {
         &self,
         vault: i64,
     ) -> Result<Vec<(i64, String, String, Option<String>)>> {
+        #[cfg(test)]
+        self.link_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rows = sqlx::query(
             "SELECT rowid, src_path, raw_target, dst_path FROM vault_links WHERE vault_id = ?",
         )
@@ -552,6 +694,9 @@ impl Store {
         &self,
         vault: i64,
     ) -> Result<Vec<(String, String, Option<String>, bool)>> {
+        #[cfg(test)]
+        self.all_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rows = sqlx::query(
             "SELECT path, title, okf_type, reserved FROM vault_notes WHERE vault_id = ? ORDER BY path",
         )
@@ -588,6 +733,9 @@ impl Store {
     }
 
     pub async fn all_file_paths(&self, vault: i64) -> Result<Vec<String>> {
+        #[cfg(test)]
+        self.all_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let rows = sqlx::query("SELECT path FROM vault_files WHERE vault_id = ?")
             .bind(vault)
             .fetch_all(&self.pool)

@@ -302,8 +302,8 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 Notes:
 - `StashInfo` = `{index, ref, sha, parents[], date, message, branch?}` — one entry per
   `git stash list`. `ref` is the `stash@{N}` selector; `parents` are `[base, index, (untracked)]`.
-- `WorktreeInfo` = `{path, head, branch?, is_main, locked, lock_reason?, prunable, dirty}` —
-  `dirty` is a best-effort uncommitted-changes probe; removal keeps the branch. Remove only
+- `WorktreeInfo` = `{path, head, branch?, is_main, locked, lock_reason?, prunable, dirty, dirty_known}` —
+  `dirty` is a best-effort uncommitted-changes probe; `dirty_known=false` means it failed, timed out, or was skipped (never proof of a clean tree). Status probes allow four per listing/eight globally, with a 3-second command budget and a 10-second optional-probe phase; admitted process cleanup retains capacity after the response ends. Forced removal returns 409 when the refreshed target status is unknown, including locked trees. Removal keeps the branch. Remove only
   accepts a path the repo itself lists (never an arbitrary directory) and never the main worktree.
 - `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
   `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
@@ -2201,7 +2201,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /fs/browse?path= | member | — | directory listing (for path pickers) |
+| GET /fs/browse?path= | member | — | complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
 | GET /fs/read?path= | member | — | file contents |
 | GET /logs/daemon | root | — | recent daemon log lines |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
@@ -2441,7 +2441,8 @@ Notes:
   UNRESOLVED (surfaced, never silently picked). Broken links are legal (OKF).
 - `index.md`/`log.md` are OKF reserved files: flagged `reserved`, excluded from
   the switcher and (by default) the graph.
-- Notes >4 MiB are indexed metadata-only (no FTS body).
+- Notes >4 MiB are indexed metadata-only: `NoteMeta.content_index_status` is `size_limited` (`full` otherwise; older absent values mean `full`). Body-derived tags, aliases, headings, description/frontmatter and outgoing links are empty; filename/title discovery and incoming path links remain available. Source bytes are unchanged. Exact SHA-256 is streamed with bounded buffers; only bodies within the limit are parsed, in bounded blocking jobs. `parse_error` remains a YAML parse error, never a size indicator. Explicit raw-note reads return the complete source and its matching hash with this same metadata policy.
+- A successful API write publishes that file's metadata, tags/links, search and directory/switcher indexes before responding; content-only changes do not rescan the entire Vault. External edits retain the five-second freshness policy. Incomplete directory enumeration preserves existing indexed entries and reports an incomplete scan; removal candidates are rechecked for absence. A warm directory lookup reads cached direct children (directory badge counts retain existing descendant-file semantics).
 
 
 Recovery and freshness details:
@@ -4156,3 +4157,36 @@ sanitized 500. No partial successful response is returned for those failures.
 The export is bounded to 10,000 source profiles and 32 MiB; exceeding either
 returns 400 rather than truncating data. Other errors: 400 invalid scope/format,
 403 inactive/non-root actor, 404 selected workspace/profile disappeared.
+
+### Bounded Agents History pages
+
+`GET /api/v1/workspaces/{wid}/history/page?q=&provider=&cwd=&status=&cursor=&limit=100`
+
+Requires workspace Viewer; non-admins see only their own agent sessions in that workspace. Admin/root additionally see globally unclaimed indexed transcripts. A provider session id claimed by any workspace/provider excludes the corresponding on-disk entry. The legacy `/history` array endpoint remains unchanged.
+
+Returns `{"entries":[HistoryEntry],"next_cursor":"opaque-or-null"}`. Limit 1–1000, default 100. Stable order is descending activity then ascending source identity. Cursor is versioned, ≤4 KiB, and bound to actor/role/workspace/filters; malformed or mismatched cursors return 400 and require reloading. Authorization is reevaluated on every page.
+
+Each request scans/resolves at most `4*limit` metadata candidates. Unicode substring search uses Rust lowercase parity, with literal `%`/`_`; exact-or-descendant cwd matching is case-sensitive. An empty entries array may still include next_cursor when matching conversations occur beyond the current scan budget. Follow the cursor to continue; only null indicates exhaustion. The UI exposes Load more for this case.
+
+Transcript session/history GETs reuse bounded immutable folds (32 retained entries / 128 MiB charged payload, 32 MiB per-entry retention cutoff, 2 min idle expiry). Two cold folds run concurrently with no distinct-key waiting queue; same-key followers are limited to eight. Saturation or a file changing during a fold returns 409 `transcript busy; retry shortly`. Authorization precedes reuse and file identity/stamps invalidate changed snapshots. Running-session GETs still arm their file tail; provider resume remains a side effect of explicit transcript touch, which the UI sends only for a mounted visible chat.
+
+
+### API client history summaries
+
+`GET /workspaces/{wid}/api-client/history/summaries` returns `ApiHistorySummary[]` with the same workspace Viewer and API Client View permissions as full history. Optional `limit` defaults to 100 and clamps to 1–500; `q`, `status`, `request_id`, and `source` preserve full-history filtering. Results sort by `executed_at DESC, id DESC`. `q` matches literal text in method/URL (SQL wildcard characters are escaped).
+
+```json
+[{"id":"history-1","workspace_id":"workspace-1","method":"POST","url":"https://example.test/items","status":201,"duration_ms":42,"executed_at":"2026-09-13T10:00:00Z","request_id":"request-1","source":{"kind":"agent","session_id":"session-1","via":"mcp"}}]
+```
+
+`status`, `duration_ms`, `request_id`, `source.session_id` and `source.via` may be null. `source.kind` defaults to `human` when absent/null and retains explicit legacy kinds. Summaries omit request/response bodies, headers and authentication. Fetch `GET /workspaces/{wid}/api-client/history/{id}` for the original full `ApiHistoryEntry` before replay. The existing full `/history` route and MCP history behavior remain unchanged. Cross-workspace detail access is rejected; missing detail is 404 and insufficient workspace access is 403. Listing causes no remote request execution or credential lookup.
+
+### Lightweight workflow progress and lazy details
+
+`GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
+
+`GET /api/v1/workflow-runs/{id}/checkpoints?cursor=&limit=100` returns `{checkpoint_rev,generation,items:[WorkflowCheckpoint],next_cursor}`. Items are summaries with the same body descriptors; no input/output/log bodies. Limit 1–200. Opaque ≤4 KiB cursor binds run, reset generation and insertion order. Ordinary node/log/checkpoint updates do not invalidate pagination; append remains discoverable. Retry/deletion/reset returns 409 for an old generation and requires reloading checkpoints. Native SQLite insertion identity is not imported/exported as authoritative data.
+
+`GET /api/v1/workflow-runs/{id}/nodes/{node_id}` and `GET /api/v1/workflow-runs/{id}/checkpoints/{node_id}` return `{rev,detail_version,body}` with exact NodeRunState or WorkflowCheckpoint recovery body. URL-encode node IDs (including `#`). Body/version come from one SQL snapshot; clients reject stale selected-body responses. All endpoints recheck run workspace Viewer permission; missing run/node returns404. Full legacy run GET and mutation responses retain their existing bodies.
+
+`GET /api/v1/workflows/{id}/runs?summary=true` returns up to 50 lightweight `{id,workflow_id,status,started_at,rev}` rows, newest first, for the run menu. Default `summary=false` preserves the existing full-row response. It has the same workspace Viewer requirement as the legacy list. The UI uses summaries for opening/polling and fetches exact node/checkpoint bodies only for expanded or selected details.

@@ -42,3 +42,17 @@ export function getWorkflowVersion(id: string, v: number): Promise<WorkflowVersi
 export function restoreWorkflowVersion(id: string, v: number, note?: string): Promise<Workflow> {
   return api.post<Workflow>(`/workflows/${id}/versions/${v}/restore`, note ? { note } : {});
 }
+
+
+export function workflowProgress(runId: string, afterRev?: number, signal?: AbortSignal): Promise<import('./types').WorkflowProgressResponse> {
+  return api.get(`/workflow-runs/${encodeURIComponent(runId)}/progress${afterRev === undefined ? '' : `?after_rev=${afterRev}`}`, signal);
+}
+export function workflowCheckpointPage(runId: string, cursor?: string): Promise<import('./types').WorkflowCheckpointPage> {
+  return api.get(`/workflow-runs/${encodeURIComponent(runId)}/checkpoints${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`);
+}
+export function workflowNodeDetail(runId: string, nodeId: string): Promise<import('./types').WorkflowDetail<import('./types').NodeRunState>> {
+  return api.get(`/workflow-runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`);
+}
+export function workflowCheckpointDetail(runId: string, nodeId: string): Promise<import('./types').WorkflowDetail<import('./types').WorkflowCheckpoint>> {
+  return api.get(`/workflow-runs/${encodeURIComponent(runId)}/checkpoints/${encodeURIComponent(nodeId)}`);
+}

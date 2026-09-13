@@ -257,8 +257,9 @@ type:Decision retention     # OKF type filter
 
 **Tags** mode lists every tag with its count (frontmatter + inline, nested
 `a/b` tags included); clicking a tag jumps to a `tag:` search. Notes **>4 MiB**
-are indexed metadata-only (title/links/tags but no FTS body) so a giant log
-can't bloat the index.
+are indexed by filename and exact hash, without parsing body metadata or outgoing
+links. Incoming path links still resolve; body search, tags and aliases resume
+when the file returns below the limit.
 
 Vault notes are also **first-class results in the global ⌘F search**
 (`kind: "vault_note"`), routed back to `#/vault` with the right vault + note
@@ -589,7 +590,7 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 - **No filesystem watcher.** External edits are picked up by the freshness
   model (§3): within one 5 s poll cycle while the page is open, or at the next
   API/MCP read. They are not pushed instantly.
-- **Notes >4 MiB** are indexed metadata-only — no full-text body search.
+- **Notes >4 MiB** are indexed by filename/hash only — no body parsing, tags, aliases, outgoing links or full-text body search.
 - **Ambiguous basenames stay unresolved** by design (never silently picked);
   fix by qualifying the link path.
 - **Reserved files** (`index.md`/`log.md`) are excluded from the switcher and
@@ -640,7 +641,7 @@ PDF annotation, community plugins.
 | Clicking an unresolved link asks to create a note | That's the feature — Obsidian-style click-to-create for ghost links. |
 | **"Diagram error: Refused to evaluate a string as JavaScript…"** on a D2 diagram | The packaged app's CSP blocked D2's engine — it needs `'wasm-unsafe-eval'` (WASM) and `'unsafe-eval'` (its worker's ELK layout loader uses `new Function`). Both are in `apps/desktop/src-tauri/tauri.conf.json`'s `script-src` **deliberately**: script SOURCES stay `'self'`-only and rendered markdown is sanitized, so don't remove them without replacing the D2 engine. Mermaid never needed either. |
 | A diagram shows "Diagram error: Parse error …" with the source | The agent wrote invalid mermaid (unquoted special chars in labels is the usual cause). The source stays visible by design; the prepared-prompt templates instruct agents to verify fences before finishing. |
-| Big note isn't found by body search | Notes >4 MiB are metadata-only in the index (title/tags/links still work). |
+| Big note isn't found by body search | Notes >4 MiB skip body parsing. Search by filename; body tags, aliases and outgoing links resume after shrinking the file. |
 | `index.md` missing from switcher/graph | Reserved OKF files are excluded by default; the graph has a **Reserved files** toggle. |
 | Graph shows a **truncated** chip | The full-mode server edge budget (default 2M, degree-prioritized) was hit; use the filters/local mode or raise `?edge_budget=`. |
 | Writes fail with 403 | Vault mutations need workspace **Editor** (Product:Edit); reads only View. |
@@ -665,3 +666,11 @@ PDF annotation, community plugins.
   vault non-goal).
 - Bundled skills: `okf-authoring` (write/validate OKF in the vault),
   `vault-repo-docs` (document a repo as an OKF bundle).
+
+### Indexing responsiveness and large notes
+
+Saving an existing note updates its own metadata, tags, outgoing links, search entry and directory/switcher label before success is returned. Atomic source writes, hash conflicts and recoverable before/after versions still apply. Adding/removing paths reconciles incoming and unresolved links, including ambiguous basenames; titles and YAML aliases remain search/switcher metadata rather than new link-target names.
+
+External edits are checked on the existing five-second freshness schedule. Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
+
+Notes larger than 4 MiB keep their original bytes and exact streamed hash but skip content parsing/indexing. The Properties panel explains this limitation; the note remains findable by filename and can still be a path-link target. Body tags, aliases, headings and outgoing links are unavailable until the file is small enough to index. Explicit raw-note reads remain complete. Preparation runs outside async workers with two active jobs and bounded admission; a busy response asks the caller to retry rather than queueing unlimited body copies.

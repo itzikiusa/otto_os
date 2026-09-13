@@ -12,6 +12,7 @@ pub mod pr_checks;
 pub mod providers;
 pub mod recovery;
 pub mod types;
+mod worktree_probe;
 
 pub use http::{router, GitCtx};
 pub use local::{clone_repo, DiffTarget, LocalGit, ResolvedBase};

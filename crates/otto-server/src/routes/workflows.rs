@@ -2,7 +2,7 @@
 //! (describe a flow → we build the graph), run + run-status, triggers, and
 //! the human-approval resume endpoint.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use otto_core::domain::WorkspaceRole;
@@ -670,15 +670,32 @@ pub async fn cancel_run(
     repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
 }
 
-/// `GET /workflows/{id}/runs`
+#[derive(Default, Deserialize)]
+pub struct RunListQuery {
+    #[serde(default)]
+    summary: bool,
+}
+/// `GET /workflows/{id}/runs?summary=true` — legacy default keeps full rows.
 pub async fn list_runs(
     Path(id): Path<Id>,
+    Query(q): Query<RunListQuery>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<WorkflowRun>>> {
+) -> ApiResult<Json<Value>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_runs(&id).await.map_err(ApiError)?))
+    let rows = if q.summary {
+        serde_json::to_value(
+            otto_state::workflow_progress::run_summaries(&ctx.pool, &id)
+                .await
+                .map_err(ApiError)?,
+        )
+    } else {
+        serde_json::to_value(repo(&ctx).list_runs(&id).await.map_err(ApiError)?)
+    };
+    Ok(Json(
+        rows.map_err(|e| ApiError(Error::Internal(e.to_string())))?,
+    ))
 }
 
 /// Fill the derived `context_dir` field: the run's context directory

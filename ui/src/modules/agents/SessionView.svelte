@@ -205,10 +205,6 @@
   // Chat tab instant when picked. The default view is Terminal for every
   // session — the chat is opt-in per session, and the user's choice is
   // persisted (`otto_session_view:<id>`, winKey).
-  const conv = $derived(isAgent ? transcript.conversation({ sessionId }) : null);
-  $effect(() => {
-    if (conv) transcript.ensure(conv.src);
-  });
   const defaultView: SessionViewMode = 'terminal';
   const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
   const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');

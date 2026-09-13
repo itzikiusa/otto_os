@@ -334,12 +334,85 @@ fn lang_from_path(path: &std::path::Path) -> String {
     .to_string()
 }
 
+/// Request lifetime is separate from the lifetime of an in-flight OS syscall.
+struct BrowseCancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for BrowseCancel {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+async fn browse_work<T, F>(
+    admission: std::sync::Arc<tokio::sync::Semaphore>,
+    deadline: std::time::Duration,
+    work: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> ApiResult<T> + Send + 'static,
+{
+    let permit = admission.try_acquire_owned().map_err(|_| {
+        ApiError(Error::Conflict(
+            "Folder browsing is busy. Retry shortly.".into(),
+        ))
+    })?;
+    let cancel = BrowseCancel(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        false,
+    )));
+    let flag = cancel.0.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        // A canceled/timed-out request cannot release capacity while its actual
+        // blocking operation is still running. There is no unbounded task queue.
+        let _permit = permit;
+        work(flag)
+    });
+    match tokio::time::timeout(deadline, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(ApiError(Error::Internal(format!(
+            "Folder browse task failed: {error}"
+        )))),
+        Err(_) => Err(ApiError(Error::Upstream(
+            "Folder listing timed out. Retry or choose another folder.".into(),
+        ))),
+    }
+}
+
+fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
+    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+        Err(ApiError(Error::Conflict("Folder browsing canceled".into())))
+    } else {
+        Ok(())
+    }
+}
+
 /// `GET /api/v1/fs/browse?path=<abs-or-~-path>[&files=true]`
 pub async fn browse(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Query(params): Query<BrowseParams>,
 ) -> ApiResult<Json<FsBrowse>> {
+    static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let admission = ADMISSION
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone();
+    let data_dir = ctx.data_dir.clone();
+    browse_work(
+        admission,
+        std::time::Duration::from_secs(10),
+        move |cancel| browse_sync(data_dir, &user, params, &cancel),
+    )
+    .await
+    .map(Json)
+}
+
+fn browse_sync(
+    data_dir: std::path::PathBuf,
+    user: &User,
+    params: BrowseParams,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> ApiResult<FsBrowse> {
+    browse_canceled(cancel)?;
     // Resolve the target path.
     let raw = params
         .path
@@ -364,7 +437,8 @@ pub async fn browse(
     // secret-store deny-list on top. Done on the canonical (symlink/`..`-resolved)
     // path so escapes — including a path that's merely *outside* the roots — are
     // caught.
-    guard_dir(&canonical, &ctx.data_dir, &user)?;
+    guard_dir(&canonical, &data_dir, user)?;
+    browse_canceled(cancel)?;
 
     let path_str = canonical.to_string_lossy().into_owned();
 
@@ -379,6 +453,7 @@ pub async fn browse(
         .map_err(|e| ApiError(Error::Invalid(format!("cannot read directory: {e}"))))?;
 
     for entry_res in read_dir {
+        browse_canceled(cancel)?;
         let entry = match entry_res {
             Ok(e) => e,
             Err(_) => continue,
@@ -419,20 +494,21 @@ pub async fn browse(
     }
 
     // Sort each group case-insensitively, then concatenate dirs before files.
-    dirs.sort_by_key(|a| a.name.to_lowercase());
-    files.sort_by_key(|a| a.name.to_lowercase());
+    dirs.sort_by_cached_key(|a| a.name.to_lowercase());
+    files.sort_by_cached_key(|a| a.name.to_lowercase());
     dirs.extend(files);
 
     // Whether the browsed directory is itself a git repo (so the picker can let
     // you select it once you've navigated inside).
     let is_git_repo = canonical.join(".git").is_dir();
 
-    Ok(Json(FsBrowse {
+    browse_canceled(cancel)?;
+    Ok(FsBrowse {
         path: path_str,
         parent,
         is_git_repo,
         entries: dirs,
-    }))
+    })
 }
 
 /// Max file size we'll serve in full (~400 KB).
@@ -537,6 +613,114 @@ fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browse_sync_keeps_complete_sorted_listing_and_canonical_guards() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for name in ["zeta", "Alpha", ".hidden", ".git"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        std::fs::write(root.join("Bravo.txt"), "fixture").unwrap();
+        let user = otto_core::domain::User {
+            id: "fixture".into(),
+            username: "fixture".into(),
+            display_name: "Fixture".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = super::browse_sync(
+            root.clone(),
+            &user,
+            super::BrowseParams {
+                path: Some(root.to_string_lossy().into_owned()),
+                files: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![".hidden", "Alpha", "zeta", "Bravo.txt"]
+        );
+        assert!(result.is_git_repo);
+        let denied = super::browse_sync(
+            root,
+            &user,
+            super::BrowseParams {
+                path: Some("/etc".into()),
+                files: false,
+            },
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(matches!(denied.0, otto_core::Error::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn browse_work_keeps_capacity_until_canceled_blocking_job_exits() {
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::Duration;
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started) = tokio::sync::oneshot::channel();
+        let worker_gate = gate.clone();
+        let worker_admission = admission.clone();
+        let caller = tokio::spawn(async move {
+            super::browse_work(worker_admission, Duration::from_secs(10), move |cancel| {
+                let _ = started_tx.send(cancel.clone());
+                let (lock, wake) = &*worker_gate;
+                let mut ready = lock.lock().unwrap();
+                while !*ready {
+                    ready = wake.wait(ready).unwrap();
+                }
+                Ok(())
+            })
+            .await
+        });
+        let cancel = started.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(admission.available_permits(), 0);
+        let busy = super::browse_work(admission.clone(), Duration::from_secs(1), |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(matches!(busy.0, otto_core::Error::Conflict(_)));
+        let (lock, wake) = &*gate;
+        *lock.lock().unwrap() = true;
+        wake.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while admission.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn browse_work_timeout_leaves_async_runtime_responsive() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let result = super::browse_work(admission, Duration::from_millis(10), |_| {
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(())
+        })
+        .await;
+        assert!(matches!(
+            result.unwrap_err().0,
+            otto_core::Error::Upstream(_)
+        ));
+    }
+
     use super::sandbox;
     use std::path::Path;
     use std::sync::Mutex;

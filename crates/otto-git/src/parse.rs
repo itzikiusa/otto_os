@@ -386,6 +386,7 @@ pub fn parse_worktree_list(out: &str) -> Vec<WorktreeInfo> {
                 lock_reason: None,
                 prunable: false,
                 dirty: false,
+                dirty_known: false,
             });
             continue;
         }

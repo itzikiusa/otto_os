@@ -336,7 +336,7 @@ class EventsClient {
       this.backoff = 1000;
       if (reconnected) {
         void swarm.resync();
-        transcript.resyncAll(ws.currentId);
+        transcript.resyncVisible();
       }
     };
     this.sock.onmessage = (ev: MessageEvent) => {
@@ -360,7 +360,7 @@ class EventsClient {
         } else if (parsed.type === 'api_history_appended') {
           // API Client history is shared across human sends and agent MCP runs.
           // Refresh once after a burst so the current workspace stays live.
-          apiClient.noteHistoryAppended(parsed.workspace_id);
+          apiClient.noteHistoryAppended(parsed.workspace_id, parsed.entry_id);
         } else if (
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||

@@ -51,11 +51,11 @@
     ctx.queuedLive = activeQueued(conv.turns).map((q) => q.text);
   });
 
-  // Load on mount / when the source changes.
-  // `error == null` keeps a 401/404/500 from retrying forever (Retry is manual).
+  // The lease owns initial/reconnect reads and releases them on source change.
   $effect(() => {
-    const c = conv;
-    if (c.transcript == null && !c.loading && c.error == null) void c.load();
+    const source = src;
+    void conv; // Reacquire after daemon/user identity invalidates the conversation.
+    return untrack(() => transcript.acquireView(source));
   });
   // Board-task nudges for the composer status line.
   $effect(() => {
@@ -101,28 +101,6 @@
       ws.sessions.find((s) => s.id === sessionId)?.provider_session_id != null,
   );
 
-  // ---- parity with the terminal: opening the chat RESUMES a suspended session --
-  // Reopening a terminal auto-resumes (the WS attach calls `ensure_live`);
-  // a chat never attached, so a session you stepped away from for a few
-  // minutes came back as a dead "Resume" banner. The per-session touch now
-  // does the same `ensure_live`, so send one on mount while suspended (once —
-  // the status flip to working/idle re-runs nothing here; the `alive` effect
-  // below takes over and keeps the tail armed).
-  $effect(() => {
-    if (!suspended) return;
-    const c = conv;
-    untrack(() => void c.touch());
-  });
-  // Remount over an already-loaded conversation: the tail may have lapsed
-  // while the view was away (a fresh tail starts at the file's END, so records
-  // written in the gap never arrive as deltas) — re-read the newest page.
-  $effect(() => {
-    const c = conv;
-    untrack(() => {
-      if (c.transcript != null && !c.loading) void c.resync();
-    });
-  });
-
   // ---- liveness: this VIEW keeps the server tail armed -----------------------
   // The tail stops a few minutes after the last touch, so an open chat pings
   // once a minute (only while mounted and the session is alive — closing the
@@ -131,18 +109,9 @@
   $effect(() => {
     if (!alive) return;
     const c = conv;
-    void c.touch();
     const id = setInterval(() => void c.touch(), TOUCH_EVERY_MS);
-    // Back from a hidden tab / sleep: catch up on what the socket missed and
-    // re-arm — the reader should never have to press Reload.
-    const onVis = (): void => {
-      if (!document.hidden) void c.resync();
-    };
-    document.addEventListener('visibilitychange', onVis);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', onVis);
-    };
+    // Visibility recovery is owned once per window by TranscriptLifecycle.
+    return () => clearInterval(id);
   });
   // No transcript yet (first prompt not sent, provider id not captured, Codex
   // rollout not matched): nothing will push an event, so retry the read every
@@ -151,7 +120,7 @@
   $effect(() => {
     if (!alive || !t?.unavailable_reason || conv.loading) return;
     const c = conv;
-    const id = setTimeout(() => void c.load(), RETRY_EVERY_MS);
+    const id = setTimeout(() => c.requestRefresh(), RETRY_EVERY_MS);
     return () => clearTimeout(id);
   });
 

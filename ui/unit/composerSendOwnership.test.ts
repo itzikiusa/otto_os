@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
+import { TranscriptLifecycle } from '../src/lib/stores/transcriptLifecycle.ts';
 
 test('a reopened composer shares the pending send claim while other sessions remain usable', () => {
   const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
+    './transcriptLifecycle': { TranscriptLifecycle },
     '../win': { winKey: (key: string) => key },
     '../api/client': { api: {}, isAbortError: () => false },
   });
@@ -22,6 +24,7 @@ test('production send keeps a remounted draft and allows only one pending reques
   const ts = (await import('typescript')).default;
   const { deferred } = await import('./sourceHarness.ts');
   const { transcript } = loadSource(new URL('../src/lib/stores/transcript.svelte.ts', import.meta.url), {
+    './transcriptLifecycle': { TranscriptLifecycle },
     '../win': { winKey: (key: string) => key }, '../api/client': { api: {} },
   });
   const source = readFileSync(new URL('../src/modules/agents/conversation/Composer.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];

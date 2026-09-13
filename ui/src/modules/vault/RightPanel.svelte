@@ -94,6 +94,9 @@
       <span class="badge">{props.length}</span>
     </button>
     {#if open.props}
+      {#if vault.note?.meta.content_index_status === 'size_limited'}
+        <div class="none warn">Content indexing skipped: this note exceeds 4 MiB. Search by file name; the original file is unchanged.</div>
+      {/if}
       {#if vault.note?.meta.parse_error}
         <div class="none warn">Frontmatter is not parseable YAML</div>
       {/if}

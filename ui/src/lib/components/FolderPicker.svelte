@@ -12,6 +12,8 @@
   import type { FsBrowse, FsEntry } from '../api/types';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import VirtualList from './VirtualList.svelte';
+  import { moveGrid, gridAction } from './folderGrid';
 
   interface Props {
     title?: string;
@@ -32,6 +34,12 @@
   // Type-to-filter the current listing; "Show hidden" reveals dotfiles
   // (default off — dotfiles are hidden so the listing isn't cluttered).
   let filter = $state('');
+  let filterElement: HTMLInputElement | undefined = $state();
+  let retryElement: HTMLButtonElement | undefined = $state();
+  let gridElement: HTMLDivElement | undefined = $state();
+  let position = $state({ index: 0, action: 0 });
+  let scrollVersion = $state(0);
+  const gridId = `folder-grid-${crypto.randomUUID()}`;
   let showHidden = $state(false);
 
   // The entries actually rendered: dotfiles hidden unless `showHidden`, and
@@ -51,11 +59,19 @@
   let storageKey = '';
   let crumbsElement: HTMLElement | undefined = $state();
   let requestSeq = 0;
+  let requestController: AbortController | null = null;
   let lastAttempt: { path: string; index?: number } = { path: '' };
   const backIndex = $derived(historyTarget(history, -1));
   const forwardIndex = $derived(historyTarget(history, 1));
 
   async function load(path: string, index?: number): Promise<void> {
+    const restoreFocus = !!gridElement && (document.activeElement === gridElement || gridElement.contains(document.activeElement));
+    if (restoreFocus) filterElement?.focus();
+    requestController?.abort();
+    const controller = new AbortController();
+    requestController = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 12000);
     const seq = ++requestSeq;
     lastAttempt = { path, index };
     loading = true;
@@ -63,7 +79,7 @@
     try {
       let q = path ? `?path=${encodeURIComponent(path)}` : '';
       if (files) q = q ? `${q}&files=true` : '?files=true';
-      const next = await api.get<FsBrowse>(`/fs/browse${q}`);
+      const next = await api.get<FsBrowse>(`/fs/browse${q}`, controller.signal);
       if (seq !== requestSeq) return;
       view = next;
       updateShortcuts(current => rememberFolder(current, next.path));
@@ -77,11 +93,42 @@
       await tick();
       if (seq === requestSeq && crumbsElement) crumbsElement.scrollLeft = crumbsElement.scrollWidth;
     } catch (e) {
-      if (seq === requestSeq) error = (e instanceof Error ? e.message : String(e)) || 'Could not open folder.';
+      if (seq === requestSeq) error = timedOut
+        ? 'Folder listing timed out. Retry or choose another folder.'
+        : (e instanceof Error ? e.message : String(e)) || 'Could not open folder.';
     } finally {
-      if (seq === requestSeq) loading = false;
+      clearTimeout(timeout);
+      if (seq === requestSeq) {
+        loading = false;
+        if (requestController === controller) requestController = null;
+        if (restoreFocus) { await tick(); if (seq === requestSeq) (error ? retryElement : gridElement)?.focus(); }
+      }
     }
   }
+
+  function disposeRequest() { requestSeq++; requestController?.abort(); requestController = null; }
+  function closePicker() { disposeRequest(); onclose(); }
+  function pick(path: string) { disposeRequest(); onpick(path); }
+  function cellId(index: number, action: number) { return `${gridId}-${encodeURIComponent(shown[index]?.path ?? '')}-${action}`; }
+  function activate(index: number, action: number) {
+    const entry = shown[index]; if (!entry) return;
+    const intent = gridAction(entry, action, gitOnly);
+    if (intent === 'open') void load(entry.path);
+    else if (intent === 'pick') pick(entry.path);
+  }
+  function gridKey(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || shown.length === 0) return;
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); activate(position.index, position.action); return; }
+    const next = moveGrid(position, event.key, shown.length, Math.max(1, Math.floor((gridElement?.clientHeight ?? 288) / 32)));
+    if (!next) return;
+    event.preventDefault(); event.stopPropagation();
+    if (!gridAction(shown[next.index], next.action, gitOnly)) next.action = 0;
+    position = next; scrollVersion++;
+  }
+  $effect(() => {
+    void filter; void showHidden; void view?.path;
+    untrack(() => { position = { index: 0, action: 0 }; scrollVersion++; });
+  });
 
   function updateShortcuts(update: (current: ReturnType<typeof emptyShortcuts>) => ReturnType<typeof emptyShortcuts>) {
     // Merge against storage at mutation time: another window may have pinned a
@@ -133,10 +180,10 @@
       void load(initial);
     });
   });
-  onDestroy(() => { requestSeq++; });
+  onDestroy(disposeRequest);
 </script>
 
-<Modal {title} {onclose} width={620}>
+<Modal {title} onclose={closePicker} width={620}>
   <div class="navigation" aria-label="Folder navigation">
     <button class="btn" disabled={loading || backIndex === null} onclick={() => traverse(backIndex)}>Back</button>
     <button class="btn" disabled={loading || forwardIndex === null} onclick={() => traverse(forwardIndex)}>Forward</button>
@@ -157,7 +204,7 @@
 
   <div class="pick-tools">
     <!-- svelte-ignore a11y_autofocus -->
-    <input class="input filter-input" placeholder="Filter…" bind:value={filter} autofocus />
+    <input class="input filter-input" placeholder="Filter…" bind:this={filterElement} bind:value={filter} autofocus />
     <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden
@@ -192,7 +239,7 @@
       <div class="dim pad">Loading…</div>
     {:else if error}
       <div class="err pad" role="alert">{error}</div>
-      <button class="btn retry" onclick={() => load(lastAttempt.path, lastAttempt.index)}>Retry</button>
+      <button class="btn retry" bind:this={retryElement} onclick={() => load(lastAttempt.path, lastAttempt.index)}>Retry</button>
     {:else if view}
       {#if view.parent !== null}
         <button class="row" onclick={() => load(view!.parent!)}>
@@ -201,29 +248,33 @@
           <span class="dim">up</span>
         </button>
       {/if}
-      {#each shown as e (e.path)}
-        {#if e.is_dir}
-          <div class="row-wrap">
-            <button class="row" onclick={() => load(e.path)}>
-              <Icon name={e.is_git_repo ? 'branch' : 'folder'} size={14} />
-              <span class="grow ellipsis">{e.name}</span>
-              {#if e.is_git_repo}<span class="chip">git</span>{/if}
-            </button>
-            {#if gitOnly ? e.is_git_repo : true}
-              <button class="use" title="Use this folder" onclick={() => onpick(e.path)}>Use</button>
-            {/if}
-          </div>
-        {:else}
-          <!-- file row: only rendered when files=true (backend filters) -->
-          <div class="row-wrap">
-            <button class="row file-row" onclick={() => onpick(e.path)}>
-              <Icon name="file" size={14} />
-              <span class="grow ellipsis">{e.name}</span>
-              <span class="dim use-file">select</span>
-            </button>
-          </div>
-        {/if}
-      {/each}
+      {#if shown.length > 0}
+        <div class="folder-grid" bind:this={gridElement} role="grid" tabindex="0"
+          aria-label="Folder entries. Arrow keys choose a row and Open or Use; Enter activates."
+          aria-rowcount={shown.length} aria-colcount={2}
+          aria-activedescendant={cellId(position.index, position.action)} onkeydown={gridKey}>
+          <VirtualList items={shown} estimateHeight={32} pinnedIndex={position.index}
+            scrollIndex={position.index} {scrollVersion} tabindex={-1} key={entry => entry.path} class="picker-rows">
+            {#snippet row(e: FsEntry, index: number)}
+              <div class="row-wrap" role="row" aria-rowindex={index + 1}>
+                <div class="entry-cell" role="gridcell" id={cellId(index, 0)} aria-colindex={1} aria-selected={position.index === index && position.action === 0}>
+                  <button class="row" class:file-row={!e.is_dir} tabindex="-1" onclick={() => activate(index, 0)}>
+                    <Icon name={e.is_dir ? (e.is_git_repo ? 'branch' : 'folder') : 'file'} size={14} />
+                    <span class="grow ellipsis">{e.name}</span>
+                    {#if e.is_git_repo}<span class="chip">git</span>{/if}
+                    {#if !e.is_dir}<span class="dim use-file">select</span>{/if}
+                  </button>
+                </div>
+                {#if gridAction(e, 1, gitOnly)}
+                  <div role="gridcell" id={cellId(index, 1)} aria-colindex={2} aria-selected={position.index === index && position.action === 1}>
+                    <button class="use" tabindex="-1" title="Use this folder" onclick={() => activate(index, 1)}>Use</button>
+                  </div>
+                {/if}
+              </div>
+            {/snippet}
+          </VirtualList>
+        </div>
+      {/if}
       {#if shown.length === 0}
         <div class="dim pad">
           {#if view.entries.length === 0}
@@ -239,12 +290,12 @@
   </div>
 
   {#snippet footer()}
-    <button class="btn" onclick={onclose}>Cancel</button>
+    <button class="btn" onclick={closePicker}>Cancel</button>
     <!-- Always selectable when picking a plain folder; in gitOnly mode, selectable
          once you've navigated INTO a git repo (so you're not forced to pick it
          from the parent listing). -->
     {#if !files && (!gitOnly || view?.is_git_repo)}
-      <button class="btn primary" disabled={!view || loading || !!error} onclick={() => view && onpick(view.path)}>
+      <button class="btn primary" disabled={!view || loading || !!error} onclick={() => view && pick(view.path)}>
         {gitOnly ? 'Use this repository' : 'Use this folder'}
       </button>
     {/if}
@@ -334,12 +385,21 @@
     flex: 1;
     min-width: 0;
     height: 320px;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
   }
+  .folder-grid { flex: 1; min-height: 0; outline-offset: -2px; }
+  .folder-grid :global(.picker-rows) { height: 100%; }
+  .entry-cell { flex: 1; min-width: 0; }
+  .entry-cell .row { width: 100%; height: 32px; }
+  .folder-grid:focus-within [aria-selected="true"] { background: var(--surface); outline: 1px solid var(--accent); outline-offset: -1px; }
+  .browser > .row { flex: none; height: 32px; }
   .row-wrap {
+    height: 32px;
     display: flex;
     align-items: center;
   }

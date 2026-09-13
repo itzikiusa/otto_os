@@ -291,6 +291,10 @@ impl VaultEngine {
         };
         Self::check_rel(&item.stored_path)?;
         let dest = Self::check_rel(destination.unwrap_or(&item.original_path))?;
+        let state = self.index_state(id);
+        state.ensure(self.store(), id).await?;
+        let publication = state.publication.lock().await;
+        state.mutated(&[&dest]);
         let (source_parent, source_name) =
             Self::text_parent(&v.root_path, &format!(".trash/{}", item.stored_path))?;
         let (target_parent, target_name) = Self::text_parent(&v.root_path, &dest)?;
@@ -313,6 +317,7 @@ impl VaultEngine {
             rustix::fs::unlinkat(parent, name, AtFlags::empty())
                 .map_err(|e| Error::Internal(format!("remove restored trash marker: {e}")))?;
         }
+        drop(publication);
         self.scan(id).await?;
         Ok(dest)
     }

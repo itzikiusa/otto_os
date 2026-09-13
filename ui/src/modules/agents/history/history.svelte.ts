@@ -1,16 +1,17 @@
 // History store — every past Claude/Codex conversation Otto knows about:
 // its own session rows (all statuses, archived included) merged with transcripts
 // found on disk that no session claims (`status:'on_disk'`). Backed by
-// `GET /workspaces/{wid}/history` (docs/design/conversation-view.md §4.3/§4.6).
+// `GET /workspaces/{wid}/history/page` (docs/design/conversation-view.md §4.3/§4.6).
 //
 // Filters are server-side where the API has a knob (q / provider / cwd /
 // status) and client-side for the date window. Paging is keyset: `before` is
-// the oldest loaded row's `last_active_at`.
+// the last scanned metadata row (including pages with no matches).
 
 import { api } from '../../../lib/api/client';
 import { activity } from '../../../lib/stores/activity.svelte';
 import type {
   HistoryEntry,
+  HistoryPage,
   HistoryImportReq,
   HistoryStatus,
   Session,
@@ -86,6 +87,7 @@ class HistoryStore {
   /** Workspace the current list belongs to (reload when it changes). */
   private wsId: string | null = null;
   private seq = 0;
+  private nextCursor: string | null = null;
 
   selected = $derived<HistoryEntry | null>(
     this.entries.find((e) => entryKey(e) === this.selectedKey) ?? null,
@@ -127,14 +129,14 @@ class HistoryStore {
     );
   });
 
-  private query(before?: string): string {
+  private query(cursor?: string): string {
     const p = new URLSearchParams();
     const q = this.q.trim();
     if (q) p.set('q', q);
     if (this.provider !== 'all') p.set('provider', this.provider);
     if (this.status !== 'all') p.set('status', this.status);
     if (this.cwd) p.set('cwd', this.cwd);
-    if (before) p.set('before', before);
+    if (cursor) p.set('cursor', cursor);
     p.set('limit', String(PAGE));
     return p.toString();
   }
@@ -147,10 +149,12 @@ class HistoryStore {
     this.loadingMore = false;
     this.error = null;
     try {
-      const rows = await api.get<HistoryEntry[]>(`/workspaces/${wsId}/history?${this.query()}`);
+      const result = await api.get<HistoryPage>(`/workspaces/${encodeURIComponent(wsId)}/history/page?${this.query()}`);
+      const rows = result.entries;
       if (my !== this.seq) return; // a newer load superseded this one
       this.entries = rows;
-      this.hasMore = rows.length >= PAGE;
+      this.nextCursor = result.next_cursor;
+      this.hasMore = this.nextCursor != null;
       if (this.selectedKey && !rows.some((e) => entryKey(e) === this.selectedKey)) {
         // Keep the selection only while it is in the list (filters may hide it).
         this.selectedKey = null;
@@ -165,21 +169,23 @@ class HistoryStore {
 
   /** Append the next page (older rows). */
   async loadMore(): Promise<void> {
-    if (!this.wsId || this.loading || this.loadingMore || !this.hasMore || this.entries.length === 0) return;
+    if (!this.wsId || this.loading || this.loadingMore || !this.hasMore || !this.nextCursor) return;
     const my = this.seq;
     const wsId = this.wsId;
     const query = this.query();
     const current = () => my === this.seq && wsId === this.wsId && query === this.query();
-    const before = this.entries[this.entries.length - 1].last_active_at;
+    const cursor = this.nextCursor;
     this.loadingMore = true;
     try {
-      const rows = await api.get<HistoryEntry[]>(
-        `/workspaces/${wsId}/history?${this.query(before)}`,
+      const result = await api.get<HistoryPage>(
+        `/workspaces/${encodeURIComponent(wsId)}/history/page?${this.query(cursor)}`,
       );
+      const rows = result.entries;
       if (!current()) return;
       const have = new Set(this.entries.map(entryKey));
       this.entries = [...this.entries, ...rows.filter((e) => !have.has(entryKey(e)))];
-      this.hasMore = rows.length >= PAGE;
+      this.nextCursor = result.next_cursor;
+      this.hasMore = this.nextCursor != null;
     } catch (e) {
       if (!current()) return;
       this.error = e instanceof Error ? e.message : String(e);

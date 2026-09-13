@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -23,7 +24,6 @@ use otto_core::Result;
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
-use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
@@ -44,7 +44,7 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// cache, exactly like [`crate::drivers::mysql::MysqlDriver`].
 #[derive(Default)]
 pub struct PostgresDriver {
-    pools: Mutex<HashMap<String, sqlx::PgPool>>,
+    pools: ResourceCache<sqlx::PgPool>,
     completions: crate::complete::CompletionCache,
 }
 
@@ -496,8 +496,17 @@ impl Driver for PostgresDriver {
 
     /// Evict + close the cached pool for `cache_key` (connection close, or a
     /// config change superseded it); also drops the matching completion snapshot.
+    fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        let captured = Self::default();
+        for (key, value) in self.pools.take_where(|key| key == cache_key) {
+            captured.pools.insert_ready(key, value);
+        }
+        self.completions.invalidate(cache_key);
+        Some(std::sync::Arc::new(captured))
+    }
+
     async fn close(&self, cache_key: &str) {
-        let pool = self.pools.lock().await.remove(cache_key);
+        let pool = self.pools.remove(cache_key);
         if let Some(pool) = pool {
             pool.close().await;
         }
@@ -563,7 +572,9 @@ impl Driver for PostgresDriver {
         let QueryHandle::PostgresBackendPid(pid) = handle else {
             return Ok(());
         };
-        let pool = self.pool(cfg).await?;
+        let Some(pool) = self.pools.get_ready(&cfg.cache_key()) else {
+            return Ok(());
+        };
         let _ = sqlx::query("SELECT pg_cancel_backend($1)")
             .bind(pid)
             .execute(&pool)
@@ -1279,14 +1290,14 @@ impl PostgresDriver {
     }
 
     async fn pool(&self, cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
-        let key = cfg.cache_key();
-        let mut cache = self.pools.lock().await;
-        if let Some(pool) = cache.get(&key) {
-            return Ok(pool.clone());
-        }
-        let pool = build_pool(cfg).await?;
-        cache.insert(key, pool.clone());
-        Ok(pool)
+        self.pools
+            .get_or_try_init(
+                cfg.cache_key(),
+                cfg.lifecycle.as_ref(),
+                |_| true,
+                build_pool(cfg),
+            )
+            .await
     }
 }
 

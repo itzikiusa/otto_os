@@ -4,17 +4,21 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
+import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 
-function setup(overrides: Record<string, unknown> = {}) {
+function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
   const ws = {currentId: 'A'};
   const api = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
   const context = {exports: {} as Record<string, any>,
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v}), $derived: (v: unknown) => v,
-    crypto: {randomUUID}, URL, AbortController, setTimeout, clearTimeout,
+    crypto: {randomUUID}, URL, AbortController, DOMException, setTimeout, clearTimeout,
     localStorage: {getItem() {return null;},setItem() {}},
     require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
       : p.includes('workspace.svelte') ? {ws}
       : p.includes('toast') ? {toasts: {error() {},success() {}}}
+      : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
+      : p.endsWith('/scriptRunner') ? {runScript}
+      : p.endsWith('/scripts') ? {runPreRequest: () => ({logs:[],tests:[]})}
       : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
@@ -65,4 +69,50 @@ test('OAuth completion updates originating inactive tab and keeps later auth edi
   v.tabs[0].auth={type:'bearer',token:'user-edit'};
   v.applySavedAuth('A',{id:'oauth',auth:{type:'oauth2',access_token:{$secret:'new'}}},original);
   assert.equal(v.tabs[0].auth.token,'user-edit');
+});
+
+
+test('cancel during asynchronous pre-script prevents HTTP and clears sending', async () => {
+  let sent=0, release!: (value: unknown) => void;
+  const script=new Promise(r=>{release=r;});
+  const {v}=setup({post:async()=>{sent++;return {headers:[],status:200};}},()=>script);
+  v.draft={...v.draft,url:'https://example.test',pre_request_script:'console.log(1)'};
+  const pending=v.execute();
+  assert.equal(v.sending,true);assert.equal(sent,0);
+  v.cancelExecute();assert.equal(v.sending,false);
+  release({run:{logs:[],tests:[]},request:{method:'GET',url:'https://example.test',headers:[],body:''},vars:{late:'no'}});
+  await pending;assert.equal(sent,0);assert.equal(v.runtimeVars.late,undefined);
+});
+
+test('closing the initiating tab cancels a pending pre-script', async () => {
+  let signal: AbortSignal | undefined;
+  const {v}=setup({},(_input,s)=>{signal=s;return new Promise((_resolve,reject)=>s.addEventListener('abort',()=>reject(new DOMException('canceled','AbortError'))));});
+  v.draft={...v.draft,url:'https://example.test',pre_request_script:'while(true){}'};
+  const pending=v.execute();v.closeTab(0);
+  assert.equal(signal?.aborted,true);await pending;assert.equal(v.sending,false);
+});
+
+test('replaced execution ignores late pre-script even with the same tab identity', async () => {
+  let release!: (value: unknown) => void;let sent=0;
+  const slow=new Promise(r=>{release=r;});let scripts=0;
+  const {v}=setup({post:async()=>{sent++;return {headers:[],status:200};}},async input=>++scripts===1?slow:{run:{logs:[],tests:[]},request:input.request,vars:{current:'yes'}});
+  v.draft={...v.draft,url:'https://example.test',pre_request_script:'console.log(1)'};
+  const first=v.execute();await v.execute();
+  release({run:{logs:[],tests:[]},request:{method:'GET',url:'https://old.test',headers:[],body:''},vars:{old:'no'}});
+  await first;assert.equal(sent,1);assert.equal(v.runtimeVars.old,undefined);assert.equal(v.runtimeVars.current,'yes');
+});
+
+
+test('environment stays with the execution snapshot while pre-script is pending', async () => {
+  let release!: (value: unknown) => void;
+  const script = new Promise(r => { release = r; });
+  let dispatched: any;
+  const {v} = setup({post: async (_url: string, body: any) => { dispatched = body; return {headers:[],status:200}; }}, () => script);
+  v.activeEnv = {id:'env-a'};
+  v.draft = {...v.draft,url:'https://example.test',pre_request_script:'console.log(1)'};
+  const pending = v.execute();
+  v.activeEnv = {id:'env-b'};
+  release({run:{logs:[],tests:[]},request:{method:'GET',url:'https://example.test',headers:[],body:''},vars:{}});
+  await pending;
+  assert.equal(dispatched.environment_id, 'env-a');
 });

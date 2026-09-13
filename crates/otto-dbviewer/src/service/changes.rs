@@ -173,7 +173,7 @@ impl DbViewerService {
             let target = child.as_deref().ok_or_else(|| {
                 Error::Forbidden("approved execution requires one explicit database target".into())
             })?;
-            for grant in r.driver.native_grants(&r.config).await? {
+            for grant in r.with_lifecycle(r.driver.native_grants(&r.config)).await? {
                 if grant.child != target
                     || (grant.operation != "db_browse" && !operations.contains(&grant.operation))
                 {
@@ -223,7 +223,7 @@ impl DbViewerService {
             ..Default::default()
         };
         let token = CancelToken::new();
-        let execution = r.driver.run_tracked(&r.config, &req, &token);
+        let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, &req, &token));
         tokio::pin!(execution);
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {

@@ -206,3 +206,41 @@ async fn recovery_routes_require_editor_for_restore_and_allow_viewer_reads() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test]
+async fn note_wire_metadata_reports_index_limit_without_truncating_source() {
+    use sha2::{Digest, Sha256};
+    let (app, dir, id) = fixture(WorkspaceRole::Viewer).await;
+    for (name, body, expected) in [
+        ("small.md", "# Small\n#tag".to_string(), "full"),
+        (
+            "large.md",
+            format!("[[small]] #tag\n{}", "x".repeat(4 * 1024 * 1024)),
+            "size_limited",
+        ),
+    ] {
+        std::fs::write(dir.path().join(name), &body).unwrap();
+        let req = Request::builder()
+            .uri(format!(
+                "/workspaces/{WS}/vault/vaults/{id}/note?path={name}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["raw"], body);
+        assert_eq!(result["meta"]["content_index_status"], expected);
+        assert_eq!(
+            result["meta"]["hash"],
+            format!("{:x}", Sha256::digest(body.as_bytes()))
+        );
+        if expected == "size_limited" {
+            assert_eq!(result["meta"]["tags"], json!([]));
+            assert_eq!(result["outgoing"], json!([]));
+        }
+    }
+}

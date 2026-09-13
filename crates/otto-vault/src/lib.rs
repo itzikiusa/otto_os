@@ -7,8 +7,10 @@
 
 pub mod engine;
 pub mod http;
+mod index;
 pub mod okf;
 pub mod parse;
+mod prepare;
 mod recovery;
 pub mod resolve;
 pub mod scan;

@@ -575,3 +575,12 @@ The native formats were checked against these primary sources:
 Automated tests validate serialization, existing Workbench parser compatibility,
 credential opt-in and isolated FileStore authorization/error handling. They do not
 launch third-party database applications or connect to real database/SSH hosts.
+
+
+### Upload progress probes
+
+Upload progress requests metadata for the exact owned staging file rather than enumerating its parent directory. Successful probes run at a one-second cadence; failures back off to two, four, then eight seconds, resetting after success. Authorization is still checked on the independent one-second transfer tick. Unavailable progress keeps the last confirmed byte count.
+
+Each probe has a500ms deadline and separate32KiB stdout/stderr limits; timeout, excess output or cancellation kills/reaps that probe’s owned client process. Copy timeout remains1–600seconds. Final publication is separately awaited and retains its existing cancellation/outcome semantics.
+
+Literal path handling follows the [OpenSSH SFTP batch parser and glob implementation](https://raw.githubusercontent.com/openssh/openssh-portable/master/sftp.c): quoted wildcard characters and explicitly escaped braces cannot broaden the probe. Numeric long-list output must name the requested file (normalizing harmless `./` and repeated separators); ambiguous results, directories, and directory-child output are ignored. Local tests exercise special filenames over OpenSSH’s stdio mode without SSH or network connections. These limits bound probe output and waiting, not the remote server’s internal work or an operating-system syscall.

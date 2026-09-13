@@ -1394,6 +1394,9 @@ pub struct WorktreeInfo {
     /// the check fails or the entry is prunable).
     #[serde(default)]
     pub dirty: bool,
+    /// Whether the bounded status probe succeeded; unknown is never force-safe.
+    #[serde(default)]
+    pub dirty_known: bool,
 }
 
 /// One entry from `git submodule status`, enriched with `.gitmodules` config.

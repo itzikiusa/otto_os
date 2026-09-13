@@ -222,10 +222,18 @@ All auth fields accept `{{var}}` substitution.
   set variables for chaining. Supported matchers: `toBe`, `toEqual`/`eql`,
   `toContain`, `toBeTruthy`, `toBeFalsy`, `above`, `below`.
 
-> **Interactive runs execute scripts in the webview, client-side**
-> (`new Function(...)`); **automation runs execute them in the daemon** (a
-> `boa`-based engine exposing the same `pm` API). Neither is a security
-> sandbox — they are a convenience runtime for your own endpoints. Scripts
+> **Interactive runs execute scripts in a dedicated client-side Worker**;
+> **automation runs execute them in the daemon** (a `boa`-based engine exposing
+> the same `pm` API). Interactive scripts have a 5-second elapsed deadline;
+> Cancel, closing their tab, workspace changes and replacement sends terminate
+> their Worker. Each script admits at most 8 MiB of input/result data and retains
+> at most 1,000 log/test entries with 256 KiB of text. These are conservative
+> data budgets, not an absolute JavaScript heap limit. Oversized scripted input
+> is rejected before posting; unscripted requests retain their existing limits.
+> The `pm` API is preserved; DOM/window globals are unavailable in Workers.
+> Failed/canceled scripts do not publish partial variables, and a failed
+> pre-request script does not send HTTP. Neither runtime is a security sandbox.
+> Scripts
 > **persist with the saved request** (in `extras.scripts`) and round-trip to
 > Postman `prerequest`/`test` events on git sync.
 
@@ -705,3 +713,12 @@ scripts it did not intend to change.
 | Backend (REST) | `crates/otto-server/src/routes/api_client.rs`, `grpc.rs`, `api_stream.rs` |
 | SSRF guard | `crates/otto-netguard/src/lib.rs` |
 | Domain / contract DTOs | `crates/otto-core/src/domain.rs`, `crates/otto-core/src/api.rs`, `docs/contracts/api.md` |
+
+
+### History responsiveness and replay
+
+The sidebar and compact panel load metadata from `GET /workspaces/{wid}/api-client/history/summaries`. They fetch the retained full `ApiHistoryEntry` only when you select an execution. Loading a historical request shows progress and leaves the draft intact if the request fails, you switch tabs/workspaces, or you edit before it finishes. Loading history does not send the request automatically.
+
+Direct sends and history append events share a150ms refresh window, one active summary request, and at most one pending follow-up per workspace. New append IDs missing from an in-flight snapshot trigger the follow-up; duplicate events already represented by that snapshot do not. Full history and MCP response contracts remain available for existing integrations.
+
+Migration0132 adds compact metadata and performs one cold pass over existing request JSON. Invalid legacy JSON does not abort migration; original request and response bytes are preserved. SQLite triggers maintain metadata for regular writes and older archive imports. Listing summaries neither loads response bodies nor repeatedly extracts metadata from large retained request bodies.

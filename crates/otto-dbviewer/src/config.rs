@@ -92,6 +92,7 @@ pub fn parse(conn: &Connection, secret: Option<String>) -> Result<ParsedProfile>
     };
 
     let config = ResolvedConfig {
+        lifecycle: None,
         engine,
         host,
         port,

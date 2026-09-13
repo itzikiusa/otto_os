@@ -1291,3 +1291,12 @@ without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
   the ownership tiers that gate saved queries / dashboards / widgets.
 - **API contract**: `docs/contracts/api.md` (DB Explorer engine access + saved
   queries/dashboards/widgets).
+
+
+### Connection initialization and close
+
+Database driver and SSH tunnel setup use independent initialization slots per configuration. A slow first handshake for one endpoint does not block another endpoint’s cached connection. Concurrent requests for the same configuration share setup. Redis logical databases retain separate connection managers.
+
+Closing a connection retires the generation held by already-started requests, including requests still resolving credentials/tunnels or waiting for native verification. Such requests cannot reopen a pool after close. An explicit later request can reconnect once cleanup completes; requests arriving during close receive a connection-closed error with retry guidance.
+
+Close cleanup owns the retired pools and tunnel leases independently of the HTTP caller. It attempts native cancellation before physical teardown, with separate five-second aggregate budgets for cancellation and driver shutdown. Cleanup then drops only its captured ownership; canceling the close request cannot abandon those resources or cause later cleanup to remove a new generation. Already-issued remote operations retain best-effort cancellation semantics; close is not a remote transaction rollback guarantee. Held tunnel leases remain alive while their owning operation/cancellation finishes.

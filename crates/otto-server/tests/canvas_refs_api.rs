@@ -248,6 +248,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         connections,
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
+        transcript_cache: Default::default(),
         brokers,
         mcp,
         spawner: Arc::new(NoopSpawner),

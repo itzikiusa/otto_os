@@ -23,7 +23,7 @@
     // offsetParent filters display:none/collapsed elements (a fixed-position
     // sheet still gives its children an offsetParent).
     return Array.from(sheetEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (el) => el.offsetParent !== null || el === document.activeElement,
+      (el) => el.tabIndex >= 0 && (el.offsetParent !== null || el === document.activeElement),
     );
   }
 
@@ -51,6 +51,10 @@
   });
 
   function onKeydown(e: KeyboardEvent) {
+    // Nested pickers are separate sheets. Only the top sheet may trap keys;
+    // otherwise an underlying New Session modal steals focus on every Tab.
+    const sheets = document.querySelectorAll<HTMLElement>('.sheet[role="dialog"][aria-modal="true"]');
+    if (sheets[sheets.length - 1] !== sheetEl) return;
     if (e.key === 'Escape') {
       e.stopPropagation();
       onclose();

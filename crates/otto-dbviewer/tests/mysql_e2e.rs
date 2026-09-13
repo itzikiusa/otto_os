@@ -14,6 +14,7 @@ use serde_json::json;
 
 fn cfg() -> ResolvedConfig {
     ResolvedConfig {
+        lifecycle: None,
         engine: Engine::Mysql,
         host: "127.0.0.1".into(),
         port: 13306,

@@ -1168,7 +1168,9 @@
   async function wtRemove(w: WorktreeInfo): Promise<void> {
     // A dirty tree needs --force and the confirm must say what that discards.
     // Removal always KEEPS the branch (and its commits) either way.
-    const detail = w.dirty
+    const detail = !w.dirty_known
+      ? ' Its changes could not be checked; removal will proceed only if Git can do so safely.'
+      : w.dirty
       ? ' It has UNCOMMITTED changes that will be discarded.'
       : w.locked
         ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
@@ -1181,7 +1183,7 @@
     try {
       worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/remove`, {
         path: w.path,
-        force: w.dirty || w.locked,
+        force: w.dirty_known === true && (w.dirty || w.locked),
       });
       toasts.success('Worktree removed', wtName(w));
     } catch (e) {
@@ -2626,7 +2628,8 @@
             >
               <Icon name="worktree" size={10} />
               <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
-              {#if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
+              {#if !w.dirty_known}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
+              {:else if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
               {#if w.locked}<Icon name="lock" size={9} />{/if}
               {#if w.prunable}
                 <span class="wt-flag mono dim">stale</span>

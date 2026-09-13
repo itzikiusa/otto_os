@@ -28,6 +28,17 @@ impl Registry {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_for_test(&mut self, engine: Engine, driver: Arc<dyn Driver>) {
+        match engine {
+            Engine::Mysql => self.mysql = driver,
+            Engine::Postgres => self.postgres = driver,
+            Engine::Redis => self.redis = driver,
+            Engine::Mongodb => self.mongodb = driver,
+            Engine::Clickhouse => self.clickhouse = driver,
+        }
+    }
+
     pub fn get(&self, engine: Engine) -> Arc<dyn Driver> {
         match engine {
             Engine::Mysql => Arc::clone(&self.mysql),

@@ -264,6 +264,7 @@ pub(crate) async fn start<S: ConnectionsCtx>(
             };
             tokio::pin!(transfer);
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut progress_probe = ProgressProbeSchedule::new(Instant::now());
             loop {
                 tokio::select! {
                     biased;
@@ -271,16 +272,15 @@ pub(crate) async fn start<S: ConnectionsCtx>(
                     _ = interval.tick() => {
                         authorize_transfer(&ctx, &user.id, &id, &connection.params, operation).await?;
                         snapshot.elapsed_secs = started.elapsed().as_secs();
-                        snapshot.bytes = if upload {
-                            // The partial remote file reports bytes actually received;
-                            // an unavailable progress probe never stalls cancellation.
-                            let parent = stage_remote.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
-                            let name = stage_remote.rsplit('/').next().unwrap_or("");
-                            match tokio::time::timeout(Duration::from_millis(500), sftp.list(parent)).await {
-                                Ok(Ok(entries)) => entries.iter().find(|e| e.name == name).map(|e| e.size).unwrap_or(snapshot.bytes),
-                                _ => snapshot.bytes,
+                        if upload {
+                            if progress_probe.ready(Instant::now()) {
+                                let size = sftp.file_size(&stage_remote).await;
+                                progress_probe.record(Instant::now(), size.is_ok());
+                                if let Ok(size) = size { snapshot.bytes = size; }
                             }
-                        } else { tokio::fs::metadata(&stage_local).await.map(|m| m.len()).unwrap_or(snapshot.bytes) };
+                        } else {
+                            snapshot.bytes = tokio::fs::metadata(&stage_local).await.map(|m| m.len()).unwrap_or(snapshot.bytes);
+                        }
                         ctx.connections().transfers.update(&snapshot);
                     }
                 }
@@ -337,9 +337,50 @@ pub(crate) async fn start<S: ConnectionsCtx>(
     Ok((StatusCode::ACCEPTED, Json(initial)))
 }
 
+/// Metadata probes may back off; authorization continues on its independent1s tick.
+struct ProgressProbeSchedule {
+    next: Instant,
+    failures: u32,
+}
+impl ProgressProbeSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now,
+            failures: 0,
+        }
+    }
+    fn ready(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+    fn record(&mut self, now: Instant, success: bool) {
+        self.failures = if success {
+            0
+        } else {
+            (self.failures + 1).min(3)
+        };
+        self.next = now + Duration::from_secs(1 << self.failures);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_probe_backoff_is_bounded_and_success_resets_cadence() {
+        let start = Instant::now();
+        let mut schedule = ProgressProbeSchedule::new(start);
+        assert!(schedule.ready(start));
+        let mut now = start;
+        for seconds in [2, 4, 8, 8] {
+            schedule.record(now, false);
+            assert!(!schedule.ready(now + Duration::from_secs(seconds - 1)));
+            now += Duration::from_secs(seconds);
+            assert!(schedule.ready(now));
+        }
+        schedule.record(now, true);
+        assert!(!schedule.ready(now));
+        assert!(schedule.ready(now + Duration::from_secs(1)));
+    }
     #[test]
     fn cancellation_is_actor_and_connection_scoped() {
         let jobs = Transfers::default();
@@ -461,7 +502,7 @@ import sys, shlex, pathlib, time, os
 for line in sys.stdin:
     args = shlex.split(line)
     if not args: continue
-    cmd = args[0]
+    cmd = args[0].lstrip('@')
     if cmd in ('get', 'put'):
         src, dst = map(pathlib.Path, args[-2:])
         with src.open('rb') as source, dst.open('xb') as dest:
@@ -470,8 +511,11 @@ for line in sys.stdin:
                 if not block: break
                 dest.write(block); dest.flush(); time.sleep(0.12)
     elif cmd == 'ls':
-        for entry in pathlib.Path(args[-1]).iterdir():
-            print('-rw-r--r-- 1 fixture fixture %d Sep 13 12:00 %s' % (entry.stat().st_size, entry.name), flush=True)
+        target=pathlib.Path(args[-1])
+        with pathlib.Path(__file__).with_name('ls-probes').open('a') as log: log.write(str(target)+'\n')
+        entries=list(target.iterdir()) if target.is_dir() else [target]
+        for entry in entries:
+            print('-rw-r--r-- 1 1000 1000 %d Sep 13 12:00 %s' % (entry.stat().st_size, str(entry)), flush=True)
     elif cmd == 'rename':
         src, dst = map(pathlib.Path, args[-2:])
         if dst.exists(): raise RuntimeError('destination exists')
@@ -667,6 +711,25 @@ for line in sys.stdin:
         }
     }
 
+    #[tokio::test]
+    async fn upload_progress_probes_staging_file_not_parent_directory() {
+        let fixture = Fixture::new().await;
+        std::fs::write(fixture.root.join("source"), vec![42; 128 * 1024]).unwrap();
+        let job = fixture.start("upload", "source", "uploaded", 15).await;
+        fixture
+            .wait(&job.id, |j| j.status == "running" && j.bytes > 0)
+            .await;
+        let probes = std::fs::read_to_string(fixture.root.join("ls-probes")).unwrap();
+        assert!(
+            probes.lines().all(|path| std::path::Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".otto-transfer-")),
+            "parent directory was enumerated: {probes}"
+        );
+        fixture.wait(&job.id, |j| j.status == "completed").await;
+    }
     #[tokio::test]
     async fn download_and_upload_report_actual_progress_then_publish_exact_content() {
         let fixture = Fixture::new().await;
