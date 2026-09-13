@@ -1,0 +1,106 @@
+import { test, expect } from '@playwright/test';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { apiCtx, seedWorkspace, seedShellSession } from './seed';
+import { openPage, expectFullyInViewport } from './helpers';
+
+test('shared folder picker navigates ancestors and history while retaining search', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop browser only');
+  test.setTimeout(90_000);
+  page.on('pageerror', error => console.error('PICKER PAGE ERROR', error));
+  const fixture = realpathSync(mkdtempSync(join(homedir(), '.otto-folder-picker-test-')));
+  const parent = join(fixture, 'Itzik Lavon');
+  const leaf = join(parent, 'go_deposit');
+  for (const name of ['go_deposit', 'another repo', '.hidden']) mkdirSync(join(parent, name), { recursive: true });
+  const { ctx, base } = await apiCtx();
+  try {
+    const ws = await seedWorkspace(ctx, base);
+    await seedShellSession(ctx, base, ws);
+    await page.addInitScript(id => {
+      localStorage.setItem('otto_workspace', id);
+      localStorage.setItem('otto_firstrun_dismissed', '1');
+    }, ws);
+    await openPage(page, 'agents');
+    await page.getByTitle('New session (⌘T)').click();
+    const dialog = page.getByRole('dialog', { name: 'New Session', exact: true });
+    await dialog.locator('#ns-cwd').fill(leaf);
+    await dialog.getByRole('button', { name: 'Browse…' }).first().click();
+    const picker = page.getByRole('dialog', { name: 'Choose working directory', exact: true });
+    const back = picker.getByRole('button', { name: 'Back', exact: true });
+    const forward = picker.getByRole('button', { name: 'Forward', exact: true });
+    const up = picker.getByRole('button', { name: 'Up', exact: true });
+    await expect(back).toBeDisabled();
+    await expect(forward).toBeDisabled();
+    await expect(up).toBeEnabled();
+    await picker.locator('.crumb').getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await back.click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', leaf);
+    await forward.click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await picker.getByPlaceholder('Filter…').fill('ANOTHER');
+    await expect(picker.locator('.row-wrap')).toHaveCount(1);
+    await picker.locator('.row').filter({ hasText: 'another repo' }).click();
+    await expect(picker.getByPlaceholder('Filter…')).toHaveValue('');
+    await back.click();
+    await picker.locator('.row').filter({ hasText: 'go_deposit' }).click();
+    await expect(forward).toBeDisabled();
+    await up.click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await expect(picker.locator('.row-wrap')).toHaveCount(2);
+    await picker.getByLabel('Show hidden').check();
+    await expect(picker.locator('.row-wrap')).toHaveCount(3);
+    // A failed browse must not create a history entry or allow choosing stale data.
+    let rejectNextLeaf = true;
+    await page.route('**/api/v1/fs/browse?*', async route => {
+      if (new URL(route.request().url()).searchParams.get('path') === leaf && rejectNextLeaf) {
+        rejectNextLeaf = false;
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ code: 'unavailable', message: 'Folder temporarily unavailable' }) });
+      } else await route.continue();
+    });
+    await picker.locator('.row').filter({ hasText: 'go_deposit' }).click();
+    await expect(picker.getByRole('alert')).toContainText('Folder temporarily unavailable');
+    await expect(picker.getByRole('button', { name: 'Use this folder', exact: true })).toBeDisabled();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await picker.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', leaf);
+    await back.click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await page.unroute('**/api/v1/fs/browse?*');
+    const other = await page.context().newPage();
+    await other.goto('/#/agents');
+    await other.getByTitle('New session (⌘T)').click();
+    const otherDialog = other.getByRole('dialog', { name: 'New Session', exact: true });
+    await otherDialog.locator('#ns-cwd').fill(leaf);
+    await otherDialog.getByRole('button', { name: 'Browse…' }).first().click();
+    const otherPicker = other.getByRole('dialog', { name: 'Choose working directory', exact: true });
+    await expect(otherPicker.locator('.crumb')).toHaveAttribute('data-path', leaf);
+    await picker.getByRole('button', { name: 'Add favorite', exact: true }).click();
+    await otherPicker.getByRole('button', { name: 'Up', exact: true }).click();
+    await expect(otherPicker.getByRole('region', { name: 'Favorites', exact: true }).getByRole('button', { name: 'Itzik Lavon', exact: true })).toBeVisible();
+    await other.close();
+    await picker.getByRole('region', { name: 'Favorites', exact: true }).getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expectFullyInViewport(page, picker, 'folder picker with long path');
+    await expectFullyInViewport(page, picker.locator('.crumb'), 'scrollable ancestor path');
+    await page.screenshot({ path: '/tmp/otto-folder-picker-mobile.png' });
+    await picker.getByRole('button', { name: 'Use this folder', exact: true }).click();
+    await expect(dialog.locator('#ns-cwd')).toHaveValue(parent);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.reload();
+    await page.getByTitle('New session (⌘T)').click();
+    await dialog.getByRole('button', { name: 'Browse…' }).first().click();
+    const favorites = picker.getByRole('region', { name: 'Favorites', exact: true });
+    await favorites.getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', parent);
+    await picker.getByRole('region', { name: 'Recents', exact: true }).getByRole('button', { name: 'go_deposit', exact: true }).click();
+    await expect(picker.locator('.crumb')).toHaveAttribute('data-path', leaf);
+    await favorites.getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
+    await picker.getByRole('button', { name: 'Remove favorite', exact: true }).click();
+    await expect(favorites.getByRole('button')).toHaveCount(0);
+  } finally {
+    await ctx.dispose();
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});

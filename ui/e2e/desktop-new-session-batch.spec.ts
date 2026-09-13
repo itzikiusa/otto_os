@@ -97,7 +97,7 @@ test.describe('new-session batch', () => {
     await expect(picker).toBeVisible();
     // The daemon resolved `~` to an absolute path and listed it.
     await expect(picker.locator('.crumb')).toContainText('/');
-    const chosen = (await picker.locator('.crumb').innerText()).trim();
+    const chosen = (await picker.locator('.crumb').getAttribute('data-path'))!;
 
     await picker.getByRole('button', { name: 'Use this folder' }).click();
     await expect(picker).toHaveCount(0);
