@@ -99,7 +99,12 @@ modal (`NewSession.svelte`) offers:
   workspace, so a one-off job somewhere else needs no new workspace. **Browse…**
   opens the shared daemon-side folder picker (`GET /fs/browse`, sandboxed to
   `$HOME` + the data dir — see [daemon-http-api](./daemon-http-api.md)), and the
-  field offers your recently used directories (this workspace's root first, then
+  picker provides **Back**, **Forward**, **Up**, and clickable path segments
+  for jumping to any ancestor. Search still filters the current listing, with
+  **Show hidden** available. **Favorites** stores folders you pin, and **Recents**
+  lists the last 20 distinct folders opened. These shortcuts persist locally
+  for the current daemon/user; every jump still checks access permissions. The same navigation appears in every shared
+  folder/file picker across Otto. The working-directory field offers your recently used directories (this workspace's root first, then
   the cwds of its existing sessions) as a datalist. The daemon `mkdir -p`s the
   directory if it does not exist (a missing cwd would otherwise make the child
   fall back to `$HOME`).
@@ -1012,3 +1017,36 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
 - **`docs/MULTI-USER-RBAC.md`** — the full RBAC, ownership, and isolation model.
 - **`docs/contracts/api.md`** / **`docs/contracts/ws.md`** — the authoritative
   REST and WebSocket contracts.
+
+## September 2026 reliability and recovery updates
+
+Chat drafts and uploaded attachments belong to their session when switching panes.
+Workspace selection and History pagination reject obsolete responses, including a
+second refresh that finishes while the first selection is still restoring saved tabs.
+Session archive, removal, kill, suspend, unarchive, and restart share a lifecycle lock,
+so an archived session cannot finish a pending restart and continue invisibly.
+
+History's scope selector includes **No workspace**, and broadcasting works across
+scratch sessions when all recipients belong to that same scope. Mixed-workspace panes
+show why broadcasting is unavailable. New Session, onboarding and Handover show shared
+provider readiness from the configured executable, including custom providers.
+
+Mission saved views can be authored with status, provider and repository selectors;
+advanced JSON remains available and its filters combine with the regular cost filter.
+
+Handover accepts reasoning agents only. On the target, expand **Handover** to inspect
+the saved brief and delivery state. A failed/interrupted delivery can be retried after
+inspecting the target. **Sent** means the PTY accepted paste and Enter; **Confirm
+received** records the operator's receipt confirmation. If source archival was selected,
+it happens only after that confirmation. Failed or interrupted deliveries retain the
+brief and source session for recovery.
+
+### Pending messages and context-dependent providers
+
+A pending chat send belongs to its session across view changes. Reopening the
+composer keeps Send disabled until that request settles, while allowing a new
+draft to be edited. Completion clears only the submitted draft and attachments.
+Provider executable templates containing `{cwd}` or `{sid}` are resolved at
+launch, when those values exist; global readiness shows them as unchecked and
+keeps them selectable. Mission Control ignores stale workspace loads and save
+completions, so switching workspaces preserves the destination's view and form.

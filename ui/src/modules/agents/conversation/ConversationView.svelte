@@ -473,6 +473,7 @@
   {/if}
 
   {#if canCompose && sessionId}
+    {#key sessionId}
     <Composer
       {sessionId}
       {status}
@@ -483,6 +484,7 @@
       termStatus={conv.liveStatus}
       termInput={conv.liveInput}
     />
+    {/key}
   {/if}
 </div>
 

@@ -10,6 +10,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ConflictFilePane from './ConflictFilePane.svelte';
+  import { canCompleteOperation } from './operationState';
 
   interface Props {
     repoId: string;
@@ -79,7 +80,7 @@
         status = s;
         op = s.op ?? null;
         // Prefer the daemon's authoritative list; fall back to the seed.
-        const files = s.conflicted_files.length > 0 ? s.conflicted_files : initialFiles;
+        const files = s.conflicted_files;
         pending = [...files];
         resolved = new Set();
         selected = files[0] ?? null;
@@ -107,7 +108,7 @@
   const oursLabel = $derived(git.statusById[repoId]?.branch ?? 'OURS');
   const theirsLabel = $derived(sourceLabel ?? 'THEIRS');
   const allFiles = $derived([...pending]);
-  const allResolved = $derived(allFiles.length > 0 && allFiles.every((f) => resolved.has(f)));
+  const allResolved = $derived(canCompleteOperation(op, allFiles, resolved));
 
   function isResolved(path: string): boolean {
     return resolved.has(path);
@@ -130,7 +131,7 @@
   async function reconcile(): Promise<void> {
     try {
       const s = await git.getMergeStatus(repoId);
-      op = s.op ?? op;
+      op = s.op ?? null;
       const live = new Set(s.conflicted_files);
       const known = new Set(pending);
       const added = s.conflicted_files.filter((f) => !known.has(f));
@@ -184,11 +185,17 @@
         resolved = new Set();
         selected = result.conflicted_files[0] ?? null;
         toasts.warn('Still conflicting', 'Some files still have conflicts.');
+      } else if (result.repo_status.op_in_progress) {
+        pending = [];
+        resolved = new Set();
+        selected = null;
+        toasts.info('Operation paused', result.note ?? 'Amend the current commit, then continue.');
       } else {
         toasts.success('Merge completed', result.commit ? result.commit.slice(0, 8) : undefined);
         onleave();
       }
     } catch (e) {
+      await reconcile();
       toasts.error('Complete failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
@@ -283,7 +290,7 @@
               path={selected}
               {oursLabel}
               {theirsLabel}
-              onresolved={() => handleResolved(selected!)}
+              onresolved={handleResolved}
             />
           {/key}
         {:else}

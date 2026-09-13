@@ -144,6 +144,7 @@ class HistoryStore {
     this.wsId = wsId;
     const my = ++this.seq;
     this.loading = true;
+    this.loadingMore = false;
     this.error = null;
     try {
       const rows = await api.get<HistoryEntry[]>(`/workspaces/${wsId}/history?${this.query()}`);
@@ -164,20 +165,26 @@ class HistoryStore {
 
   /** Append the next page (older rows). */
   async loadMore(): Promise<void> {
-    if (!this.wsId || this.loadingMore || !this.hasMore || this.entries.length === 0) return;
+    if (!this.wsId || this.loading || this.loadingMore || !this.hasMore || this.entries.length === 0) return;
+    const my = this.seq;
+    const wsId = this.wsId;
+    const query = this.query();
+    const current = () => my === this.seq && wsId === this.wsId && query === this.query();
     const before = this.entries[this.entries.length - 1].last_active_at;
     this.loadingMore = true;
     try {
       const rows = await api.get<HistoryEntry[]>(
-        `/workspaces/${this.wsId}/history?${this.query(before)}`,
+        `/workspaces/${wsId}/history?${this.query(before)}`,
       );
+      if (!current()) return;
       const have = new Set(this.entries.map(entryKey));
       this.entries = [...this.entries, ...rows.filter((e) => !have.has(entryKey(e)))];
       this.hasMore = rows.length >= PAGE;
     } catch (e) {
+      if (!current()) return;
       this.error = e instanceof Error ? e.message : String(e);
     } finally {
-      this.loadingMore = false;
+      if (my === this.seq) this.loadingMore = false;
     }
   }
 

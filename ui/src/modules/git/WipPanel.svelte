@@ -55,7 +55,7 @@
    *  --ours/--theirs` + stage). Confirmed — it discards the other side. */
   async function takeSide(path: string, side: 'ours' | 'theirs'): Promise<void> {
     const ok = await confirmer.ask(
-      `Resolve ${path} by keeping ${side === 'ours' ? 'YOUR version (ours)' : 'THEIR version (theirs)'}? The other side's changes to this file are discarded.`,
+      `Resolve ${path} by keeping ${side === 'ours' ? 'YOUR version (ours)' : 'THEIR version (theirs)'}? If that side deleted the file, it will be deleted. The other side's changes are discarded.`,
       { title: `Take ${side}`, confirmLabel: `Take ${side}` },
     );
     if (!ok) return;

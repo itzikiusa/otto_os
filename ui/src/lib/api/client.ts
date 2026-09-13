@@ -94,12 +94,6 @@ async function request<T>(
   // its caller's error toast, never a GitHub/Bitbucket outage.
   if (isProviderPath(path)) serviceHealth.report(resp.status);
 
-  // No-content responses: 204, async-accepted 202, or any explicitly empty body.
-  // (Avoids resp.json() throwing on bodyless endpoints like rewrite/testcase-generate.)
-  if (resp.status === 204 || resp.status === 202 || resp.headers.get('content-length') === '0') {
-    return undefined as T;
-  }
-
   if (!resp.ok) {
     let problem: Problem = { code: 'internal', message: resp.statusText };
     try {
@@ -110,7 +104,11 @@ async function request<T>(
     throw new ApiError(resp.status, problem);
   }
 
-  return (await resp.json()) as T;
+  // Accepted responses may carry a job/review object. Only an actually empty
+  // successful body is void; an empty error must still reject above.
+  if (resp.status === 204) return undefined as T;
+  const text = await resp.text();
+  return text.trim() === '' ? undefined as T : JSON.parse(text) as T;
 }
 
 export const api = {

@@ -18,6 +18,9 @@ import type {
   VaultStatus,
   VaultSwitchHit,
   VaultTagCount,
+  VaultTrashEntry,
+  VaultRevision,
+  VaultRevisionDetail,
 } from './types';
 
 const base = (ws: string) => `/workspaces/${ws}/vault/vaults`;
@@ -222,4 +225,21 @@ export function resetRefineSession(ws: string, id: number, path: string) {
   return api.del<{ session_id: string | null; running: boolean }>(
     `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,
   );
+}
+
+// Recovery: reads are Viewer-gated; every restore requires Editor.
+export function vaultTrash(ws: string, id: number) {
+  return api.get<VaultTrashEntry[]>(`${base(ws)}/${id}/trash`);
+}
+export function restoreVaultTrash(ws: string, id: number, entry: string, destination?: string) {
+  return api.post<{path: string}>(`${base(ws)}/${id}/trash/${enc(entry)}/restore`, {destination});
+}
+export function vaultHistory(ws: string, id: number, path = '', before?: string) {
+  return api.get<VaultRevision[]>(`${base(ws)}/${id}/history?path=${enc(path)}${before ? `&before=${enc(before)}` : ''}`);
+}
+export function vaultRevision(ws: string, id: number, entry: string) {
+  return api.get<VaultRevisionDetail>(`${base(ws)}/${id}/history/${enc(entry)}`);
+}
+export function restoreVaultRevision(ws: string, id: number, entry: string, version: 'before' | 'after', if_hash: string) {
+  return api.post<void>(`${base(ws)}/${id}/history/${enc(entry)}/restore`, {version, if_hash});
 }

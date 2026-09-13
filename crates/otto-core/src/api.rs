@@ -934,6 +934,30 @@ pub struct SftpDownloadResp {
 }
 
 /// `POST /api/v1/connections/{id}/sftp/upload` — push a local file to remote.
+/// Asynchronous SFTP transfer. Files stage under a unique partial name until
+/// successful completion. Timeout covers the entire operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpTransferReq {
+    pub direction: String,
+    pub local_path: String,
+    pub remote_path: String,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpTransfer {
+    pub id: Id,
+    pub direction: String,
+    pub local_path: String,
+    pub remote_path: String,
+    /// running | finalizing | completed | cancelled | failed | timed_out | outcome_unknown
+    pub status: String,
+    pub bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub elapsed_secs: u64,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpUploadReq {
     /// Local source (leading `~` expanded to the daemon user's home).
@@ -1415,6 +1439,9 @@ pub struct Hunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
+    /// SHA-256 of the byte-exact file diff; required by hunk mutations.
+    #[serde(default)]
+    pub fingerprint: String,
     pub path: String,
     pub old_path: Option<String>,
     pub is_binary: bool,
@@ -1531,7 +1558,7 @@ pub struct MergePreview {
 /// conflicted-file list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeResult {
-    /// "merged" | "conflicts" | "up_to_date"
+    /// "merged" | "conflicts" | "up_to_date" | "paused"
     pub status: String,
     /// New HEAD sha when merged; None for conflicts / up_to_date.
     pub commit: Option<String>,
@@ -1583,6 +1610,14 @@ pub enum ConflictSegment {
 /// so the client can render each conflict and deterministically rebuild the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConflictFile {
+    #[serde(default)]
+    pub ours_present: bool,
+    #[serde(default)]
+    pub theirs_present: bool,
+    #[serde(default)]
+    pub worktree_present: bool,
+    #[serde(default)]
+    pub trailing_newline: bool,
     pub path: String,
     pub is_binary: bool,
     pub segments: Vec<ConflictSegment>,
@@ -2131,7 +2166,7 @@ pub struct HandoverReq {
     /// `brief` is supplied. Defaults to false.
     #[serde(default)]
     pub fast: Option<bool>,
-    /// Archive the source session once the handover is sent. Defaults to false.
+    /// Archive the source only after explicit receipt acknowledgement on the target. Defaults to false.
     #[serde(default)]
     pub archive_source: Option<bool>,
 }
@@ -2789,6 +2824,42 @@ pub struct ApiRunResult {
     pub steps: Vec<ApiRunStepResult>,
     /// True when every step was `ok`.
     pub passed: bool,
+}
+
+/// Run options. Dataset rows overlay the chosen environment independently;
+/// values remain in memory and are never included in the persisted snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StartApiAutomationRunReq {
+    #[serde(default)]
+    pub environment_id: Option<Id>,
+    #[serde(default)]
+    pub stop_on_failure: bool,
+    #[serde(default)]
+    pub dataset: Vec<serde_json::Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiAutomationRun {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub automation_id: Id,
+    pub environment_id: Option<Id>,
+    pub created_by: Id,
+    /// running | passed | failed | cancelled | interrupted
+    pub status: String,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub stop_on_failure: bool,
+    pub dataset_rows: usize,
+    /// Redacted, ordered request/step metadata as it was when this run started.
+    pub snapshot: Value,
+    pub report: ApiRunResult,
+    /// Dataset row index (zero based) for each result in report.steps.
+    pub result_rows: Vec<usize>,
+    /// Stable identifiers for completed step executions, parallel to report.steps.
+    #[serde(default)]
+    pub result_ids: Vec<Id>,
+    pub error: Option<String>,
 }
 
 /// `GET /workspaces/{wid}/api-client/overview` — the agent-facing discovery view.

@@ -6,7 +6,6 @@
   import Modal from '../../lib/components/Modal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
   import type {
@@ -15,7 +14,7 @@
     HandoverTarget,
     HandoverBriefResp,
   } from '../../lib/api/types';
-  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider, providerReadiness } from '../../lib/providers';
 
   interface Props {
     sessionId: string;
@@ -37,6 +36,7 @@
         s.id !== sessionId &&
         !s.archived &&
         s.kind === 'agent' &&
+        s.provider !== 'shell' &&
         isForeground(s) &&
         s.workspace_id === source?.workspace_id,
     ),
@@ -62,9 +62,7 @@
   let busy = $state(false);
 
   function toolFound(p: string): boolean {
-    const t = (auth.meta?.tools ?? []).find((x) => x.name === p);
-    // Unknown tools (custom providers, shell) are assumed available.
-    return t ? t.found : true;
+    return providerReadiness(p).available;
   }
 
   function providerDesc(p: string): string {
@@ -198,7 +196,7 @@
               class:selected={provider === p}
               class:unavailable={!avail}
               disabled={!avail}
-              title={avail ? '' : `${p} is not installed`}
+              title={providerReadiness(p).message}
               onclick={() => (provider = p)}
             >
               <span class="provider-name">
@@ -267,7 +265,7 @@
       <label class="toggle-row">
         <input type="checkbox" bind:checked={archiveSource} />
         <span class="toggle-text">
-          <span class="toggle-title">Archive {source?.provider ?? 'source'} after handover</span>
+          <span class="toggle-title">Archive {source?.provider ?? 'source'} after confirming receipt</span>
           <span class="hint">Close out the source agent once the brief is delivered.</span>
         </span>
       </label>

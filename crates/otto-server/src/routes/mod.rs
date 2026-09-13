@@ -6,14 +6,18 @@ pub mod resource_access;
 
 pub mod activity;
 pub mod admin_sessions;
+pub(crate) mod api_automation_runs;
 pub mod api_client;
+pub(crate) mod api_oauth;
 pub mod api_stream;
 pub mod audit;
 pub mod auth_routes;
 pub mod backup;
+pub mod backup_git;
 pub mod browser;
 pub mod capabilities;
 pub mod channel_webhook;
+pub mod connection_export;
 pub mod email_sender;
 pub mod findings;
 pub mod fs;
@@ -66,6 +70,7 @@ use crate::state::ServerCtx;
 pub fn public_routes() -> Router<ServerCtx> {
     Router::new()
         .route("/health", get(meta::health))
+        .route("/api-client/oauth2/callback", get(api_oauth::callback))
         .route("/meta", get(meta::meta))
         .route("/onboarding/root", post(onboarding::onboard_root))
         .route("/auth/login", post(auth_routes::login))
@@ -440,6 +445,14 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(api_client::oauth2_token),
         )
         .route(
+            "/workspaces/{wid}/api-client/oauth2/authorize",
+            post(api_oauth::start),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/oauth2/flows/{id}",
+            get(api_oauth::status),
+        )
+        .route(
             "/workspaces/{wid}/api-client/cookies",
             get(api_client::list_cookies).delete(api_client::clear_cookies),
         )
@@ -454,6 +467,22 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{wid}/api-client/automations/{id}/run",
             post(api_client::run_automation),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/automations/{id}/runs",
+            post(api_automation_runs::start),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/automation-runs",
+            get(api_automation_runs::list),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/automation-runs/{id}",
+            get(api_automation_runs::get),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/automation-runs/{id}/cancel",
+            post(api_automation_runs::cancel),
         )
         .route(
             "/workspaces/{wid}/api-client/postman/sync",
@@ -510,6 +539,14 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/sessions/{id}/handover", post(handover::handover_session))
         .route(
+            "/sessions/{id}/handover/retry",
+            post(handover::retry_handover),
+        )
+        .route(
+            "/sessions/{id}/handover/acknowledge",
+            post(handover::acknowledge_handover),
+        )
+        .route(
             "/sessions/{id}/handover/brief",
             post(handover::handover_brief),
         )
@@ -535,6 +572,11 @@ pub fn protected_routes() -> Router<ServerCtx> {
                 .delete(workflows::delete_workflow),
         )
         .route("/workflows/{id}/run", post(workflows::run_workflow))
+        .route("/workflows/{id}/validate", post(workflows::validate_graph))
+        .route(
+            "/workflows/{id}/triggers/preview",
+            post(workflows::preview_trigger),
+        )
         .route("/workflows/{id}/runs", get(workflows::list_runs))
         // In-flight runs across a workspace (the "Running" sidebar list).
         .route(

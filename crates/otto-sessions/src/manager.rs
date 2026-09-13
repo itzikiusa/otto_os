@@ -3101,27 +3101,11 @@ impl SessionManager {
     /// Top-level null values in the patch remove that key. Non-object existing
     /// meta is replaced by an empty object before merging.
     ///
-    /// Uses the repo's atomic `merge_meta` (single UPDATE via `json_patch`) so a
-    /// concurrent writer (e.g. the resize persister) can never be overwritten by
-    /// a stale snapshot. `json_patch` deep-merges OBJECT values, but this API's
-    /// contract is shallow-replace — so object-valued keys are nulled first,
-    /// then set (two atomic merges; the key is briefly absent, never stale).
+    /// Object-valued keys are replaced in one atomic UPDATE, preserving other
+    /// keys and never exposing an absent object between removal and replacement.
     pub async fn update_meta(&self, id: &Id, patch: serde_json::Value) -> Result<Session> {
-        // Verify the session exists up-front (preserves the NotFound error path).
         let _ = self.repo.get(id).await?;
-        if let serde_json::Value::Object(ref patch_map) = patch {
-            let nulls: serde_json::Map<String, serde_json::Value> = patch_map
-                .iter()
-                .filter(|(_, v)| v.is_object())
-                .map(|(k, _)| (k.clone(), serde_json::Value::Null))
-                .collect();
-            if !nulls.is_empty() {
-                self.repo
-                    .merge_meta(id, &serde_json::Value::Object(nulls))
-                    .await?;
-            }
-            self.repo.merge_meta(id, &patch).await?;
-        }
+        self.repo.replace_meta_keys(id, &patch).await?;
         let updated = self.repo.get(id).await?;
         let _ = self.events.send(Event::SessionMetaUpdated {
             session_id: updated.id.clone(),
@@ -3133,6 +3117,8 @@ impl SessionManager {
 
     /// Kill the PTY (if live) and mark the session exited.
     pub async fn kill_session(&self, id: &Id) -> Result<()> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
         if let Some(handle) = self.live_handle(id) {
             let _ = handle.kill();
@@ -3161,6 +3147,8 @@ impl SessionManager {
     /// `Reconnectable` instead. We also set `Reconnectable` here directly, so
     /// the final status is correct regardless of which path wins.
     pub async fn suspend(&self, id: &Id) -> Result<()> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
         // Mark as suspending so the status task's exit branch chooses
         // Reconnectable over Exited. Cleared by that branch (or below).
@@ -3715,6 +3703,8 @@ impl SessionManager {
     /// row and history. It disappears from the active list (clients hide it)
     /// but can be restored or deleted later.
     pub async fn archive(&self, id: &Id) -> Result<Session> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
@@ -3791,6 +3781,8 @@ impl SessionManager {
     /// Un-archive a session (it returns to the active list as reconnectable;
     /// agent sessions can then be restarted to resume).
     pub async fn unarchive(&self, id: &Id) -> Result<Session> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
         self.repo.set_archived(id, false).await?;
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
@@ -3802,6 +3794,8 @@ impl SessionManager {
 
     /// Kill the PTY, delete the DB row and emit `SessionRemoved`.
     pub async fn remove(&self, id: &Id) -> Result<()> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
@@ -3818,7 +3812,11 @@ impl SessionManager {
         // Drop the per-session disconnect sender; any attached viewers were
         // already evicted by the terminate path before removal.
         self.evict.remove(id);
-        self.resume_locks.remove(id);
+        // Keep the same lock while another lifecycle operation is queued. A
+        // waiter will observe the deleted row instead of spawning after removal.
+        if Arc::strong_count(&lock) == 2 {
+            self.resume_locks.remove(id);
+        }
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -4440,6 +4438,35 @@ mod tests {
         (mgr, repo, ws, user)
     }
 
+    #[tokio::test]
+    async fn lifecycle_mutations_wait_for_in_flight_restart() {
+        for operation in ["archive", "kill", "remove", "suspend", "unarchive"] {
+            let (mgr, repo, ws, user) = test_manager().await;
+            let id = seed_session(&repo, &ws, &user, None).await;
+            // A restart owns this lock through setup/spawn. No terminal
+            // mutation may publish its outcome while that spawn is pending.
+            let lock = mgr.resume_lock(&id);
+            let guard = lock.lock().await;
+            let mut mutation = Box::pin(async {
+                match operation {
+                    "archive" => mgr.archive(&id).await.map(|_| ()),
+                    "kill" => mgr.kill_session(&id).await,
+                    "remove" => mgr.remove(&id).await,
+                    "suspend" => mgr.suspend(&id).await,
+                    _ => mgr.unarchive(&id).await.map(|_| ()),
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut mutation)
+                    .await
+                    .is_err(),
+                "{operation} crossed an in-flight restart"
+            );
+            drop(guard);
+            mutation.await.unwrap();
+        }
+    }
+
     /// RAII: set an env var for one test and restore the previous value on drop
     /// (panic-safe). The environment is process-global and tests run in
     /// parallel, so a `set_var` that outlives its test leaks to every test
@@ -4710,9 +4737,17 @@ mod tests {
             .await
             .unwrap();
 
-        let probe = mgr.capture_probes.get(&id).unwrap();
-        assert!(probe.first_at.is_some(), "first input moment recorded");
-        assert_eq!(normalize_pty_input(&probe.raw), "hello world");
+        {
+            let probe = mgr.capture_probes.get(&id).unwrap();
+            assert!(probe.first_at.is_some(), "first input moment recorded");
+            assert_eq!(normalize_pty_input(&probe.raw), "hello world");
+        }
+        // A retained read guard deadlocks the next input when its session ID
+        // hashes to this shard. Check that shard without risking a hung test.
+        assert!(
+            mgr.capture_probes.try_get_mut(&id).is_present(),
+            "capture-probe inspection must release its shard before more input"
+        );
         // Sessions WITHOUT a pending capture don't accumulate probes.
         let other = seed_session(&repo, &ws, &user, Some("sid")).await;
         mgr.live

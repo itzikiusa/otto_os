@@ -87,10 +87,12 @@ pub mod transcript_tail;
 pub mod turn_oracle;
 pub mod vault_docs_agent;
 pub mod workflow_chat;
+mod workflow_checkpoint;
 pub mod workflow_context;
 pub mod workflow_engine;
 pub mod workflow_prepare;
 pub mod workflow_trigger_scheduler;
+mod workflow_validation;
 pub mod workgraph_projector;
 pub mod ws_events;
 
@@ -242,3 +244,5 @@ fn is_private_lan_host(host: &str) -> bool {
     let [a, b, ..] = ip.octets();
     a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
 }
+
+pub mod state_archive;

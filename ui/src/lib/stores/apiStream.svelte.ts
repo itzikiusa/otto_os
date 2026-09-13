@@ -3,7 +3,7 @@
 // accumulates the events/messages for the response console.
 
 import { baseUrl, getToken } from '../api/client';
-import type { ApiKeyVal } from '../api/types';
+import type { ExecuteApiReq } from '../api/types';
 
 export type StreamStatus = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 export type StreamItemKind = 'open' | 'event' | 'message' | 'error' | 'closed';
@@ -35,6 +35,8 @@ class ApiStreamStore {
   status: StreamStatus = $state('idle');
   items: StreamItem[] = $state([]);
   error = $state('');
+  dropped = $state(0);
+  workspaceId = $state('');
   mode: 'sse' | 'websocket' = $state('sse');
 
   private ws: WebSocket | null = null;
@@ -44,15 +46,11 @@ class ApiStreamStore {
   }
 
   /** Open a streaming connection of the given kind. */
-  connect(
-    kind: 'sse' | 'websocket',
-    url: string,
-    method: string,
-    headers: ApiKeyVal[],
-    body: string,
-  ): void {
+  connect(workspaceId: string, kind: 'sse' | 'websocket', request: ExecuteApiReq): void {
     this.disconnect();
     this.items = [];
+    this.dropped = 0;
+    this.workspaceId = workspaceId;
     this.error = '';
     this.mode = kind;
     this.status = 'connecting';
@@ -62,7 +60,7 @@ class ApiStreamStore {
       const base = new URL(baseUrl());
       const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
       const token = getToken() ?? '';
-      wsUrl = `${proto}//${base.host}/ws/api-client/stream?token=${encodeURIComponent(token)}`;
+      wsUrl = `${proto}//${base.host}/ws/api-client/stream?token=${encodeURIComponent(token)}&workspace_id=${encodeURIComponent(workspaceId)}`;
     } catch {
       this.fail('Invalid daemon base URL');
       return;
@@ -78,18 +76,17 @@ class ApiStreamStore {
     this.ws = sock;
 
     sock.onopen = () => {
+      if (this.ws !== sock) return;
       sock.send(
         JSON.stringify({
           action: 'open',
           kind,
-          url,
-          method,
-          headers: headers.filter((h) => h.enabled !== false && h.key.trim() !== ''),
-          body,
+          request,
         }),
       );
     };
     sock.onmessage = (e) => {
+      if (this.ws !== sock) return;
       let msg: DaemonMsg;
       try {
         msg = JSON.parse(typeof e.data === 'string' ? e.data : '');
@@ -98,8 +95,9 @@ class ApiStreamStore {
       }
       this.handle(msg);
     };
-    sock.onerror = () => this.fail('Relay connection error');
+    sock.onerror = () => { if (this.ws === sock) this.fail('Relay connection error'); };
     sock.onclose = () => {
+      if (this.ws !== sock) return;
       if (this.status !== 'error' && this.active) this.status = 'closed';
       this.ws = null;
     };
@@ -114,13 +112,15 @@ class ApiStreamStore {
 
   disconnect(): void {
     if (this.ws) {
+      const socket = this.ws;
+      this.ws = null;
       try {
-        this.ws.send(JSON.stringify({ action: 'close' }));
+        socket.send(JSON.stringify({ action: 'close' }));
       } catch {
         /* ignore */
       }
       try {
-        this.ws.close();
+        socket.close();
       } catch {
         /* ignore */
       }
@@ -131,6 +131,7 @@ class ApiStreamStore {
 
   clear(): void {
     this.items = [];
+    this.dropped = 0;
   }
 
   private fail(msg: string): void {
@@ -140,7 +141,12 @@ class ApiStreamStore {
   }
 
   private push(item: Omit<StreamItem, 't'>): void {
-    this.items = [...this.items, { t: Date.now(), ...item }];
+    const next = [...this.items, { t: Date.now(), ...item, data: item.data.slice(0, 64 * 1024) }];
+    let bytes = next.reduce((n, entry) => n + entry.data.length, 0);
+    while (next.length > 1000 || bytes > 4 * 1024 * 1024) {
+      bytes -= next.shift()!.data.length; this.dropped++;
+    }
+    this.items = next;
   }
 
   private handle(msg: DaemonMsg): void {

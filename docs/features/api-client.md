@@ -108,8 +108,7 @@ From the builder, **Save** (`⌘S`):
 > (`ssh_connection_id`), its `collection_id`/`position`, **and** an `extras`
 > object carrying **Scripts, Docs, Settings (timeout/redirects/TLS), GraphQL
 > variables and the transport kind** — reloading or loading the request fresh
-> from a collection restores all of them. Only the gRPC `.proto` upload stays
-> draft-local. Secret auth members are stored as Keychain `$secret` markers,
+> from a collection restores all of them, including gRPC `.proto` and selected method. Secret auth members are stored as Keychain `$secret` markers,
 > never plaintext (see [§11](#11-security)).
 
 ### Import / export
@@ -210,10 +209,9 @@ Content-Type, and only overwrites a value you didn't hand-type.
 | **oauth2** | Grant (Client Credentials / Password / Refresh Token), Token URL, Client ID/Secret, Username/Password (password grant), Refresh Token (refresh grant), Scope | **Get New Token** calls `POST …/oauth2/token` server-side; the returned `access_token` is stored on the draft and attached as `Authorization: <token_type> <access_token>`. |
 
 All auth fields accept `{{var}}` substitution.
-**oauth2 authorization-code grant (browser redirect) is not supported** — only
-the three server-to-server grants above.
+**Authorization Code + PKCE** adds the browser consent flow described below; the three server-side grants remain available.
 
-**Scripts** *(HTTP/SSE only)* — two JS editors:
+**Scripts** *(HTTP only)* — two JS editors:
 
 - **Pre-request Script** — runs before sending; can mutate the request
   (`pm.request.method/url/body`, `pm.request.headers.add/upsert/remove/get`) and
@@ -262,6 +260,12 @@ JSON request, **Metadata** holds headers. **Invoke** calls `…/grpc/invoke`.
 
 ---
 
+### Browser OAuth and saved gRPC
+
+Choose **Authorization Code + PKCE (browser)** under Authorization, enter the authorization URL, token URL and client ID, and register the displayed callback with the provider. **Get New Token** saves the request, opens the system browser, exchanges the returned code using S256 PKCE, and stores access/refresh tokens in Keychain. The callback runs on the daemon host; the browser must reach that host's loopback address. Flows expire after ten minutes and each state can be used once. Public provider URLs require HTTPS; loopback development endpoints may use HTTP when local access is enabled. Changing request authorization while the browser is open rejects completion rather than replacing newer credentials. A pending flow is not resumed after quitting the application or daemon.
+
+Saved gRPC requests retain `.proto` text and the selected method in `extras.grpc`; reload and Invoke use those fields. **Re-parse** rebuilds the method chooser when needed. Saved extras are limited to 256 KiB. Clearing scripts/settings/docs saves an explicit `{v:1}` so old extras are removed.
+
 ## 5. Environments & variables
 
 `EnvSelector.svelte`. Environments are named bags of string key/value variables,
@@ -288,7 +292,7 @@ query values, header values, body, and auth fields. Resolution order:
 3. **Active (or explicitly selected) environment** variables.
 4. Unknown placeholders are **left intact** (e.g. `{{missing}}` stays literally).
 
-Runtime variables are an in-memory session map in the UI store; scripts read/write
+Runtime variables are an in-memory map per workspace in the UI store; scripts read/write
 them via `pm.*`, and automation **extracts** write into the run's chained map.
 
 ---
@@ -339,6 +343,10 @@ and has an input box to send a message while connected. The daemon bridges to th
 upstream over `ws://…/ws/api-client/stream` (so secrets stay server-side and CORS
 is bypassed).
 
+The relay requires workspace Editor and API Client Edit access. SSE shares HTTP query, environment/runtime variable, Keychain auth, body, timeout, redirect, TLS and SSH preparation. Governed SSH profiles require shell authorization. WebSocket supports GET, query, headers, auth and connection timeout; it rejects request bodies, SSH and disabling TLS verification. It does not follow redirects. Scripts are HTTP-only and the builder displays this limit for streaming requests.
+
+The store keeps at most 1000 messages / 4 MiB of text; each displayed message is capped at 64 KiB and the console renders the last 500. A counter reports discarded messages. The daemon caps SSE buffered events and WebSocket frames/messages at 1 MiB. Switching workspace disconnects and clears the old stream. HTTP downloads stop reading after the 25 MiB inline cap; `size_bytes` is a lower bound when `too_large` is true.
+
 ---
 
 ## 7. History
@@ -388,24 +396,25 @@ variables for later steps (request chaining).
 
 ### Running
 
-**Run** (saves first if dirty) calls `POST …/automations/{id}/run`. The daemon:
+**Run** (saves first if dirty) starts `POST …/automations/{id}/runs`, then polls the saved report. The daemon:
 
-- Seeds the chained variable map from the workspace's **active environment**.
-- Runs **every step in order** against its saved request, reusing the exact
-  `/execute` send path. A failing step is recorded but **never aborts the run**;
-  errors are captured, not thrown.
+- Seeds variables from the explicitly selected environment (or the active environment at start).
+- Pins the saved request definitions and runs steps in order through the shared HTTP send path. **Stop on first failure** is optional; otherwise all steps run. Errors are retained in the report.
 - Evaluates assertions against status / duration / the JSON body, then applies
   extractions into the chained map for later steps.
 - Returns a report: an overall pass/fail banner (`passed = every step ok`),
   plus per-step status, duration, error, and per-assertion `✓/✕`.
 
-After a run the environments are refreshed (extracts may have updated variables).
+Extracted variables are local to the run; saved environment values are not modified.
 
 > Automations replay the request's **stored** fields — including its persisted
 > **Scripts** (pre/post run server-side; `pm.test` results appear alongside the
 > step's assertions and affect its pass/fail), **Settings** and **GraphQL
-> variables**. They don't take an explicit environment id (they always use the
-> active one). Non-HTTP transports (SSE/WS/gRPC) are not runnable in automations.
+> variables**. Runs accept an explicit environment id or use the active environment at start. Non-HTTP transports (SSE/WS/gRPC) are not runnable in automations.
+
+Use **Dataset rows (JSON)** to provide an array of objects. Each row overlays the selected environment independently; extracted variables chain only within that row. Dataset values stay in memory. Runs accept at most 1 MiB of dataset JSON and 1000 total step executions.
+
+**Run history** retains the latest 50 reports with **Load older runs** pagination, request versions at start, row indices, status, assertions and errors. Each completed step also gets a correlated request-history row. Completed results are saved before the next request starts. **Cancel run** stops waiting on the active request and skips remaining work; a request already sent may have reached its server. After daemon restart unfinished runs become `interrupted`, retain completed steps, and are never automatically replayed. Cancellation and restarting are separate actions.
 
 ---
 
@@ -450,9 +459,13 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `POST /automations` | Editor | `UpsertApiAutomationReq` → `Automation` |
 | `PATCH /automations/{id}` | Editor | `UpsertApiAutomationReq` → `Automation` |
 | `DELETE /automations/{id}` | Editor | → 204 |
-| `POST /automations/{id}/run` | Editor | → `ApiRunResult` |
+| `POST /automations/{id}/run` | Editor | Options → synchronous `ApiRunResult` (also durable) |
+| `POST /automations/{id}/runs` | Editor | Options → `ApiAutomationRun` immediately |
+| `GET /automation-runs` / `GET /automation-runs/{id}` | Editor | Saved report list / detail |
+| `POST /automation-runs/{id}/cancel` | Editor | Cancel current execution |
+| `POST /oauth2/authorize` / `GET /oauth2/flows/{id}` | Editor | Start browser flow / poll status |
 | `POST /api-client/import-curl` *(not workspace-scoped)* | member | `{curl}` → `ParsedCurl` |
-| `GET /ws/api-client/stream?token=…` *(root WS)* | token | SSE/WebSocket relay |
+| `GET /ws/api-client/stream?token=…&workspace_id=…` *(root WS)* | Editor + API Edit | SSE/WebSocket relay |
 
 ### Persisted shapes (the server-side source of truth)
 
@@ -476,8 +489,7 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
 `body_mode` persists as one of `none | json | raw | form | graphql`
 (form-data/multipart and the raw sub-types are encoded into `body`/headers).
 **Scripts, Docs, GraphQL variables, Settings and the transport kind persist in
-`ApiRequest.extras`** (a versioned extension object; `NULL` = never set). Only
-the gRPC `.proto` upload remains draft-local.
+`ApiRequest.extras`** (a versioned extension object; `NULL` = never set), including gRPC `.proto` and selected method in `extras.grpc`.
 
 ---
 
@@ -523,13 +535,8 @@ the gRPC `.proto` upload remains draft-local.
 - **Use non-fetchable schemes.** Only `http(s)` / `ws(s)` / `grpc(s)` are
   allowed; `file:`, `data:`, etc. are rejected.
 - **Send a `binary` (single-file) body** — the radio exists but is disabled.
-- **Use OAuth2 authorization-code grant** (browser redirect) — only the three
-  server-side grants are implemented.
 - **Call client-streaming or bidirectional gRPC** — only unary and
   server-streaming are supported.
-- **Persist the gRPC `.proto` upload with a saved request** — it stays
-  draft-local (everything else — Scripts, Docs, Settings, GraphQL variables,
-  transport — persists in `extras` and rides the git/OpenAPI exports).
 - **Treat scripts as a sandbox** — interactive runs execute in the webview,
   automation runs in the daemon's `boa` engine (loop-limited, but not a
   security boundary).
@@ -668,7 +675,7 @@ scripts it did not intend to change.
 | Auth field shows "•••••• stored in Keychain" | The value was migrated to the macOS Keychain; it is used at execute time. Type into the field to replace it. |
 | Saved request lost its body type as form-data | form-data/multipart and raw sub-types are encoded into `body`/headers; the stored `body_mode` is `none/json/raw/form/graphql` only. |
 | `client-streaming gRPC methods are not supported` | Only unary and server-streaming gRPC are implemented. |
-| OAuth2 "Get New Token" fails | Check the **Token URL** and grant; the authorization-code (redirect) grant isn't supported — use client-credentials / password / refresh-token. |
+| OAuth2 "Get New Token" fails | Check the **Token URL** and grant; for browser authorization register the displayed loopback callback, then use Authorization Code + PKCE. Expired, declined, or changed-request flows must be restarted. |
 | Streamed log seems to drop messages | The console caps at the **last 500** messages. |
 | Big response shows a "too large"/"truncated" banner | >25 MB isn't inlined; text >512 KB is truncated for display — use **Save** for the full body. |
 | Import says "Unrecognized format" | Only Postman v2.1, OpenAPI 3/Swagger, and HAR JSON are recognized. |

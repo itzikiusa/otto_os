@@ -9,8 +9,9 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { importSources, importScan, importCreate } from '../../lib/api/client';
+  import { api, importSources, importScan, importCreate } from '../../lib/api/client';
   import type {
+    Connection,
     ConnectionKind,
     ImportSource,
     SourceStatus,
@@ -53,6 +54,9 @@
   let rows = $state<ParsedConnection[]>([]);
   // Per-row keep flag (index-aligned with `rows`). Unsupported rows are never set.
   let keep = $state<boolean[]>([]);
+  let existing = $state<Connection[]>([]);
+  let actions = $state<('create' | 'update' | 'skip')[]>([]);
+  let targets = $state<string[]>([]);
 
   // Step 3 — create in flight.
   let creating = $state(false);
@@ -90,7 +94,10 @@
     warnings = [];
     scanPath = s.path ?? null;
     try {
-      const res = await importScan(wsId, s.source);
+      const [res, saved] = await Promise.all([importScan(wsId, s.source), api.get<Connection[]>(`/workspaces/${wsId}/connections`)]);
+      existing = saved;
+      targets = res.connections.map(c => { const matches = saved.filter(e => e.name === c.name && e.kind === c.kind); return matches.length === 1 ? matches[0].id : ''; });
+      actions = res.connections.map((c, i) => targets[i] || !c.supported ? 'skip' : 'create');
       rows = res.connections;
       scanPath = res.path ?? s.path ?? null;
       warnings = res.warnings;
@@ -129,7 +136,7 @@
   // falling back to the name when nothing obvious is there.
   function summarize(c: ParsedConnection): string {
     const p = (c.params ?? {}) as Record<string, unknown>;
-    if (c.kind === 'mongodb') return String(p.connection_string ?? '');
+    if (c.kind === 'mongodb') return String(p.conn_string ?? '');
     if (c.kind === 'custom') return String(p.template ?? '');
     const host = p.host !== undefined && p.host !== '' ? String(p.host) : '';
     if (!host) return '';
@@ -141,9 +148,10 @@
 
   async function create(): Promise<void> {
     if (creating) return;
-    const picked: ImportCreateItem[] = rows
-      .filter((c, i) => c.supported && keep[i] && c.kind)
-      .map((c) => ({ name: c.name, kind: c.kind as ConnectionKind, params: c.params }));
+    const picked: ImportCreateItem[] = rows.flatMap((c, i) => c.supported && keep[i] && c.kind ? [{
+      name: c.name, kind: c.kind, params: c.params, action: actions[i] ?? 'create',
+      ...(actions[i] === 'update' ? { target_id: targets[i] } : {}),
+    }] : []);
     if (picked.length === 0) {
       toasts.info('Nothing selected', 'Pick at least one connection to import.');
       return;
@@ -151,14 +159,14 @@
     creating = true;
     try {
       const res = await importCreate(wsId, { connections: picked, section_id: null });
-      const made = res.created.length;
+      const made = res.created.length + res.updated.length;
       const failed = res.failed.length;
       if (made > 0) {
         toasts.success(
           `Imported ${made}`,
           failed > 0
             ? `${failed} failed — set passwords on imported connections before connecting.`
-            : 'Set passwords on imported connections before connecting.',
+            : `${res.created.length} created, ${res.updated.length} updated, ${res.skipped.length} skipped. Existing passwords are retained on updates.`,
         );
       }
       if (failed > 0) {
@@ -288,7 +296,7 @@
 
           <div class="rows" role="list">
             {#each rows as c, i (c.name + i)}
-              <label class="row" class:disabled={!c.supported} role="listitem">
+              <div class="row" class:disabled={!c.supported} role="listitem">
                 <input
                   type="checkbox"
                   class="row-check"
@@ -308,7 +316,17 @@
                 </span>
                 <span class="grow"></span>
                 {#if c.supported}
-                  {#if c.kind}<span class="kind-badge">{c.kind}</span>{/if}
+                  <select aria-label={`Action for ${c.name}`} bind:value={actions[i]} disabled={!keep[i]}>
+                    <option value="create">Create new</option><option value="skip">Skip</option>
+                    <option value="update" disabled={!existing.some(e => e.kind === c.kind)}>Update existing</option>
+                  </select>
+                  {#if actions[i] === 'update'}
+                    <select aria-label={`Update target for ${c.name}`} bind:value={targets[i]} required>
+                      <option value="" disabled>Choose connection</option>
+                      {#each existing.filter(e => e.kind === c.kind) as target (target.id)}<option value={target.id}>{target.name}</option>{/each}
+                    </select>
+                  {/if}
+                                    {#if c.kind}<span class="kind-badge">{c.kind}</span>{/if}
                   {#if c.needs_password}
                     <span class="pill warn" title="No password was imported — set it before connecting">
                       needs password
@@ -319,7 +337,7 @@
                     {c.note ?? 'Not supported'}
                   </span>
                 {/if}
-              </label>
+              </div>
             {/each}
           </div>
 

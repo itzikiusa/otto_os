@@ -1,3 +1,4 @@
+import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 // API client ("Postman") store — workspace-scoped collections, requests,
 // environments, history, plus a live "draft" request the builder edits and
 // executes through the daemon. Reads `ws.currentId` only (never mutates it).
@@ -65,6 +66,8 @@ export interface ApiCookie {
 
 /** The editable request the builder/panel work on (a request not yet saved). */
 export interface ApiDraft {
+  /** Stable local ownership key, independent of the saved request id. */
+  tabId?: string;
   /** When the draft came from a saved request, its id (for "Save" = update). */
   requestId: Id | null;
   name: string;
@@ -100,6 +103,7 @@ export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'O
 
 function blankDraft(): ApiDraft {
   return {
+    tabId: crypto.randomUUID(),
     requestId: null,
     name: '',
     kind: 'http',
@@ -127,17 +131,15 @@ function secretMasked(v: ApiSecretable | undefined | null): string {
 }
 
 /** Serialize the draft's once-draft-only fields into the persisted `extras`
- * object. Returns null when everything is unset/default so untouched requests
- * keep a NULL column. */
-export function draftToExtras(d: ApiDraft): ApiRequestExtras | null {
+ * object. An explicit empty v1 object clears previously saved extras. */
+export function draftToExtras(d: ApiDraft): ApiRequestExtras {
   const extras: ApiRequestExtras = { v: 1 };
-  let any = false;
-  if (d.kind && d.kind !== 'http') { extras.transport = d.kind; any = true; }
-  if (d.graphql_variables?.trim()) { extras.graphql_variables = d.graphql_variables; any = true; }
-  if (d.docs?.trim()) { extras.docs_md = d.docs; any = true; }
+  if (d.kind && d.kind !== 'http') { extras.transport = d.kind; }
+  if (d.graphql_variables?.trim()) { extras.graphql_variables = d.graphql_variables; }
+  if (d.docs?.trim()) { extras.docs_md = d.docs; }
   const pre = d.pre_request_script?.trim() ? d.pre_request_script : undefined;
   const post = d.post_response_script?.trim() ? d.post_response_script : undefined;
-  if (pre || post) { extras.scripts = { ...(pre ? { pre } : {}), ...(post ? { post } : {}) }; any = true; }
+  if (pre || post) { extras.scripts = { ...(pre ? { pre } : {}), ...(post ? { post } : {}) }; }
   const s = d.settings;
   if (s && (s.timeout_ms != null || !s.follow_redirects || !s.verify_ssl)) {
     extras.settings = {
@@ -145,9 +147,9 @@ export function draftToExtras(d: ApiDraft): ApiRequestExtras | null {
       follow_redirects: s.follow_redirects,
       tls_verify: s.verify_ssl,
     };
-    any = true;
   }
-  return any ? extras : null;
+  if (d.kind === 'grpc') extras.grpc = {proto: d.proto ?? '', method: d.grpc_method ?? ''};
+  return extras;
 }
 
 /** Restore persisted `extras` onto a draft loaded from a saved request. */
@@ -160,6 +162,7 @@ function extrasToDraft(d: ApiDraft, extras: ApiRequestExtras | null | undefined)
   if (typeof extras.docs_md === 'string') out.docs = extras.docs_md;
   if (extras.scripts?.pre) out.pre_request_script = extras.scripts.pre;
   if (extras.scripts?.post) out.post_response_script = extras.scripts.post;
+  if (extras.grpc) { out.proto = extras.grpc.proto; out.grpc_method = extras.grpc.method; }
   if (extras.settings) {
     out.settings = {
       timeout_ms: extras.settings.timeout_ms ?? null,
@@ -211,6 +214,7 @@ function sanitizeDraft(raw: unknown): ApiDraft | null {
   return {
     ...blankDraft(),
     ...d,
+    tabId: typeof d.tabId === 'string' ? d.tabId : crypto.randomUUID(),
     requestId: typeof d.requestId === 'string' ? d.requestId : null,
     name: str(d.name, ''),
     kind: DRAFT_KINDS.includes(d.kind as ApiRequestKind) ? (d.kind as ApiRequestKind) : 'http',
@@ -245,6 +249,8 @@ class ApiClientStore {
   lastRun: ApiRunResult | null = $state(null);
   /** In-flight automation run. */
   running = $state(false);
+  automationRuns: ApiAutomationRun[] = $state([]);
+  currentRun: ApiAutomationRun | null = $state(null);
 
   /** Open request tabs; the active one is edited via `draft`. */
   tabs: ApiDraft[] = $state([blankDraft()]);
@@ -254,7 +260,7 @@ class ApiClientStore {
     return this.tabs[this.activeTab] ?? this.tabs[0];
   }
   set draft(d: ApiDraft) {
-    this.tabs[this.activeTab] = d;
+    this.tabs[this.activeTab] = {...d, tabId: d.tabId ?? this.tabs[this.activeTab]?.tabId ?? crypto.randomUUID()};
     this.persistTabs();
   }
   /** A short label for a tab. */
@@ -268,7 +274,7 @@ class ApiClientStore {
     }
   }
   openTab(d: ApiDraft = blankDraft()): void {
-    this.tabs = [...this.tabs, d];
+    this.tabs = [...this.tabs, {...d, tabId: crypto.randomUUID()}];
     this.activeTab = this.tabs.length - 1;
     this.lastResponse = null;
     this.persistTabs();
@@ -350,6 +356,10 @@ class ApiClientStore {
   private restoreTabs(wid: Id): void {
     if (this.tabsWid === wid) return;
     this.flushTabsWrite();
+    this.cancelExecute();
+    this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
+    this.sending = false;
+    this.scriptLogs = []; this.testResults = [];
     this.tabsWid = wid;
     let next: ApiDraft[] = [];
     let active = 0;
@@ -415,6 +425,7 @@ class ApiClientStore {
         api.get<ApiEnvironment[]>(`${base}/environments`),
         api.get<ApiHistoryEntry[]>(`${base}/history`),
       ]);
+      if (this.wsId() !== wid) return;
       this.collections = collections;
       this.requests = requests;
       this.environments = environments;
@@ -431,9 +442,9 @@ class ApiClientStore {
     } catch (e) {
       toasts.error('Could not load API client', errMsg(e));
     } finally {
-      this.loading = false;
+      if (this.wsId() === wid) this.loading = false;
     }
-    void this.loadSshConnections();
+    if (this.wsId() === wid) void this.loadSshConnections();
   }
 
   /** Load the workspace's `ssh`-kind connections for the SSH-tunnel picker.
@@ -443,7 +454,7 @@ class ApiClientStore {
     if (!wid) return;
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
-      this.sshConnections = all.filter((c) => c.kind === 'ssh');
+      if (this.wsId() === wid) this.sshConnections = all.filter((c) => c.kind === 'ssh');
     } catch {
       this.sshConnections = [];
     }
@@ -750,6 +761,7 @@ class ApiClientStore {
       const saved = id
         ? await api.patch<ApiRequest>(`${base}/requests/${id}`, req)
         : await api.post<ApiRequest>(`${base}/requests`, req);
+      if (this.base() !== base) return saved;
       this.requests = this.requests.some((r) => r.id === saved.id)
         ? this.requests.map((r) => (r.id === saved.id ? saved : r))
         : [...this.requests, saved];
@@ -760,9 +772,30 @@ class ApiClientStore {
     }
   }
 
+  /** OAuth may finish after navigation. Update the owning workspace's tabs,
+   * keeping auth edits made after the flow started. Saved values are markers. */
+  applySavedAuth(wid: Id, request: ApiRequest, previousAuth: ApiAuth): void {
+    const before = JSON.stringify(previousAuth);
+    const update = (tab: ApiDraft): ApiDraft => tab.requestId === request.id && JSON.stringify(tab.auth) === before
+      ? {...tab,auth:{...request.auth}} : tab;
+    if (this.tabsWid === wid) {
+      this.tabs = this.tabs.map(update); this.persistTabs();
+      if (this.wsId() === wid) this.requests = this.requests.map(r => r.id === request.id ? request : r);
+    } else {
+      try {
+        const raw = localStorage.getItem(tabsKey(wid));
+        if (raw) {const saved = JSON.parse(raw) as PersistedTabs; if (Array.isArray(saved.tabs)) {
+          saved.tabs = saved.tabs.map(update);localStorage.setItem(tabsKey(wid),JSON.stringify(saved));
+        }}
+      } catch { /* The server retains the saved request if browser storage is unavailable. */ }
+    }
+  }
+
   /** Persist the current draft into a collection. Returns the saved request. */
   async saveDraft(name: string, collectionId: Id | null): Promise<ApiRequest | null> {
     const d = this.draft;
+    const wid = this.wsId(), tabId = d.tabId;
+    const submittedAuth = JSON.stringify(d.auth);
     const body: UpsertApiRequestReq = {
       collection_id: collectionId,
       name,
@@ -783,7 +816,14 @@ class ApiClientStore {
       // Re-adopt the SAVED auth: secret members the daemon just moved to the
       // Keychain come back as `$secret` markers, and the builder shows them
       // masked instead of holding plaintext in tab-persisted localStorage.
-      this.draft = { ...this.draft, requestId: saved.id, name: saved.name, auth: { ...saved.auth } };
+      if (this.wsId() !== wid) return saved;
+      const index = this.tabs.findIndex(t => t.tabId === tabId);
+      if (index >= 0) {
+        const current = this.tabs[index];
+        this.tabs[index] = { ...current, requestId: saved.id, name: saved.name,
+          auth: JSON.stringify(current.auth) === submittedAuth ? {...saved.auth} : current.auth };
+        this.persistTabs();
+      }
       toasts.success('Request saved', saved.name);
     }
     return saved;
@@ -846,7 +886,12 @@ class ApiClientStore {
   // ── Execute ─────────────────────────────────────────────────────────────
 
   /** Runtime/session variables (set by scripts or by hand) sent as overrides. */
-  runtimeVars: Record<string, string> = $state({});
+  private runtimeScopes: Record<string, Record<string, string>> = $state({});
+  get runtimeVars(): Record<string, string> { return this.runtimeScopes[this.wsId() ?? ''] ?? {}; }
+  set runtimeVars(vars: Record<string, string>) {
+    const id = this.wsId();
+    if (id) this.runtimeScopes = {...this.runtimeScopes, [id]: vars};
+  }
   setRuntimeVar(key: string, value: string): void {
     this.runtimeVars = { ...this.runtimeVars, [key]: value };
   }
@@ -880,6 +925,9 @@ class ApiClientStore {
       return null;
     }
 
+    const wid = this.wsId()!, tabId = draft.tabId;
+    const runtimeVars = {...this.runtimeVars};
+    const ownsView = () => this.wsId() === wid && this.draft.tabId === tabId;
     const logs: string[] = [];
     this.testResults = [];
 
@@ -891,7 +939,8 @@ class ApiClientStore {
       body: draft.body,
     };
     if (draft.pre_request_script?.trim()) {
-      const pre = runPreRequest(draft.pre_request_script, reqCtx, this.runtimeVars);
+      const pre = runPreRequest(draft.pre_request_script, reqCtx, runtimeVars);
+      this.runtimeScopes = {...this.runtimeScopes, [wid]: {...runtimeVars}};
       logs.push(...pre.logs.map((l) => `[pre] ${l}`));
       if (pre.error) {
         this.scriptLogs = [...logs, `[pre] error: ${pre.error}`];
@@ -925,16 +974,18 @@ class ApiClientStore {
       timeout_ms: s?.timeout_ms ?? null,
       follow_redirects: s?.follow_redirects ?? true,
       verify_ssl: s?.verify_ssl ?? true,
-      vars: Object.keys(this.runtimeVars).length ? this.runtimeVars : undefined,
+      vars: Object.keys(runtimeVars).length ? runtimeVars : undefined,
       ssh_connection_id: draft.ssh_connection_id ?? null,
     };
-    this._abortCtrl = new AbortController();
-    const { signal } = this._abortCtrl;
+    this.cancelExecute();
+    const controller = new AbortController();
+    this._abortCtrl = controller;
+    const { signal } = controller;
     this.sending = true;
     try {
       const resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
-      this.lastResponse = resp;
-      void this.loadHistory();
+      if (ownsView()) this.lastResponse = resp;
+      if (this.wsId() === wid) void this.loadHistory();
 
       // Post-response script: chaining (set vars) + tests.
       if (draft.post_response_script?.trim()) {
@@ -943,22 +994,21 @@ class ApiClientStore {
         const post = runPostResponse(
           draft.post_response_script,
           { code: resp.status, status: resp.status_text, responseTime: resp.duration_ms, headers: headersObj, bodyText: resp.body },
-          this.runtimeVars,
+          runtimeVars,
         );
         logs.push(...post.logs.map((l) => `[test] ${l}`));
-        this.testResults = post.tests;
+        if (ownsView()) this.testResults = post.tests;
         if (post.error) logs.push(`[test] error: ${post.error}`);
-        this.runtimeVars = { ...this.runtimeVars };
+        this.runtimeScopes = {...this.runtimeScopes, [wid]: {...runtimeVars}};
       }
-      this.scriptLogs = logs;
+      if (ownsView()) this.scriptLogs = logs;
       return resp;
     } catch (e) {
-      this.scriptLogs = logs;
+      if (ownsView()) this.scriptLogs = logs;
       if (!isAbortError(e)) toasts.error('Request failed', errMsg(e));
       return null;
     } finally {
-      this.sending = false;
-      this._abortCtrl = null;
+      if (this._abortCtrl === controller) { this.sending = false; this._abortCtrl = null; }
     }
   }
 
@@ -1150,23 +1200,36 @@ class ApiClientStore {
     }
   }
 
-  /** Run an automation through the daemon; stores + returns the run report. */
-  async runAutomation(id: Id): Promise<ApiRunResult | null> {
-    const base = this.base();
-    if (!base) return null;
+  async loadAutomationRuns(automationId?: Id, before?: Id): Promise<void> {
+    const base = this.base(); if (!base) return;
+    const query = new URLSearchParams();
+    if (automationId) query.set('automation_id',automationId);
+    if (before) query.set('before',before);
+    try {
+      const runs = await api.get<ApiAutomationRun[]>(`${base}/automation-runs?${query}`);
+      if (base === this.base()) this.automationRuns = before ? [...this.automationRuns,...runs] : runs;
+    } catch (e) {toasts.error('Could not load run history',errMsg(e));}
+  }
+  async cancelAutomationRun(id: Id): Promise<void> {
+    const base = this.base(); if (!base) return;
+    try {await api.post(`${base}/automation-runs/${id}/cancel`,{});}
+    catch (e) {toasts.error('Could not cancel run',errMsg(e));}
+  }
+  async runAutomation(id: Id, options: StartApiAutomationRunReq = {}): Promise<ApiRunResult | null> {
+    const base = this.base(); if (!base) return null;
     this.running = true;
     try {
-      const result = await api.post<ApiRunResult>(`${base}/automations/${id}/run`, {});
-      this.lastRun = result;
-      // Extracts may have written environment variables; refresh to reflect them.
-      void this.loadEnvironments();
-      return result;
-    } catch (e) {
-      toasts.error('Run automation failed', errMsg(e));
+      let run = await api.post<ApiAutomationRun>(`${base}/automations/${id}/runs`,options);
+      while (base === this.base()) {
+        this.currentRun = run; this.lastRun = run.report;
+        if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
+        await new Promise(resolve => setTimeout(resolve,500));
+        if (base !== this.base()) break;
+        run = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}`);
+      }
       return null;
-    } finally {
-      this.running = false;
-    }
+    } catch (e) {toasts.error('Run automation failed',errMsg(e)); return null;}
+    finally {if (base === this.base()) this.running = false;}
   }
 
   // ── Draft helpers ─────────────────────────────────────────────────────────
@@ -1180,6 +1243,7 @@ class ApiClientStore {
   loadRequestIntoDraft(r: ApiRequest): void {
     this.draft = extrasToDraft(
       {
+        tabId: crypto.randomUUID(),
         requestId: r.id,
         name: r.name,
         kind: 'http',
@@ -1208,7 +1272,7 @@ class ApiClientStore {
       // Unsaved draft: dirty once anything meaningful was entered.
       return Boolean(
         d.url.trim() || d.body.trim() || d.headers.length || d.query.length ||
-        d.auth.type !== 'none' || draftToExtras(d),
+        d.auth.type !== 'none' || Object.keys(draftToExtras(d)).length > 1,
       );
     }
     const kv = (rows: ApiKeyVal[]): string =>
@@ -1222,7 +1286,7 @@ class ApiClientStore {
       kv(d.query) !== kv(saved.query) ||
       JSON.stringify(d.auth) !== JSON.stringify(saved.auth) ||
       (d.ssh_connection_id ?? null) !== (saved.ssh_connection_id ?? null) ||
-      JSON.stringify(draftToExtras(d)) !== JSON.stringify(saved.extras ?? null)
+      JSON.stringify(draftToExtras(d)) !== JSON.stringify(saved.extras ?? {v: 1})
     );
   }
 

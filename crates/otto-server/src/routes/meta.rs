@@ -60,7 +60,24 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
         .filter(|s| !s.is_empty())
         .filter(|s| providers.iter().any(|p| p == s));
 
-    let tools = futures_util::future::join_all(DETECTED_TOOLS.iter().map(|t| detect_tool(t))).await;
+    // Probe the configured executable, not merely a provider's display name.
+    // This makes custom providers and builtin command overrides first-class in
+    // every launch readiness surface without executing custom version commands.
+    let mut tool_specs: std::collections::BTreeMap<String, String> = DETECTED_TOOLS
+        .iter()
+        .map(|name| (name.to_string(), name.to_string()))
+        .collect();
+    for name in &providers {
+        if let Some(program) = ctx.manager.providers().program_for(name) {
+            configure_provider_probe(&mut tool_specs, name, program);
+        }
+    }
+    let tools = futures_util::future::join_all(
+        tool_specs
+            .iter()
+            .map(|(name, program)| detect_tool(name, program)),
+    )
+    .await;
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),
@@ -74,12 +91,26 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
     }))
 }
 
+/// A template cannot be checked until a session supplies its cwd/id. Omit its
+/// row so callers report unchecked rather than disabling a valid provider.
+fn configure_provider_probe(
+    tools: &mut std::collections::BTreeMap<String, String>,
+    name: &str,
+    program: String,
+) {
+    if program.contains("{cwd}") || program.contains("{sid}") {
+        tools.remove(name);
+    } else {
+        tools.insert(name.to_string(), program);
+    }
+}
+
 /// Probe one external tool: `which <name>` for presence, then
 /// `<name> --version` (2s timeout) for the version string.
-async fn detect_tool(name: &str) -> ToolStatus {
+async fn detect_tool(name: &str, program: &str) -> ToolStatus {
     let found = match timeout(
         Duration::from_secs(2),
-        Command::new("which").arg(name).output(),
+        Command::new("which").arg(program).output(),
     )
     .await
     {
@@ -88,10 +119,10 @@ async fn detect_tool(name: &str) -> ToolStatus {
     };
 
     let mut version = None;
-    if found {
+    if found && DETECTED_TOOLS.contains(&name) {
         if let Ok(Ok(out)) = timeout(
             Duration::from_secs(2),
-            Command::new(name).arg("--version").output(),
+            Command::new(program).arg("--version").output(),
         )
         .await
         {
@@ -196,6 +227,36 @@ async fn resolve_one_hop(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod walkthrough_tests {
     use super::*;
+
+    #[test]
+    fn context_dependent_provider_programs_remain_unchecked_including_builtin_overrides() {
+        let mut probes =
+            std::collections::BTreeMap::from([("claude".to_string(), "claude".to_string())]);
+        configure_provider_probe(&mut probes, "claude", "{cwd}/.venv/bin/agent".into());
+        configure_provider_probe(&mut probes, "custom-agent", "/tmp/{sid}/agent".into());
+        assert!(
+            probes.is_empty(),
+            "templates must not become false missing-executable reports"
+        );
+        configure_provider_probe(&mut probes, "custom-agent", "/bin/sh".into());
+        assert_eq!(probes["custom-agent"], "/bin/sh");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_detection_uses_its_configured_executable() {
+        let ready = detect_tool("custom-agent", "/bin/sh").await;
+        assert_eq!(ready.name, "custom-agent");
+        assert!(ready.found);
+        assert!(
+            ready.version.is_none(),
+            "custom executables are never run just to probe a version"
+        );
+        assert!(
+            !detect_tool("custom-agent", "/nonexistent/otto-custom-agent")
+                .await
+                .found
+        );
+    }
 
     #[tokio::test]
     async fn rejects_non_github_urls() {

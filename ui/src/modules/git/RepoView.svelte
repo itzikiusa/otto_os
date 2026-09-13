@@ -12,6 +12,7 @@
   import BlamePanel from './BlamePanel.svelte';
   import FileHistoryPanel from './FileHistoryPanel.svelte';
   import RemotesPanel from './RemotesPanel.svelte';
+  import RecoveryTools from './RecoveryTools.svelte';
   import { gitBridge } from './gitBridge.svelte';
   import FocusView from './FocusView.svelte';
   import PrList from './PrList.svelte';
@@ -242,6 +243,7 @@
     <button class="btn ghost small" onclick={() => (remotesOpen = true)} title="Manage remotes">
       <Icon name="globe" size={12} /> Remotes
     </button>
+    <button class="btn ghost small" onclick={() => gitBridge.openRecovery(repo.id)} title="Reflog recovery, interactive rebase and bisect">Recovery tools</button>
     <span class="grow"></span>
     {#if status}
       <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
@@ -597,3 +599,11 @@
     .conflict-tab { margin-inline-start: 0; }
   }
 </style>
+
+{#if gitBridge.recovery?.repoId === repo.id}
+  {#key repo.id}
+    <RecoveryTools repoId={repo.id} initialMode={gitBridge.recovery.mode} initialOnto={gitBridge.recovery.onto}
+      onclose={() => { gitBridge.recovery = null; graphKey++; }}
+      onresolve={() => { gitBridge.recovery = null; resolving = true; }} />
+  {/key}
+{/if}

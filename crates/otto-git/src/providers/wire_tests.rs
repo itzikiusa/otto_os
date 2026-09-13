@@ -43,6 +43,45 @@ mod github {
     }
 
     #[tokio::test]
+    async fn merge_cleanup_never_deletes_a_fork_namesake() {
+        for owner in ["contributor", "acme"] {
+            let server = MockServer::start().await;
+            let gh = Github::with_base("tok".into(), server.uri());
+            Mock::given(method("GET"))
+                .and(path("/repos/acme/app/pulls/7"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "head": {"ref": "feature", "repo": {"full_name": format!("{owner}/app")}}
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/repos/acme/app/pulls/7/merge"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            gh.merge(&rr(), 7, otto_core::api::MergeStrategy::Merge, true)
+                .await
+                .unwrap();
+            let deletes = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.method.as_str() == "DELETE")
+                .count();
+            assert_eq!(
+                deletes,
+                usize::from(owner == "acme"),
+                "cleanup of {owner}/app"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn list_prs_two_pages_sets_has_more() {
         let server = MockServer::start().await;
         let gh = Github::with_base("tok".into(), server.uri());

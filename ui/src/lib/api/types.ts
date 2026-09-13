@@ -2042,6 +2042,8 @@ export interface ImportScanResult {
 
 /** One connection the user chose to create. */
 export interface ImportCreateItem {
+  action?: 'create' | 'update' | 'skip';
+  target_id?: string;
   name: string;
   kind: ConnectionKind;
   params: Record<string, unknown>;
@@ -2057,6 +2059,8 @@ export interface ImportCreateReq {
 
 /** Result of an import create batch (best-effort — partial success is fine). */
 export interface ImportCreateResult {
+  updated: Connection[];
+  skipped: string[];
   created: Connection[];
   failed: { name: string; error: string }[];
 }
@@ -2097,6 +2101,15 @@ export interface SftpDownloadResp {
 }
 
 /** `POST /api/v1/connections/{id}/sftp/upload`. */
+export interface SftpTransferReq {
+  direction: 'download' | 'upload'; local_path: string; remote_path: string; timeout_secs?: number;
+}
+export interface SftpTransfer {
+  id: string; direction: 'download' | 'upload'; local_path: string; remote_path: string;
+  status: 'running' | 'finalizing' | 'completed' | 'cancelled' | 'failed' | 'timed_out' | 'outcome_unknown';
+  bytes: number; total_bytes: number | null; elapsed_secs: number; error: string | null;
+}
+
 export interface SftpUploadReq {
   /** Local source (leading `~` expands to daemon home). */
   local_path: string;
@@ -2485,6 +2498,7 @@ export interface Hunk {
 }
 
 export interface FileDiff {
+  fingerprint?: string;
   path: string;
   old_path: string | null;
   is_binary: boolean;
@@ -2517,6 +2531,7 @@ export interface StageHunkReq {
   path: string;
   hunk_index: number;
   hunk_header: string;
+  fingerprint: string;
   lines?: number[];
   op: HunkOp;
   /** Required for `discard` — it rewrites the working file. */
@@ -2567,7 +2582,7 @@ export interface MergeBranchReq {
 
 /** Outcome of a local merge / merge-completion. Conflicts are a normal result. */
 export interface MergeResult {
-  status: 'merged' | 'conflicts' | 'up_to_date';
+  status: 'merged' | 'conflicts' | 'up_to_date' | 'paused';
   commit: string | null;
   conflicted_files: string[];
   repo_status: RepoStatusResp;
@@ -2606,6 +2621,10 @@ export type ConflictSegment =
 
 /** `GET /repos/{id}/conflict?path=<p>` */
 export interface ConflictFile {
+  ours_present: boolean;
+  theirs_present: boolean;
+  worktree_present: boolean;
+  trailing_newline: boolean;
   path: string;
   is_binary: boolean;
   segments: ConflictSegment[];
@@ -3230,6 +3249,23 @@ export interface HandoffReq {
   comment_ids?: string[] | null;
 }
 
+/** Durable delivery record stored in the target session's meta.handover. */
+export interface HandoverDelivery {
+  id: Id;
+  source_id: Id;
+  state: 'preparing' | 'awaiting_target' | 'sent' | 'acknowledged' | 'failed';
+  brief: string;
+  focus: string;
+  archive_source: boolean;
+  include_git: boolean;
+  fast: boolean;
+  error: string | null;
+  updated_at: string;
+}
+
+/** POST /sessions/{id}/handover/{retry|acknowledge}; guards stale panel actions. */
+export interface HandoverDeliveryActionReq { delivery_id: Id }
+
 /** Where a handover brief is delivered. */
 export type HandoverTarget =
   | { kind: 'new_agent'; provider: string }
@@ -3248,7 +3284,7 @@ export interface HandoverReq {
   include_git?: boolean | null;
   /** Summarize with a fast model. Defaults to false. */
   fast?: boolean | null;
-  /** Archive the source session after handover. Defaults to false. */
+  /** Archive the source only after receipt is explicitly acknowledged. Defaults to false. */
   archive_source?: boolean | null;
 }
 
@@ -3995,7 +4031,8 @@ export type ApiAuth =
   | { type: 'api_key'; key: string; value: ApiSecretable; in: 'header' | 'query' }
   | {
       type: 'oauth2';
-      grant: 'client_credentials' | 'password' | 'refresh_token';
+      grant: 'client_credentials' | 'password' | 'refresh_token' | 'authorization_code';
+      authorization_url?: string;
       token_url: string;
       client_id: string;
       client_secret: ApiSecretable;
@@ -4011,6 +4048,8 @@ export type ApiAuth =
  * settings / GraphQL variables / transport). The UI owns this shape; the
  * daemon validates only that it is an object within the size cap. */
 export interface ApiRequestExtras {
+  /** Saved runnable unary/server-streaming gRPC schema and selected method. */
+  grpc?: {proto: string; method: string};
   v: number;
   /** Transport kind; absent = http. */
   transport?: 'http' | 'sse' | 'websocket' | 'grpc';
@@ -4755,6 +4794,8 @@ export interface NodeRunState {
 }
 
 export interface WorkflowRun {
+  /** Durable loop attempt records; populated by the run detail endpoint. */
+  checkpoints?: WorkflowCheckpoint[];
   id: Id;
   workflow_id: Id;
   workspace_id: Id;
@@ -4790,6 +4831,29 @@ export interface WorkflowRun {
    *  repos.json, per-step handoff files). Present on `GET /workflow-runs/{id}`
    *  when the directory exists on disk; absent on list endpoints. */
   context_dir?: string | null;
+}
+
+export interface WorkflowCheckpoint {
+  node_id: string;
+  loop_id: string;
+  iteration: number;
+  step_index: number;
+  kind: string;
+  name: string;
+  status: NodeStatus;
+  attempts: number;
+  input: unknown;
+  output: unknown;
+  error?: string | null;
+  logs: string[];
+  updated_at: string;
+}
+
+export interface WorkflowValidationIssue {
+  node_id: string | null;
+  edge_id: string | null;
+  field: string;
+  message: string;
 }
 
 /** `POST /workflows/{id}/run` body. `review_mode` seeds `input.review_mode` and overrides every
@@ -5797,7 +5861,31 @@ export interface Vault {
   links: number;
 }
 
+/** File-backed recovery records; hidden content is excluded from indexing. */
+export interface VaultTrashEntry {
+  id: string;
+  original_path: string;
+  stored_path: string;
+  deleted_at: string;
+  kind: 'file' | 'dir';
+}
+export interface VaultRevision {
+  id: string;
+  path: string;
+  created_at: string;
+  before_hash: string | null;
+  after_hash: string;
+  reason: string;
+  committed: boolean;
+}
+export interface VaultRevisionDetail extends VaultRevision {
+  before: string | null;
+  after: string;
+}
+
 export interface VaultStatus {
+  /** Opaque change token; unchanged scans keep it stable. */
+  generation?: string | null;
   id: number;
   scan_state: string;
   last_scan_at: string | null;
@@ -8336,3 +8424,96 @@ export type DatabaseChange = ChangeInput & {id:string;author_id:string;real_auth
 export type ChangeAttempt = {id:string;change_id:string;connection_id:string;node:string|null;state:string;executor_id:string;ordinal:number;summary:string|null;started_at:string|null;finished_at:string|null};
 export type ChangeEvent = {id:string;revision:number;action:string;actor_id:string;real_actor_id:string;data:unknown;created_at:string};
 export type ChangeDetail = {change:DatabaseChange;attempts:ChangeAttempt[];history:ChangeEvent[]};
+
+// Git recovery tools (otto-git/recovery.rs).
+export interface GitRecoveryEntry { sha: string; selector: string; subject: string }
+export interface GitPlanCommit { sha: string; subject: string; action: 'pick' | 'squash' | 'edit' }
+export interface GitInteractivePlan { head_sha: string; onto_sha: string; base_sha: string; commits: GitPlanCommit[] }
+export interface GitBisectState {
+  active: boolean; current_sha: string; current_subject: string;
+  finished: boolean; first_bad: string | null; remaining: number | null;
+  log: string; output: string;
+}
+
+export interface StartApiAutomationRunReq {
+  environment_id?: Id | null;
+  stop_on_failure?: boolean;
+  dataset?: Record<string, unknown>[];
+}
+export interface ApiAutomationRun {
+  id: Id; workspace_id: Id; automation_id: Id; environment_id: Id | null;
+  created_by: Id; status: 'running' | 'passed' | 'failed' | 'cancelled' | 'interrupted';
+  created_at: string; finished_at: string | null; stop_on_failure: boolean;
+  dataset_rows: number; snapshot: unknown; report: ApiRunResult; result_rows: number[]; result_ids: Id[]; error: string | null;
+}
+
+/** Portable saved-data archive. Authentication secrets and live processes are excluded. */
+export interface StateArchive {
+  archive_format: 2;
+  schema_version: number;
+  daemon_version: string;
+  snapshot_at: string;
+  records: Record<string, Record<string, unknown>[]>;
+  roots: { id: string; kind: string; owner_id?: string }[];
+  files: { root: string; path: string; sha256: string; content_base64: string }[];
+  excluded: string[];
+  reconnect: string[];
+}
+export type RestoreConflictPolicy = 'abort' | 'skip_existing';
+export interface RestorePreview {
+  preview_token: string;
+  can_restore: boolean;
+  record_count: number;
+  file_count: number;
+  table_counts: Record<string, number>;
+  conflicts: { kind: 'record' | 'file'; location: string; reason: string }[];
+  excluded: string[];
+  reconnect: string[];
+  warnings: string[];
+}
+export interface RestoreResult {
+  records_inserted: number;
+  records_skipped: number;
+  files_restored: number;
+  files_skipped: number;
+  restore_root: string;
+  reconnect: string[];
+}
+
+export interface GitBackupStatus {
+  repo_path: string;
+  head: string | null;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  remotes: string[];
+}
+export interface GitBackupPreview {
+  token: string;
+  snapshot_digest: string;
+  status: GitBackupStatus;
+  changes: { path: string; action: 'added' | 'modified' | 'removed' | 'unchanged'; bytes: number }[];
+  excluded: string[];
+  reconnect: string[];
+}
+
+export interface ConnectionExportFormat {
+  id: string;
+  label: string;
+  kinds: string[];
+  password_support: 'native' | 'sidecar';
+  description: string;
+  import_instructions: string;
+}
+export interface ConnectionExportResult {
+  format: string;
+  total_connections: number;
+  exported_connections: number;
+  contains_passwords: boolean;
+  files: { name: string; mime: string; content: string }[];
+  skipped: { id: string; name: string; kind: string; reason: string }[];
+  warnings: string[];
+  import_instructions: string;
+}

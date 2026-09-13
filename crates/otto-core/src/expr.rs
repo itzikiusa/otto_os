@@ -54,6 +54,14 @@ impl std::error::Error for ExprError {}
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Validate syntax without evaluating dynamic references against invented data.
+pub fn validate(src: &str) -> Result<(), ExprError> {
+    let toks = lex(src)?;
+    let mut parser = Parser { toks, pos: 0 };
+    parser.parse_expr()?;
+    parser.expect_eof()
+}
+
 /// Parse and evaluate `src` against `ctx`, returning the resulting JSON value.
 pub fn eval(src: &str, ctx: &Value) -> Result<Value, ExprError> {
     let toks = lex(src)?;

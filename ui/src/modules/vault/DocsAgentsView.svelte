@@ -958,6 +958,7 @@
           </span>
           {#each run.written as p (p)}
             <button class="written-link" onclick={() => void vault.open(p)}>{p}</button>
+            <button class="written-link" title={`Review edits to ${p} during this run`} onclick={() => void vault.openHistory(p, run.started_at)}>Review edits</button>
           {/each}
         </div>
       {/if}

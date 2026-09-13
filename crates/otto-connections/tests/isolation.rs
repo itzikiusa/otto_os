@@ -454,3 +454,216 @@ async fn seed_owned_connection(
         })
         .await
 }
+
+#[derive(Default)]
+struct MemorySecrets(std::sync::Mutex<std::collections::HashMap<String, String>>);
+impl SecretStore for MemorySecrets {
+    fn put(&self, k: &str, v: &str) -> Result<()> {
+        self.0.lock().unwrap().insert(k.into(), v.into());
+        Ok(())
+    }
+    fn get(&self, k: &str) -> Result<Option<String>> {
+        Ok(self.0.lock().unwrap().get(k).cloned())
+    }
+    fn delete(&self, k: &str) -> Result<()> {
+        self.0.lock().unwrap().remove(k);
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn mongo_uri_is_normalized_on_create_update_legacy_read_and_duplicate_has_no_secret() {
+    let pool = mem_pool().await;
+    let root = seed_user(&pool, "credential-root", true).await;
+    let secrets = Arc::new(MemorySecrets::default());
+    let repo = ConnectionsRepo::new(pool.clone());
+    let svc = ConnectionsService::new(
+        repo.clone(),
+        ConnectionSectionsRepo::new(pool),
+        secrets.clone(),
+    );
+    let request = otto_core::api::UpsertConnectionReq {
+        name: "replica".into(),
+        kind: ConnectionKind::Mongodb,
+        params: serde_json::json!({"conn_string":"mongodb://alice:p%40ss@one,two/db?tls=true"}),
+        secret: None,
+        first_command: None,
+        section_id: None,
+        environment: None,
+        read_only: None,
+    };
+    let conn = svc.create(None, &root.id, request.clone()).await.unwrap();
+    assert_eq!(
+        conn.params["conn_string"],
+        "mongodb://alice:{secret}@one,two/db?tls=true"
+    );
+    assert_eq!(
+        secrets
+            .get(conn.secret_ref.as_ref().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some("p@ss")
+    );
+    assert!(!serde_json::to_string(&repo.get(&conn.id).await.unwrap())
+        .unwrap()
+        .contains("p%40ss"));
+    let copy = svc.duplicate(&conn.id, &root.id).await.unwrap();
+    assert!(copy.secret_ref.is_none());
+    assert_eq!(copy.params, conn.params);
+    let mut edit = request;
+    edit.params["conn_string"] = "mongodb://alice:next%3Apass@one/db".into();
+    let edited = svc.update(&conn.id, &root.id, edit).await.unwrap();
+    assert_eq!(
+        secrets
+            .get(edited.secret_ref.as_ref().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some("next:pass")
+    );
+    let legacy_params = serde_json::json!({"conn_string":"mongodb://u:legacy%2Fpass@host/db"});
+    repo.update(
+        &conn.id,
+        None,
+        Some(&legacy_params),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let migrated = svc.get(&conn.id).await.unwrap();
+    assert_eq!(
+        migrated.params["conn_string"],
+        "mongodb://u:{secret}@host/db"
+    );
+    assert_eq!(
+        secrets
+            .get(migrated.secret_ref.as_ref().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some("legacy/pass")
+    );
+}
+
+#[tokio::test]
+async fn import_reconciliation_create_update_skip_preserves_secret_and_reports_invalid_target() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Extension,
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let pool = mem_pool().await;
+    let root = seed_user(&pool, "import-root", true).await;
+    let ws = seed_ws(&pool).await;
+    let ctx = TestCtx::new(pool.clone());
+    let saved = ctx
+        .svc
+        .create(
+            None,
+            &root.id,
+            otto_core::api::UpsertConnectionReq {
+                name: "original".into(),
+                kind: ConnectionKind::Mysql,
+                params: serde_json::json!({"host":"before", "advanced":"keep"}),
+                secret: Some("fixture-only".into()),
+                first_command: Some("select 1".into()),
+                section_id: None,
+                environment: Some(Environment::Prod),
+                read_only: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    let router = otto_connections::api_router::<TestCtx>()
+        .layer(Extension(otto_core::auth::AuthUser(root)))
+        .with_state(ctx.clone());
+    let body = serde_json::json!({"connections":[
+        {"name":"updated", "kind":"mysql", "params":{"host":"after"}, "action":"update", "target_id":saved.id},
+        {"name":"new", "kind":"mysql", "params":{"host":"new"}, "action":"create"},
+        {"name":"skipped", "kind":"mysql", "params":{"host":"skip"}, "action":"skip"},
+        {"name":"invalid", "kind":"mysql", "params":{"host":"bad"}, "action":"update", "target_id":"missing"}
+    ]});
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/workspaces/{ws}/connections/import/create"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(result["created"].as_array().unwrap().len(), 1);
+    assert_eq!(result["updated"].as_array().unwrap().len(), 1);
+    assert_eq!(result["skipped"], serde_json::json!(["skipped"]));
+    assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+    let updated = ctx.svc.get(&saved.id).await.unwrap();
+    assert_eq!(
+        updated.params,
+        serde_json::json!({"host":"after", "advanced":"keep"})
+    );
+    assert_eq!(updated.secret_ref, saved.secret_ref);
+    assert_eq!(updated.first_command, saved.first_command);
+    assert_eq!(updated.environment, Environment::Prod);
+    assert!(updated.read_only);
+    assert_eq!(
+        ConnectionsRepo::new(pool)
+            .list_visible(&ws)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn failed_legacy_uri_secret_write_preserves_row_and_does_not_expose_it() {
+    struct Unavailable;
+    impl SecretStore for Unavailable {
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Err(Error::Internal("fixture secret store unavailable".into()))
+        }
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+    let pool = mem_pool().await;
+    let root = seed_user(&pool, "unavailable-root", true).await;
+    let ws = seed_ws(&pool).await;
+    let repo = ConnectionsRepo::new(pool.clone());
+    let params = serde_json::json!({"conn_string":"mongodb://u:legacy-fixture-password@host/db"});
+    let conn = repo
+        .create(otto_state::NewConnection {
+            workspace_id: None,
+            name: "legacy".into(),
+            kind: ConnectionKind::Mongodb,
+            params: params.clone(),
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Environment::Dev,
+            read_only: false,
+            created_by: root.id.clone(),
+        })
+        .await
+        .unwrap();
+    let service = ConnectionsService::new(
+        repo.clone(),
+        ConnectionSectionsRepo::new(pool),
+        Arc::new(Unavailable),
+    );
+    let error = service.get(&conn.id).await.unwrap_err().to_string();
+    assert!(!error.contains("legacy-fixture-password"));
+    assert!(service.list_for(&ws, &root.id).await.is_err());
+    assert_eq!(repo.get(&conn.id).await.unwrap().params, params);
+}

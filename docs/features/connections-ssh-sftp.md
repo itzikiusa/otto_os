@@ -12,8 +12,8 @@ SSH/custom → terminal session, DB kinds → the workbench (right-click keeps
 "Open terminal client" and SSH rows keep "Browse files (SFTP)"), clusters →
 the Message Brokers view (`#/brokers`, reached from here; it has no sidebar
 entry of its own, and neither does `#/database`, which stays as an alias).
-Opening a profile drops you into a **live terminal session** sitting side-by-side
-with your agents (same session machinery), driven by the system client binary
+Opening an authorized SSH/custom profile drops you into a **live terminal session**
+sitting side-by-side with your agents (same session machinery), driven by the system client binary
 (`ssh`, `mysql`, `redis-cli`, `mongosh`, `clickhouse-client`, …). The very same
 Connection objects feed the **Database Explorer** (native data access — see
 [`./database-explorer.md`](./database-explorer.md)) and the **Kafka viewer** (see
@@ -35,7 +35,7 @@ download/upload read and write *your* real local disk.
 
 | Concern | Location |
 |---|---|
-| Connection list / sidebar (SSH + Custom) | `ui/src/modules/connections/ConnectionsPage.svelte` |
+| Unified connection hub (all kinds + Kafka) | `ui/src/modules/database/DatabasePage.svelte` |
 | Create / edit form (all kinds) | `ui/src/modules/connections/ConnectionForm.svelte` |
 | SFTP browser UI | `ui/src/modules/connections/SftpBrowser.svelte` |
 | SFTP client store (per-connection cwd) | `ui/src/lib/stores/sftp.svelte.ts` |
@@ -48,11 +48,12 @@ download/upload read and write *your* real local disk.
 | Request/response shapes (`UpsertConnectionReq`, `Sftp*`) | `crates/otto-core/src/api.rs` |
 | Authoritative contract | `docs/contracts/api.md` (§ Connections #25–30, § SFTP, § sections, § MCP) |
 
-> **DB engines vs. the Connections page.** The Connections page shows only
-> `ssh` and `custom` profiles; MySQL / Redis / MongoDB / ClickHouse profiles are
-> created and managed inside the **Database Explorer** (they are the *same*
-> `Connection` rows — just filtered into a different page). All kinds can still be
-> *opened as a terminal* and *tested* through the endpoints documented here.
+> **One hub, governed actions.** `#/connections` shows all profile kinds and
+> Kafka clusters in one tree. DB profiles open the workbench; SSH/custom profiles
+> open a terminal only when the current identity has `shell` authority. Governed
+> database/custom profiles cannot bypass native restrictions through terminal
+> clients. Root provisions identities and passwords, then delegates individual
+> operations through the connection's **Access** menu.
 
 ---
 
@@ -63,7 +64,7 @@ A profile is one `UpsertConnectionReq`:
 ```jsonc
 {
   "name": "staging mysql",          // required, display name
-  "kind": "mysql",                  // ssh | mysql | redis | mongodb | clickhouse | custom
+  "kind": "mysql",                  // ssh | mysql | postgres | redis | mongodb | clickhouse | custom
   "params": { /* per-kind, below */ },
   "secret": "s3cr3t",               // write-only → Keychain; omit on PATCH to keep
   "first_command": "USE app_db; SHOW TABLES;",  // optional; typed into the PTY after connect
@@ -95,6 +96,7 @@ create/update via `validate_params`, which simply tries to build the command.
 |---|---|---|---|---|
 | `ssh` | `host` | `port`, `user`, `identity_file`, `jump` (`ProxyJump`) | `ssh` | ssh-agent / key — no password in argv |
 | `mysql` | `host` | `port`, `user`, `db`, `jump`, `identity_file` | `mysql` | `MYSQL_PWD` env |
+| `postgres` | `host` | `port`, `user`, `db`, `jump`, `identity_file` | `psql` | `PGPASSWORD` env |
 | `redis` | `host` | `port`, `db` (→ `-n`), `jump`, `identity_file` | `redis-cli` | `REDISCLI_AUTH` env |
 | `mongodb` | `conn_string` | (`{secret}` placeholder inside the URI) | `mongosh` | substituted into the URI |
 | `clickhouse` | `host` | `port`, `user`, `db`, `jump`, `identity_file` | `clickhouse-client` | `--password <x>` argv ⚠️ |
@@ -335,7 +337,7 @@ both pages render one tree).
 - **Drag a connection onto a section** to file it (`PATCH …/connections/{id}` with
   `section_id`); **drag a section onto another** to nest it (`…/move`). Reparenting
   rejects cycles (a section can't become its own descendant).
-- Global (root-managed) connections are **not** assignable to a workspace section.
+- Root-managed global connections use the same global section tree.
 - A search box flattens the tree into a flat result list (matched by name /
   host-user / kind / section name).
 
@@ -413,7 +415,7 @@ would require per-CLI env-passing support).
 
 ## 8. Capabilities & limitations
 
-- ✅ Five first-class kinds + a `custom` escape hatch for any CLI.
+- ✅ SSH and five database kinds, plus a governed custom CLI profile.
 - ✅ One profile feeds three features: terminal session, Database Explorer, Kafka
   viewer — define host/auth/tunnel once.
 - ✅ SSH tunnels via the system `ssh` (agent / config / known_hosts honoured),
@@ -428,8 +430,7 @@ would require per-CLI env-passing support).
   access.
 - ⚠️ SFTP text view is capped at **1 MiB**; larger files report `truncated` (use
   Download for the whole file). No in-place file editing.
-- ⚠️ The Connections page lists only `ssh`/`custom`; DB kinds are managed in the
-  Database Explorer.
+- ✅ The unified Connections hub lists all database, SSH, custom and Kafka entries.
 - ⚠️ Requires the relevant client binaries on `PATH` (`ssh`, `sftp`, `mysql`,
   `redis-cli`, `mongosh`, `clickhouse-client`).
 
@@ -440,8 +441,9 @@ would require per-CLI env-passing support).
 - **Secrets in the Keychain only.** The SQLite state DB stores an opaque
   `secret_ref` (`conn-<id>`); the secret itself lives in the macOS Keychain and is
   fetched only at open/test time. It is never serialized back to the client.
-- **No password in argv** except `clickhouse-client` (flagged `warn_argv`);
-  MySQL/Redis use env vars, Mongo substitutes into the URI, SSH uses keys/agent.
+- **Terminal credential channels.** MySQL/Redis use environment variables; SSH
+  uses keys/agent. MongoDB URI substitution and ClickHouse terminal passwords can
+  appear in argv (`warn_argv`). Native DB tests avoid the CLI argv channel.
 - **Test-connect error redaction** scrubs userinfo and `--password`/`-p` argv
   before surfacing stderr.
 - **SFTP control-char guard** rejects newline/CR/etc. in any path to block
@@ -454,6 +456,44 @@ would require per-CLI env-passing support).
   `Connections:Admin`. See [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md).
 
 ---
+
+## Saved credentials, imports and transfers
+
+Renaming or editing a profile preserves advanced settings, including custom
+placeholder values, TLS shorthand, unknown TLS/tunnel options and database aliases.
+Clearing an exposed field removes that field. Pasting `rediss://` or
+`clickhouse+https://` enables required TLS; unsupported non-Mongo URI options produce
+a warning instead of silently promising support.
+
+MongoDB URI passwords move into the secret store on save. The visible connection
+string keeps `{secret}`; reserved characters in the password are encoded when a
+client connects. Existing URI credentials are normalized on read by the Connections
+service. If the secret store is unavailable, the read fails without exposing the
+URI password. In the edit form, **Test** uses proposed settings and the saved secret
+when the password box is unchanged; this requires root and does not save edits.
+
+Right-click a profile and choose **Duplicate without password** to copy its
+configuration and protection flags into a new owner-managed profile. Add a password
+in the editor. Delegated access rules and the original credential are not copied.
+Import preview offers **Create new**, **Update existing**, and **Skip** per row.
+Unique same-name/kind matches default to Skip; choose Update and its target explicitly
+to reconcile an existing profile while retaining its password and unimported settings.
+
+The SFTP browser shows byte progress, elapsed time, status and **Cancel** for each
+transfer. Copying has a default ten-minute timeout. Temporary partial files stay
+separate until the transfer succeeds; downloads refuse to overwrite an existing
+file. Publication briefly shows **finalizing** and completes without cancellation.
+If a remote publication cannot be confirmed, **outcome_unknown** means inspect the
+destination before retrying. Partial-file cleanup is best-effort after a transport
+failure. Jobs survive closing/reopening the pane, but are not resumed after daemon
+restart. An initial listing failure stays visible with **Retry**; it does not keep
+reconnecting automatically.
+
+SSH configuration chooses the port when the form leaves it empty. Reused SFTP
+transports are isolated by user and profile settings, limited to 32, and expire
+when idle. Every request and running transfer rechecks current authorization.
+Governed transfers to or from daemon-local paths require root; a permission change
+stops copying before publication.
 
 ## 10. Troubleshooting
 
@@ -482,3 +522,56 @@ would require per-CLI env-passing support).
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — per-feature roles
   (`Connections:View` / `Connections:Edit`) and `owner_private`.
 - `docs/contracts/api.md` — authoritative endpoint, request, and response shapes.
+## Exporting connections to another tool
+
+Open **Settings → Backup & Restore → Export connections** as root. Choose all
+workspaces or selected workspaces (global profiles are included in either case),
+then choose a format. Password export is off by default. **Prepare export**
+returns a list of downloadable files, unsupported profiles and import instructions.
+Download each file separately; **Clear prepared export** drops the prepared payload
+from the UI. Preparing an export does not contact connection hosts or create
+server-side files.
+
+| Format | Connections | Credentials and destination |
+|---|---|---|
+| Otto JSON | All seven kinds | Complete profile fields and advanced parameters; optional plaintext `password` per profile. Opaque Keychain references are excluded. |
+| CSV | All seven kinds | Summary columns plus a `record_json` field containing the complete equivalent profile. Parse that JSON field for a lossless round trip, including quotes/newlines in passwords. Summary values are JSON literals to avoid spreadsheet formula interpretation. |
+| MySQL Workbench | Direct MySQL | `connections.xml`, plus an optional credential JSON sidecar for manual **Store in Vault** entry. Workbench passwords cannot be portably imported from its platform vault. |
+| DBeaver MySQL | Direct MySQL | Custom CSV import with the MySQL driver; optional password column. |
+| DBeaver MongoDB | Direct MongoDB | Custom CSV import with the MongoDB driver, available in supporting DBeaver editions; optional URI/CSV credentials. |
+| NoSQLBooster 9+ | Direct MongoDB | Native URI-list text, including replica sets and `mongodb+srv`; `// name` comments retain labels. Use **Connections → Import → From File…** or **From Clipboard (URI List)**. |
+| RedisInsight | Direct standalone Redis | Native JSON array, including database index, ACL username, TLS verification and inline certificates. Passwords and inline private keys are included only when explicitly selected. |
+
+Generic exports preserve referenced local paths, custom parameters and command
+text; they do not read or bundle SSH/private-key files. Review free-form commands
+before sharing a generic export. Default exports remove recognized structured
+credential fields and URI passwords without reading the credential store. An
+explicit password export fails with reconnect guidance if a saved credential is
+missing, and returns a sanitized error if the store cannot be read.
+
+Native exports list incompatible kinds and transports as skipped. SSH tunnels,
+unsupported legacy SSL settings and native formats unable to carry required
+certificate material use the generic formats instead; exports never silently
+downgrade those settings. MySQL TLS mode/verification, `secure: true`, IPv6 hosts,
+`db`/`database` aliases and MongoDB URI options are preserved where representable.
+Workbench and DBeaver MySQL preserve their supported TLS modes; RedisInsight
+accepts inline certificate objects. Review the reported import instructions and
+skips before downloading. Exports are limited to 10,000 saved profiles and 32 MiB
+and fail rather than truncate.
+
+The native formats were checked against these primary sources:
+
+- [MySQL Workbench configuration files](https://dev.mysql.com/doc/workbench/en/wb-configuring-files.html),
+  [platform password vault](https://dev.mysql.com/doc/workbench/en/wb-mysql-connections-vault.html),
+  and [official GRT XML fixture](https://github.com/mysql/mysql-workbench/blob/8.0/testing/test-suite/data/connections.xml).
+- [DBeaver Custom CSV/XML fields, including password](https://dbeaver.com/docs/dbeaver/Admin-Manage-Connections/)
+  and [Custom import wizard](https://dbeaver.com/docs/dbeaver/How-to-import-Connections-from-External-Tools/).
+- [NoSQLBooster 9 URI-list support](https://nosqlbooster.com/blog/announcing-nosqlbooster-90/)
+  and [official screenshot showing `//` labels and SRV URIs](https://www.nosqlbooster.com/blog/img/import-mongodb-uri-list.png).
+- [RedisInsight JSON preconfiguration](https://redis.io/docs/latest/operate/redisinsight/configuration/),
+  [export model](https://github.com/redis/RedisInsight/blob/main/redisinsight/api/src/modules/database/models/export-database.ts),
+  and [official export format/secret tests](https://github.com/redis/RedisInsight/blob/main/redisinsight/api/test/api/database/POST-databases-export.test.ts).
+
+Automated tests validate serialization, existing Workbench parser compatibility,
+credential opt-in and isolated FileStore authorization/error handling. They do not
+launch third-party database applications or connect to real database/SSH hosts.

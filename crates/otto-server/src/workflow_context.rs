@@ -587,6 +587,13 @@ impl RunContextFiles {
         self.dir.as_ref().map(|d| d.join(format!("{base_name}.md")))
     }
 
+    /// Restore the deliverable pointer without rewriting an adopted handoff.
+    pub fn adopt_step(&self, base_name: &str, kind: &str) {
+        if !is_utility_kind(kind) && self.step_md_path(base_name).is_some_and(|p| p.is_file()) {
+            *self.content_step.lock().unwrap() = Some(base_name.to_string());
+        }
+    }
+
     pub fn step_md_mtime(&self, base_name: &str) -> Option<SystemTime> {
         let p = self.step_md_path(base_name)?;
         std::fs::metadata(p).ok()?.modified().ok()
@@ -1056,6 +1063,21 @@ mod tests {
         let d = RunContextFiles::disabled("rY");
         assert!(!d.has_file("prompt.md"));
         assert!(!d.write_named("x.md", "y"));
+    }
+
+    #[test]
+    fn resumed_context_adopts_existing_deliverable_without_overwriting_it() {
+        let td = tempfile::tempdir().unwrap();
+        let first = RunContextFiles::create(td.path(), "resume");
+        assert!(first.write_named("step2-report.md", "curated report"));
+        let resumed = RunContextFiles::create(td.path(), "resume");
+        resumed.adopt_step("step2-report", "agent_prompt");
+        resumed.adopt_step("step3-notify", "channel_notify");
+        assert_eq!(resumed.write_final_output().unwrap(), b"curated report");
+        assert_eq!(
+            resumed.read_named("step2-report.md").as_deref(),
+            Some("curated report")
+        );
     }
 
     #[test]

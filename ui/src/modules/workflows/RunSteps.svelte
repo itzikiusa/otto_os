@@ -187,6 +187,19 @@
   </div>
 {/if}
 
+{#if run.checkpoints?.length}
+  <details class="checkpoint-list" open={run.status === 'running'}>
+    <summary>Loop checkpoints · {run.checkpoints.filter((c) => c.status === 'success').length}/{run.checkpoints.length} complete</summary>
+    {#each run.checkpoints.filter((c) => c.iteration > 0) as checkpoint (checkpoint.node_id)}
+      <details>
+        <summary>{checkpoint.name} · iteration {checkpoint.iteration} · {checkpoint.status} · {checkpoint.attempts} attempt(s)</summary>
+        {#if checkpoint.error}<p class="err">{checkpoint.error}</p>{/if}
+        {#if checkpoint.logs.length}<pre>{checkpoint.logs.join('\n')}</pre>{/if}
+        <pre>{JSON.stringify(checkpoint.output ?? checkpoint.input, null, 2)}</pre>
+      </details>
+    {/each}
+  </details>
+{/if}
 <div class="steps">
   {#each run.nodes as ns (ns.node_id)}
     <details
@@ -339,6 +352,8 @@
 {/if}
 
 <style>
+  .checkpoint-list { margin: 8px 0; padding: 8px; border: 1px solid var(--border); }
+  .checkpoint-list pre { max-height: 240px; overflow: auto; white-space: pre-wrap; }
   .steps {
     display: flex;
     flex-direction: column;

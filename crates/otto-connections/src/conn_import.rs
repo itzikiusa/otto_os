@@ -100,8 +100,15 @@ pub struct ImportCreateReq {
 }
 
 /// One connection the user chose to create.
+fn create_action() -> String {
+    "create".into()
+}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportCreateItem {
+    #[serde(default = "create_action")]
+    pub action: String,
+    #[serde(default)]
+    pub target_id: Option<otto_core::Id>,
     pub name: String,
     pub kind: ConnectionKind,
     pub params: Value,
@@ -121,6 +128,8 @@ pub struct ImportFailure {
 /// Result of a create batch (best-effort — partial successes are fine).
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportCreateResult {
+    pub updated: Vec<otto_core::domain::Connection>,
+    pub skipped: Vec<String>,
     pub created: Vec<otto_core::domain::Connection>,
     pub failed: Vec<ImportFailure>,
 }

@@ -40,6 +40,20 @@ export function agentProviders(): string[] {
   return allProviders().filter((p) => p !== SHELL_PROVIDER);
 }
 
+/** Shared launch readiness. Older daemons may not probe custom executables;
+ *  keep those launchable but say the check is unknown instead of claiming it passed. */
+export function providerReadiness(provider: string): { available: boolean; checked: boolean; message: string; version?: string } {
+  if (!allProviders().includes(provider)) return { available: false, checked: true, message: 'Provider is not registered. Configure it in Settings → Providers.' };
+  const tool = auth.meta?.tools?.find((t) => t.name === provider);
+  if (tool) return {
+    available: tool.found,
+    checked: true,
+    message: tool.found ? 'Ready' : 'Executable not found. Install the CLI or update its command in Settings → Providers.',
+    version: tool.version ?? undefined,
+  };
+  return { available: true, checked: provider === SHELL_PROVIDER, message: provider === SHELL_PROVIDER ? 'Ready' : 'Executable availability has not been checked.' };
+}
+
 /** `agentProviders()` but guaranteed to include `current` (even if it is not
  *  registered), so an editor showing a previously-saved provider never drops
  *  it. Preserves registry order, appending `current` if missing. */

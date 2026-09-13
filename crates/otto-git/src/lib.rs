@@ -10,6 +10,7 @@ pub mod parse;
 pub mod patch;
 pub mod pr_checks;
 pub mod providers;
+pub mod recovery;
 pub mod types;
 
 pub use http::{router, GitCtx};

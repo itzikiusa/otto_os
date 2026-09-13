@@ -6,6 +6,7 @@
 pub mod access;
 pub mod api;
 pub mod auth;
+pub mod connection_credentials;
 pub mod domain;
 pub mod error;
 pub mod eval_score;

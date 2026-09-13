@@ -8,7 +8,8 @@
 
 import { api } from '../api/client';
 import type {
-  SftpDownloadReq,
+  SftpTransfer,
+  SftpTransferReq,
   SftpDownloadResp,
   SftpEntry,
   SftpListResp,
@@ -32,10 +33,12 @@ interface SftpState {
   /** True once an initial list has resolved (so the UI can distinguish
    *  "never loaded" from "loaded but empty"). */
   loaded: boolean;
+  attempted: boolean;
+  transfers: SftpTransfer[];
 }
 
 function blankState(): SftpState {
-  return { cwd: '', entries: [], loading: false, error: '', loaded: false };
+  return { cwd: '', entries: [], loading: false, error: '', loaded: false, attempted: false, transfers: [] };
 }
 
 class SftpStore {
@@ -76,6 +79,8 @@ class SftpStore {
   /** List a remote path (empty/undefined → the server resolves pwd). */
   async list(connId: string, path?: string): Promise<void> {
     const s = this.ensure(connId);
+    if (s.loading) return;
+    s.attempted = true;
     s.loading = true;
     s.error = '';
     try {
@@ -118,18 +123,36 @@ class SftpStore {
   /** Download a remote file to a chosen local dir (returns the result). */
   async download(connId: string, remotePath: string, localDir: string): Promise<SftpDownloadResp> {
     this.localDir = localDir;
-    const body: SftpDownloadReq = { remote_path: remotePath, local_path: localDir };
-    return api.post<SftpDownloadResp>(`/connections/${connId}/sftp/download`, body);
+    const transfer = await this.transfer(connId, { direction: 'download', remote_path: remotePath, local_path: localDir });
+    return { local_path: transfer.local_path, bytes: transfer.bytes };
   }
 
   /** Upload a local file into the current remote dir. */
   async upload(connId: string, localPath: string): Promise<void> {
-    const name = baseName(localPath);
-    const remotePath = this.childPath(connId, name);
-    await api.post(`/connections/${connId}/sftp/upload`, {
-      local_path: localPath,
-      remote_path: remotePath,
-    });
+    await this.transfer(connId, { direction: 'upload', local_path: localPath, remote_path: this.childPath(connId, baseName(localPath)) });
+  }
+
+  async loadTransfers(connId: string): Promise<void> {
+    this.ensure(connId).transfers = await api.get<SftpTransfer[]>(`/connections/${connId}/sftp/transfers`);
+  }
+
+  async cancelTransfer(connId: string, id: string): Promise<void> {
+    await api.post(`/connections/${connId}/sftp/transfers/${id}/cancel`, {});
+    await this.loadTransfers(connId);
+  }
+
+  private async transfer(connId: string, body: SftpTransferReq): Promise<SftpTransfer> {
+    const started = await api.post<SftpTransfer>(`/connections/${connId}/sftp/transfers`, body);
+    const state = this.ensure(connId);
+    state.transfers = [...state.transfers, started];
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await this.loadTransfers(connId);
+      const current = this.state(connId).transfers.find(t => t.id === started.id);
+      if (!current) throw new Error('Transfer is no longer available; refresh to check its status.');
+      if (current.status === 'completed') return current;
+      if (current.status !== 'running' && current.status !== 'finalizing') throw new Error(current.error ?? `Transfer ${current.status}`);
+    }
   }
 
   /** Create a directory under the current cwd. */

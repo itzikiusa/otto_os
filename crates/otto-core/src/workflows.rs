@@ -140,6 +140,10 @@ pub fn default_on_restart() -> String {
 /// status.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunScope {
+    /// Restart continuation adopts settled nodes inside the ORIGINAL scope.
+    /// Explicit operator retries leave this false and rerun their selected set.
+    #[serde(default)]
+    pub continue_unfinished: bool,
     /// Start execution from this node (it plus everything downstream unless
     /// `only_node`). Out-of-scope nodes adopt their prior states.
     #[serde(default)]
@@ -276,6 +280,25 @@ pub struct NodeRunState {
 
 /// One execution of a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowCheckpoint {
+    pub node_id: String,
+    pub loop_id: String,
+    pub iteration: u64,
+    pub step_index: usize,
+    pub kind: String,
+    pub name: String,
+    pub status: NodeStatus,
+    pub attempts: u32,
+    pub input: Value,
+    pub output: Option<Value>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One execution of a workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRun {
     pub id: Id,
     pub workflow_id: Id,
@@ -285,6 +308,9 @@ pub struct WorkflowRun {
     pub input: Value,
     #[serde(default)]
     pub nodes: Vec<NodeRunState>,
+    /// Durable inner-loop attempts, populated on the run detail endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<WorkflowCheckpoint>,
     #[serde(default)]
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,

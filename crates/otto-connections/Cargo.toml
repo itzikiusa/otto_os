@@ -21,6 +21,7 @@ tracing = { workspace = true }
 roxmltree = "0.20"
 
 [dev-dependencies]
+otto-keychain = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 sqlx = { workspace = true }

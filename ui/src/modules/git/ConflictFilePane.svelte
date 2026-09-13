@@ -7,6 +7,8 @@
   // be "marked resolved" — we recompose the full file text and POST it.
   import type { ConflictFile, ConflictSegment } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
+  import { api } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -19,7 +21,7 @@
     oursLabel?: string;
     theirsLabel?: string;
     /** Called once the file has been marked resolved on the daemon. */
-    onresolved: () => void;
+    onresolved: (path: string) => void;
   }
   let { repoId, path, oursLabel = 'OURS', theirsLabel = 'THEIRS', onresolved }: Props = $props();
 
@@ -151,7 +153,19 @@
         out.push(...(choices[ord] ?? []));
       }
     }
-    return out.length === 0 ? '' : out.join('\n') + '\n';
+    return out.length === 0 ? '' : out.join('\n') + (file.trailing_newline ? '\n' : '');
+  }
+
+  async function takeSide(side: 'ours' | 'theirs' | 'keep' | 'delete'): Promise<void> {
+    if (!file || saving) return;
+    const deleting = side === 'delete' || (side === 'ours' && !file.ours_present) || (side === 'theirs' && !file.theirs_present);
+    if (deleting && !await confirmer.ask(`Resolve ${path} by deleting it?`, { title: 'Resolve as deleted', confirmLabel: 'Delete', danger: true })) return;
+    saving = true;
+    try {
+      await api.post(`/repos/${repoId}/conflict/resolve`, { path, side });
+      onresolved(path);
+    } catch (e) { toasts.error('Resolve failed', e instanceof Error ? e.message : String(e)); }
+    finally { saving = false; }
   }
 
   async function markResolved(): Promise<void> {
@@ -161,7 +175,7 @@
       const content = composeContent();
       await git.resolveConflict(repoId, path, content);
       toasts.success('File resolved', path);
-      onresolved();
+      onresolved(path);
     } catch (e) {
       toasts.error('Resolve failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -198,9 +212,17 @@
         <span>Failed to load conflict: {loadError}</span>
       </div>
     {:else if file}
+      <div class="whole-actions">
+        <button class="btn small" disabled={saving} onclick={() => takeSide('ours')}>{file.ours_present ? `Take ${oursLabel}` : `Take ${oursLabel} (delete)`}</button>
+        <button class="btn small" disabled={saving} onclick={() => takeSide('theirs')}>{file.theirs_present ? `Take ${theirsLabel}` : `Take ${theirsLabel} (delete)`}</button>
+        {#if conflictCount === 0}
+          <button class="btn small" disabled={saving || !file.worktree_present} onclick={() => takeSide('keep')}>Keep working file</button>
+          <button class="btn small danger" disabled={saving} onclick={() => takeSide('delete')}>Delete file…</button>
+        {/if}
+      </div>
       {#if file.is_binary}
         <div class="binary dim">
-          Binary file — choose a side via the file list, or resolve it on the command line.
+          Binary file — choose a whole side above, or keep your edited working file.
         </div>
       {:else}
         {#each file.segments as seg, si (si)}
@@ -291,6 +313,7 @@
 </div>
 
 <style>
+  .whole-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .pane {
     display: flex;
     flex-direction: column;

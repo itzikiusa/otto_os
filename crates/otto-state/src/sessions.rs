@@ -349,6 +349,33 @@ impl SessionsRepo {
         Ok(())
     }
 
+    /// Replace object-valued top-level keys without exposing a missing-key
+    /// intermediate state. Both merge patches belong to one atomic UPDATE.
+    pub async fn replace_meta_keys(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
+        let Some(object) = patch.as_object() else {
+            return Ok(());
+        };
+        let nulls: serde_json::Map<String, serde_json::Value> = object
+            .iter()
+            .filter(|(_, value)| value.is_object())
+            .map(|(key, _)| (key.clone(), serde_json::Value::Null))
+            .collect();
+        sqlx::query(
+            "UPDATE sessions SET meta_json = json_patch(json_patch(
+                 CASE WHEN meta_json IS NOT NULL AND json_valid(meta_json)
+                           AND json_type(meta_json) = 'object'
+                      THEN meta_json ELSE '{}' END, ?), ?)
+             WHERE id = ?",
+        )
+        .bind(serde_json::Value::Object(nulls).to_string())
+        .bind(patch.to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("replace session meta keys"))?;
+        Ok(())
+    }
+
     pub async fn set_archived(&self, id: &Id, archived: bool) -> Result<()> {
         sqlx::query("UPDATE sessions SET archived = ? WHERE id = ?")
             .bind(archived as i64)
@@ -645,6 +672,35 @@ mod tests {
         assert!(got.meta.get("keep_alive").is_none());
         assert_eq!(got.meta.get("pty_cols"), Some(&serde_json::json!(80)));
         assert_eq!(got.meta.get("pty_rows"), Some(&serde_json::json!(40)));
+    }
+
+    #[tokio::test]
+    async fn replacing_saved_delivery_is_one_atomic_update() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let session = repo.create(NewSession {
+            workspace_id: ws, kind: SessionKind::Agent, provider: "test".into(),
+            title: "atomic metadata".into(), cwd: "/tmp".into(),
+            provider_session_id: None, connection_id: None, created_by: user,
+            meta: serde_json::json!({"handover":{"state":"preparing","obsolete":true},"pty_cols":120}),
+        }).await.unwrap();
+        // This trigger observes EVERY write, including the old implementation's
+        // removal pass. A crash at that point used to lose the durable record.
+        sqlx::raw_sql("CREATE TRIGGER keep_delivery BEFORE UPDATE OF meta_json ON sessions WHEN json_type(NEW.meta_json, '$.handover') IS NULL BEGIN SELECT RAISE(ABORT, 'saved delivery disappeared'); END;")
+            .execute(&pool).await.unwrap();
+        repo.replace_meta_keys(
+            &session.id,
+            &serde_json::json!({"handover":{"state":"sent","brief":"keep this"}}),
+        )
+        .await
+        .unwrap();
+        let saved = repo.get(&session.id).await.unwrap();
+        assert_eq!(
+            saved.meta["handover"],
+            serde_json::json!({"state":"sent","brief":"keep this"})
+        );
+        assert_eq!(saved.meta["pty_cols"], 120);
     }
 
     #[tokio::test]

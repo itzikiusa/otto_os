@@ -206,7 +206,10 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                         "mongodb conn_string references {secret} but no secret is stored".into(),
                     )
                 })?;
-                template.replace("{secret}", secret)
+                template.replace(
+                    "{secret}",
+                    &otto_core::connection_credentials::encode_password(secret),
+                )
             } else {
                 template.to_string()
             };

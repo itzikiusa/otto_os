@@ -5,7 +5,10 @@
   // /fs/browse. `gitOnly` highlights git repos for the repo picker.
   // When `files` is true, files are shown and can be picked directly (for
   // identity-file selection etc.); directories still navigate on click.
-  import { api } from '../api/client';
+  import { untrack, onDestroy, onMount, tick } from 'svelte';
+  import { emptyHistory, recordFolder, historyTarget, folderCrumbs, emptyShortcuts, parseShortcuts, rememberFolder, toggleFavorite } from './folderNavigation';
+  import { auth } from '../stores/auth.svelte';
+  import { api, baseUrl } from '../api/client';
   import type { FsBrowse, FsEntry } from '../api/types';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
@@ -43,31 +46,113 @@
     });
   });
 
-  async function load(path: string): Promise<void> {
+  let history = $state(emptyHistory());
+  let shortcuts = $state(emptyShortcuts());
+  let storageKey = '';
+  let crumbsElement: HTMLElement | undefined = $state();
+  let requestSeq = 0;
+  let lastAttempt: { path: string; index?: number } = { path: '' };
+  const backIndex = $derived(historyTarget(history, -1));
+  const forwardIndex = $derived(historyTarget(history, 1));
+
+  async function load(path: string, index?: number): Promise<void> {
+    const seq = ++requestSeq;
+    lastAttempt = { path, index };
     loading = true;
     error = '';
-    filter = ''; // reset the filter on navigate so the new listing isn't pre-filtered
     try {
       let q = path ? `?path=${encodeURIComponent(path)}` : '';
-      if (files) {
-        q = q ? `${q}&files=true` : '?files=true';
+      if (files) q = q ? `${q}&files=true` : '?files=true';
+      const next = await api.get<FsBrowse>(`/fs/browse${q}`);
+      if (seq !== requestSeq) return;
+      view = next;
+      updateShortcuts(current => rememberFolder(current, next.path));
+      filter = ''; // A successful navigation starts with the full listing.
+      if (index === undefined) history = recordFolder(history, next.path);
+      else {
+        const paths = [...history.paths];
+        paths[index] = next.path;
+        history = { paths, index };
       }
-      view = await api.get<FsBrowse>(`/fs/browse${q}`);
+      await tick();
+      if (seq === requestSeq && crumbsElement) crumbsElement.scrollLeft = crumbsElement.scrollWidth;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (seq === requestSeq) error = (e instanceof Error ? e.message : String(e)) || 'Could not open folder.';
     } finally {
-      loading = false;
+      if (seq === requestSeq) loading = false;
     }
   }
 
-  $effect(() => {
-    void load(start);
+  function updateShortcuts(update: (current: ReturnType<typeof emptyShortcuts>) => ReturnType<typeof emptyShortcuts>) {
+    // Merge against storage at mutation time: another window may have pinned a
+    // folder since this picker opened. Navigating must never overwrite that pin.
+    let latest = shortcuts;
+    try { latest = parseShortcuts(localStorage.getItem(storageKey)); } catch { /* Memory-only fallback. */ }
+    shortcuts = update(latest);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(shortcuts));
+      window.dispatchEvent(new CustomEvent('otto:folder-shortcuts', { detail: storageKey }));
+    } catch { /* Private browsing may disable storage. */ }
+  }
+
+  function favoriteCurrent() {
+    if (!view || loading || error) return;
+    const path = view.path;
+    updateShortcuts(current => toggleFavorite(current, path));
+  }
+
+  onMount(() => {
+    const refresh = () => {
+      try { shortcuts = parseShortcuts(localStorage.getItem(storageKey)); } catch { /* Keep in-memory choices. */ }
+    };
+    const stored = (event: StorageEvent) => { if (event.key === storageKey || event.key === null) refresh(); };
+    const local = (event: Event) => { if ((event as CustomEvent).detail === storageKey) refresh(); };
+    window.addEventListener('storage', stored);
+    window.addEventListener('otto:folder-shortcuts', local);
+    return () => {
+      window.removeEventListener('storage', stored);
+      window.removeEventListener('otto:folder-shortcuts', local);
+    };
   });
+
+  function folderName(path: string) { return path.split('/').filter(Boolean).at(-1) ?? '/'; }
+
+  function traverse(index: number | null) {
+    if (index !== null) void load(history.paths[index], index);
+  }
+
+  $effect(() => {
+    const initial = start;
+    const key = `otto_folder_shortcuts:${baseUrl()}:${auth.me?.id ?? 'anonymous'}`;
+    void files;
+    untrack(() => {
+      storageKey = key;
+      try { shortcuts = parseShortcuts(localStorage.getItem(key)); } catch { shortcuts = emptyShortcuts(); }
+      history = emptyHistory();
+      view = null;
+      void load(initial);
+    });
+  });
+  onDestroy(() => { requestSeq++; });
 </script>
 
 <Modal {title} {onclose} width={620}>
+  <div class="navigation" aria-label="Folder navigation">
+    <button class="btn" disabled={loading || backIndex === null} onclick={() => traverse(backIndex)}>Back</button>
+    <button class="btn" disabled={loading || forwardIndex === null} onclick={() => traverse(forwardIndex)}>Forward</button>
+    <button class="btn" disabled={loading || !view?.parent} onclick={() => view?.parent && load(view.parent)}>Up</button>
+    <button class="btn favorite-action" disabled={!view || loading || !!error} onclick={favoriteCurrent}>
+      {view && shortcuts.favorites.includes(view.path) ? 'Remove favorite' : 'Add favorite'}
+    </button>
+  </div>
   {#if view}
-    <div class="crumb mono">{view.path}</div>
+    <nav bind:this={crumbsElement} class="crumb mono" dir="ltr" aria-label="Folder path" data-path={view.path}>
+      {#each folderCrumbs(view.path) as part, i (part.path)}
+        {#if i > 1}<span aria-hidden="true">/</span>{/if}
+        <button title={part.path} aria-current={part.path === view.path ? 'location' : undefined}
+          disabled={loading} onclick={() => load(part.path)}>{part.label}</button>
+      {/each}
+    </nav>
   {/if}
 
   <div class="pick-tools">
@@ -79,11 +164,35 @@
     </label>
   </div>
 
+  <div class="pick-content">
+    <aside class="shortcuts" aria-label="Quick navigation">
+      <section aria-label="Favorites">
+        <h4>Favorites</h4>
+        <div class="shortcut-list">
+          {#each shortcuts.favorites as path (path)}
+            <div class="favorite-row">
+              <button title={path} disabled={loading} class:current={path === view?.path} onclick={() => load(path)}>{folderName(path)}</button>
+              <button class="remove-favorite" aria-label={`Remove ${folderName(path)} from favorites`} title="Remove favorite"
+                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}>×</button>
+            </div>
+          {:else}<p class="dim">Save a folder with Add favorite.</p>{/each}
+        </div>
+      </section>
+      <section aria-label="Recents">
+        <h4>Recents</h4>
+        <div class="shortcut-list">
+          {#each shortcuts.recents as path (path)}
+            <button title={path} disabled={loading} class:current={path === view?.path} onclick={() => load(path)}>{folderName(path)}</button>
+          {:else}<p class="dim">Folders you open appear here.</p>{/each}
+        </div>
+      </section>
+    </aside>
   <div class="browser">
     {#if loading}
       <div class="dim pad">Loading…</div>
     {:else if error}
-      <div class="err pad">{error}</div>
+      <div class="err pad" role="alert">{error}</div>
+      <button class="btn retry" onclick={() => load(lastAttempt.path, lastAttempt.index)}>Retry</button>
     {:else if view}
       {#if view.parent !== null}
         <button class="row" onclick={() => load(view!.parent!)}>
@@ -127,13 +236,15 @@
     {/if}
   </div>
 
+  </div>
+
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
     <!-- Always selectable when picking a plain folder; in gitOnly mode, selectable
          once you've navigated INTO a git repo (so you're not forced to pick it
          from the parent listing). -->
     {#if !files && (!gitOnly || view?.is_git_repo)}
-      <button class="btn primary" disabled={!view} onclick={() => view && onpick(view.path)}>
+      <button class="btn primary" disabled={!view || loading || !!error} onclick={() => view && onpick(view.path)}>
         {gitOnly ? 'Use this repository' : 'Use this folder'}
       </button>
     {/if}
@@ -141,14 +252,61 @@
 </Modal>
 
 <style>
+  .navigation {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .favorite-action { margin-inline-start: auto; }
+  .pick-content { display: flex; gap: 10px; min-width: 0; }
+  .shortcuts { flex: 0 0 145px; min-width: 0; }
+  .shortcuts h4 { font-size: 11px; color: var(--text-dim); margin: 5px 6px; }
+  .shortcuts section + section { margin-top: 10px; }
+  .shortcut-list { max-height: 130px; overflow-y: auto; }
+  .shortcut-list p { font-size: 11px; margin: 6px; }
+  .shortcut-list button {
+    display: block; width: 100%; padding: 5px 6px; border: 0;
+    border-radius: var(--radius-s); background: transparent; color: var(--text);
+    text-align: start; font-size: 12px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .favorite-row { display: flex; align-items: center; min-width: 0; }
+  .favorite-row > button:first-child { flex: 1; min-width: 0; }
+  .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; text-align: center; color: var(--text-dim); }
+  .shortcut-list button:hover, .shortcut-list button.current { background: var(--surface-2); }
+  @media (max-width: 520px) {
+    .pick-content { flex-direction: column; }
+    .shortcuts { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .shortcuts section { min-width: 0; }
+    .shortcuts section + section { margin-top: 0; }
+    .shortcut-list { max-height: 85px; }
+    .pick-content .browser { flex: none; height: 240px; }
+  }
+  .navigation .btn { padding: 4px 10px; }
   .crumb {
+    display: flex;
+    align-items: center;
+    gap: 3px;
     font-size: 11.5px;
     color: var(--text-dim);
     padding: 2px 2px 10px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-x: auto;
     white-space: nowrap;
   }
+  .crumb button {
+    flex-shrink: 0;
+    font: inherit;
+    color: inherit;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    padding: 4px;
+    cursor: pointer;
+  }
+  .crumb button:hover { background: var(--surface-2); color: var(--text); }
+  .crumb button[aria-current] { color: var(--text); }
+  .retry { margin: 0 14px 14px; }
   .pick-tools {
     display: flex;
     align-items: center;
@@ -173,6 +331,8 @@
     cursor: pointer;
   }
   .browser {
+    flex: 1;
+    min-width: 0;
     height: 320px;
     overflow-y: auto;
     border: 1px solid var(--border);

@@ -14,6 +14,8 @@
   import { activity } from '../../lib/stores/activity.svelte';
   import { router } from '../../lib/router.svelte';
   import { winKey } from '../../lib/win';
+  import { matchesSavedView } from './viewFilters';
+  import { agentProviders } from '../../lib/providers';
 
   // ---------------------------------------------------------------------------
   // Types (module-local; mirroring the Rust DTOs without touching api/types.ts)
@@ -57,6 +59,15 @@
   let loading = $state(false);
   let newViewName = $state('');
   let newViewFilter = $state('{}');
+  let filterBucket = $state('');
+  let filterProvider = $state('');
+  let filterRepo = $state('');
+  let advancedFilter = $state(false);
+  const providers = $derived(agentProviders());
+  const repositories = $derived([...new Set([
+    ...ws.sessions.map((s) => s.cwd),
+    ...(view ? Object.values(view).flat() as MissionItem[] : []).map((item) => item.repo ?? ''),
+  ].filter(Boolean))].sort());
   let showNewViewForm = $state(false);
 
   /** The active saved view's ID (null = no filter active = show all).
@@ -76,23 +87,29 @@
   // Data loading
   // ---------------------------------------------------------------------------
 
+  let loadGeneration = 0;
+  let alive = true;
   async function load(showSpinner = true) {
-    if (!wsId) return;
+    const owner = wsId;
+    const generation = ++loadGeneration;
+    const current = () => alive && owner === wsId && generation === loadGeneration;
+    if (!owner) { view = null; savedViews = []; loading = false; return; }
     if (showSpinner) loading = true;
     try {
       const [v, sv] = await Promise.all([
-        api.get<MissionView>(`/workspaces/${wsId}/mission`),
-        api.get<SavedView[]>(`/workspaces/${wsId}/mission/views`),
+        api.get<MissionView>(`/workspaces/${owner}/mission`),
+        api.get<SavedView[]>(`/workspaces/${owner}/mission/views`),
         // Task roll-up for the done/total strip on session-backed cards
         // (`GET /workspaces/{wid}/activity/summary`; `tasks_updated` keeps it live).
-        activity.loadSummary(wsId),
+        activity.loadSummary(owner),
       ]);
+      if (!current()) return;
       view = v;
       savedViews = sv;
     } catch {
       /* best-effort — stale data stays */
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -102,20 +119,30 @@
 
   async function createView() {
     if (!wsId || !newViewName.trim()) return;
+    const owner = wsId;
+    const name = newViewName.trim();
+    const generation = loadGeneration;
     let filter: Record<string, unknown> = {};
     try {
-      filter = JSON.parse(newViewFilter || '{}');
+      filter = advancedFilter ? JSON.parse(newViewFilter || '{}') : {
+        ...(filterBucket ? { bucket: filterBucket } : {}),
+        ...(filterProvider ? { provider: filterProvider } : {}),
+        ...(filterRepo ? { repo: filterRepo } : {}),
+      };
+      if (!filter || typeof filter !== 'object' || Array.isArray(filter)) throw new Error('object required');
     } catch {
       toasts.error('Filter must be valid JSON');
       return;
     }
     try {
-      await api.post(`/workspaces/${wsId}/mission/views`, {
-        name: newViewName.trim(),
+      await api.post(`/workspaces/${owner}/mission/views`, {
+        name,
         filter,
       });
+      if (!alive || wsId !== owner || generation !== loadGeneration) return;
       newViewName = '';
       newViewFilter = '{}';
+      filterBucket = ''; filterProvider = ''; filterRepo = ''; advancedFilter = false;
       showNewViewForm = false;
       await load(false);
     } catch (e: unknown) {
@@ -124,8 +151,10 @@
   }
 
   async function deleteView(id: string) {
+    const owner = wsId;
     try {
       await api.del(`/mission-views/${id}`);
+      if (!alive || wsId !== owner) return;
       await load(false);
     } catch (e: unknown) {
       toasts.error(e instanceof Error ? e.message : 'Failed to delete view');
@@ -159,12 +188,7 @@
     if (!view) return [];
     const items = view[key] ?? [];
     if (!activeFilter) return items;
-    // Apply min_cost_usd filter if present.
-    const minCost = activeFilter['min_cost_usd'];
-    if (typeof minCost === 'number') {
-      return items.filter((it) => (it.cost_usd ?? 0) >= minCost);
-    }
-    return items;
+    return items.filter((it) => matchesSavedView(it, activeFilter, ws.sessions));
   }
 
   // ---------------------------------------------------------------------------
@@ -211,13 +235,15 @@
   });
 
   onDestroy(() => {
+    alive = false;
+    ++loadGeneration;
     clearInterval(pollInterval);
     clearTimeout(refreshTimer);
   });
 
   // Reload when the workspace changes.
   $effect(() => {
-    if (wsId) load();
+    void load();
   });
 
   // ---------------------------------------------------------------------------
@@ -390,12 +416,14 @@
         bind:value={newViewName}
         class="sv-input"
       />
-      <input
-        type="text"
-        placeholder={'Filter JSON e.g. {"bucket":"needs_you"}'}
-        bind:value={newViewFilter}
-        class="sv-input wide"
-      />
+      <label><input type="checkbox" bind:checked={advancedFilter} /> Advanced JSON</label>
+      {#if advancedFilter}
+        <input type="text" aria-label="Filter JSON" placeholder={'{"bucket":"needs_you"}'} bind:value={newViewFilter} class="sv-input wide" />
+      {:else}
+        <select aria-label="View status" bind:value={filterBucket}><option value="">All statuses</option>{#each ALL_BUCKETS as bucket}<option value={bucket}>{BUCKET_LABELS[bucket]}</option>{/each}</select>
+        <select aria-label="View provider" bind:value={filterProvider}><option value="">All providers</option>{#each providers as provider}<option value={provider}>{provider}</option>{/each}</select>
+        <select aria-label="View repository" bind:value={filterRepo}><option value="">All repositories</option>{#each repositories as repo}<option value={repo}>{repo}</option>{/each}</select>
+      {/if}
       <button class="btn-save" onclick={createView}>Save</button>
       <button class="btn-cancel" onclick={() => (showNewViewForm = false)}>Cancel</button>
     </div>

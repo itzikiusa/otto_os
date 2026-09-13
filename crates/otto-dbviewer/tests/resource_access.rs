@@ -643,3 +643,87 @@ async fn governed_readonly_profile_rejects_confirmed_root_write_before_network()
         matches!(result,Err(Error::Forbidden(ref reason)) if reason.contains("read-only connection"))
     );
 }
+
+#[tokio::test]
+async fn proposed_edits_use_saved_secret_without_persisting_and_reject_delegated_forwarding() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let fixture = Fixture::new(ConnectionKind::Redis, port).await;
+    let params = serde_json::json!({"host":"127.0.0.1", "port":port, "db":0});
+    assert!(fixture
+        .service
+        .test_saved_config(
+            &fixture.conn,
+            &fixture.reader.id,
+            ConnectionKind::Redis,
+            params.clone(),
+            None
+        )
+        .await
+        .is_err());
+    let before = fixture.service.get_connection(&fixture.conn).await.unwrap();
+    let peer = tokio::spawn(async move {
+        let mut passwords = Vec::new();
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            loop {
+                let mut line = String::new();
+                if socket.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let count: usize = line.trim().strip_prefix('*').unwrap().parse().unwrap();
+                let mut args = Vec::new();
+                for _ in 0..count {
+                    line.clear();
+                    socket.read_line(&mut line).await.unwrap();
+                    let len: usize = line.trim().strip_prefix('$').unwrap().parse().unwrap();
+                    let mut bytes = vec![0; len + 2];
+                    socket.read_exact(&mut bytes).await.unwrap();
+                    args.push(String::from_utf8(bytes[..len].to_vec()).unwrap());
+                }
+                let reply: &[u8] = match args[0].as_str() {
+                    "AUTH" => {
+                        passwords.push(args.last().unwrap().clone());
+                        b"+OK\r\n"
+                    }
+                    "PING" => b"+PONG\r\n",
+                    "INFO" => b"$21\r\nredis_version:7.0.0\r\n\r\n",
+                    _ => b"+OK\r\n",
+                };
+                socket.get_mut().write_all(reply).await.unwrap();
+                if args[0] == "INFO" {
+                    break;
+                }
+            }
+        }
+        passwords
+    });
+    for secret in [None, Some("edited_fixture_password".to_string())] {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.service.test_saved_config(
+                &fixture.conn,
+                &fixture.root.id,
+                ConnectionKind::Redis,
+                params.clone(),
+                secret,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(result.ok, "{}", result.message);
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("fixture_password"));
+    }
+    assert_eq!(
+        peer.await.unwrap(),
+        ["otto_fixture_only", "edited_fixture_password"]
+    );
+    let after = fixture.service.get_connection(&fixture.conn).await.unwrap();
+    assert_eq!(before.params, after.params);
+    assert_eq!(before.secret_ref, after.secret_ref);
+}

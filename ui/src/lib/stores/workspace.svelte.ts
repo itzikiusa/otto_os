@@ -96,6 +96,9 @@ class WorkspaceStore {
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
   injections: Record<Id, { text: string; n: number }> = $state({});
   sessionsLoading = $state(false);
+  private selectionGeneration = 0;
+  private sessionsGeneration = 0;
+  private sessionsInFlight: Promise<void> | null = null;
 
   /** In-flight workflow runs (pending|running) in the current workspace, for the
    *  "Running" sidebar list + the Workflows nav count chip. Refreshed on each
@@ -292,6 +295,7 @@ class WorkspaceStore {
    *  it (the sidebar's grouped rows route through this). */
   async openInWorkspace(wsId: Id, sessionId: Id): Promise<void> {
     if (wsId !== this.currentId) await this.select(wsId);
+    if (this.currentId !== wsId) return;
     this.navigateToSession(sessionId);
   }
 
@@ -429,6 +433,7 @@ class WorkspaceStore {
 
   async select(id: Id): Promise<void> {
     if (this.currentId === id && this.sessions.length > 0) return;
+    const generation = ++this.selectionGeneration;
     this.currentId = id;
     localStorage.setItem(winKey(LS_CURRENT), id);
     // Pin both persistence keys NOW, before the await below: the route→store
@@ -440,6 +445,8 @@ class WorkspaceStore {
     // tabs against the NEW session list and persist that under the new key,
     // clobbering this workspace's saved layout before `restoreLayout` reads it.
     await this.refreshSessions({ reconcile: false });
+    await this.waitForSessions(generation);
+    if (generation !== this.selectionGeneration || this.currentId !== id) return;
     void this.refreshActiveWorkflowRuns();
     void this.refreshOtherSessions();
     this.restoreLayout(id);
@@ -449,12 +456,15 @@ class WorkspaceStore {
    *  no current workspace, only scratch sessions, layout keyed on
    *  `SCRATCH_WORKSPACE_ID` so tabs/panes still survive reloads. */
   private async selectNone(): Promise<void> {
+    const generation = ++this.selectionGeneration;
     this.currentId = null;
     this.activeWorkflowRuns = [];
     this.otherWsSessions = [];
     this.tabsKey = SCRATCH_WORKSPACE_ID;
     this.bindTabsKey(SCRATCH_WORKSPACE_ID);
     await this.refreshSessions({ reconcile: false });
+    await this.waitForSessions(generation);
+    if (generation !== this.selectionGeneration || this.currentId !== null) return;
     this.restoreLayout(SCRATCH_WORKSPACE_ID);
   }
 
@@ -510,9 +520,27 @@ class WorkspaceStore {
    *  (default on) prunes phantom tabs afterwards; a workspace switch turns it
    *  off because {@link restoreLayout} replaces the layout wholesale. */
   async refreshSessions(opts: { reconcile?: boolean } = {}): Promise<void> {
+    const pending = this.loadSessions(opts);
+    this.sessionsInFlight = pending;
+    try { await pending; }
+    finally { if (this.sessionsInFlight === pending) this.sessionsInFlight = null; }
+  }
+
+  /** Events may refresh again while selection is waiting. Restore persisted
+   * tabs only after the latest response for this selection is settled. */
+  private async waitForSessions(selection: number): Promise<void> {
+    while (selection === this.selectionGeneration && this.sessionsInFlight) {
+      await this.sessionsInFlight;
+    }
+  }
+
+  private async loadSessions(opts: { reconcile?: boolean }): Promise<void> {
+    const generation = ++this.sessionsGeneration;
+    const selection = this.selectionGeneration;
+    const wsId = this.currentId;
+    const current = () => generation === this.sessionsGeneration && selection === this.selectionGeneration && wsId === this.currentId;
     this.sessionsLoading = true;
     try {
-      const wsId = this.currentId;
       // The current workspace's sessions (when one is selected) plus the
       // scratch workspace's — always, best-effort (a daemon without the
       // scratch row answers 403, which leaves workspace-less sessions empty
@@ -523,6 +551,7 @@ class WorkspaceStore {
           .get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions`)
           .catch(() => [] as Session[]),
       ]);
+      if (!current()) return;
       const seen = new Set<Id>();
       const all: Session[] = [];
       for (const s of [...own, ...scratch]) {
@@ -550,8 +579,10 @@ class WorkspaceStore {
       this.sessions = kept;
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
       if (opts.reconcile !== false) this.reconcileTabs();
+    } catch (e) {
+      if (current()) throw e;
     } finally {
-      this.sessionsLoading = false;
+      if (current()) this.sessionsLoading = false;
     }
   }
 

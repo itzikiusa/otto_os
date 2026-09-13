@@ -229,6 +229,7 @@
         {/each}
       </nav>
       <div class="actions">
+        <button class="mode-btn" title="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         {#if vault.saving}
           <span class="save-state">saving…</span>
         {:else if vault.dirty}

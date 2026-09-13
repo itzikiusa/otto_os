@@ -14,7 +14,14 @@
 //!                 {type:"error", message}
 //!                 {type:"closed", detail}
 
-use std::sync::Arc;
+use crate::state::ServerCtx;
+use otto_core::{
+    api::ExecuteApiReq,
+    domain::{Capability, Feature, WorkspaceRole},
+    Id,
+};
+use otto_state::GrantsRepo;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -26,68 +33,60 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use otto_core::auth::TokenAuthenticator;
-
-#[derive(Clone)]
-struct StreamState {
-    auth: Arc<dyn TokenAuthenticator>,
-}
-
 #[derive(Deserialize)]
 struct StreamQuery {
     token: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct KV {
-    #[serde(default)]
-    key: String,
-    #[serde(default)]
-    value: String,
+    workspace_id: Id,
 }
 
 #[derive(Deserialize)]
 struct OpenSpec {
-    #[serde(default)]
     action: String,
-    #[serde(default)]
     kind: String,
-    #[serde(default)]
-    url: String,
-    #[serde(default = "default_get")]
-    method: String,
-    #[serde(default)]
-    headers: Vec<KV>,
-    #[serde(default)]
-    body: String,
+    request: ExecuteApiReq,
 }
 
-fn default_get() -> String {
-    "GET".to_string()
-}
-
-/// Root-level WS router (self-authenticates via `?token=`).
-pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>) -> Router {
+/// Root-level WS router: authenticate AND authorize before upgrading.
+pub fn ws_router(ctx: ServerCtx) -> Router {
     Router::new()
         .route("/ws/api-client/stream", get(stream_ws))
-        .with_state(StreamState {
-            auth: authenticator,
-        })
+        .with_state(ctx)
 }
 
 async fn stream_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<StreamQuery>,
-    State(st): State<StreamState>,
+    State(ctx): State<ServerCtx>,
 ) -> Response {
     let token = match q.token {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };
-    if st.auth.authenticate(&token).await.is_err() {
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    let auth = match ctx.authenticator.authenticate(&token).await {
+        Ok(auth) => auth,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
+    };
+    let user = &auth.effective_user;
+    if auth.scope.is_some()
+        || auth.mcp_only
+        || ctx
+            .roles
+            .check(user, &q.workspace_id, WorkspaceRole::Editor)
+            .await
+            .is_err()
+        || !matches!(GrantsRepo::new(ctx.pool.clone()).capability_of(user, Feature::ApiClient).await,
+            Ok(cap) if cap >= Capability::Edit)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "API Client edit access is required in this workspace",
+        )
+            .into_response();
     }
-    ws.on_upgrade(serve)
+    let actor = user.id.clone();
+    ws.max_message_size(1024 * 1024)
+        .max_frame_size(1024 * 1024)
+        .on_upgrade(move |socket| serve(socket, ctx, q.workspace_id, actor))
 }
 
 async fn send_json(socket: &mut WebSocket, v: Value) -> Result<(), axum::Error> {
@@ -105,7 +104,7 @@ fn is_close_action(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn serve(mut socket: WebSocket) {
+async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
     // First UI frame carries the open spec.
     let first = loop {
         match socket.recv().await {
@@ -135,8 +134,8 @@ async fn serve(mut socket: WebSocket) {
         return;
     }
     match spec.kind.as_str() {
-        "sse" => serve_sse(socket, spec).await,
-        "websocket" | "ws" => serve_websocket(socket, spec).await,
+        "sse" => serve_sse(socket, spec, &ctx, &wid, &actor).await,
+        "websocket" | "ws" => serve_websocket(socket, spec, &ctx, &wid, &actor).await,
         other => {
             let _ = send_json(
                 &mut socket,
@@ -149,42 +148,22 @@ async fn serve(mut socket: WebSocket) {
 
 // ── SSE upstream ────────────────────────────────────────────────────────────
 
-async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
-    // SSRF guard: resolve + classify the upstream host before connecting.
-    if let Err(m) = crate::routes::api_client::net_guard::check_url(&spec.url).await {
-        let _ = send_json(&mut socket, json!({"type":"error","message":m})).await;
-        return;
-    }
-    let client = match reqwest::Client::builder()
-        .user_agent("Otto-ApiClient/1.0")
-        // Cap + re-validate each redirect hop's host (SSRF guard).
-        .redirect(crate::routes::api_client::net_guard::redirect_policy())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":e.to_string()})).await;
-            return;
-        }
+async fn serve_sse(mut socket: WebSocket, spec: OpenSpec, ctx: &ServerCtx, wid: &Id, actor: &Id) {
+    let connecting = async {
+        let req = super::api_client::prepare_stream(ctx, wid, &spec.request, actor).await?;
+        req.header("Accept", "text/event-stream")
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())
     };
-    let method = reqwest::Method::from_bytes(spec.method.to_uppercase().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
-    let mut req = client
-        .request(method, &spec.url)
-        .header("Accept", "text/event-stream");
-    for h in &spec.headers {
-        if !h.key.trim().is_empty() {
-            req = req.header(&h.key, &h.value);
-        }
-    }
-    if !spec.body.is_empty() {
-        req = req.body(spec.body.clone());
-    }
-
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = send_json(&mut socket, json!({"type":"error","message":e.to_string()})).await;
+    let result = tokio::select! {
+        result = connecting => result,
+        _ = socket.recv() => return,
+    };
+    let resp = match result {
+        Ok(resp) => resp,
+        Err(message) => {
+            let _ = send_json(&mut socket, json!({"type":"error","message":message})).await;
             return;
         }
     };
@@ -205,6 +184,10 @@ async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
         tokio::select! {
             chunk = stream.next() => match chunk {
                 Some(Ok(bytes)) => {
+                    if buf.len() + bytes.len() > 1024 * 1024 {
+                        let _ = send_json(&mut socket, json!({"type":"error","message":"SSE event exceeds 1 MiB"})).await;
+                        return;
+                    }
                     buf.push_str(&String::from_utf8_lossy(&bytes));
                     buf = buf.replace("\r\n", "\n");
                     while let Some(idx) = buf.find("\n\n") {
@@ -217,7 +200,7 @@ async fn serve_sse(mut socket: WebSocket, spec: OpenSpec) {
                     }
                 }
                 Some(Err(e)) => {
-                    let _ = send_json(&mut socket, json!({"type":"error","message":e.to_string()})).await;
+                    let _ = send_json(&mut socket, json!({"type":"error","message":e.without_url().to_string()})).await;
                     break;
                 }
                 None => break,
@@ -269,50 +252,58 @@ fn parse_sse_event(block: &str) -> Option<Value> {
 
 // ── WebSocket upstream ──────────────────────────────────────────────────────
 
-async fn serve_websocket(mut socket: WebSocket, spec: OpenSpec) {
+async fn serve_websocket(
+    mut socket: WebSocket,
+    spec: OpenSpec,
+    ctx: &ServerCtx,
+    wid: &Id,
+    actor: &Id,
+) {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
     use tokio_tungstenite::tungstenite::Message as TMsg;
 
-    // SSRF guard: resolve + classify the upstream host before connecting.
-    if let Err(m) = crate::routes::api_client::net_guard::check_url(&spec.url).await {
-        let _ = send_json(&mut socket, json!({"type":"error","message":m})).await;
-        return;
-    }
-
-    let mut request = match spec.url.as_str().into_client_request() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = send_json(
-                &mut socket,
-                json!({"type":"error","message":format!("bad ws url: {e}")}),
-            )
-            .await;
-            return;
+    let connecting = async {
+        if spec.request.verify_ssl == Some(false)
+            || spec.request.ssh_connection_id.is_some()
+            || !spec.request.body.is_empty()
+            || spec.request.method.to_uppercase() != "GET"
+        {
+            return Err("WebSocket supports GET headers, query and auth; TLS verification must be enabled, SSH and request bodies are unavailable".to_string());
         }
+        let prepared = super::api_client::prepare_stream(ctx, wid, &spec.request, actor)
+            .await?
+            .build()
+            .map_err(|e| e.without_url().to_string())?;
+        let mut request = prepared
+            .url()
+            .as_str()
+            .into_client_request()
+            .map_err(|e| e.to_string())?;
+        for (name, value) in prepared.headers() {
+            let name =
+                HeaderName::from_bytes(name.as_str().as_bytes()).map_err(|e| e.to_string())?;
+            let value = HeaderValue::from_bytes(value.as_bytes()).map_err(|e| e.to_string())?;
+            request.headers_mut().insert(name, value);
+        }
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(1024 * 1024),
+            max_frame_size: Some(1024 * 1024),
+            ..Default::default()
+        };
+        tokio_tungstenite::connect_async_with_config(request, Some(config), false).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
     };
-    for h in &spec.headers {
-        if h.key.trim().is_empty() {
-            continue;
-        }
-        if let (Ok(name), Ok(val)) = (
-            HeaderName::from_bytes(h.key.as_bytes()),
-            HeaderValue::from_str(&h.value),
-        ) {
-            request.headers_mut().insert(name, val);
-        }
-    }
-
-    let (upstream, _resp) = match tokio_tungstenite::connect_async(request).await {
-        Ok(x) => x,
-        Err(e) => {
-            let _ = send_json(
-                &mut socket,
-                json!({"type":"error","message":format!("connect failed: {e}")}),
-            )
-            .await;
+    let result = tokio::select! {
+        result = tokio::time::timeout(Duration::from_millis(spec.request.timeout_ms.unwrap_or(60_000)), connecting) =>
+            result.unwrap_or_else(|_| Err("WebSocket connection timed out".into())),
+        _ = socket.recv() => return,
+    };
+    let (upstream, _resp) = match result {
+        Ok(upstream) => upstream,
+        Err(message) => {
+            let _ = send_json(&mut socket, json!({"type":"error","message":message})).await;
             return;
         }
     };

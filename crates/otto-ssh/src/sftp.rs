@@ -42,10 +42,10 @@ pub struct SftpEntry {
 
 /// Connection params for an SFTP session — the SSH subset of a connection
 /// profile. Auth is the system ssh client's (agent / `identity_file` / config).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SftpParams {
     pub host: String,
-    pub port: u16,
+    pub port: Option<u16>,
     pub user: Option<String>,
     /// Path to a private key on disk (optional; agent/config used otherwise).
     pub identity_file: Option<String>,
@@ -58,6 +58,7 @@ pub struct SftpParams {
 /// underlying connection warm between ops.
 pub struct SftpSession {
     params: SftpParams,
+    program: PathBuf,
     /// Unique temp dir holding the ControlMaster socket; removed on drop.
     ctl_dir: PathBuf,
     ctl_path: String,
@@ -67,14 +68,28 @@ impl SftpSession {
     /// Build a session from connection params. Creates a private temp dir for
     /// the control socket. No network I/O happens until the first method call.
     pub fn new(params: SftpParams) -> Result<Self> {
+        Self::with_program(params, PathBuf::from("sftp"))
+    }
+
+    /// Inject the executable for isolated transport fixtures. HTTP callers never
+    /// control this value; production uses the system SFTP client.
+    #[doc(hidden)]
+    pub fn with_program(params: SftpParams, program: PathBuf) -> Result<Self> {
         // A unique dir per session keeps the control socket private (0700 by
         // mkdir default under TMPDIR) and lets Drop clean it up wholesale.
         let ctl_dir = std::env::temp_dir().join(format!("otto-sftp-{}", uniq_token()));
         std::fs::create_dir_all(&ctl_dir)
             .map_err(|e| Error::Internal(format!("create sftp control dir: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ctl_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| Error::Internal(format!("secure sftp control dir: {e}")))?;
+        }
         let ctl_path = ctl_dir.join("ctl.sock").to_string_lossy().into_owned();
         Ok(Self {
             params,
+            program,
             ctl_dir,
             ctl_path,
         })
@@ -103,9 +118,10 @@ impl SftpSession {
             format!("ControlPath={}", self.ctl_path),
             "-o".into(),
             "ControlPersist=60s".into(),
-            "-P".into(),
-            p.port.to_string(),
         ];
+        if let Some(port) = p.port {
+            args.extend(["-P".into(), port.to_string()]);
+        }
         if let Some(identity) = p.identity_file.as_deref().filter(|s| !s.is_empty()) {
             args.push("-i".into());
             args.push(identity.to_string());
@@ -130,7 +146,13 @@ impl SftpSession {
     /// stderr (first non-empty line, else whole) as the error on a non-zero
     /// exit. Secrets are never in argv (key/agent auth) so args are safe.
     async fn run(&self, batch: &str) -> Result<String> {
-        let mut cmd = Command::new("sftp");
+        tokio::time::timeout(std::time::Duration::from_secs(600), self.run_inner(batch))
+            .await
+            .map_err(|_| Error::Upstream("SFTP operation timed out after 600 seconds".into()))?
+    }
+
+    async fn run_inner(&self, batch: &str) -> Result<String> {
+        let mut cmd = Command::new(&self.program);
         cmd.args(self.base_args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -224,20 +246,35 @@ impl SftpSession {
 
 impl Drop for SftpSession {
     fn drop(&mut self) {
-        // Best-effort: ask the control master to exit, then remove the temp dir
-        // (and any leftover socket). Both are non-fatal if they fail.
-        let _ = std::process::Command::new("ssh")
-            .args([
-                "-o",
-                &format!("ControlPath={}", self.ctl_path),
-                "-O",
-                "exit",
-                &self.target(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = std::fs::remove_dir_all(&self.ctl_dir);
+        // Never block an async request on process cleanup. No connection is
+        // opened for an unused session, and a stuck control client is bounded.
+        let dir = self.ctl_dir.clone();
+        let path = self.ctl_path.clone();
+        let target = self.target();
+        std::thread::spawn(move || {
+            if std::path::Path::new(&path).exists() {
+                if let Ok(mut child) = std::process::Command::new("ssh")
+                    .args(["-o", &format!("ControlPath={path}"), "-O", "exit", &target])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    loop {
+                        if child.try_wait().ok().flatten().is_some() {
+                            break;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        });
     }
 }
 
@@ -520,7 +557,7 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
     fn base_args_shape() {
         let s = SftpSession::new(SftpParams {
             host: "h.example.com".into(),
-            port: 2222,
+            port: Some(2222),
             user: Some("deploy".into()),
             identity_file: Some("/home/me/.ssh/id_ed25519".into()),
             jump: Some("bastion.example.com".into()),
@@ -552,13 +589,14 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
     fn base_args_omit_identity_and_jump_when_absent() {
         let s = SftpSession::new(SftpParams {
             host: "h".into(),
-            port: 22,
+            port: None,
             user: None,
             identity_file: None,
             jump: None,
         })
         .unwrap();
         let args = s.base_args();
+        assert!(!args.iter().any(|a| a == "-P"));
         assert!(!args.iter().any(|a| a == "-i"));
         assert!(!args.iter().any(|a| a == "-J"));
         assert_eq!(args.last().unwrap(), "h");

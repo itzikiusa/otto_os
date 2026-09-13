@@ -394,6 +394,7 @@
         path: file.path,
         hunk_index: hi,
         hunk_header: hunk.header,
+        fingerprint: file.fingerprint,
         lines: picked,
         op,
         confirm: op === 'discard' ? true : undefined,

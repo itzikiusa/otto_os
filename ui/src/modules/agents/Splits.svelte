@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { broadcastScope } from './viewFilters';
   // Split layout host: renders the nested split TREE (`layout.tree`) through the
   // recursive SplitNode, and owns the layout-wide keyboard chords + ⌘K commands.
   // Pane membership, fractions and focus live in the layout store — this file
   // only mounts the root and keeps the broadcast bar.
   import SplitNode from './SplitNode.svelte';
-  import { ws, DB_PANE_ID, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
+  import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { layout, type Preset, type Rect, type Side } from '../../lib/stores/splitLayout.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { api } from '../../lib/api/client';
@@ -107,34 +108,28 @@
     [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID))],
   );
 
-  // `POST /workspaces/{id}/broadcast` is a WORKSPACE route: it needs a current
-  // workspace, and the daemon only relays to sessions that live in it. A
-  // workspace-less (scratch) pane can therefore never be a target, and with no
-  // workspace selected there is no id to post to at all — in both cases the bar
-  // would offer a compose box whose Enter silently does nothing, so hide it.
-  const broadcastable = $derived(
-    ws.currentId !== null &&
-      !broadcastTargets.some(
-        (id) => ws.sessions.find((s) => s.id === id)?.workspace_id === SCRATCH_WORKSPACE_ID,
-      ),
-  );
+  // The target sessions determine the workspace, including scratch. Never
+  // silently skip a pane belonging to another workspace.
+  const targetWorkspace = $derived(broadcastScope(broadcastTargets, ws.sessions));
+  const broadcastable = $derived(targetWorkspace !== null);
 
   // Auto-disable broadcast mode when panes collapse to 1 or 0, or when the
-  // targets stop being broadcastable (a scratch session dropped into a pane).
+  // targets stop being broadcastable (panes from different workspaces).
   $effect(() => {
     if (ws.panes.length < 2 || !broadcastable) broadcastMode = false;
   });
 
   async function sendBroadcast(): Promise<void> {
     const text = broadcastText.trim();
-    if (!text || broadcastBusy || !ws.currentId) return;
+    if (!text || broadcastBusy || !targetWorkspace) return;
+    const scope = targetWorkspace;
     broadcastBusy = true;
     try {
       const resp = await api.post<BroadcastResp>(
-        `/workspaces/${ws.currentId}/broadcast`,
+        `/workspaces/${scope}/broadcast`,
         { text, session_ids: broadcastTargets },
       );
-      broadcastText = '';
+      if (targetWorkspace === scope && broadcastText.trim() === text) broadcastText = '';
       toasts.info('Broadcast sent', `Delivered to ${resp.session_ids.length} session(s).`);
     } catch (e) {
       toasts.error('Broadcast failed', e instanceof Error ? e.message : String(e));
@@ -156,6 +151,9 @@
 </script>
 
 <div class="splits" class:has-broadcast={broadcastMode}>
+  {#if broadcastTargets.length >= 2 && !broadcastable}
+    <p class="hint">Broadcast requires every selected session to belong to the same workspace.</p>
+  {/if}
   {#if ws.panes.length >= 2 && broadcastTargets.length >= 2 && broadcastable}
     <div class="broadcast-bar-wrap">
       <button

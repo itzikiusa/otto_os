@@ -179,8 +179,18 @@
         : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
+      ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
     ]);
+  }
+
+  async function duplicateConnection(c: Connection): Promise<void> {
+    try {
+      const copy = await api.post<Connection>(`/connections/${c.id}/duplicate`, {});
+      await database.loadConnections();
+      editConnection(copy);
+      toasts.info('Configuration duplicated', 'Set a password for the new connection. Access grants were not copied.');
+    } catch (error) { toasts.error('Could not duplicate connection', error instanceof Error ? error.message : String(error)); }
   }
 
   // --- Section hierarchy (THE unified tree: every kind + broker clusters) ----

@@ -215,7 +215,7 @@
     <div class="stream-console">
       <div class="stream-head">
         <span class="status-pill {apiStream.status === 'open' ? 'ok' : apiStream.status === 'error' ? 'server' : 'none'}">{apiStream.status}</span>
-        <span class="meta">{apiStream.items.length} message(s)</span>
+        <span class="meta">{apiStream.items.length} message(s){apiStream.dropped ? ` · ${apiStream.dropped} older messages discarded` : ''}</span>
         <span class="grow"></span>
         <button class="save-btn" onclick={() => apiStream.clear()} title="Clear log">Clear</button>
       </div>

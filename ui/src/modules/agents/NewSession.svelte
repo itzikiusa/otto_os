@@ -8,7 +8,7 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { allProviders } from '../../lib/providers';
+  import { allProviders, providerReadiness } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
    *  to fork 200 agent processes at once. */
@@ -86,6 +86,7 @@
 
   /** Set the count for one provider, keeping `provider` on something selected. */
   function bump(p: string, delta: number): void {
+    if (delta > 0 && !providerReadiness(p).available) return;
     const n = Math.min(MAX_PER_PROVIDER, Math.max(0, countOf(p) + delta));
     const next = { ...counts };
     if (n === 0) delete next[p];
@@ -246,8 +247,10 @@
       // Preselect the configured default agent when it's still available;
       // when none is set, prefer claude (the historical default, matching the
       // channel bridge), then fall back to the first available provider.
-      const def = defaultProvider && providers.includes(defaultProvider) ? defaultProvider : null;
-      selectProvider(def ?? (providers.includes('claude') ? 'claude' : providers[0]));
+      const available = providers.filter((p) => providerReadiness(p).available);
+      const def = defaultProvider && available.includes(defaultProvider) ? defaultProvider : null;
+      const initial = def ?? (available.includes('claude') ? 'claude' : available[0]);
+      if (initial) selectProvider(initial);
     }
     if (cwd === '') {
       if (scratchMode) cwd = scratchHome;
@@ -257,6 +260,8 @@
 
   async function create(): Promise<void> {
     if (busy || total === 0) return;
+    const unavailable = chosen.find((p) => !providerReadiness(p).available);
+    if (unavailable) { toasts.error(`Cannot start ${unavailable}`, providerReadiness(unavailable).message); return; }
     busy = true;
     try {
       // Fold a pending draft (typed but not yet "Add"-ed) into the list.
@@ -385,6 +390,8 @@
             class="card-main"
             role="radio"
             aria-checked={provider === p}
+            disabled={!providerReadiness(p).available}
+            title={providerReadiness(p).message}
             tabindex={provider === p ? 0 : -1}
             onclick={() => selectProvider(p)}
           >
@@ -410,7 +417,7 @@
             <button
               type="button"
               class="cbtn"
-              disabled={countOf(p) >= MAX_PER_PROVIDER}
+              disabled={countOf(p) >= MAX_PER_PROVIDER || !providerReadiness(p).available}
               aria-label={`One more ${p} session`}
               onclick={() => bump(p, 1)}
             >+</button>
@@ -448,7 +455,7 @@
         list="ns-recent-dirs"
         placeholder="/absolute/path/to/folder"
       />
-      <button type="button" class="btn" onclick={() => (browsing = 'cwd')}>Browse…</button>
+      <button type="button" class="btn" title="Browse for a working directory" onclick={() => (browsing = 'cwd')}>Browse…</button>
     </div>
     <datalist id="ns-recent-dirs">
       {#each recentDirs as d (d)}<option value={d}></option>{/each}

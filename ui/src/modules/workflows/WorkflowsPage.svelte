@@ -5,6 +5,7 @@
   import { marked } from 'marked';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
   import RunAgents from './RunAgents.svelte';
@@ -254,7 +255,8 @@
     } catch {
       inner = `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
     }
-    return `<!doctype html><html><head><meta charset="utf-8"><style>${FINAL_OUTPUT_CSS}</style></head><body>${inner}</body></html>`;
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }${FINAL_OUTPUT_CSS}</style></head><body>${inner}</body></html>`;
   }
   async function loadFinalOutput(runId: string, contextDir: string): Promise<void> {
     finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
@@ -331,6 +333,7 @@
   }
 
   function open(wf: Workflow): void {
+    validationIssues = [];
     current = wf;
     const g = structuredClone($state.snapshot(wf.graph)) as WorkflowGraph;
     graph = g && g.nodes ? g : { nodes: [], edges: [] };
@@ -549,9 +552,26 @@
     }
   }
 
+  let validationIssues = $state<import('../../lib/api/types').WorkflowValidationIssue[]>([]);
+  let validating = $state(false);
+  async function validateGraph(): Promise<boolean> {
+    if (!current) return false;
+    const id = current.id;
+    validating = true;
+    try {
+      const result = await api.post<{ valid: boolean; issues: import('../../lib/api/types').WorkflowValidationIssue[] }>(`/workflows/${id}/validate`, { graph });
+      if (current?.id !== id) return false;
+      validationIssues = result.issues;
+      return result.valid;
+    } catch (e) { toasts.error('Preflight failed', e instanceof Error ? e.message : String(e)); return false; }
+    finally { validating = false; }
+  }
+
   async function execRun(body: RunWorkflowReq): Promise<void> {
     if (!current || running) return;
+    if (!await validateGraph()) return;
     if (dirty) await save();
+    if (dirty) return; // failed save: never execute an older persisted graph
     running = true;
     const workflowId = current.id;
     try {
@@ -1156,16 +1176,13 @@
 
   // --- Per-node retry policy (writes node.retry, not params) ----------------
   function retryNum(field: 'max_attempts' | 'backoff_ms', def: number): number {
-    const r = selectedNode?.retry;
+    const r = effectiveRetry(selectedNode);
     const v = r ? r[field] : undefined;
     return typeof v === 'number' ? v : def;
   }
   function onRetry(field: 'max_attempts' | 'backoff_ms', value: number): void {
     if (!selectedNode) return;
-    const cur = selectedNode.retry ?? { max_attempts: 0, backoff_ms: 0, factor: 2 };
-    const next = { ...cur, [field]: Number.isFinite(value) && value > 0 ? value : 0 };
-    // Drop the policy entirely when it's a no-op (no extra attempts).
-    selectedNode.retry = next.max_attempts > 0 ? next : null;
+    selectedNode.retry = updateRetry(selectedNode, field, value);
     graph = graph;
     dirty = true;
   }
@@ -1500,6 +1517,7 @@
           </button>
         {/if}
 
+        <button class="btn small" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
         {#if running}
           <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
         {/if}
@@ -1584,11 +1602,23 @@
         </div>
       {/if}
 
+      {#if validationIssues.length}
+        <div class="preflight" role="alert"><strong>Resolve these issues before running</strong>
+          {#each validationIssues as issue}
+            <button class="btn ghost small" onclick={() => { selectedId = issue.node_id; selectedEdgeId = issue.edge_id; }}>{issue.node_id ?? issue.edge_id ?? 'Graph'}: {issue.message}</button>
+          {/each}
+        </div>
+      {/if}
+      {#if run?.workflow_version && current.version !== run.workflow_version}
+        <div class="preflight">This run uses version {run.workflow_version}; retries retain that definition. The editor shows version {current.version}. Review it and choose Run to start a new run with these changes.</div>
+      {/if}
       <div class="canvas-wrap">
         <WorkflowCanvas
           bind:graph
           {types}
           {runStates}
+          invalidNodes={validationIssues.flatMap((i) => i.node_id ? [i.node_id] : [])}
+          invalidEdges={validationIssues.flatMap((i) => i.edge_id ? [i.edge_id] : [])}
           {selectedId}
           {selectedEdgeId}
           onselect={(id) => { selectedId = id; selectedEdgeId = null; }}
@@ -1632,6 +1662,7 @@
       {/if}
 
       {#if triggersOpen && current}
+        {#key current.id}
         <div class="triggers-wrap">
           <TriggersPanel
             workflowId={current.id}
@@ -1640,6 +1671,7 @@
             ontriggers={(ts) => (triggers = ts)}
           />
         </div>
+        {/key}
       {/if}
 
       {#if versionsOpen && current}
@@ -2660,7 +2692,8 @@
             <!-- Retry policy (any node): extra attempts with exponential backoff. -->
             {#if selectedNode.kind !== 'manual_trigger'}
               <div class="retry-form">
-                <span class="retry-h">Retry</span>
+                <span class="retry-h">Retry · {selectedNode.retry ? 'custom' : 'default'} ({effectiveRetry(selectedNode).max_attempts} extra attempts)</span>
+                <button class="btn ghost small" onclick={() => { if (selectedNode) clearRetry(selectedNode); graph = graph; dirty = true; }}>Use default</button>
                 <div class="retry-row">
                   <label for="np-retry-max">Max retries (0–5)</label>
                   <input
@@ -2813,6 +2846,7 @@
 {/if}
 
 <style>
+  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
   .wf {
     display: flex;
     height: 100%;

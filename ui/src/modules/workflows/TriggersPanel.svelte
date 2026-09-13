@@ -2,10 +2,12 @@
   // Triggers configuration panel: list, add, toggle and delete workflow
   // triggers (schedule / webhook / event).  Shown in the workflow inspector
   // sidebar when the "Triggers" tab is active.
+  import { onDestroy } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
+  import { buildTriggerSpec, defaultTriggerForm, formFromTrigger, EVENT_KINDS } from './triggerForm';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
@@ -35,6 +37,8 @@
       `  - goal 1\n` +
       `  - under 20 minutes`,
   );
+  let alive = true;
+  onDestroy(() => { alive = false; });
   let copied = $state(false);
   async function copyChat(): Promise<void> {
     try {
@@ -46,37 +50,38 @@
     }
   }
 
-  // ---- state for the "add trigger" form ----------------------------------
   let adding = $state(false);
-  let newKind = $state<TriggerKind>('schedule');
-  // Schedule params
-  let cadence = $state<'interval' | 'daily' | 'weekly'>('interval');
-  let everyMin = $state(60);
-  let atTime = $state('09:00');
-  let weekday = $state(0);
-  // Event params
-  let eventKind = $state('ReviewChanged');
-  // Webhook has no extra params (token is auto-generated server-side).
-  // Chat params: pins this workflow to a channel/chat(/thread) — any message
-  // there starts it, no keyword needed (see workflow_chat.rs binding_matches).
-  let chatChannel = $state<'slack' | 'telegram'>('slack');
-  let chatId = $state('');
-  let chatThread = $state('');
-  let chatMentionOnly = $state(false);
-
-  // `mention_only` is matched against the Slack `<@…>` entity token
-  // (workflow_chat.rs's `has_mention` check) — Telegram mentions never match
-  // that shape, so the checkbox is meaningless (and always false) there.
-  // Keep the toggle disabled + reset off whenever Telegram is selected.
-  $effect(() => {
-    if (chatChannel === 'telegram' && chatMentionOnly) chatMentionOnly = false;
-  });
+  let form = $state(defaultTriggerForm());
+  let editingId = $state<string | null>(null);
+  let originalSpec: Record<string, unknown> = {};
+  let preview = $state<string[] | null>(null);
+  let previewTimezone = $state('UTC');
+  let previewing = $state(false);
+  function edit(t?: WorkflowTrigger): void {
+    editingId = t?.id ?? null;
+    originalSpec = t ? { ...(t.spec as Record<string, unknown>) } : {};
+    form = t ? formFromTrigger(t) : defaultTriggerForm();
+    preview = null;
+    adding = true;
+  }
+  async function previewTrigger(): Promise<void> {
+    previewing = true;
+    const timezone = form.timezone;
+    try {
+      const result = await api.post<{ next_fire_times: string[] }>(`/workflows/${workflowId}/triggers/preview`, { kind: form.kind, spec: buildSpec() });
+      if (!alive) return;
+      previewTimezone = timezone;
+      preview = result.next_fire_times;
+    } catch (e) { toasts.error('Trigger preview failed', e instanceof Error ? e.message : String(e)); }
+    finally { previewing = false; }
+  }
 
   let saving = $state(false);
 
   async function load(): Promise<void> {
     try {
       const ts = await api.get<WorkflowTrigger[]>(`/workflows/${workflowId}/triggers`);
+      if (!alive) return;
       triggers = ts;
       ontriggers?.(ts);
     } catch (e) {
@@ -88,39 +93,20 @@
     if (workflowId) void load();
   });
 
-  function buildSpec(): Record<string, unknown> {
-    switch (newKind) {
-      case 'schedule':
-        if (cadence === 'interval') return { cadence, every_min: everyMin, enabled: true };
-        if (cadence === 'daily') return { cadence, at: atTime, enabled: true };
-        return { cadence, at: atTime, weekday, enabled: true };
-      case 'event':
-        return { event_kind: eventKind };
-      case 'chat': {
-        const spec: Record<string, unknown> = { channel: chatChannel, chat: chatId.trim() };
-        if (chatThread.trim()) spec.thread = chatThread.trim();
-        if (chatMentionOnly) spec.mention_only = true;
-        return spec;
-      }
-      case 'webhook':
-      default:
-        return {};
-    }
-  }
+  function buildSpec(): Record<string, unknown> { return buildTriggerSpec(form, originalSpec); }
 
   async function addTrigger(): Promise<void> {
     if (saving) return;
     saving = true;
     try {
-      const t = await api.post<WorkflowTrigger>(`/workflows/${workflowId}/triggers`, {
-        kind: newKind,
-        spec: buildSpec(),
-        enabled: true,
-      });
-      triggers = [...triggers, t];
+      const t = editingId
+        ? await api.patch<WorkflowTrigger>(`/workflow-triggers/${editingId}`, { spec: buildSpec() })
+        : await api.post<WorkflowTrigger>(`/workflows/${workflowId}/triggers`, { kind: form.kind, spec: buildSpec(), enabled: true });
+      if (!alive) return;
+      triggers = editingId ? triggers.map((old) => old.id === t.id ? t : old) : [...triggers, t];
       ontriggers?.(triggers);
       adding = false;
-      toasts.success('Trigger added');
+      toasts.success(editingId ? 'Trigger updated' : 'Trigger added');
     } catch (e) {
       toasts.error('Could not add trigger', e instanceof Error ? e.message : String(e));
     } finally {
@@ -133,6 +119,7 @@
       const updated = await api.patch<WorkflowTrigger>(`/workflow-triggers/${t.id}`, {
         enabled: !t.enabled,
       });
+      if (!alive) return;
       triggers = triggers.map((x) => (x.id === t.id ? updated : x));
       ontriggers?.(triggers);
     } catch (e) {
@@ -143,6 +130,7 @@
   async function remove(t: WorkflowTrigger): Promise<void> {
     try {
       await api.del(`/workflow-triggers/${t.id}`);
+      if (!alive) return;
       triggers = triggers.filter((x) => x.id !== t.id);
       ontriggers?.(triggers);
       toasts.success('Trigger removed');
@@ -156,12 +144,13 @@
     if (t.kind === 'schedule') {
       const c = s.cadence as string | undefined;
       if (c === 'interval') return `every ${s.every_min ?? 60} min`;
-      if (c === 'daily') return `daily at ${s.at ?? '09:00'} UTC`;
+      if (c === 'daily') return `daily at ${s.at ?? '09:00'} ${s.timezone ?? 'UTC'}`;
       if (c === 'weekly') {
         const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
         const wd = typeof s.weekday === 'number' ? (days[s.weekday] ?? 'Mon') : 'Mon';
-        return `weekly ${wd} at ${s.at ?? '09:00'} UTC`;
+        return `weekly ${wd} at ${s.at ?? '09:00'} ${s.timezone ?? 'UTC'}`;
       }
+      if (c === 'cron') return `${s.expr ?? ''} (${s.timezone ?? 'UTC'})`;
       return 'custom schedule';
     }
     if (t.kind === 'webhook') {
@@ -190,7 +179,7 @@
 <div class="tp">
   <div class="tp-head">
     <span class="tp-title">Triggers</span>
-    <button class="btn ghost small" onclick={() => (adding = !adding)}>
+    <button class="btn ghost small" onclick={() => edit()}>
       <Icon name="plus" size={12} /> Add
     </button>
   </div>
@@ -199,7 +188,7 @@
     <div class="add-form">
       <label class="fl">
         <span>Kind</span>
-        <select bind:value={newKind}>
+        <select bind:value={form.kind} disabled={editingId !== null}>
           <option value="schedule">Schedule</option>
           <option value="webhook">Webhook</option>
           <option value="event">Event</option>
@@ -207,29 +196,32 @@
         </select>
       </label>
 
-      {#if newKind === 'schedule'}
+      {#if form.kind === 'schedule'}
         <label class="fl">
           <span>Cadence</span>
-          <select bind:value={cadence}>
+          <select bind:value={form.cadence}>
             <option value="interval">Interval</option>
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
+            <option value="cron">Cron</option>
           </select>
         </label>
-        {#if cadence === 'interval'}
+        {#if form.cadence === 'interval'}
           <label class="fl">
             <span>Every (min)</span>
-            <input type="number" min="1" max="10080" bind:value={everyMin} />
+            <input type="number" min="1" max="10080" bind:value={form.everyMin} />
           </label>
+        {:else if form.cadence === 'cron'}
+          <label class="fl"><span>Cron (5 fields)</span><input bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
         {:else}
           <label class="fl">
-            <span>At (UTC HH:MM)</span>
-            <input type="text" placeholder="09:00" bind:value={atTime} />
+            <span>At (local HH:MM)</span>
+            <input type="text" placeholder="09:00" bind:value={form.atTime} />
           </label>
-          {#if cadence === 'weekly'}
+          {#if form.cadence === 'weekly'}
             <label class="fl">
               <span>Weekday</span>
-              <select bind:value={weekday}>
+              <select bind:value={form.weekday}>
                 {#each ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as d, i (i)}
                   <option value={i}>{d}</option>
                 {/each}
@@ -237,35 +229,38 @@
             </label>
           {/if}
         {/if}
-      {:else if newKind === 'event'}
+        <label class="fl"><span>Timezone (IANA)</span><input bind:value={form.timezone} placeholder="Asia/Jerusalem" /></label>
+        <label class="fl"><span>Run prompt</span><textarea bind:value={form.prompt} rows="3"></textarea></label>
+      {:else if form.kind === 'event'}
         <label class="fl">
           <span>Event kind</span>
-          <input type="text" placeholder="ReviewChanged" bind:value={eventKind} />
+          <select bind:value={form.eventKind}>{#each EVENT_KINDS as [value, label] (value)}<option {value}>{label}</option>{/each}</select>
         </label>
-        <p class="hint">The workflow starts whenever this daemon event fires.</p>
-      {:else if newKind === 'chat'}
+        <label class="fl"><span>Match fields (JSON)</span><textarea rows="3" bind:value={form.filter}></textarea></label>
+        <p class="hint">All specified fields must match the event.</p>
+      {:else if form.kind === 'chat'}
         <label class="fl">
           <span>Channel</span>
-          <select bind:value={chatChannel}>
+          <select bind:value={form.chatChannel}>
             <option value="slack">Slack</option>
             <option value="telegram">Telegram</option>
           </select>
         </label>
         <label class="fl">
           <span>Chat id</span>
-          <input type="text" placeholder="C0123456 (Slack) / -100987654321 (Telegram)" bind:value={chatId} />
+          <input type="text" placeholder="C0123456 (Slack) / -100987654321 (Telegram)" bind:value={form.chatId} />
         </label>
         <label class="fl">
           <span>Thread (optional)</span>
-          <input type="text" placeholder="thread ts — leave blank to match any thread" bind:value={chatThread} />
+          <input type="text" placeholder="thread ts — leave blank to match any thread" bind:value={form.chatThread} />
         </label>
-        <label class="chk-row" class:disabled={chatChannel === 'telegram'}>
+        <label class="chk-row" class:disabled={form.chatChannel === 'telegram'}>
           <input
             type="checkbox"
-            bind:checked={chatMentionOnly}
-            disabled={chatChannel === 'telegram'}
+            bind:checked={form.chatMentionOnly}
+            disabled={form.chatChannel === 'telegram'}
           />
-          <span>Only when the bot is @mentioned{chatChannel === 'telegram' ? ' (Slack only)' : ''}</span>
+          <span>Only when the bot is @mentioned{form.chatChannel === 'telegram' ? ' (Slack only)' : ''}</span>
         </label>
         <p class="hint">Any message in this channel/chat starts the workflow — no keyword needed.</p>
       {:else}
@@ -276,6 +271,16 @@
         </p>
       {/if}
 
+      <label class="fl"><span>Send results to</span><select bind:value={form.resultChannel}><option value="">No chat delivery</option><option value="slack">Slack</option><option value="telegram">Telegram</option></select></label>
+      {#if form.resultChannel}
+        <label class="fl"><span>Channel / chat ID</span><input bind:value={form.resultChat} /></label>
+        <label class="fl"><span>Thread (optional)</span><input bind:value={form.resultThread} /></label>
+      {/if}
+      <label class="fl"><span>Result webhook (optional)</span><input type="url" bind:value={form.resultWebhook} placeholder="https://example.com/result" /></label>
+      <button class="btn small" disabled={previewing} onclick={previewTrigger}>{previewing ? 'Checking…' : 'Preview / validate'}</button>
+      {#if preview}
+        <div class="hint">{#if preview.length}Next fires ({previewTimezone}):<ul>{#each preview as at}<li>{new Date(at).toLocaleString(undefined, { timeZone: previewTimezone })}</li>{/each}</ul>{:else}Trigger configuration is valid.{/if}</div>
+      {/if}
       <div class="add-btns">
         <button class="btn primary small" disabled={saving} onclick={addTrigger}>
           {saving ? 'Saving…' : 'Save trigger'}
@@ -303,6 +308,7 @@
       >
         {t.enabled ? 'on' : 'off'}
       </button>
+      <button class="btn ghost small" title="Edit trigger" onclick={() => edit(t)}><Icon name="edit" size={12} /></button>
       <button class="row-del" title="Delete" onclick={() => remove(t)}>
         <Icon name="trash" size={12} />
       </button>

@@ -277,6 +277,27 @@ impl LocalGit {
         self.run_env(args, &[]).await.map(|(out, _)| out)
     }
 
+    /// Run server automation plumbing without editor or SSH password prompts.
+    /// The explicit remote flag chooses the existing network budget; both paths
+    /// retain process-group cleanup and detached completion on caller disconnect.
+    pub async fn run_automation(&self, args: &[&str], remote: bool) -> Result<String> {
+        let envs = [
+            ("GIT_EDITOR".to_owned(), "true".to_owned()),
+            (
+                "GIT_SSH_COMMAND".to_owned(),
+                "ssh -o BatchMode=yes".to_owned(),
+            ),
+        ];
+        let class = if remote {
+            SpawnClass::Remote
+        } else {
+            SpawnClass::LocalWrite
+        };
+        self.run_env_class(args, &envs, class)
+            .await
+            .map(|(out, _)| out)
+    }
+
     /// Run a READ-ONLY git command (log/diff/status/refs/…): bounded by the
     /// local budget and cancelled with the request, since nothing is written.
     pub(crate) async fn run_read(&self, args: &[&str]) -> Result<String> {
@@ -286,7 +307,11 @@ impl LocalGit {
     }
 
     /// Run git with extra env vars; returns (stdout, stderr).
-    async fn run_env(&self, args: &[&str], envs: &[(String, String)]) -> Result<(String, String)> {
+    pub(crate) async fn run_env(
+        &self,
+        args: &[&str],
+        envs: &[(String, String)],
+    ) -> Result<(String, String)> {
         self.run_env_class(args, envs, SpawnClass::LocalWrite).await
     }
 
@@ -472,7 +497,7 @@ impl LocalGit {
     /// or the `gitdir:` target when `.git` is a file (linked worktree /
     /// submodule). Pure filesystem — called on every `status()`, so it must not
     /// cost a git process.
-    async fn git_dir(&self) -> Option<PathBuf> {
+    pub(crate) async fn git_dir(&self) -> Option<PathBuf> {
         let dot = self.repo_path.join(".git");
         match tokio::fs::metadata(&dot).await {
             Ok(m) if m.is_dir() => Some(dot),
@@ -1391,8 +1416,18 @@ impl LocalGit {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to unstage".into()));
         }
+        let mut expanded = paths.to_vec();
+        for change in self.status().await?.changes {
+            if paths.contains(&change.path) && change.kind == "renamed" {
+                if let Some(original) = change.orig_path {
+                    expanded.push(original);
+                }
+            }
+        }
+        expanded.sort();
+        expanded.dedup();
         let mut args = vec!["restore", "--staged", "--"];
-        args.extend(paths.iter().map(String::as_str));
+        args.extend(expanded.iter().map(String::as_str));
         self.run_locked(&args).await
     }
 
@@ -2376,35 +2411,81 @@ impl LocalGit {
     /// Binary files report `is_binary=true` with no segments.
     pub async fn conflict_file(&self, path: &str) -> Result<ConflictFile> {
         let abs = self.safe_join(path)?;
-        let bytes = tokio::fs::read(&abs)
-            .await
-            .map_err(|e| Error::NotFound(format!("read {path}: {e}")))?;
-        if bytes.contains(&0u8) {
-            return Ok(ConflictFile {
-                path: path.to_string(),
-                is_binary: true,
-                segments: Vec::new(),
-            });
-        }
-        let text = String::from_utf8_lossy(&bytes);
+        let (ours_present, theirs_present) = self.conflict_sides(path).await?;
+        let (bytes, worktree_present) = match tokio::fs::read(&abs).await {
+            Ok(bytes) => (bytes, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+            Err(e) => return Err(Error::Internal(format!("read {path}: {e}"))),
+        };
+        let is_binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
         Ok(ConflictFile {
             path: path.to_string(),
-            is_binary: false,
-            segments: crate::parse::parse_conflict_segments(&text),
+            is_binary,
+            ours_present,
+            theirs_present,
+            worktree_present,
+            trailing_newline: bytes.ends_with(b"\n"),
+            segments: if is_binary {
+                Vec::new()
+            } else {
+                crate::parse::parse_conflict_segments(&String::from_utf8_lossy(&bytes))
+            },
         })
     }
 
-    /// Resolve `path` by taking one side wholesale (`git checkout --ours` /
-    /// `--theirs`) and staging it — the WIP panel's quick actions on a
-    /// conflicted row. Only meaningful while the file is actually unmerged.
+    /// Index stages distinguish a deleted side from an empty file. Read them
+    /// before taking a side so modify/delete and binary conflicts share one flow.
+    async fn conflict_sides(&self, path: &str) -> Result<(bool, bool)> {
+        Self::guard_path(path)?;
+        let entries = self
+            .run_read(&["ls-files", "--unmerged", "-z", "--", path])
+            .await?;
+        if entries.is_empty() {
+            return Err(Error::Conflict(
+                "this file is no longer conflicted — refresh first".into(),
+            ));
+        }
+        let stages: Vec<&str> = entries
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter_map(|(meta, _)| meta.split_whitespace().nth(2))
+            .collect();
+        Ok((stages.contains(&"2"), stages.contains(&"3")))
+    }
+
+    /// Explicit whole-file actions preserve binary bytes and represent deletion
+    /// as removal, never as an empty replacement file.
     pub async fn resolve_take_side(&self, path: &str, side: &str) -> Result<()> {
-        let flag = match side {
-            "ours" => "--ours",
-            "theirs" => "--theirs",
-            other => return Err(Error::Invalid(format!("bad side: {other} (ours|theirs)"))),
+        let (ours, theirs) = self.conflict_sides(path).await?;
+        let delete = match side {
+            "ours" => !ours,
+            "theirs" => !theirs,
+            "delete" => true,
+            "keep" => false,
+            other => {
+                return Err(Error::Invalid(format!(
+                    "bad side: {other} (ours|theirs|keep|delete)"
+                )))
+            }
         };
-        self.run(&["checkout", flag, "--", path]).await?;
-        self.run(&["add", "--", path]).await?;
+        if delete {
+            self.run(&["rm", "--force", "--", path]).await?;
+        } else {
+            if side != "keep" {
+                self.run(&[
+                    "checkout",
+                    if side == "ours" { "--ours" } else { "--theirs" },
+                    "--",
+                    path,
+                ])
+                .await?;
+            } else if !self.safe_join(path)?.exists() {
+                return Err(Error::Conflict(
+                    "the working file is absent; choose Delete instead".into(),
+                ));
+            }
+            self.run(&["add", "--", path]).await?;
+        }
         Ok(())
     }
 
@@ -2459,20 +2540,40 @@ impl LocalGit {
                 }
             }
             Some("rebase") => {
-                self.run_env(&["rebase", "--continue"], &noedit).await?;
+                self.continue_operation("rebase", &noedit).await?;
             }
             Some("cherry_pick") => {
-                self.run_env(&["cherry-pick", "--continue"], &noedit)
-                    .await?;
+                self.continue_operation("cherry-pick", &noedit).await?;
             }
             Some("revert") => {
-                self.run_env(&["revert", "--continue"], &noedit).await?;
+                self.continue_operation("revert", &noedit).await?;
             }
             Some(other) => {
                 return Err(Error::Conflict(format!(
                     "cannot conclude an in-progress {other} here"
                 )));
             }
+        }
+        let conflicted_files = self.conflicted_paths().await?;
+        if !conflicted_files.is_empty() {
+            return Ok(MergeResult {
+                status: "conflicts".into(),
+                commit: None,
+                conflicted_files,
+                repo_status: self.status().await?,
+                note: None,
+            });
+        }
+        if self.op_in_progress().await.is_some() {
+            return Ok(MergeResult {
+                status: "paused".into(),
+                commit: None,
+                conflicted_files: Vec::new(),
+                repo_status: self.status().await?,
+                note: Some(
+                    "Rebase paused for editing. Amend the current commit, then continue.".into(),
+                ),
+            });
         }
         let commit = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
         Ok(MergeResult {
@@ -2482,6 +2583,14 @@ impl LocalGit {
             repo_status: self.status().await?,
             note: None,
         })
+    }
+
+    async fn continue_operation(&self, op: &str, env: &[(String, String)]) -> Result<()> {
+        match self.run_env(&[op, "--continue"], env).await {
+            Ok(_) => Ok(()),
+            Err(_) if !self.conflicted_paths().await?.is_empty() => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Abort the in-progress operation with its own abort verb (merge / rebase
@@ -3012,6 +3121,107 @@ mod tests {
         write(&dir, "e.txt", "loose\n");
 
         (tmp, dir)
+    }
+
+    #[tokio::test]
+    async fn binary_and_marker_free_conflicts_preserve_exact_bytes() {
+        for side in ["ours", "theirs", "keep", "delete"] {
+            let (_tmp, dir) = fixture_on_branch("main");
+            let git = LocalGit::new(&dir);
+            std::fs::write(dir.join("blob"), b"base\0bytes").unwrap();
+            sh_git(&dir, &["add", "."]);
+            sh_git(&dir, &["commit", "-m", "test: base binary"]);
+            sh_git(&dir, &["checkout", "-b", "other"]);
+            std::fs::write(dir.join("blob"), b"other\0bytes").unwrap();
+            sh_git(&dir, &["commit", "-am", "test: other binary"]);
+            sh_git(&dir, &["checkout", "main"]);
+            std::fs::write(dir.join("blob"), b"ours\0bytes").unwrap();
+            sh_git(&dir, &["commit", "-am", "test: our binary"]);
+            let _ = git.run(&["merge", "other"]).await;
+            let file = git.conflict_file("blob").await.unwrap();
+            assert!(file.is_binary && file.ours_present && file.theirs_present);
+            if side == "keep" {
+                std::fs::write(dir.join("blob"), b"manual resolution").unwrap();
+            }
+            git.resolve_take_side("blob", side).await.unwrap();
+            if side == "delete" {
+                assert!(!dir.join("blob").exists());
+            } else {
+                let expected: &[u8] = match side {
+                    "theirs" => b"other\0bytes",
+                    "keep" => b"manual resolution",
+                    _ => b"ours\0bytes",
+                };
+                assert_eq!(std::fs::read(dir.join("blob")).unwrap(), expected);
+            }
+            assert!(git.conflicted_paths().await.unwrap().is_empty());
+            assert!(
+                git.resolve_take_side("blob", "delete").await.is_err(),
+                "stale action cannot delete a resolved file"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_deleted_side_removes_file_and_index_conflict() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        write(&dir, "deleted.txt", "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "test: base"]);
+        sh_git(&dir, &["checkout", "-b", "remove"]);
+        sh_git(&dir, &["rm", "deleted.txt"]);
+        sh_git(&dir, &["commit", "-m", "test: remove"]);
+        sh_git(&dir, &["checkout", "main"]);
+        write(&dir, "deleted.txt", "changed\n");
+        sh_git(&dir, &["commit", "-am", "test: modify"]);
+        let _ = git.run(&["merge", "remove"]).await;
+        git.resolve_take_side("deleted.txt", "theirs")
+            .await
+            .unwrap();
+        assert!(!dir.join("deleted.txt").exists());
+        assert!(git.conflicted_paths().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unstage_rename_restores_both_index_paths() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        git.unstage(&["d.txt".into()]).await.unwrap();
+        let staged = git.run(&["diff", "--cached", "--name-only"]).await.unwrap();
+        assert_eq!(
+            staged.trim(),
+            "f.txt",
+            "the unrelated addition stays staged; neither rename side does"
+        );
+        assert!(dir.join("d.txt").exists());
+        assert!(!dir.join("c.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn continuing_rebase_returns_successive_conflicts() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        write(&dir, "sequence.txt", "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "test: add base"]);
+        sh_git(&dir, &["checkout", "-b", "topic"]);
+        for content in ["first\n", "second\n"] {
+            write(&dir, "sequence.txt", content);
+            sh_git(&dir, &["commit", "-am", "test: change topic"]);
+        }
+        sh_git(&dir, &["checkout", "main"]);
+        write(&dir, "sequence.txt", "upstream\n");
+        sh_git(&dir, &["commit", "-am", "test: change upstream"]);
+        sh_git(&dir, &["checkout", "topic"]);
+        git.rebase("main", false).await.unwrap();
+        git.write_resolution("sequence.txt", "resolved differently\n")
+            .await
+            .unwrap();
+        let next = git.merge_commit(None).await.unwrap();
+        assert_eq!(next.status, "conflicts");
+        assert_eq!(next.conflicted_files, vec!["sequence.txt"]);
+        git.merge_abort().await.unwrap();
     }
 
     /// Stash must take UNTRACKED files too — without `-u`, a tree whose only

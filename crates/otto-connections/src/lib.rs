@@ -3,6 +3,7 @@
 //! test-connect, plus the REST router.
 
 pub mod builders;
+pub mod conn_export;
 pub mod conn_import;
 pub mod http;
 mod keyperms;
@@ -16,3 +17,7 @@ pub use http::{
 pub use service::{ConnectionsService, DbTester, Spawner};
 
 mod access;
+
+mod sftp_pool;
+
+mod transfers;

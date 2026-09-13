@@ -48,7 +48,7 @@ Each repo tab has its own sub-tabs: **Graph**, **Changes**, **History**,
 |---|---|
 | Git page (repo tabs + landing) | `ui/src/modules/git/GitPage.svelte`, `GitTabs.svelte` |
 | One repo (toolbar + Graph/Changes/History/PRs/Review tabs) | `ui/src/modules/git/RepoView.svelte` |
-| Stage/commit/discard panel | `ui/src/modules/git/ChangesView.svelte` |
+| Stage/commit/discard panel | `ui/src/modules/git/WipPanel.svelte` |
 | Commit graph + branch chips + context menus | `ui/src/modules/git/GraphView.svelte` |
 | Diff rendering | `ui/src/modules/git/DiffViewer.svelte` |
 | Create-PR sheet | `ui/src/modules/git/CreatePr.svelte` |
@@ -270,7 +270,7 @@ not redirect them.
 
 ## 5. Stage / commit / discard / diff
 
-The **Changes** tab is the working-tree view, backed by `git status`:
+The graph’s **WIP** panel is the working-tree view, backed by `git status`:
 
 - **Stage / unstage** selected paths (`POST /repos/{id}/stage`,
   `/unstage`). Each returns the fresh `RepoStatusResp` so the UI updates. The
@@ -642,3 +642,34 @@ in **[code-review.md](./code-review.md)**.
   local-working-tree review, findings lifecycle, and merge-readiness.
 - **[SSH & SFTP connections](./connections-ssh-sftp.md)** — browsing remote files
   over SSH. SFTP is a **separate feature** from this Git module.
+
+
+## Recovery tools
+
+Use **Recovery tools** in the repository header for:
+
+- **Recovery history:** inspect previous HEAD positions and create a recovery
+  branch at a selected commit. Recovery leaves the current branch and files in place.
+- **Interactive rebase:** enter an onto revision, preview the exact commits, move
+  them up/down, and choose Pick, Squash into previous, or Edit. Starting requires
+  a clean worktree and explicit confirmation; changed HEAD rejects the stale plan.
+  Edit stops let you amend from WIP, then continue. Continue, Skip, and Abort are
+  available when reopening the tools. Skip discards uncommitted work and confirms
+  that consequence. Linear histories are supported; merge-containing plans explain
+  that limitation before changing anything. No force push is performed.
+- **Bisect:** select known good/bad revisions in a graph commit’s menu or enter
+  revisions in the tool. Test each checked-out candidate and mark Works, Broken,
+  or Cannot test. Current candidate and history survive closing Otto. End bisect
+  restores the original branch; commit or stash test changes first. If all remaining
+  candidates were skipped, Git’s diagnostic identifies the unresolved range.
+
+The conflict resolver also handles binary files and deletion-versus-modification:
+choose a whole side, keep edited working bytes, or explicitly delete the path. An
+absent side is labeled as a deletion. Resolving every file and reopening the view
+still permits completion; a rebase stopping on another conflict refreshes its list.
+
+Hunk/line operations now validate a byte-exact file-diff fingerprint. Concurrent
+edits are rejected even when line counts and `@@` headers have not changed. Refresh
+and review the new content before retrying. Unstaging a rename unstages both names.
+GitHub branch cleanup after merge only deletes a verified same-repository source;
+Otto skips fork cleanup rather than targeting a namesake in the base repository.
