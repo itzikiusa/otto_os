@@ -255,7 +255,11 @@ impl LocalGit {
             String::new()
         };
         let first_bad = log.lines().find_map(|line| {
+            // Git 2.55 quotes the term in its persisted completion marker.
+            // Match only the two exact formats, never "possible first" entries
+            // written when skipped candidates leave the result inconclusive.
             line.strip_prefix("# first bad commit: [")
+                .or_else(|| line.strip_prefix("# first 'bad' commit: ["))
                 .and_then(|rest| rest.split_once(']').map(|(sha, _)| sha.to_string()))
         });
         let mut remaining = None;
@@ -606,6 +610,95 @@ mod tests {
         assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), original);
         assert_eq!(git(dir.path(), &["branch", "--show-current"]), "main");
     }
+    #[tokio::test]
+    async fn bisect_resumes_completed_logs_before_and_since_git_2_55() {
+        let (dir, _) = fixture();
+        let bad = git(dir.path(), &["rev-parse", "HEAD"]);
+        // Adjacent endpoints complete immediately using real Git state. Replay
+        // both upstream log spellings regardless of the test host's Git version.
+        git(dir.path(), &["bisect", "start", "HEAD", "HEAD~1"]);
+        let path = dir.path().join(".git/BISECT_LOG");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let legacy = original.replace("# first 'bad' commit: [", "# first bad commit: [");
+        assert!(legacy.contains(&format!("# first bad commit: [{bad}]")));
+        for log in [
+            legacy.clone(),
+            legacy.replace("# first bad commit: [", "# first 'bad' commit: ["),
+        ] {
+            std::fs::write(&path, &log).unwrap();
+            let resumed = LocalGit::new(dir.path());
+            let state = resumed.bisect_state().await.unwrap();
+            assert!(state.active);
+            assert!(state.finished, "completion not recognized in {log}");
+            assert_eq!(state.first_bad.as_deref(), Some(bad.as_str()));
+            assert!(matches!(
+                resumed
+                    .bisect_action(BisectRequest {
+                        op: BisectAction::Good,
+                        good: None,
+                        bad: None,
+                        expected_head: Some(state.current_sha),
+                    })
+                    .await,
+                Err(Error::Conflict(_))
+            ));
+        }
+        git(dir.path(), &["bisect", "reset"]);
+        assert!(
+            !LocalGit::new(dir.path())
+                .bisect_state()
+                .await
+                .unwrap()
+                .finished
+        );
+    }
+
+    #[tokio::test]
+    async fn bisect_skipped_ambiguity_is_not_a_completed_result() {
+        let (dir, local) = fixture();
+        let start = local
+            .bisect_action(BisectRequest {
+                op: BisectAction::Start,
+                good: Some("HEAD~2".into()),
+                bad: Some("HEAD".into()),
+                expected_head: None,
+            })
+            .await
+            .unwrap();
+        assert!(!start.finished);
+        let skipped = local
+            .bisect_action(BisectRequest {
+                op: BisectAction::Skip,
+                good: None,
+                bad: None,
+                expected_head: Some(start.current_sha),
+            })
+            .await
+            .unwrap();
+        assert!(!skipped.finished);
+        let legacy = skipped.log.replace(
+            "# possible first 'bad' commit: [",
+            "# possible first bad commit: [",
+        );
+        assert!(legacy.contains("# possible first bad commit: ["));
+        for log in [
+            legacy.clone(),
+            legacy.replace(
+                "# possible first bad commit: [",
+                "# possible first 'bad' commit: [",
+            ),
+        ] {
+            std::fs::write(dir.path().join(".git/BISECT_LOG"), &log).unwrap();
+            let resumed = LocalGit::new(dir.path()).bisect_state().await.unwrap();
+            assert!(resumed.active);
+            assert!(
+                !resumed.finished,
+                "ambiguous candidates marked complete: {log}"
+            );
+            assert_eq!(resumed.first_bad, None);
+        }
+    }
+
     #[tokio::test]
     async fn plan_rejects_duplicates_and_skip_advances_edit_stop() {
         let (_dir, local) = fixture();
