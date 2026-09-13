@@ -522,3 +522,56 @@ stops copying before publication.
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — per-feature roles
   (`Connections:View` / `Connections:Edit`) and `owner_private`.
 - `docs/contracts/api.md` — authoritative endpoint, request, and response shapes.
+## Exporting connections to another tool
+
+Open **Settings → Backup & Restore → Export connections** as root. Choose all
+workspaces or selected workspaces (global profiles are included in either case),
+then choose a format. Password export is off by default. **Prepare export**
+returns a list of downloadable files, unsupported profiles and import instructions.
+Download each file separately; **Clear prepared export** drops the prepared payload
+from the UI. Preparing an export does not contact connection hosts or create
+server-side files.
+
+| Format | Connections | Credentials and destination |
+|---|---|---|
+| Otto JSON | All seven kinds | Complete profile fields and advanced parameters; optional plaintext `password` per profile. Opaque Keychain references are excluded. |
+| CSV | All seven kinds | Summary columns plus a `record_json` field containing the complete equivalent profile. Parse that JSON field for a lossless round trip, including quotes/newlines in passwords. Summary values are JSON literals to avoid spreadsheet formula interpretation. |
+| MySQL Workbench | Direct MySQL | `connections.xml`, plus an optional credential JSON sidecar for manual **Store in Vault** entry. Workbench passwords cannot be portably imported from its platform vault. |
+| DBeaver MySQL | Direct MySQL | Custom CSV import with the MySQL driver; optional password column. |
+| DBeaver MongoDB | Direct MongoDB | Custom CSV import with the MongoDB driver, available in supporting DBeaver editions; optional URI/CSV credentials. |
+| NoSQLBooster 9+ | Direct MongoDB | Native URI-list text, including replica sets and `mongodb+srv`; `// name` comments retain labels. Use **Connections → Import → From File…** or **From Clipboard (URI List)**. |
+| RedisInsight | Direct standalone Redis | Native JSON array, including database index, ACL username, TLS verification and inline certificates. Passwords and inline private keys are included only when explicitly selected. |
+
+Generic exports preserve referenced local paths, custom parameters and command
+text; they do not read or bundle SSH/private-key files. Review free-form commands
+before sharing a generic export. Default exports remove recognized structured
+credential fields and URI passwords without reading the credential store. An
+explicit password export fails with reconnect guidance if a saved credential is
+missing, and returns a sanitized error if the store cannot be read.
+
+Native exports list incompatible kinds and transports as skipped. SSH tunnels,
+unsupported legacy SSL settings and native formats unable to carry required
+certificate material use the generic formats instead; exports never silently
+downgrade those settings. MySQL TLS mode/verification, `secure: true`, IPv6 hosts,
+`db`/`database` aliases and MongoDB URI options are preserved where representable.
+Workbench and DBeaver MySQL preserve their supported TLS modes; RedisInsight
+accepts inline certificate objects. Review the reported import instructions and
+skips before downloading. Exports are limited to 10,000 saved profiles and 32 MiB
+and fail rather than truncate.
+
+The native formats were checked against these primary sources:
+
+- [MySQL Workbench configuration files](https://dev.mysql.com/doc/workbench/en/wb-configuring-files.html),
+  [platform password vault](https://dev.mysql.com/doc/workbench/en/wb-mysql-connections-vault.html),
+  and [official GRT XML fixture](https://github.com/mysql/mysql-workbench/blob/8.0/testing/test-suite/data/connections.xml).
+- [DBeaver Custom CSV/XML fields, including password](https://dbeaver.com/docs/dbeaver/Admin-Manage-Connections/)
+  and [Custom import wizard](https://dbeaver.com/docs/dbeaver/How-to-import-Connections-from-External-Tools/).
+- [NoSQLBooster 9 URI-list support](https://nosqlbooster.com/blog/announcing-nosqlbooster-90/)
+  and [official screenshot showing `//` labels and SRV URIs](https://www.nosqlbooster.com/blog/img/import-mongodb-uri-list.png).
+- [RedisInsight JSON preconfiguration](https://redis.io/docs/latest/operate/redisinsight/configuration/),
+  [export model](https://github.com/redis/RedisInsight/blob/main/redisinsight/api/src/modules/database/models/export-database.ts),
+  and [official export format/secret tests](https://github.com/redis/RedisInsight/blob/main/redisinsight/api/test/api/database/POST-databases-export.test.ts).
+
+Automated tests validate serialization, existing Workbench parser compatibility,
+credential opt-in and isolated FileStore authorization/error handling. They do not
+launch third-party database applications or connect to real database/SSH hosts.

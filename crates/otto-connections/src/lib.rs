@@ -3,6 +3,7 @@
 //! test-connect, plus the REST router.
 
 pub mod builders;
+pub mod conn_export;
 pub mod conn_import;
 pub mod http;
 mod keyperms;

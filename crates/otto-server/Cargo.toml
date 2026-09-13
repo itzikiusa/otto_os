@@ -11,6 +11,8 @@ default = []
 embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
+tempfile.workspace = true
+rustix.workspace = true
 otto-core.workspace = true
 otto-state.workspace = true
 otto-rbac.workspace = true
@@ -21,6 +23,7 @@ tower-http.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 dirs.workspace = true
@@ -64,7 +67,6 @@ prost.workspace = true
 prost-reflect.workspace = true
 prost-types.workspace = true
 tonic.workspace = true
-tempfile.workspace = true
 uuid.workspace = true
 rand.workspace = true
 reqwest_cookie_store.workspace = true
@@ -74,7 +76,6 @@ sha2.workspace = true
 boa_engine = "0.20"
 
 [dev-dependencies]
-tempfile.workspace = true
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5", features = ["util"] }

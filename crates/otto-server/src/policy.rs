@@ -835,11 +835,26 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if matches!(p, "/capabilities" | "/support-bundle") {
         return Require(Settings, Admin);
     }
+    if p.starts_with("/state/git/") {
+        return Require(Settings, Admin);
+    }
+    if matches!(
+        p,
+        "/state/connections/export" | "/state/connections/export/formats"
+    ) {
+        return Require(Settings, Admin);
+    }
     // Settings export/import + state backup/restore (C3) — root diagnostics, same
     // tier as the audit log; handlers also enforce require_root.
     if matches!(
         p,
-        "/settings/export" | "/settings/import" | "/state/backup" | "/state/restore"
+        "/settings/export"
+            | "/settings/import"
+            | "/state/backup"
+            | "/state/restore"
+            | "/state/archive"
+            | "/state/archive/preview"
+            | "/state/archive/restore"
     ) {
         return Require(Settings, Admin);
     }

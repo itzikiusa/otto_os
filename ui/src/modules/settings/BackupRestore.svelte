@@ -3,8 +3,11 @@
   // Routes used:
   //   GET  /api/v1/settings/export  — download scrubbed settings JSON
   //   POST /api/v1/settings/import  — upload settings JSON to merge
-  //   GET  /api/v1/state/backup     — download full non-secret state snapshot
+  //   GET  /api/v1/state/backup     — download settings plus workspace manifest
   //   POST /api/v1/state/restore    — restore non-secret settings from snapshot
+  import ConnectionsExport from './ConnectionsExport.svelte';
+  import GitBackup from './GitBackup.svelte';
+  import FullBackup from './FullBackup.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -106,7 +109,7 @@
     try {
       const resp = await api.get<StateBackupResp>('/state/backup');
       downloadJson(resp, `otto-state-backup-${dateSlug()}.json`);
-      toasts.success('State backup downloaded', `${resp.manifest.workspace_count} workspace${resp.manifest.workspace_count === 1 ? '' : 's'} in manifest.`);
+      toasts.success('Settings backup downloaded', `${resp.manifest.workspace_count} workspace${resp.manifest.workspace_count === 1 ? '' : 's'} in manifest.`);
     } catch (e) {
       toasts.error('Backup failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -166,16 +169,20 @@
   <div class="page-header">
     <div>
       <h1>Backup &amp; Restore</h1>
-      <div class="sub">Export settings, download a full non-secret state snapshot, or restore from a backup.</div>
+      <div class="sub">Back up saved Otto data, restore an archive, or transfer settings.</div>
     </div>
   </div>
+
+  <FullBackup />
+  <GitBackup />
+  <ConnectionsExport />
 
   <!-- Settings export / import -->
   <div class="section-title">Settings</div>
   <div class="card pad">
     <p class="hint">
       Export downloads a JSON file with all daemon settings. Secrets (tokens, passwords, Keychain
-      refs) are excluded automatically — the file is safe to store outside this machine.
+      refs) are filtered automatically. This export contains settings only; review configuration before sharing it.
     </p>
     <div class="row-actions">
       <button class="btn primary" disabled={exporting} onclick={exportSettings}>
@@ -204,19 +211,19 @@
   </div>
 
   <!-- State backup / restore -->
-  <div class="section-title">State Backup</div>
+  <div class="section-title">Settings backup with manifest</div>
   <div class="card pad">
     <p class="hint">
-      A state backup bundles the scrubbed settings with a manifest (workspace names, migration
+      A settings backup bundles the scrubbed settings with a manifest (workspace names, migration
       level, daemon version). It does <em>not</em> include session data, PTY output, secrets, or
       raw database rows.
     </p>
     <button class="btn primary" disabled={backingUp} onclick={downloadBackup}>
-      {backingUp ? 'Downloading…' : 'Download state backup'}
+      {backingUp ? 'Downloading…' : 'Download settings backup'}
     </button>
   </div>
 
-  <div class="section-title">Restore</div>
+  <div class="section-title">Restore settings</div>
   <div class="card pad">
     <p class="hint">
       Restoring applies the non-secret settings from a backup file. It does <em>not</em> wipe the

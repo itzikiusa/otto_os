@@ -8446,3 +8446,74 @@ export interface ApiAutomationRun {
   created_at: string; finished_at: string | null; stop_on_failure: boolean;
   dataset_rows: number; snapshot: unknown; report: ApiRunResult; result_rows: number[]; result_ids: Id[]; error: string | null;
 }
+
+/** Portable saved-data archive. Authentication secrets and live processes are excluded. */
+export interface StateArchive {
+  archive_format: 2;
+  schema_version: number;
+  daemon_version: string;
+  snapshot_at: string;
+  records: Record<string, Record<string, unknown>[]>;
+  roots: { id: string; kind: string; owner_id?: string }[];
+  files: { root: string; path: string; sha256: string; content_base64: string }[];
+  excluded: string[];
+  reconnect: string[];
+}
+export type RestoreConflictPolicy = 'abort' | 'skip_existing';
+export interface RestorePreview {
+  preview_token: string;
+  can_restore: boolean;
+  record_count: number;
+  file_count: number;
+  table_counts: Record<string, number>;
+  conflicts: { kind: 'record' | 'file'; location: string; reason: string }[];
+  excluded: string[];
+  reconnect: string[];
+  warnings: string[];
+}
+export interface RestoreResult {
+  records_inserted: number;
+  records_skipped: number;
+  files_restored: number;
+  files_skipped: number;
+  restore_root: string;
+  reconnect: string[];
+}
+
+export interface GitBackupStatus {
+  repo_path: string;
+  head: string | null;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  remotes: string[];
+}
+export interface GitBackupPreview {
+  token: string;
+  snapshot_digest: string;
+  status: GitBackupStatus;
+  changes: { path: string; action: 'added' | 'modified' | 'removed' | 'unchanged'; bytes: number }[];
+  excluded: string[];
+  reconnect: string[];
+}
+
+export interface ConnectionExportFormat {
+  id: string;
+  label: string;
+  kinds: string[];
+  password_support: 'native' | 'sidecar';
+  description: string;
+  import_instructions: string;
+}
+export interface ConnectionExportResult {
+  format: string;
+  total_connections: number;
+  exported_connections: number;
+  contains_passwords: boolean;
+  files: { name: string; mime: string; content: string }[];
+  skipped: { id: string; name: string; kind: string; reason: string }[];
+  warnings: string[];
+  import_instructions: string;
+}

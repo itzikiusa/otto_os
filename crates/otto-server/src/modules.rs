@@ -7409,6 +7409,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::workgraph::workgraph_routes(),
         crate::routes::search::search_routes(),
         crate::routes::backup::backup_routes(),
+        crate::routes::connection_export::routes(),
+        crate::routes::backup_git::routes(),
         // Runtime custom plugins: management + scoped host-API + reverse-proxy to
         // sidecar processes. (Asset/iframe routes are root-mounted; see root vec.)
         crate::plugins::api_routes(),

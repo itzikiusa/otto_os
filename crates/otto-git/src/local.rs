@@ -277,6 +277,27 @@ impl LocalGit {
         self.run_env(args, &[]).await.map(|(out, _)| out)
     }
 
+    /// Run server automation plumbing without editor or SSH password prompts.
+    /// The explicit remote flag chooses the existing network budget; both paths
+    /// retain process-group cleanup and detached completion on caller disconnect.
+    pub async fn run_automation(&self, args: &[&str], remote: bool) -> Result<String> {
+        let envs = [
+            ("GIT_EDITOR".to_owned(), "true".to_owned()),
+            (
+                "GIT_SSH_COMMAND".to_owned(),
+                "ssh -o BatchMode=yes".to_owned(),
+            ),
+        ];
+        let class = if remote {
+            SpawnClass::Remote
+        } else {
+            SpawnClass::LocalWrite
+        };
+        self.run_env_class(args, &envs, class)
+            .await
+            .map(|(out, _)| out)
+    }
+
     /// Run a READ-ONLY git command (log/diff/status/refs/…): bounded by the
     /// local budget and cancelled with the request, since nothing is written.
     pub(crate) async fn run_read(&self, args: &[&str]) -> Result<String> {

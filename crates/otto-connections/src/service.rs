@@ -308,6 +308,40 @@ impl ConnectionsService {
         crate::access::check(&self.repo.pool(), &conn, user_id, operation).await
     }
 
+    /// Explicit root-only portable export. Read the profile and its credential
+    /// under the same lock as updates, so an export cannot combine old identity
+    /// settings with a newly rotated password. The default never reads Keychain.
+    pub async fn export_profile(
+        &self,
+        id: &Id,
+        actor_id: &Id,
+        include_passwords: bool,
+    ) -> Result<crate::conn_export::ExportProfile> {
+        let _guard = self.credentials_lock.lock().await;
+        let actor = otto_state::UsersRepo::new(self.repo.pool())
+            .get(actor_id)
+            .await?;
+        if actor.disabled || !actor.is_root {
+            return Err(Error::Forbidden(
+                "connection export requires an active root user".into(),
+            ));
+        }
+        let connection = self.repo.get(id).await?;
+        let password = if include_passwords {
+            match connection.secret_ref.as_deref() {
+                Some(reference) => Some(self.secrets.get(reference)
+                    .map_err(|_| Error::Internal("Could not read a saved connection credential; no export was produced".into()))?
+                    .ok_or_else(|| Error::Conflict("A saved connection credential is missing; reconnect it or export without passwords".into()))?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let record = serde_json::to_value(connection)
+            .map_err(|_| Error::Internal("Could not serialize connection profile".into()))?;
+        Ok(crate::conn_export::ExportProfile { record, password })
+    }
+
     pub async fn is_enforced(&self, id: &Id) -> Result<bool> {
         crate::access::enforced(&self.repo.pool(), id).await
     }

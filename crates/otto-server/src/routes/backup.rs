@@ -14,7 +14,7 @@
 //! `settings.rs` and `auth_routes.rs` for the few additional high-value sites
 //! we wire without touching cross-cutting call sites.
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,6 +36,15 @@ pub fn backup_routes() -> Router<ServerCtx> {
         .route("/settings/import", post(import_settings))
         .route("/state/backup", get(state_backup))
         .route("/state/restore", post(state_restore))
+        .merge(
+            Router::new()
+                .route("/state/archive", get(full_archive))
+                .route("/state/archive/preview", post(archive_preview))
+                .route("/state/archive/restore", post(archive_restore))
+                .layer(DefaultBodyLimit::max(
+                    crate::state_archive::MAX_ARCHIVE_BYTES + 1024 * 1024,
+                )),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -456,4 +465,60 @@ mod tests {
         let pr = scrubbed["pr_review"].as_object().unwrap();
         assert_eq!(pr["password"], json!("[redacted]"));
     }
+}
+
+#[derive(Deserialize)]
+struct ArchivePreviewRequest {
+    archive: crate::state_archive::StateArchive,
+    conflicts: crate::state_archive::ConflictPolicy,
+}
+#[derive(Deserialize)]
+struct ArchiveRestoreRequest {
+    archive: crate::state_archive::StateArchive,
+    #[serde(flatten)]
+    options: crate::state_archive::RestoreOptions,
+}
+async fn full_archive(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<crate::state_archive::StateArchive>> {
+    require_root(&user)?;
+    let archive = crate::state_archive::build_snapshot(&ctx, Default::default()).await?;
+    record_action(&ctx, &user.id, "state.archive.export", None, None).await;
+    Ok(Json(archive))
+}
+async fn archive_preview(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ArchivePreviewRequest>,
+) -> ApiResult<Json<crate::state_archive::RestorePreview>> {
+    require_root(&user)?;
+    let preview = crate::state_archive::preview_restore(&ctx, &req.archive, req.conflicts).await?;
+    record_action(&ctx, &user.id, "state.archive.preview", None, None).await;
+    Ok(Json(preview))
+}
+async fn archive_restore(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ArchiveRestoreRequest>,
+) -> ApiResult<Json<crate::state_archive::RestoreResult>> {
+    require_root(&user)?;
+    tokio::spawn(async move {
+        let fresh = otto_state::UsersRepo::new(ctx.pool.clone())
+            .get(&user.id)
+            .await
+            .map_err(ApiError)?;
+        if fresh.disabled {
+            return Err(ApiError(otto_core::Error::Forbidden(
+                "User is disabled".into(),
+            )));
+        }
+        require_root(&fresh)?;
+        let result =
+            crate::state_archive::restore_snapshot(&ctx, &req.archive, req.options).await?;
+        record_action(&ctx, &fresh.id, "state.archive.restore", None, None).await;
+        Ok(Json(result))
+    })
+    .await
+    .map_err(|e| ApiError(otto_core::Error::Internal(format!("Restore task: {e}"))))?
 }

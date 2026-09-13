@@ -4019,3 +4019,140 @@ Mission saved-view `filter` supports combined `bucket`, `provider`, `repo`, and
 where the item has no explicit repo. History offers the hidden `scratch` workspace as
 “No workspace.” Broadcast resolves its workspace from all selected sessions; mixed or
 missing scopes are refused by the UI rather than silently dropping recipients.
+
+### Saved-data archives (format 2)
+
+The root-only archive endpoints supplement the legacy settings-only
+`GET /state/backup` envelope. They preserve saved records and owned files;
+Keychain contents, authentication secrets, live processes, external database
+contents, and repository working trees are not portable archive data. The
+archive carries explicit `excluded` and `reconnect` lists.
+
+- `GET /state/archive` returns `StateArchive`:
+  `{archive_format:2,schema_version,daemon_version,snapshot_at,records,roots,files,excluded,reconnect}`.
+  `records` maps installed table names to row objects; BLOB values use
+  `{$base64:string}`. Roots are `{id,kind,owner_id?}`; files are
+  `{root,path,sha256,content_base64}` with confined relative paths.
+- `POST /state/archive/preview` accepts `{archive,conflicts}` where conflicts
+  is `abort` or `skip_existing`. Returns
+  `{preview_token,can_restore,record_count,file_count,table_counts,conflicts,excluded,reconnect,warnings}`.
+  Each conflict is `{kind:'record'|'file',location,reason}`. Preview validates
+  schema, paths, integrity, and existing items before mutation.
+- `POST /state/archive/restore` accepts
+  `{archive,conflicts,preview_token,confirm:true}` and returns
+  `{records_inserted,records_skipped,files_restored,files_skipped,restore_root,reconnect}`.
+  Apply is bound to the reviewed archive/policy and checks conflicts again.
+  Existing records/files are never replaced. Imported automatic activity is
+  inactive and imported users cannot authenticate until configured explicitly.
+
+Encoded archives are bounded to 256 MiB and individual files to 64 MiB. An
+oversize export/import fails explicitly; it is not silently truncated. A
+format/schema mismatch, invalid path/hash, stale preview, or incompatible
+references prevents restore. Use legacy settings import/restore for format 1
+files; its workspace-name manifest does not contain workspace data.
+
+### Portable state Git sync
+
+All routes below are **POST**, root-only, under `/api/v1/state/git/`.
+`repo_path` selects an existing local Git repository; no repository or remote is
+created implicitly. Status and preview never contact a remote.
+
+| Suffix | Request | Response |
+|---|---|---|
+| POST /state/git/status | `{repo_path}` | Git status below |
+| POST /state/git/preview | `{repo_path}` | Export preview below |
+| POST /state/git/export | `{repo_path,preview_token}` | Refreshed export preview |
+| POST /state/git/commit | `{repo_path,expected_head,snapshot_digest,message}` | `{status}` |
+| POST /state/git/sync | `{repo_path,expected_head,action,remote}` | `{status}`; action `fetch`, `pull`, or `push` |
+| POST /state/git/restore/preview | `{repo_path,conflicts}` | The format-2 backup restore preview |
+| POST /state/git/restore | `{repo_path,conflicts,preview_token,confirm:true}` | The format-2 backup restore result |
+
+Git status is `{repo_path,head,branch,upstream,ahead,behind,dirty,remotes}`.
+`head`, `branch`, and `upstream` are nullable strings; `ahead` and `behind` use
+locally cached tracking refs, and `remotes` contains configured names, not URLs.
+Export preview is `{token,snapshot_digest,status,changes,excluded,reconnect}`;
+each change is `{path,action,bytes}` with action `added`, `modified`, `removed`,
+or `unchanged`. `snapshot_digest` hashes the deterministic manifest.
+
+The Git layout is `.otto-sync/manifest.json`, `.otto-sync/.gitattributes`,
+`config/<table>.json`, and `files/<root>/<path>` under `.otto-sync`. The managed
+attributes preserve snapshot bytes against ordinary Git text/filter transformations. It uses the same centralized portable archive sanitation
+as full backup; runtime/auth/grant data and credentials are excluded. Capture
+time is normalized for idempotent exports; asset capture excludes `.otto-sync`
+so a repository inside a Vault cannot recursively capture its own snapshots. Preview tokens pin the archive,
+repository HEAD and existing managed files. Export rejects stale previews,
+symlinks, unowned collisions and edits to previously exported files (409).
+Only unchanged, manifest-owned obsolete files may be removed.
+
+Commit requires the reviewed manifest digest and expected HEAD, stages/commits
+only snapshot paths, preserves unrelated staged work, and disables repository
+hooks and interactive prompts. Sync requires expected HEAD and a configured
+remote name. Push never forces; pull requires a clean repository and performs
+fetch followed by fast-forward-only merge of the current branch from that
+remote. Detached branches and divergence require the user to resolve the Git
+state. Sync never imports data automatically. Git restore verifies file hashes
+and invokes the same additive archive preview/apply contract with conflict
+policy `abort` or `skip_existing`; existing data is never overwritten.
+# Connection export
+
+`GET /api/v1/state/connections/export/formats` and `POST /api/v1/state/connections/export`
+require an active root user and Settings:Admin. Handlers reload the actor before
+reading profiles/credentials and before returning a prepared export. Share tokens
+and non-root users cannot export. Exports do not connect to database/SSH hosts or
+write server-side files. Only format, scope, credential opt-in and counts enter audit.
+
+`GET /state/connections/export/formats` returns:
+
+```json
+{"formats":[{"id":"json","label":"Otto JSON — all connections","kinds":["*"],"password_support":"native","description":"Complete profile records, including advanced parameters and optional plaintext credentials.","import_instructions":"..."}]}
+```
+
+Format IDs: `json`, `csv`, `mysql_workbench`, `dbeaver_mysql`, `dbeaver_mongodb`,
+`nosqlbooster`, `redisinsight`. `password_support` is `native` or `sidecar`;
+Workbench uses a sidecar because its OS password vault is not portable.
+
+`POST /state/connections/export` accepts:
+
+```json
+{"format":"json","scope":"all","include_passwords":false}
+```
+
+Or select workspaces explicitly:
+
+```json
+{"format":"nosqlbooster","scope":"workspaces","workspace_ids":["workspace-id"],"include_passwords":true}
+```
+
+`scope` is required. `all` requires an absent/empty `workspace_ids` list and
+includes every saved profile across all workspaces and owners. `workspaces`
+requires 1–1000 existing workspace IDs and includes global profiles plus profiles
+in the selected workspaces. `include_passwords` defaults to false. Unknown
+request fields, formats and contradictory scope selections are rejected.
+
+Response (`Cache-Control: no-store`, `Pragma: no-cache`):
+
+```json
+{"format":"json","total_connections":2,"exported_connections":2,"contains_passwords":false,"files":[{"name":"otto-connections.json","mime":"application/json","content":"{...}"}],"skipped":[],"warnings":[],"import_instructions":"..."}
+```
+
+`files` holds UTF-8 text for each download. A Workbench export can include both
+`connections.xml` and an explicitly opted-in `workbench-credentials.json` for
+manual password entry. `skipped` entries are `{id,name,kind,reason}` for profiles
+that the selected native target cannot represent. Required transport/TLS settings
+are never silently dropped. `contains_passwords` describes the generated files,
+not merely the requested option. Generic JSON/CSV retain all supported kinds and
+advanced parameters; opaque Keychain references are never exported. JSON has
+`{format:"otto-connections",version:1,connections:[...]}`; each optional `password`
+contains the stored credential. CSV uses `id,name,kind,workspace_id,record_json`;
+summary values are JSON literals and `record_json` is the complete equivalent
+JSON profile, preserving commas, line breaks and passwords exactly.
+
+Default exports do not read Keychain and remove recognized structured credential
+fields and URI credentials. Free-form custom commands remain configuration and
+must be reviewed before sharing. Referenced local SSH/private-key files are never
+read. If credential export was requested and a saved credential is missing,
+return 409 with reconnect guidance; an unavailable credential store returns a
+sanitized 500. No partial successful response is returned for those failures.
+The export is bounded to 10,000 source profiles and 32 MiB; exceeding either
+returns 400 rather than truncating data. Other errors: 400 invalid scope/format,
+403 inactive/non-root actor, 404 selected workspace/profile disappeared.
