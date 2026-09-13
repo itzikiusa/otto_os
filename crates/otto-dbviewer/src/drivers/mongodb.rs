@@ -7,9 +7,10 @@
 //! then sampled top-level fields via `$sample`. `run` accepts both a JSON
 //! command object and a tolerant `db.coll.find(...)` shorthand.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
+use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use mongodb::bson::{
@@ -22,7 +23,6 @@ use mongodb::options::{
 use mongodb::{Client, Collection};
 use otto_core::Result;
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::drivers::{mongo_parse, mongo_sql};
@@ -54,7 +54,7 @@ const JSON_SAFE_INT: u64 = 1 << 53;
 /// `#[derive(Default)]` (used by the registry) still works.
 #[derive(Default)]
 pub struct MongoDriver {
-    clients: Mutex<HashMap<String, Client>>,
+    clients: ResourceCache<Client>,
     /// Per-connection completion cache: the collection list (cheap) plus each
     /// collection's sampled+indexed field paths (lazy, sampled only in context).
     completions: crate::complete::CompletionCache,
@@ -560,8 +560,17 @@ impl Driver for MongoDriver {
     /// Evict + shut down the cached `Client` for `cache_key` (connection close,
     /// or a config change superseded it). `Client::shutdown` closes the pool and
     /// stops the topology-monitor tasks; also drops the completion snapshot.
+    fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        let captured = Self::default();
+        for (key, value) in self.clients.take_where(|key| key == cache_key) {
+            captured.clients.insert_ready(key, value);
+        }
+        self.completions.invalidate(cache_key);
+        Some(std::sync::Arc::new(captured))
+    }
+
     async fn close(&self, cache_key: &str) {
-        let client = self.clients.lock().await.remove(cache_key);
+        let client = self.clients.remove(cache_key);
         if let Some(client) = client {
             client.shutdown().await;
         }
@@ -1340,18 +1349,15 @@ impl MongoDriver {
     /// Get (or lazily build + cache) the `Client` for `cfg`, keyed by
     /// [`ResolvedConfig::cache_key`]. The client is internally pooled +
     /// self-healing and cheap to clone, so reusing it across calls amortizes
-    /// connection setup. Holding the tokio mutex across the build await only
-    /// briefly serializes concurrent *first* builds for the same key.
+    /// connection setup. Initialization waits are confined to this exact key.
     async fn connect(&self, cfg: &ResolvedConfig) -> Result<Client> {
         let cache_key = cfg.cache_key();
-        let mut cache = self.clients.lock().await;
-        if let Some(client) = cache.get(&cache_key) {
-            return Ok(client.clone());
-        }
-        let opts = self.client_options(cfg).await?;
-        let client = Client::with_options(opts).map_err(types::upstream)?;
-        cache.insert(cache_key, client.clone());
-        Ok(client)
+        self.clients
+            .get_or_try_init(cache_key, cfg.lifecycle.as_ref(), |_| true, async {
+                let opts = self.client_options(cfg).await?;
+                Client::with_options(opts).map_err(types::upstream)
+            })
+            .await
     }
 
     /// Assemble `ClientOptions`: a full `conn_string` wins (with `{secret}`
@@ -3184,6 +3190,7 @@ mod tests {
 
     fn script_cfg(params: Value) -> ResolvedConfig {
         ResolvedConfig {
+            lifecycle: None,
             engine: crate::types::Engine::Mongodb,
             host: "127.0.0.1".into(),
             port: 27017,
@@ -3843,6 +3850,7 @@ mod sql_e2e {
 
     fn cfg_on(port: u16) -> ResolvedConfig {
         ResolvedConfig {
+            lifecycle: None,
             engine: Engine::Mongodb,
             host: "127.0.0.1".into(),
             port,

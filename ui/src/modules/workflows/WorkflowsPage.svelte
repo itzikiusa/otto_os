@@ -21,7 +21,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
-  import { listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
+  import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
+  import { mergeRunProgress } from './runProgress';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import type {
@@ -50,7 +51,8 @@
   let generating = $state(false);
   let running = $state(false);
   let run = $state<WorkflowRun | null>(null);
-  let runs = $state<WorkflowRun[]>([]);
+  let runs = $state<Pick<WorkflowRun, 'id' | 'workflow_id' | 'status' | 'started_at' | 'rev'>[]>([]);
+  let requestedRunId: string | null = null;
   let runsOpen = $state(false);
   // Manual-run input editor: where you provide repo_id / story_id / goals / msg
   // that the trigger emits to the graph.
@@ -86,7 +88,20 @@
     Object.fromEntries((run?.nodes ?? []).map((n) => [n.node_id, n])),
   );
   const selectedNode = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
-  const selectedRun = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
+  const selectedSummary = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
+  let inspectorBody = $state<NodeRunState | null>(null);
+  const selectedRun = $derived(inspectorBody ?? selectedSummary);
+  $effect(() => {
+    const id = run?.id, node = selectedSummary;
+    inspectorBody = null;
+    if (!id || !node?.detail_version) return;
+    const expected = node.detail_version;
+    let active = true;
+    void workflowNodeDetail(id,node.node_id).then(result => {
+      if (active && result.detail_version === expected) inspectorBody = result.body;
+    }).catch(() => {});
+    return () => {active = false;};
+  });
   const instructionsDirty = $derived(wfInstructions !== (current?.instructions ?? ''));
 
   $effect(() => {
@@ -121,76 +136,41 @@
   /** Cheap change signature over the fields a node update can touch. Object
    *  fields (output/logs/sessions) are only reassigned when it changes, so
    *  unchanged step subtrees don't re-render on every merge. */
-  function nodeSig(n: NodeRunState): string {
-    const out = n.output === undefined || n.output === null ? 0 : 1;
-    // The engine stamps `updated_at` on every activity write, so phase text +
-    // stamp + sub-agent count catch a sub-agent flipping to done without
-    // walking the list.
-    const a = n.activity;
-    const act = a ? `${a.phase}|${a.updated_at}|${a.subagents?.length ?? 0}|${a.hold_reason ?? ''}` : '';
-    return `${n.status}|${n.error ?? ''}|${n.started_at ?? ''}|${n.duration_ms ?? -1}|${n.attempts ?? 0}|${n.logs?.length ?? 0}|${(n.logs ?? [])[Math.max(0, (n.logs?.length ?? 0) - 1)] ?? ''}|${n.sessions?.length ?? 0}|${out}|${act}`;
-  }
-
-  function mergeNode(into: NodeRunState, from: NodeRunState): void {
-    if (nodeSig(into) === nodeSig(from)) return;
-    into.status = from.status;
-    into.error = from.error ?? null;
-    into.started_at = from.started_at ?? null;
-    into.duration_ms = from.duration_ms ?? null;
-    into.attempts = from.attempts ?? null;
-    into.logs = from.logs ?? [];
-    into.sessions = from.sessions ?? [];
-    into.output = from.output;
-    // Absent on a finished step (the engine clears it) — never sticky.
-    into.activity = from.activity ?? null;
-  }
-
-  /** Merge a full snapshot into the viewed run (id + rev guarded). */
   function applyRunSnapshot(nr: WorkflowRun): void {
-    const cur = run;
-    if (!cur || cur.id !== nr.id) return; // the view moved on — never stomp it
-    if ((nr.rev ?? 0) < (cur.rev ?? 0)) return; // stale snapshot — ignore
-    cur.rev = nr.rev ?? cur.rev;
-    cur.status = nr.status;
-    cur.error = nr.error ?? null;
-    cur.finished_at = nr.finished_at ?? null;
-    cur.waiting_approval = nr.waiting_approval ?? false;
-    cur.approval_node_id = nr.approval_node_id ?? null;
-    cur.workflow_version = nr.workflow_version ?? null;
-    cur.proof_pack_id = nr.proof_pack_id ?? null;
-    cur.resume_attempts = nr.resume_attempts ?? cur.resume_attempts ?? 0;
-    // Keep the last known dir when a payload omits it (list rows / WS-driven
-    // snapshots don't carry it) so the Context-files browser doesn't vanish.
-    cur.context_dir = nr.context_dir ?? cur.context_dir ?? null;
-    for (const n of nr.nodes ?? []) {
-      const ex = cur.nodes.find((x) => x.node_id === n.node_id);
-      if (ex) mergeNode(ex, n);
-      else cur.nodes.push(n);
-    }
+    if (run) mergeRunProgress(run,nr);
   }
 
   // Single-flight refetch: at most one GET in the air; a request that arrives
   // while one is flying coalesces into one trailing fetch.
-  let runFetchInFlight = false;
+  let runRead: AbortController | null = null;
   let runRefetchQueued = false;
   async function refetchRun(runId: string): Promise<void> {
-    if (runFetchInFlight) {
-      runRefetchQueued = true;
-      return;
-    }
-    runFetchInFlight = true;
+    if (destroyed || document.hidden || run?.id !== runId) return;
+    if (runRead) {runRefetchQueued = true; return;}
+    const ac = new AbortController();
+    runRead = ac;
     try {
       do {
         runRefetchQueued = false;
-        const nr = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
-        applyRunSnapshot(nr);
-      } while (runRefetchQueued && untrack(() => run)?.id === runId && !destroyed);
-    } catch {
-      /* transient; the fallback poll heals */
-    } finally {
-      runFetchInFlight = false;
-    }
+        const result = await workflowProgress(runId,run?.summary ? run.rev : undefined,ac.signal);
+        if (ac.signal.aborted || document.hidden || run?.id !== runId) return;
+        if (result.changed) applyRunSnapshot(result.run);
+      } while (runRefetchQueued && run?.id === runId && !destroyed);
+    } catch { /* The visible fallback poll heals transient errors. */ }
+    finally {if (runRead === ac) runRead = null;}
   }
+  $effect(() => {
+    const id = run?.id;
+    return () => {if (id) {runRead?.abort(); runRead = null;}};
+  });
+  $effect(() => {
+    const visibility = () => {
+      if (document.hidden) {runRead?.abort();runRead = null;}
+      else if (run) void refetchRun(run.id);
+    };
+    document.addEventListener('visibilitychange',visibility);
+    return () => document.removeEventListener('visibilitychange',visibility);
+  });
 
   // (1) WS fast-path: apply the event to the viewed run without refetching
   // when it carries the changed node and the very next rev.
@@ -203,20 +183,8 @@
       const evRev = workflowRunBus.rev;
       const curRev = cur.rev ?? 0;
       if (evRev > 0 && evRev <= curRev) return; // already have this state
-      const status = workflowRunBus.status;
-      const terminal = status === 'success' || status === 'error' || status === 'canceled';
-      const evNode = workflowRunBus.node;
-      if (!terminal && evRev === curRev + 1 && evNode) {
-        cur.rev = evRev;
-        cur.status = status as WorkflowRun['status'];
-        const ex = cur.nodes.find((x) => x.node_id === evNode.node_id);
-        if (ex) mergeNode(ex, evNode);
-        else cur.nodes.push(evNode);
-        return;
-      }
-      // Rev gap (missed events), no node payload (run-level / approval /
-      // oversized node), or terminal (pick up proof pack + final states):
-      // converge via one full, guarded snapshot.
+      // Poll the small projection even for contiguous events: a node event
+      // cannot describe checkpoint-only freshness or its current body version.
       void refetchRun(cur.id);
     });
   });
@@ -285,17 +253,20 @@
   /** Open a run from the "Running" sidebar list: ensure its workflow is open,
    *  then show the run (which the auto-update effects keep live). */
   async function openRunById(workflowId: string, runId: string): Promise<void> {
+    requestedRunId = runId;
     try {
       if (current?.id !== workflowId) {
-        let wf = workflows.find((w) => w.id === workflowId);
+        let wf = workflows.find(w => w.id === workflowId);
         if (!wf) wf = await api.get<Workflow>(`/workflows/${workflowId}`);
-        open(wf); // resets run=null + reloads the workflow's run history
+        if (requestedRunId !== runId) return;
+        open(wf);
+        requestedRunId = runId;
       }
-      run = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
+      const result = await workflowProgress(runId);
+      if (requestedRunId !== runId || current?.id !== workflowId || destroyed) return;
+      if (result.changed) run = result.run;
       runsOpen = false;
-    } catch (e) {
-      toasts.error('Could not open run', e instanceof Error ? e.message : String(e));
-    }
+    } catch (e) {toasts.error('Could not open run',e instanceof Error ? e.message : String(e));}
   }
 
   /** Compact "5m ago" for run rows. */
@@ -333,6 +304,7 @@
   }
 
   function open(wf: Workflow): void {
+    requestedRunId = null;
     validationIssues = [];
     current = wf;
     const g = structuredClone($state.snapshot(wf.graph)) as WorkflowGraph;
@@ -540,9 +512,9 @@
         error = cur.error;
       } else {
         try {
-          const g = await api.get<WorkflowRun>(`/workflow-runs/${runId}`);
-          status = g.status;
-          error = g.error;
+          const g = await workflowProgress(runId);
+          status = g.changed ? g.run.status : 'running';
+          error = g.changed ? g.run.error : null;
         } catch {
           status = 'running'; // transient fetch error — keep waiting
         }
@@ -578,6 +550,7 @@
       const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
       // Show the new run (a user-initiated view switch); from here the shared
       // live-run sync streams its progress in.
+      requestedRunId = r.id;
       run = r;
       const done = await waitRunTerminal(r.id);
       if (destroyed) return;
@@ -910,7 +883,9 @@
   async function loadRuns(): Promise<void> {
     if (!current) return;
     try {
-      runs = await api.get<WorkflowRun[]>(`/workflows/${current.id}/runs`);
+      const workflowId = current.id;
+      const rows = await api.get<typeof runs>(`/workflows/${workflowId}/runs?summary=true`);
+      if (current?.id === workflowId) runs = rows;
     } catch {
       /* ignore */
     }
@@ -1453,7 +1428,7 @@
             <div class="palette runs-pop">
               {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
               {#each runs as r (r.id)}
-                <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; void refetchRun(r.id); }}>
+                <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
                   <span class="dot {r.status}"></span>
                   <span class="run-status">{runStatusLabel(r.status)}</span>
                   <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
@@ -1778,7 +1753,7 @@
                 </button>
               {/each}
             </div>
-            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} onRunUpdated={applyRunSnapshot} /></div>
+            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} onRunUpdated={applyRunSnapshot} onRefresh={() => { if (run) void refetchRun(run.id); }} /></div>
             {#if run.status === 'success' && run.context_dir && finalOutputAvailable && finalOutputRunId === run.id && !viewport.isDesktop}
               <!-- Mobile/tablet: the run's deliverable, above the context-file tree
                    below. On desktop this moves into the Context-files sidebar. -->

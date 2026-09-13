@@ -2325,6 +2325,26 @@ pub struct ApiHistoryEntry {
     pub executed_at: DateTime<Utc>,
 }
 
+/// List metadata only; fetch ApiHistoryEntry to replay a retained request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiHistorySummary {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub method: String,
+    pub url: String,
+    pub status: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub executed_at: DateTime<Utc>,
+    pub request_id: Option<String>,
+    pub source: ApiHistorySourceSummary,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiHistorySourceSummary {
+    pub kind: String,
+    pub session_id: Option<String>,
+    pub via: Option<String>,
+}
+
 /// A saved automation: an ordered sequence of saved-request executions with
 /// optional per-step assertions and variable extraction (chained across steps).
 #[derive(Debug, Clone, Serialize, Deserialize)]

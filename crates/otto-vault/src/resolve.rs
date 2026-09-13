@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 /// A snapshot of every addressable file in a vault (notes + attachments),
 /// built once per scan / rename pass.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ResolveIndex {
     /// lowercased rel path → actual rel path
     by_path: HashMap<String, String>,
@@ -31,6 +31,7 @@ impl ResolveIndex {
     }
 
     pub fn insert(&mut self, path: String) {
+        self.remove(&path);
         let lower = path.to_lowercase();
         if let Some(base) = lower.rsplit('/').next() {
             self.by_basename
@@ -39,6 +40,32 @@ impl ResolveIndex {
                 .push(path.clone());
         }
         self.by_path.insert(lower, path);
+    }
+
+    pub fn remove(&mut self, path: &str) {
+        let lower = path.to_lowercase();
+        if let Some(base) = lower.rsplit('/').next() {
+            if let Some(paths) = self.by_basename.get_mut(base) {
+                paths.retain(|p| p != path);
+                if paths.is_empty() {
+                    self.by_basename.remove(base);
+                }
+            }
+        }
+        if self.by_path.get(&lower).is_some_and(|p| p == path) {
+            self.by_path.remove(&lower);
+            if let Some(base) = lower.rsplit('/').next() {
+                if let Some(other) = self
+                    .by_basename
+                    .get(base)
+                    .into_iter()
+                    .flatten()
+                    .find(|p| p.to_lowercase() == lower)
+                {
+                    self.by_path.insert(lower, other.clone());
+                }
+            }
+        }
     }
 
     fn lookup_path(&self, rel: &str) -> Option<String> {

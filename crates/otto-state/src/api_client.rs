@@ -9,7 +9,8 @@
 
 use chrono::Utc;
 use otto_core::domain::{
-    ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiRequest,
+    ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySourceSummary,
+    ApiHistorySummary, ApiRequest,
 };
 use otto_core::{new_id, Id, Result};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
@@ -622,6 +623,65 @@ impl ApiClientRepo {
         rows.iter().map(row_to_history).collect()
     }
 
+    /// Explicit scalar projection: never reads retained request/response bodies.
+    pub async fn list_history_summaries(
+        &self,
+        ws: &Id,
+        f: &ApiHistoryQuery,
+    ) -> Result<Vec<ApiHistorySummary>> {
+        let mut qb = QueryBuilder::<Sqlite>::new("SELECT id,workspace_id,method,url,status,duration_ms,executed_at,request_id,CAST(source_kind AS TEXT) AS source_kind,source_session_id,source_via FROM api_history WHERE workspace_id = ");
+        qb.push_bind(ws);
+        if let Some(q) = &f.q {
+            // Escape the LIKE metacharacters so `a_b` matches `a_b`, not `a-b`.
+            let pattern = format!(
+                "%{}%",
+                q.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            qb.push(" AND (url LIKE ")
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\' OR method LIKE ")
+                .push_bind(pattern)
+                .push(" ESCAPE '\\')");
+        }
+        if let Some(status) = f.status {
+            qb.push(" AND status = ").push_bind(status);
+        }
+        if let Some(request_id) = &f.request_id {
+            qb.push(" AND request_id = ").push_bind(request_id);
+        }
+        if let Some(source) = &f.source {
+            qb.push(" AND source_kind = ").push_bind(source);
+        }
+        qb.push(" ORDER BY executed_at DESC, id DESC LIMIT ")
+            .push_bind(f.limit);
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("api history"))?;
+        rows.iter()
+            .map(|r| {
+                Ok(ApiHistorySummary {
+                    id: r.get("id"),
+                    workspace_id: r.get("workspace_id"),
+                    method: r.get("method"),
+                    url: r.get("url"),
+                    status: r.get("status"),
+                    duration_ms: r.get("duration_ms"),
+                    executed_at: ts(&r.get::<String, _>("executed_at"))?,
+                    request_id: r.get("request_id"),
+                    source: ApiHistorySourceSummary {
+                        kind: r.get("source_kind"),
+                        session_id: r.get("source_session_id"),
+                        via: r.get("source_via"),
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Fetch one history entry by id.
     pub async fn get_history(&self, id: &Id) -> Result<ApiHistoryEntry> {
         let r = sqlx::query("SELECT * FROM api_history WHERE id = ?")
@@ -1118,5 +1178,158 @@ mod tests {
 
         repo.delete_automation(&auto.id).await.unwrap();
         assert!(repo.list_automations(&ws).await.unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn history_summaries_do_not_transfer_bodies_and_preserve_detail() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+        let body = format!("BODY_SENTINEL{}", "x".repeat(512 * 1024));
+        let request = jval!({"request_id":"request-1","body":"REQUEST_BODY_SENTINEL","source":{"kind":"agent","session_id":"session-1","via":"mcp"}});
+        let mut last_id = String::new();
+        for _ in 0..100 {
+            last_id = repo
+                .insert_history(NewApiHistory {
+                    workspace_id: ws.clone(),
+                    method: "POST".into(),
+                    url: "https://fixture.invalid/a_b".into(),
+                    status: Some(201),
+                    duration_ms: Some(3),
+                    request: request.clone(),
+                    response: jval!({"body":body}),
+                })
+                .await
+                .unwrap()
+                .id;
+        }
+        let filter = ApiHistoryQuery {
+            limit: 100,
+            q: Some("a_b".into()),
+            status: Some(201),
+            request_id: Some("request-1".into()),
+            source: Some("agent".into()),
+        };
+        let rows = repo.list_history_summaries(&ws, &filter).await.unwrap();
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].source.session_id.as_deref(), Some("session-1"));
+        let payload = serde_json::to_string(&rows).unwrap();
+        assert!(!payload.contains("BODY_SENTINEL"));
+        assert!(!payload.contains("REQUEST_BODY_SENTINEL"));
+        assert!(payload.len() < 100 * 1024);
+        let detail = repo.get_history(&last_id).await.unwrap();
+        assert_eq!(detail.request, request);
+        assert_eq!(detail.response["body"], body);
+        assert_eq!(repo.list_history(&ws, 100).await.unwrap().len(), 100);
+        assert!(repo
+            .list_history_summaries(&"other-workspace".into(), &filter)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_summary_metadata_tracks_direct_legacy_writes_and_malformed_json() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool.clone());
+        let samples = [
+            ("legacy", r#"{"source":"automation_run"}"#, "human"),
+            ("null", r#"{"source":{"kind":null}}"#, "human"),
+            (
+                "agent",
+                r#"{"request_id":"req","source":{"kind":"agent","session_id":"s"}}"#,
+                "agent",
+            ),
+            ("custom", r#"{"source":{"kind":"custom"}}"#, "custom"),
+            ("malformed", "{broken", "human"),
+        ];
+        for (id, request, _) in &samples {
+            sqlx::query("INSERT INTO api_history(id,workspace_id,method,url,request_json,response_json,executed_at) VALUES(?,?,'GET','https://fixture.invalid',?,'{}','2026-09-13T10:00:00Z')").bind(id).bind(&ws).bind(request).execute(&pool).await.unwrap();
+        }
+        let filter = ApiHistoryQuery {
+            limit: 100,
+            q: None,
+            status: None,
+            request_id: None,
+            source: None,
+        };
+        let rows = repo.list_history_summaries(&ws, &filter).await.unwrap();
+        assert_eq!(rows.len(), samples.len());
+        for (id, request, kind) in samples {
+            assert_eq!(rows.iter().find(|r| r.id == id).unwrap().source.kind, kind);
+            let preserved: String =
+                sqlx::query_scalar("SELECT request_json FROM api_history WHERE id=?")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(preserved, request);
+        }
+        sqlx::query("UPDATE api_history SET request_json=? WHERE id='legacy'")
+            .bind(r#"{"request_id":"updated","source":{"kind":"agent","via":"fixture"}}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let changed = repo
+            .list_history_summaries(
+                &ws,
+                &ApiHistoryQuery {
+                    request_id: Some("updated".into()),
+                    source: Some("agent".into()),
+                    ..filter
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].source.via.as_deref(), Some("fixture"));
+    }
+
+    #[tokio::test]
+    async fn history_summary_backfill_preserves_original_bytes_and_filter_types() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql("CREATE TABLE api_history(id TEXT PRIMARY KEY,workspace_id TEXT,executed_at TEXT,request_json TEXT,response_json TEXT)").execute(&pool).await.unwrap();
+        let samples = [
+            (
+                "a",
+                r#"{"source":{"kind":"agent","session_id":"s","via":"mcp"},"request_id":"r","body":"retain"}"#,
+            ),
+            ("b", "{malformed"),
+            ("c", r#"{"source":{"kind":1}}"#),
+            ("d", r#"{"source":{"kind":"1"}}"#),
+        ];
+        for (id, request) in samples {
+            sqlx::query("INSERT INTO api_history VALUES(?,'workspace','2026-09-13',?,'  {\"body\":\"retain\"}  ')").bind(id).bind(request).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(include_str!("../migrations/0132_api_history_summaries.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, request) in samples {
+            let row = sqlx::query("SELECT request_json,response_json FROM api_history WHERE id=?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(row.get::<String, _>("request_json"), request);
+            assert_eq!(
+                row.get::<String, _>("response_json"),
+                "  {\"body\":\"retain\"}  "
+            );
+        }
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM api_history WHERE source_kind=?")
+            .bind("1")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["d"]);
+        let source: String = sqlx::query_scalar("SELECT source_kind FROM api_history WHERE id='b'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source, "human");
+        for query in ["EXPLAIN QUERY PLAN SELECT id FROM api_history WHERE workspace_id='workspace' AND source_kind='agent' ORDER BY executed_at DESC,id DESC LIMIT 100","EXPLAIN QUERY PLAN SELECT id FROM api_history WHERE workspace_id='workspace' AND request_id='r' ORDER BY executed_at DESC,id DESC LIMIT 100"] {
+            let rows=sqlx::query(query).fetch_all(&pool).await.unwrap();
+            assert!(rows.iter().any(|r| r.get::<String,_>("detail").contains("USING COVERING INDEX")));
+            assert!(!rows.iter().any(|r| r.get::<String,_>("detail").contains("TEMP B-TREE")));
+        }
     }
 }

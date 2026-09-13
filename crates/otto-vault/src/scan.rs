@@ -19,24 +19,39 @@ pub struct WalkEntry {
 }
 
 pub struct WalkResult {
+    pub complete: bool,
     pub notes: Vec<WalkEntry>,
     pub files: Vec<WalkEntry>,
 }
 
 /// Recursively list the vault. Blocking — call from `spawn_blocking`.
 pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
+    let mut complete = true;
     let mut notes = Vec::new();
     let mut files = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue, // permission race — skip subtree, never abort
+            Err(_) => {
+                complete = false;
+                continue;
+            } // Do not infer removals from an incomplete walk.
         };
-        for entry in entries.flatten() {
+        for result in entries {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
             let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(meta) = entry.metadata() else {
+                complete = false;
+                continue;
+            };
             if meta.is_dir() {
                 if !is_skipped_dir(&name) {
                     stack.push(path);
@@ -71,7 +86,11 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
     }
     notes.sort_by(|a, b| a.rel.cmp(&b.rel));
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
-    Ok(WalkResult { notes, files })
+    Ok(WalkResult {
+        complete,
+        notes,
+        files,
+    })
 }
 
 /// Diff a walk against the indexed signatures → (added_or_changed, removed).

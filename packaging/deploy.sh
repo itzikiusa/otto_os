@@ -13,10 +13,13 @@
 #
 # Usage:  packaging/deploy.sh            full deploy
 #         packaging/deploy.sh --status   show the log of the last install/verify phase
-# Env:    SKIP_UI=1    reuse the existing ui/dist (skip `npm run build`)
+# Env:    SKIP_UI=1    rejected: a source receipt requires a fresh UI build
 #         EMBED_UI=0   build ottod WITHOUT the SPA baked in (see step 2)
 #         DETACH=0     run steps 6–7 inline instead of under launchd (see below)
 #         PRUNE=0      keep every stale build artifact (skip step 5)
+#         BUILD_ONLY=1 build/sign and write a receipt without installing
+#         OTTO_DEPLOY_PHASE=queue-finish queue a previously receipted build
+#         FINISH_DELAY_SECONDS=15 delay detached install (integer 0–60)
 #
 # RESILIENCE (the 90%-interrupted problem): this script is usually run from an
 # agent/shell session that ottod itself owns (a PTY child of the daemon). Step 5
@@ -34,6 +37,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 APP_SRC="$ROOT/apps/desktop/src-tauri"
 APP="$APP_SRC/target/release/bundle/macos/Otto.app"
+INSTALLED_APP="/Applications/Otto.app"
+BUILD_RECEIPT="$APP_SRC/target/release/deploy-build.receipt"
 
 cd "$ROOT"
 
@@ -59,7 +64,100 @@ fi
 # in here must be safe to run with no controlling terminal and no inherited
 # environment beyond what the plist sets.
 # ---------------------------------------------------------------------------
+# These helpers are also exercised by packaging/tests/test_deploy.py with all
+# process and network commands replaced; the tests never install an app.
+deployed_daemon_path() { printf '%s/Library/Application Support/Otto/bin/ottod\n' "$HOME"; }
+sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+fail_verify() { echo "FAILED: $*" >&2; return 1; }
+health_ok() {
+    local body
+    body="$(curl -fsS --max-time 4 http://127.0.0.1:7700/api/v1/health 2>/dev/null)" || return 1
+    [[ "$(printf '%s' "$body" | tr -d '[:space:]')" == '{"ok":true}' ]]
+}
+daemon_pid() {
+    launchctl print "gui/$(id -u)/com.otto.daemon" 2>/dev/null |
+        sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' | head -1
+}
+process_path() { ps -p "$1" -o comm= 2>/dev/null | sed 's/^[[:space:]]*//'; }
+app_pid() {
+    local candidate
+    for candidate in $(pgrep -x otto-desktop || true); do
+        if [[ "$(process_path "$candidate")" == "$INSTALLED_APP/Contents/MacOS/otto-desktop" ]]; then
+            echo "$candidate"; return 0
+        fi
+    done
+    return 1
+}
+
+# Code signatures seal bundle resources; executable hashes pin the signed build.
+# Refuse a dirty source tree so HEAD identifies the complete build input.
+build_manifest() {
+    local app_hash daemon_hash commit
+    [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]] ||
+        { fail_verify 'source tree changed or is dirty; rebuild from the clean merged commit'; return 1; }
+    codesign --verify --deep --strict "$APP" || return 1
+    codesign --verify --strict "$APP/Contents/MacOS/ottod" || return 1
+    commit="$(git -C "$ROOT" rev-parse HEAD)" || return 1
+    app_hash="$(sha256 "$APP/Contents/MacOS/otto-desktop")" || return 1
+    daemon_hash="$(sha256 "$APP/Contents/MacOS/ottod")" || return 1
+    printf 'commit=%s\napp_sha256=%s\ndaemon_sha256=%s\nembed_ui=%s\n' \
+        "$commit" "$app_hash" "$daemon_hash" "${EMBED_UI:-1}"
+}
+validate_build_receipt() {
+    local actual expected
+    [[ -f "$BUILD_RECEIPT" ]] || { fail_verify 'no successful build receipt; run BUILD_ONLY=1 packaging/deploy.sh first'; return 1; }
+    actual="$(build_manifest)" || return 1
+    expected="$(cat "$BUILD_RECEIPT")"
+    [[ "$actual" == "$expected" ]] || { fail_verify 'source or signed artifacts changed since build; rebuild before queuing'; return 1; }
+}
+
+validate_delay() {
+    local delay="${FINISH_DELAY_SECONDS:-0}"
+    case "$delay" in
+        ""|*[!0-9]*) fail_verify 'FINISH_DELAY_SECONDS must be 0–60'; return 1 ;;
+    esac
+    [[ ${#delay} -le 2 ]] && (( 10#$delay <= 60 )) ||
+        { fail_verify 'FINISH_DELAY_SECONDS must be 0–60'; return 1; }
+    FINISH_DELAY_SECONDS=$((10#$delay))
+}
+
+verify_install() {
+    local installed_side="$INSTALLED_APP/Contents/MacOS/ottod" current_pid current_app_pid ready=0 html
+    codesign --verify --deep --strict "$INSTALLED_APP" || return 1
+    codesign --verify --strict "$installed_side" || return 1
+    diff -qr "$APP" "$INSTALLED_APP" || { fail_verify 'installed app differs from the signed build'; return 1; }
+    # Startup can briefly serve the old healthy daemon while the supervisor is
+    # still copying/restarting. Reconcile bytes, process identity and health together.
+    for _ in $(seq 1 30); do
+        current_pid="$(daemon_pid)" || current_pid=""
+        current_app_pid="$(app_pid)" || current_app_pid=""
+        if [[ -n "$current_pid" && -n "$current_app_pid" && -f "$dep" ]] &&
+            [[ "$(process_path "$current_pid")" == "$dep" ]] &&
+            cmp -s "$side" "$dep" &&
+            { [[ "$old_hash" == "$(sha256 "$side")" ]] || [[ "$current_pid" != "$old_pid" ]]; } && health_ok; then
+            ready=1; break
+        fi
+        sleep 2
+    done
+    [[ "$ready" == 1 ]] || { fail_verify 'expected app/daemon processes, deployed hash and healthy API did not converge'; return 1; }
+    codesign --verify --strict "$dep" || return 1
+    if [[ "${EMBED_UI:-1}" != 0 ]]; then
+        html="$(curl -fsS --max-time 4 http://127.0.0.1:7700/ 2>/dev/null)" ||
+            { fail_verify 'embedded UI fetch failed'; return 1; }
+        [[ "$html" == *'<div id="app"></div>'* && "$html" == *'<script type="module"'* && "$html" == *'/assets/'* && "$html" != *'UI not embedded'* ]] ||
+            { fail_verify 'daemon did not serve the embedded Otto SPA'; return 1; }
+    fi
+    printf 'DEPLOY-RECEIPT commit=%s app_sha256=%s daemon_sha256=%s app_pid=%s daemon_pid=%s health=ok embedded_ui=%s\n' \
+        "$(git -C "$ROOT" rev-parse HEAD)" "$(sha256 "$INSTALLED_APP/Contents/MacOS/otto-desktop")" \
+        "$(sha256 "$dep")" "$current_app_pid" "$current_pid" "${EMBED_UI:-1}"
+}
+
 finish_phase() {
+local old_pid old_hash
+old_pid="$(daemon_pid)" || old_pid=""
+dep="$(deployed_daemon_path)"
+old_hash=""
+[[ ! -f "$dep" ]] || old_hash="$(sha256 "$dep")"
 echo "==> 6/7  Install & relaunch"
 # The app redeploys the daemon ONLY at start, so it must be quit first (the
 # launchd agent has KeepAlive, so quitting the app doesn't stop the daemon).
@@ -73,19 +171,19 @@ if pgrep -x otto-desktop >/dev/null; then
     pkill -TERM -x otto-desktop || true
     for _ in $(seq 1 10); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
 fi
-rm -rf /Applications/Otto.app
-ditto "$APP" /Applications/Otto.app
-open /Applications/Otto.app
+if pgrep -x otto-desktop >/dev/null; then fail_verify "old app did not exit"; return 1; fi
+rm -rf "$INSTALLED_APP"
+ditto "$APP" "$INSTALLED_APP"
+open "$INSTALLED_APP"
 
 echo "==> 7/7  Verify (+ self-heal codesigning crash-loop)"
 
-dep="$HOME/Library/Application Support/Otto/bin/ottod"
+dep="$(deployed_daemon_path)"
 side="$APP/Contents/MacOS/ottod"
 LABEL="com.otto.daemon"
 GUI_DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-health_ok()   { curl -fsS --max-time 4 localhost:7700/api/v1/health >/dev/null 2>&1; }
 poll_health() { local n="${1:-20}"; for _ in $(seq 1 "$n"); do sleep 2; health_ok && return 0; done; return 1; }
 
 # Is the launchd job REGISTERED? `kickstart` only restarts an already-registered
@@ -125,7 +223,7 @@ restart_daemon() {
 # ---------------------------------------------------------------------------
 # Self-heal for the "Invalid Page" / OS_REASON_CODESIGNING daemon crash-loop.
 #
-# THE GOTCHA (debugged the hard way): the app self-deploys ottod by overwriting
+# THE GOTCHA (older installed app versions): the app self-deployed ottod by overwriting
 # ~/Library/Application Support/Otto/bin/ottod *in place*. If the launchd agent
 # (KeepAlive) already had that binary mapped and running, overwriting the file
 # mid-flight invalidates the mapped code pages and macOS SIGKILLs the process
@@ -138,8 +236,8 @@ restart_daemon() {
 # THE FIX: give the deployed binary a FRESH INODE — atomic rename of a clean
 # copy of the signed bundle sidecar. New inode = fresh code-signing evaluation
 # = the validly-signed bytes run. Then kickstart the launchd agent.
-# (Root cause to fix in-code one day: the self-deploy should atomic-rename a new
-#  inode instead of overwriting the running binary in place.)
+# Current supervisor versions already use atomic rename; retain this recovery
+# for previously poisoned inodes left by an older installed app.
 # ---------------------------------------------------------------------------
 heal_codesign_inode() {
     [[ -f "$dep" && -f "$side" ]] || return 1
@@ -173,43 +271,7 @@ else
     fi
 fi
 
-# Final reconcile: the deployed binary should match the freshly built bundle.
-if [[ -f "$dep" ]]; then
-    a="$(shasum -a 256 "$dep" | awk '{print $1}')"
-    b="$(shasum -a 256 "$side" | awk '{print $1}')"
-    [[ "$a" == "$b" ]] && echo "    deployed daemon matches the new bundle ✓" \
-                       || echo "    note: deployed daemon differs from bundle (the app self-deploys at start)."
-fi
-
-# The SPA check. A healthy /api/v1/health says nothing about whether the daemon
-# can still serve the UI — that's a separate feature (`embed-ui`), and losing it
-# breaks remote/mobile sharing while every other signal stays green. Assert it
-# rather than assume it.
-if [[ "${EMBED_UI:-1}" != "0" ]] && health_ok; then
-    if curl -fsS --max-time 4 localhost:7700/ 2>/dev/null | grep -q 'UI not embedded'; then
-        echo "    WARN: daemon is serving the 'UI not embedded' placeholder —"
-        echo "          remote/mobile sharing will NOT work. Was ui/dist present at compile time?"
-    else
-        echo "    daemon serves the SPA ✓ (remote/mobile sharing live)"
-    fi
-fi
-
-# NEVER exit 0 on a dead daemon. This script used to print a WARN and then
-# "done.", so a deploy that left the machine with no backend looked successful —
-# the failure was only discovered later, by hand, as "the app doesn't start".
-# A deploy that ends without a serving daemon is a FAILED deploy: say so, exit 1.
-if ! health_ok; then
-    echo
-    echo "FAILED: the daemon is NOT running after this deploy." >&2
-    if ! daemon_loaded; then
-        echo "  '$LABEL' is not registered with launchd. Recover with:" >&2
-        echo "    launchctl bootstrap $GUI_DOMAIN $PLIST" >&2
-    else
-        launchctl print "$GUI_DOMAIN/$LABEL" 2>/dev/null | grep -E 'state|last exit' | sed 's/^/  /' >&2
-    fi
-    echo "  logs: ~/Library/Logs/Otto/ottod.log.*" >&2
-    exit 1
-fi
+verify_install || return 1
 echo "done."
 }
 
@@ -219,20 +281,29 @@ FINISH_PLIST="$HOME/Library/Application Support/Otto/deploy/$FINISH_LABEL.plist"
 FINISH_LATEST="$LOG_DIR/deploy-finish-latest.log"
 SENTINEL="DEPLOY-FINISH EXIT="
 
+validate_delay
+case "${OTTO_DEPLOY_PHASE:-}" in
+    ""|finish|queue-finish) ;;
+    *) fail_verify "unknown OTTO_DEPLOY_PHASE"; exit 2 ;;
+esac
+
 # Detached-phase entry: run steps 5–6, stamp the exit code on the last line so
 # the foreground (or a later --status) can tell "still running" from "done".
 if [[ "${OTTO_DEPLOY_PHASE:-}" == "finish" ]]; then
     trap 'echo "$SENTINEL$?"' EXIT   # stamped on every exit path, set -e included
+    validate_build_receipt
+    sleep "${FINISH_DELAY_SECONDS:-0}"
+    validate_build_receipt
     finish_phase
     exit 0
 fi
 
+if [[ "${OTTO_DEPLOY_PHASE:-}" != "queue-finish" ]]; then
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { fail_verify "build requires a clean source tree"; exit 1; }
+BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
+[[ "${SKIP_UI:-0}" != 1 ]] || { fail_verify "receipted deployment requires a fresh UI build; unset SKIP_UI"; exit 1; }
 echo "==> 1/7  Frontend → ui/dist"
-if [[ "${SKIP_UI:-}" == "1" && -f ui/dist/index.html ]]; then
-    echo "    (SKIP_UI=1 — reusing existing ui/dist)"
-else
-    ( cd ui && npm run build )
-fi
+( cd ui && npm run build )
 
 # `embed-ui` bakes ui/dist into the binary so the daemon serves the SPA
 # same-origin. The desktop app doesn't need it (its webview loads the frontend
@@ -272,6 +343,15 @@ else
     bash "$HERE/prune-target.sh" || echo "    WARN: prune failed — not fatal, the deploy continues."
 fi
 
+[[ "$(git rev-parse HEAD)" == "$BUILD_SOURCE_COMMIT" ]] || { fail_verify "source commit changed during build"; exit 1; }
+build_manifest > "$BUILD_RECEIPT.tmp"
+mv "$BUILD_RECEIPT.tmp" "$BUILD_RECEIPT"
+echo "BUILD-RECEIPT $BUILD_RECEIPT"
+cat "$BUILD_RECEIPT"
+if [[ "${BUILD_ONLY:-0}" == "1" ]]; then exit 0; fi
+fi
+validate_build_receipt
+
 if [[ "${DETACH:-1}" == "0" ]]; then
     finish_phase
     exit $?
@@ -296,6 +376,7 @@ cat > "$FINISH_PLIST" <<PLIST
   </array>
   <key>EnvironmentVariables</key><dict>
     <key>OTTO_DEPLOY_PHASE</key><string>finish</string>
+    <key>FINISH_DELAY_SECONDS</key><string>${FINISH_DELAY_SECONDS:-0}</string>
     <key>EMBED_UI</key><string>${EMBED_UI:-1}</string>
     <key>HOME</key><string>$HOME</string>
     <key>PATH</key><string>$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
@@ -315,6 +396,11 @@ for _ in $(seq 1 40); do launchctl print "gui/$(id -u)/$FINISH_LABEL" >/dev/null
 launchctl bootstrap "gui/$(id -u)" "$FINISH_PLIST"
 echo "    log: $FINISH_LOG"
 echo "    (if this shell is killed by the restart, run: packaging/deploy.sh --status)"
+if [[ "${OTTO_DEPLOY_PHASE:-}" == "queue-finish" ]]; then
+    echo "DEPLOY-QUEUED delay_seconds=$FINISH_DELAY_SECONDS log=$FINISH_LOG"
+    cat "$BUILD_RECEIPT"
+    exit 0
+fi
 
 # Tail the log until the sentinel, then exit with the phase's code. `tail -f`
 # would outlive the sentinel; a poll keeps it simple and interruption-safe.

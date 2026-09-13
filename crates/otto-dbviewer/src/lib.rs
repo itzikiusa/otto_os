@@ -22,6 +22,7 @@ pub mod native_access;
 pub mod nl;
 pub mod plan;
 pub mod registry;
+mod resource_cache;
 pub mod service;
 pub mod split;
 pub mod tls;
@@ -39,6 +40,8 @@ pub use nl::{
     SqlValidator,
 };
 pub use registry::Registry;
+#[doc(hidden)]
+pub use resource_cache::Lifecycle;
 pub use service::DbViewerService;
 pub use split::{split_statements, SqlDialect, StatementSpan};
 pub use types::{

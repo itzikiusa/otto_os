@@ -51,6 +51,8 @@ pub struct ServerCtx {
     /// In-memory registry of live DB Assistant sessions (`assist_id → entry`).
     /// Ephemeral by design — discarded on close/restart; backs `db_assist.rs`.
     pub db_assist: crate::db_assist::DbAssistRegistry,
+    /// Bounded immutable transcript folds; each daemon/test context owns its cache.
+    pub transcript_cache: crate::transcript_cache::TranscriptCache,
     /// Message Brokers (Kafka) viewer engine — cluster CRUD + rdkafka client pool.
     pub brokers: Arc<otto_brokers::BrokersService>,
     /// MCP Control Plane engine — outbound MCP client + governance pipeline

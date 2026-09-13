@@ -27,7 +27,7 @@ pub struct TranscriptIndexRow {
     pub indexed_at: String,
 }
 
-fn row(r: &sqlx::sqlite::SqliteRow) -> TranscriptIndexRow {
+pub(crate) fn row(r: &sqlx::sqlite::SqliteRow) -> TranscriptIndexRow {
     TranscriptIndexRow {
         path: r.get("path"),
         provider: r.get("provider"),

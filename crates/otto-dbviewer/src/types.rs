@@ -125,6 +125,8 @@ pub use otto_ssh::SshTunnelConfig;
 /// (mongo conn_string/srv/replica_set, redis cluster, clickhouse http scheme…).
 #[derive(Clone)]
 pub struct ResolvedConfig {
+    /// Internal cancellation fence; never serialized or included in credentials.
+    pub lifecycle: Option<crate::Lifecycle>,
     pub engine: Engine,
     pub host: String,
     pub port: u16,

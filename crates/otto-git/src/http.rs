@@ -1796,6 +1796,37 @@ struct WorktreeRemoveReq {
     force: Option<bool>,
 }
 
+fn checked_worktree_force(wt: &WorktreeInfo, requested: bool) -> otto_core::Result<bool> {
+    if requested && !wt.dirty_known {
+        return Err(Error::Conflict(
+            "Worktree status is unknown; retry the status check before forcing removal".into(),
+        ));
+    }
+    Ok(requested)
+}
+
+#[cfg(test)]
+#[test]
+fn worktree_unknown_locked_status_never_authorizes_force() {
+    let mut rows =
+        crate::parse::parse_worktree_list("worktree /fixture\nHEAD abc\nlocked fixture\n");
+    let row = &mut rows[0];
+    assert!(row.locked);
+    assert!(matches!(
+        checked_worktree_force(row, true),
+        Err(Error::Conflict(_))
+    ));
+    assert!(!checked_worktree_force(row, false).unwrap());
+    row.dirty_known = true;
+    row.dirty = true;
+    assert!(checked_worktree_force(row, true).unwrap());
+    row.dirty_known = false;
+    assert!(
+        checked_worktree_force(row, true).is_err(),
+        "fresh unknown overrides an older known UI snapshot"
+    );
+}
+
 async fn repo_worktree_remove<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -1822,8 +1853,8 @@ async fn repo_worktree_remove<S: GitCtx>(
         // The directory is already gone — remove the stale registration.
         git.worktree_prune().await?;
     } else {
-        git.worktree_remove_checked(path, req.force.unwrap_or(false))
-            .await?;
+        let force = checked_worktree_force(wt, req.force.unwrap_or(false))?;
+        git.worktree_remove_checked(path, force).await?;
     }
     Ok(Json(git.worktree_list().await?))
 }
@@ -2343,6 +2374,89 @@ mod tests {
             disabled: false,
             created_at: Utc::now(),
         })
+    }
+
+    #[tokio::test]
+    async fn worktree_unknown_force_route_preserves_checkout_and_registration() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let root = canonical.join("repo");
+        let linked = canonical.join("linked");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ]);
+        // Keep a registered, non-prunable checkout whose status command fails.
+        let gitdir = std::fs::read_to_string(linked.join(".git")).unwrap();
+        let gitdir = std::path::Path::new(gitdir.trim().strip_prefix("gitdir: ").unwrap());
+        std::fs::write(gitdir.join("index"), b"invalid fixture index").unwrap();
+        std::fs::write(linked.join("keep.txt"), b"must survive").unwrap();
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws,
+                name: "fixture".into(),
+                path: root.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        let error = repo_worktree_remove(
+            State(ctx),
+            Extension(auth(&user, false)),
+            Path(repo.id),
+            Json(WorktreeRemoveReq {
+                path: linked.to_string_lossy().into_owned(),
+                force: Some(true),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error.0, Error::Conflict(message) if message.contains("unknown")),
+            "{:?}",
+            error.0
+        );
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read(linked.join("keep.txt")).unwrap(),
+            b"must survive"
+        );
+        assert!(git(&["worktree", "list", "--porcelain"]).contains(linked.to_str().unwrap()));
     }
 
     /// A repo bound to user A's git account may have its credential *used* only by

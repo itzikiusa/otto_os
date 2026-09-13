@@ -31,7 +31,8 @@ const PASSWORD = 'otto-e2e-password';
 const NEW_ROUTE_PROBE = '/sessions/e2e-probe/transcript';
 
 export default async function globalSetup(_config: FullConfig): Promise<void> {
-  sweepOrphanedClickhouse();
+  // Parallel local runs can opt out of global cleanup; teardown still owns its fixture.
+  if (process.env.OTTO_E2E_SWEEP_ORPHANS !== '0') sweepOrphanedClickhouse();
   if (!process.env.OTTO_E2E_BIN) {
     // eslint-disable-next-line no-console
     console.warn(

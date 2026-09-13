@@ -5,7 +5,7 @@
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
-  import type { ApiHistoryEntry } from '../../lib/api/types';
+  import type { ApiHistorySummary } from '../../lib/api/types';
 
   function statusClass(status: number | null): string {
     if (status == null) return 'none';
@@ -31,7 +31,7 @@
   // the url covers domain, path and query string, so "api.foo 404 get" works.
   let search = $state('');
   const tokens = $derived(search.trim().toLowerCase().split(/\s+/).filter(Boolean));
-  function entryMatches(h: ApiHistoryEntry): boolean {
+  function entryMatches(h: ApiHistorySummary): boolean {
     const hay = `${h.method} ${h.url} ${h.status ?? ''}`.toLowerCase();
     return tokens.every((t) => hay.includes(t));
   }
@@ -43,8 +43,8 @@
     ),
   );
 
-  function reload(h: ApiHistoryEntry): void {
-    apiClient.loadHistoryIntoDraft(h);
+  function reload(h: ApiHistorySummary): void {
+    void apiClient.selectHistory(h.id);
   }
 
   async function clear(): Promise<void> {
@@ -71,6 +71,8 @@
     </div>
   </div>
 
+  {#if apiClient.historyLoadingId}<div class="empty-mini" role="status">Loading request…</div>{/if}
+
   {#if apiClient.history.length > 0}
     <div class="list-search">
       <Icon name="search" size={12} />
@@ -94,7 +96,7 @@
     </div>
   {:else}
     <VirtualList items={filtered} estimateHeight={28} class="hist-vlist">
-      {#snippet row(h: ApiHistoryEntry)}
+      {#snippet row(h: ApiHistorySummary)}
         {@const src = apiClient.historySource(h)}
         <button class="hist-row" onclick={() => reload(h)} title={h.url}>
           <span class="rm rm-{h.method.toLowerCase()}">{h.method}</span>

@@ -501,6 +501,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         connections,
         db_explorer,
         db_assist: otto_server::db_assist::new_registry(),
+        transcript_cache: Default::default(),
         brokers,
         mcp,
         spawner,

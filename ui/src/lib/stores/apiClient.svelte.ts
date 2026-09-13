@@ -11,7 +11,7 @@ import type {
   ApiCollection,
   ApiEnvironment,
   ApiHistoryEntry,
-  ApiHistorySource,
+  ApiHistorySummary,
   ApiKeyVal,
   ApiRequest,
   ApiRequestExtras,
@@ -30,8 +30,10 @@ import type {
 } from '../api/types';
 import { isSecretRef } from '../api/types';
 import { ws } from './workspace.svelte';
+import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
-import { runPreRequest, runPostResponse, type PreRequestReq, type TestResult } from '../api/scripts';
+import type { PreRequestReq, TestResult } from '../api/scripts';
+import { runScript } from '../api/scriptRunner';
 import {
   detectAndParse,
   collectionToPostman,
@@ -239,7 +241,8 @@ class ApiClientStore {
   collections: ApiCollection[] = $state([]);
   requests: ApiRequest[] = $state([]);
   environments: ApiEnvironment[] = $state([]);
-  history: ApiHistoryEntry[] = $state([]);
+  history: ApiHistorySummary[] = $state([]);
+  historyLoadingId: string | null = $state(null);
   historyAgentOnly = $state(false);
   automations: ApiAutomation[] = $state([]);
   /** Workspace `ssh`-kind connections, for the Settings-tab "SSH tunnel" picker. */
@@ -287,6 +290,7 @@ class ApiClientStore {
     }
   }
   closeTab(i: number): void {
+    if (this.tabs[i]?.tabId === this._executeTab) this.cancelExecute();
     if (this.tabs.length === 1) {
       this.tabs = [blankDraft()];
       this.activeTab = 0;
@@ -355,6 +359,9 @@ class ApiClientStore {
    *  the previous workspace's pending write first so nothing is lost. */
   private restoreTabs(wid: Id): void {
     if (this.tabsWid === wid) return;
+    this.historyRefresh.reset();
+    this.historyDetail.cancel();
+    this.history = [];
     this.flushTabsWrite();
     this.cancelExecute();
     this.running = false; this.lastRun = null; this.currentRun = null; this.automationRuns = [];
@@ -387,10 +394,13 @@ class ApiClientStore {
   loading = $state(false);
   /** AbortController for the currently in-flight execute() call; null when idle. */
   private _abortCtrl: AbortController | null = null;
+  private _executeTab: string | null = null;
   /** Cancel the in-flight HTTP request (if any). No-op when idle. */
   cancelExecute(): void {
     this._abortCtrl?.abort();
     this._abortCtrl = null;
+    this._executeTab = null;
+    this.sending = false;
   }
 
   /** Active environment (is_active), or null. */
@@ -419,17 +429,16 @@ class ApiClientStore {
     this.restoreTabs(wid);
     this.loading = true;
     try {
-      const [collections, requests, environments, history] = await Promise.all([
+      const [collections, requests, environments] = await Promise.all([
         api.get<ApiCollection[]>(`${base}/collections`),
         api.get<ApiRequest[]>(`${base}/requests`),
         api.get<ApiEnvironment[]>(`${base}/environments`),
-        api.get<ApiHistoryEntry[]>(`${base}/history`),
+        this.loadHistory(),
       ]);
       if (this.wsId() !== wid) return;
       this.collections = collections;
       this.requests = requests;
       this.environments = environments;
-      this.history = history;
       // Unlink restored drafts whose saved request no longer exists, so their
       // "Save" creates anew instead of PATCHing a deleted id.
       const live = new Set(this.requests.map((r) => r.id));
@@ -490,31 +499,36 @@ class ApiClientStore {
     }
   }
 
+  private historyRefresh = new HistoryRefresh<ApiHistorySummary>({
+    workspace: () => this.wsId(),
+    fetch: (wid, signal) => api.get<ApiHistorySummary[]>(`/workspaces/${wid}/api-client/history/summaries`, signal),
+    publish: (rows) => { this.history = rows; },
+    error: (error) => toasts.error('Could not load history', errMsg(error)),
+  });
+
+  private historyDetail = new HistoryDetail<ApiHistoryEntry>({
+    owner: () => ({workspace: this.wsId(), tab: this.draft.tabId, draft: this.draft}),
+    fetch: (id, signal) => api.get<ApiHistoryEntry>(`${this.base()}/history/${encodeURIComponent(id)}`, signal),
+    publish: (entry) => this.loadHistoryIntoDraft(entry),
+    pending: (id) => { this.historyLoadingId = id; },
+    error: (error) => toasts.error('Could not load history request', errMsg(error)),
+  });
+
   async loadHistory(): Promise<void> {
-    const base = this.base();
-    if (!base) return;
-    try {
-      this.history = await api.get<ApiHistoryEntry[]>(`${base}/history`);
-    } catch (e) {
-      toasts.error('Could not load history', errMsg(e));
-    }
+    await this.historyRefresh.request();
   }
 
-  private historyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Coalesce history events so automation bursts trigger a single reload. */
-  noteHistoryAppended(workspaceId: string): void {
-    if (workspaceId !== this.wsId()) return;
-    if (this.historyRefreshTimer !== null) clearTimeout(this.historyRefreshTimer);
-    this.historyRefreshTimer = setTimeout(() => {
-      this.historyRefreshTimer = null;
-      if (workspaceId === this.wsId()) void this.loadHistory();
-    }, 150);
+  /** Direct sends and WS append events share one metadata-only refresh. */
+  noteHistoryAppended(workspaceId: string, entryId?: string): void {
+    if (workspaceId === this.wsId()) void this.historyRefresh.request(entryId);
   }
 
-  /** Read the caller marker from a history request snapshot. */
-  historySource(h: ApiHistoryEntry): ApiHistorySource | null {
-    return (h.request as { source?: ApiHistorySource } | null)?.source ?? null;
+  historySource(h: ApiHistorySummary): ApiHistorySummary['source'] {
+    return h.source;
+  }
+
+  async selectHistory(id: string): Promise<void> {
+    if (this.wsId()) await this.historyDetail.select(id);
   }
 
   // ── Cookie jar (daemon-global) ────────────────────────────────────────────
@@ -916,99 +930,81 @@ class ApiClientStore {
   /** Send the given draft through the daemon. Sets lastResponse + refreshes history. */
   async execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
     const base = this.base();
-    if (!base) {
-      toasts.error('No workspace selected');
-      return null;
-    }
-    if (!draft.url.trim()) {
-      toasts.error('URL is empty');
-      return null;
-    }
+    if (!base) { toasts.error('No workspace selected'); return null; }
+    if (!draft.url.trim()) { toasts.error('URL is empty'); return null; }
 
-    const wid = this.wsId()!, tabId = draft.tabId;
-    const runtimeVars = {...this.runtimeVars};
-    const ownsView = () => this.wsId() === wid && this.draft.tabId === tabId;
-    const logs: string[] = [];
-    this.testResults = [];
-
-    // Working copy the pre-request script may mutate.
-    const reqCtx: PreRequestReq = {
-      method: draft.method,
-      url: draft.url,
-      headers: draft.headers.map((h) => ({ ...h })),
-      body: draft.body,
-    };
-    if (draft.pre_request_script?.trim()) {
-      const pre = runPreRequest(draft.pre_request_script, reqCtx, runtimeVars);
-      this.runtimeScopes = {...this.runtimeScopes, [wid]: {...runtimeVars}};
-      logs.push(...pre.logs.map((l) => `[pre] ${l}`));
-      if (pre.error) {
-        this.scriptLogs = [...logs, `[pre] error: ${pre.error}`];
-        toasts.error('Pre-request script failed', pre.error);
-        return null;
-      }
-    }
-
-    // GraphQL: combine the query body + variables into the standard JSON payload.
-    let effectiveBody = reqCtx.body;
-    if (draft.body_mode === 'graphql') {
-      let variables: unknown = {};
-      try {
-        variables = draft.graphql_variables?.trim() ? JSON.parse(draft.graphql_variables) : {};
-      } catch {
-        variables = {};
-      }
-      effectiveBody = JSON.stringify({ query: reqCtx.body, variables });
-    }
-
-    const s = draft.settings;
-    const body: ExecuteApiReq = {
-      method: reqCtx.method,
-      url: reqCtx.url,
-      headers: liveKv(reqCtx.headers),
-      query: liveKv(draft.query),
-      body_mode: draft.body_mode,
-      body: effectiveBody,
-      auth: draft.auth,
-      environment_id: this.activeEnv?.id ?? null,
-      timeout_ms: s?.timeout_ms ?? null,
-      follow_redirects: s?.follow_redirects ?? true,
-      verify_ssl: s?.verify_ssl ?? true,
-      vars: Object.keys(runtimeVars).length ? runtimeVars : undefined,
-      ssh_connection_id: draft.ssh_connection_id ?? null,
-    };
+    // Own the complete pre → HTTP → post sequence before any user code runs.
+    // Snapshot reactive fields so editing another draft cannot alter this send.
+    draft = $state.snapshot(draft);
+    const wid = this.wsId()!, tabId = draft.tabId ?? this.draft.tabId;
+    const environmentId = this.activeEnv?.id ?? null;
     this.cancelExecute();
     const controller = new AbortController();
-    this._abortCtrl = controller;
+    this._abortCtrl = controller; this._executeTab = tabId ?? null;
+    this.sending = true; this.testResults = []; this.scriptLogs = [];
     const { signal } = controller;
-    this.sending = true;
+    const ownsExecution = () => this._abortCtrl === controller && !signal.aborted
+      && this.wsId() === wid && this.tabs.some(tab => tab.tabId === tabId);
+    const ownsView = () => ownsExecution() && this.draft.tabId === tabId;
+    const checkCurrent = () => { if (!ownsExecution()) throw new DOMException('Request canceled', 'AbortError'); };
+    let runtimeVars = {...this.runtimeVars};
+    const logs: string[] = [];
+    let reqCtx: PreRequestReq = {
+      method: draft.method, url: draft.url,
+      headers: draft.headers.map(h => ({...h})), body: draft.body,
+    };
     try {
-      const resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
-      if (ownsView()) this.lastResponse = resp;
-      if (this.wsId() === wid) void this.loadHistory();
-
-      // Post-response script: chaining (set vars) + tests.
-      if (draft.post_response_script?.trim()) {
-        const headersObj: Record<string, string> = {};
-        for (const h of resp.headers) headersObj[h.key.toLowerCase()] = h.value;
-        const post = runPostResponse(
-          draft.post_response_script,
-          { code: resp.status, status: resp.status_text, responseTime: resp.duration_ms, headers: headersObj, bodyText: resp.body },
-          runtimeVars,
-        );
-        logs.push(...post.logs.map((l) => `[test] ${l}`));
-        if (ownsView()) this.testResults = post.tests;
-        if (post.error) logs.push(`[test] error: ${post.error}`);
+      if (draft.pre_request_script?.trim()) {
+        const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:runtimeVars }, signal);
+        checkCurrent();
+        logs.push(...pre.run.logs.map(l => `[pre] ${l}`));
+        if (pre.run.error) throw new Error(`Pre-request script failed: ${pre.run.error}`);
+        if (!pre.request) throw new Error('Pre-request script returned no request.');
+        reqCtx = pre.request; runtimeVars = pre.vars;
         this.runtimeScopes = {...this.runtimeScopes, [wid]: {...runtimeVars}};
+      }
+      checkCurrent();
+      let effectiveBody = reqCtx.body;
+      if (draft.body_mode === 'graphql') {
+        let variables: unknown = {};
+        try { variables = draft.graphql_variables?.trim() ? JSON.parse(draft.graphql_variables) : {}; } catch { /* Preserve the existing empty-object fallback. */ }
+        effectiveBody = JSON.stringify({query:reqCtx.body, variables});
+      }
+      const settings = draft.settings;
+      const body: ExecuteApiReq = {
+        method:reqCtx.method, url:reqCtx.url, headers:liveKv(reqCtx.headers), query:liveKv(draft.query),
+        body_mode:draft.body_mode, body:effectiveBody, auth:draft.auth,
+        environment_id:environmentId,
+        timeout_ms:settings?.timeout_ms ?? null, follow_redirects:settings?.follow_redirects ?? true,
+        verify_ssl:settings?.verify_ssl ?? true,
+        vars:Object.keys(runtimeVars).length ? runtimeVars : undefined,
+        ssh_connection_id:draft.ssh_connection_id ?? null,
+      };
+      const resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
+      checkCurrent();
+      if (ownsView()) this.lastResponse = resp;
+      void this.loadHistory();
+      if (draft.post_response_script?.trim()) {
+        const headers: Record<string, string> = {};
+        for (const h of resp.headers) headers[h.key.toLowerCase()] = h.value;
+        const post = await runScript({kind:'post', code:draft.post_response_script,
+          response:{code:resp.status,status:resp.status_text,responseTime:resp.duration_ms,headers,bodyText:resp.body}, vars:runtimeVars}, signal);
+        checkCurrent();
+        logs.push(...post.run.logs.map(l => `[test] ${l}`));
+        if (ownsView()) this.testResults = post.run.tests;
+        if (post.run.error) logs.push(`[test] error: ${post.run.error}`);
+        else this.runtimeScopes = {...this.runtimeScopes, [wid]: {...post.vars}};
       }
       if (ownsView()) this.scriptLogs = logs;
       return resp;
     } catch (e) {
-      if (ownsView()) this.scriptLogs = logs;
-      if (!isAbortError(e)) toasts.error('Request failed', errMsg(e));
+      if (ownsView()) this.scriptLogs = [...logs, `[error] ${errMsg(e)}`];
+      if (!signal.aborted && ownsExecution() && !isAbortError(e)) toasts.error('Request failed', errMsg(e));
       return null;
     } finally {
-      if (this._abortCtrl === controller) { this.sending = false; this._abortCtrl = null; }
+      if (this._abortCtrl === controller) {
+        this.sending = false; this._abortCtrl = null; this._executeTab = null;
+      }
     }
   }
 
@@ -1147,10 +1143,15 @@ class ApiClientStore {
 
   async clearHistory(): Promise<void> {
     const base = this.base();
-    if (!base) return;
+    const wid = this.wsId();
+    if (!base || !wid) return;
     try {
       await api.del(`${base}/history`);
+      if (this.wsId() !== wid) return;
+      this.historyRefresh.reset();
+      this.historyDetail.cancel();
       this.history = [];
+      await this.loadHistory();
     } catch (e) {
       toasts.error('Clear history failed', errMsg(e));
     }

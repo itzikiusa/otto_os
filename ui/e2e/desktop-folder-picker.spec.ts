@@ -104,3 +104,64 @@ test('shared folder picker navigates ancestors and history while retaining searc
     rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test('large folder listing stays bounded and fully keyboard reachable', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop browser only');
+  const {ctx,base}=await apiCtx();
+  try {
+    const ws=await seedWorkspace(ctx,base);
+    await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');},ws);
+    const root='/large-folder-fixture';
+    const entries=Array.from({length:10000},(_,i)=>({name:`Folder${String(i).padStart(5,'0')}`,path:`${root}/Folder${String(i).padStart(5,'0')}`,is_dir:true,is_git_repo:false}));
+    await page.route('**/api/v1/fs/browse?*',route=>route.fulfill({json:{path:root,parent:'/',is_git_repo:false,entries}}));
+    await openPage(page,'agents');
+    await page.getByTitle('New session (⌘T)').click();
+    const dialog=page.getByRole('dialog',{name:'New Session',exact:true});
+    await dialog.locator('#ns-cwd').fill(root);
+    await dialog.getByRole('button',{name:'Browse…'}).first().click();
+    const picker=page.getByRole('dialog',{name:'Choose working directory',exact:true});
+    const grid=picker.getByRole('grid');
+    await expect(grid).toHaveAttribute('aria-rowcount','10000');
+    expect(await picker.locator('.row-wrap').count()).toBeLessThan(80);
+    await grid.focus();await grid.press('End');
+    await expect(grid).toBeFocused();
+    await expect(picker.getByText('Folder09999',{exact:true})).toBeVisible();
+    await picker.locator('.picker-rows').evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
+    const active=await grid.getAttribute('aria-activedescendant');
+    expect(active).toBeTruthy();
+    await expect(page.locator(`[id="${active}"]`)).toHaveCount(1);
+    expect(await picker.locator('.row-wrap').count()).toBeLessThan(80);
+    await grid.press('Tab');await expect(picker.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();
+    await page.keyboard.press('Shift+Tab');await expect(grid).toBeFocused();
+    await grid.press('ArrowRight');await grid.press('Enter');
+    await expect(dialog.locator('#ns-cwd')).toHaveValue(`${root}/Folder09999`);
+    await dialog.getByRole('button',{name:'Browse…'}).first().click();
+    await picker.getByPlaceholder('Filter…').fill('Folder09876');
+    await expect(picker.locator('.row-wrap')).toHaveCount(1);
+    await grid.focus();await grid.press('ArrowRight');await grid.press('Enter');
+    await expect(dialog.locator('#ns-cwd')).toHaveValue(`${root}/Folder09876`);
+  } finally { await ctx.dispose(); }
+});
+
+test('closing a slow folder picker aborts its browse request', async ({page},info)=>{
+  test.skip(info.project.name!=='desktop-browser','desktop browser only');
+  const {ctx,base}=await apiCtx();
+  let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});
+  try {
+    const ws=await seedWorkspace(ctx,base);
+    await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');},ws);
+    let requested=false,aborted=false;
+    page.on('requestfailed',request=>{if(request.url().includes('/fs/browse'))aborted=true;});
+    await page.route('**/api/v1/fs/browse?*',async route=>{
+      requested=true;await held;
+      try {await route.fulfill({json:{path:'/slow-fixture',parent:'/',is_git_repo:false,entries:[]}});} catch { /* expected if canceled */ }
+    });
+    await openPage(page,'agents');await page.getByTitle('New session (⌘T)').click();
+    const dialog=page.getByRole('dialog',{name:'New Session',exact:true});
+    await dialog.locator('#ns-cwd').fill('/slow-fixture');await dialog.getByRole('button',{name:'Browse…'}).first().click();
+    const picker=page.getByRole('dialog',{name:'Choose working directory',exact:true});
+    await expect.poll(()=>requested).toBe(true);await picker.getByRole('button',{name:'Cancel',exact:true}).click();
+    await expect(picker).toHaveCount(0);await expect.poll(()=>aborted).toBe(true);
+    await expect(dialog.locator('#ns-cwd')).toHaveValue('/slow-fixture');
+  } finally {release();await ctx.dispose();}
+});

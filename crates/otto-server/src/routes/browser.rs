@@ -1698,6 +1698,7 @@ mod tests {
             connections,
             db_explorer,
             db_assist: crate::db_assist::new_registry(),
+            transcript_cache: Default::default(),
             brokers,
             mcp,
             spawner: Arc::new(NoopSpawner),

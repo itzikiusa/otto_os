@@ -157,9 +157,24 @@ impl WorkflowsRepo {
         checkpoint: &WorkflowCheckpoint,
     ) -> Result<()> {
         let json = serde_json::to_string(checkpoint).map_err(|e| Error::Internal(e.to_string()))?;
+        let projection = crate::workflow_progress::checkpoint_projection(checkpoint)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin checkpoint write"))?;
         sqlx::query("INSERT INTO workflow_checkpoints (run_id, node_id, checkpoint_json) VALUES (?, ?, ?) ON CONFLICT(run_id, node_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json")
-            .bind(run_id).bind(&checkpoint.node_id).bind(json).execute(&self.pool).await
-            .map_err(dberr("save loop checkpoint"))?;
+            .bind(run_id).bind(&checkpoint.node_id).bind(json).execute(&mut *tx).await.map_err(dberr("save loop checkpoint"))?;
+        crate::workflow_progress::publish_checkpoint(
+            &mut tx,
+            run_id,
+            &checkpoint.node_id,
+            &projection,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit checkpoint write"))?;
         Ok(())
     }
 
@@ -179,7 +194,7 @@ impl WorkflowsRepo {
             .begin()
             .await
             .map_err(dberr("begin workflow retry"))?;
-        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, rev = rev + 1 WHERE id = ? AND status IN ('success','error','canceled')")
+        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
             .bind(scope_json).bind(run_id).execute(&mut *tx).await.map_err(dberr("prepare workflow retry"))?.rows_affected();
         if changed == 0 {
             return Err(Error::Conflict("run is still active".into()));
@@ -214,6 +229,14 @@ impl WorkflowsRepo {
                     serde_json::to_string(&cp).map_err(|e| Error::Internal(e.to_string()))?;
                 sqlx::query("UPDATE workflow_checkpoints SET checkpoint_json = ? WHERE run_id = ? AND node_id = ?")
                     .bind(json).bind(run_id).bind(&cp.node_id).execute(&mut *tx).await.map_err(dberr("reset loop checkpoint"))?;
+                let projection = crate::workflow_progress::checkpoint_projection(&cp)?;
+                crate::workflow_progress::publish_checkpoint(
+                    &mut tx,
+                    run_id,
+                    &cp.node_id,
+                    &projection,
+                )
+                .await?;
             }
         }
         tx.commit().await.map_err(dberr("commit workflow retry"))?;
@@ -390,6 +413,11 @@ impl WorkflowsRepo {
     ) -> Result<WorkflowRun> {
         let id = new_id();
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin workflow run"))?;
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow_id, workspace_id, status, input_json,
                                         nodes_json, started_at, created_by, workflow_version)
@@ -402,9 +430,11 @@ impl WorkflowsRepo {
         .bind(&now)
         .bind(created_by)
         .bind(workflow_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("create run"))?;
+        crate::workflow_progress::publish_nodes(&mut tx, &id, "[]").await?;
+        tx.commit().await.map_err(dberr("commit workflow run"))?;
         self.get_run(&id).await
     }
 
@@ -821,6 +851,12 @@ impl WorkflowsRepo {
         } else {
             None
         };
+        let projection = crate::workflow_progress::nodes_projection(nodes)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin workflow progress write"))?;
         let rev: i64 = sqlx::query_scalar(
             // A terminal write (finished) also clears the persisted re-entry
             // scope — it only ever describes an IN-FLIGHT (re-)entry.
@@ -839,9 +875,13 @@ impl WorkflowsRepo {
         .bind(&finished_at)
         .bind(&finished_at)
         .bind(id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(dberr("update run"))?;
+        crate::workflow_progress::publish_nodes(&mut tx, id, &projection).await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit workflow progress write"))?;
         Ok(rev)
     }
 
@@ -853,7 +893,7 @@ impl WorkflowsRepo {
     pub async fn reopen_run(&self, id: &Id) -> Result<()> {
         let n = sqlx::query(
             "UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL,
-             rev = rev + 1
+             rev = rev + 1, checkpoint_generation = checkpoint_generation + 1
              WHERE id = ? AND status IN ('success','error','canceled')",
         )
         .bind(id)
@@ -878,6 +918,12 @@ impl WorkflowsRepo {
     pub async fn update_run_progress(&self, id: &Id, nodes: &[NodeRunState]) -> Result<i64> {
         let nodes_json =
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
+        let projection = crate::workflow_progress::nodes_projection(nodes)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin workflow progress write"))?;
         let rev: i64 = sqlx::query_scalar(
             "UPDATE workflow_runs
              SET nodes_json = ?, rev = rev + 1
@@ -886,9 +932,13 @@ impl WorkflowsRepo {
         )
         .bind(&nodes_json)
         .bind(id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(dberr("update run progress"))?;
+        crate::workflow_progress::publish_nodes(&mut tx, id, &projection).await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit workflow progress write"))?;
         Ok(rev)
     }
 }

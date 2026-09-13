@@ -186,3 +186,7 @@ pub use workgraph::{
 pub use workspaces::{Member, WorkspacesRepo};
 
 pub mod api_runs;
+
+pub mod history_page;
+
+pub mod workflow_progress;

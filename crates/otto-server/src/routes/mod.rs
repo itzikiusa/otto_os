@@ -25,6 +25,7 @@ pub mod goal_loops;
 pub mod grants;
 pub mod grpc;
 pub mod handover;
+pub mod history_page;
 pub mod impersonate;
 pub mod logs;
 pub mod mcp_cp;
@@ -51,6 +52,7 @@ pub mod swarm_webhook;
 pub mod transcript;
 pub mod usage;
 pub mod users;
+pub mod workflow_progress;
 pub mod workflows;
 pub mod workgraph;
 pub mod workspaces;
@@ -417,6 +419,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(api_client::list_history).delete(api_client::clear_history),
         )
         .route(
+            "/workspaces/{wid}/api-client/history/summaries",
+            get(api_client::list_history_summaries),
+        )
+        .route(
             "/workspaces/{wid}/api-client/history/{id}",
             get(api_client::get_history),
         )
@@ -517,6 +523,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/sessions/{id}/tasks", post(transcript::create_task))
         .route("/sessions/{id}/inbox", post(transcript::inbox_upload))
         .route("/workspaces/{wid}/history", get(transcript::history))
+        .route("/workspaces/{wid}/history/page", get(history_page::list))
         .route(
             "/workspaces/{wid}/history/transcript",
             get(transcript::history_transcript),
@@ -600,6 +607,22 @@ pub fn protected_routes() -> Router<ServerCtx> {
             patch(workflows::update_trigger).delete(workflows::delete_trigger),
         )
         .route("/workflow-runs/{id}", get(workflows::get_run))
+        .route(
+            "/workflow-runs/{id}/progress",
+            get(workflow_progress::progress),
+        )
+        .route(
+            "/workflow-runs/{id}/checkpoints",
+            get(workflow_progress::checkpoints),
+        )
+        .route(
+            "/workflow-runs/{id}/checkpoints/{node_id}",
+            get(workflow_progress::checkpoint_detail),
+        )
+        .route(
+            "/workflow-runs/{id}/nodes/{node_id}",
+            get(workflow_progress::node_detail),
+        )
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
         .route(
             "/workflow-runs/{id}/retry-node",

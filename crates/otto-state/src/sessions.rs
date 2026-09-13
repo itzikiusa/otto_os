@@ -41,7 +41,7 @@ pub struct NewSession {
     pub meta: serde_json::Value,
 }
 
-fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<Session> {
+pub(crate) fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<Session> {
     Ok(Session {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),

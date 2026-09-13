@@ -62,6 +62,23 @@ pub struct Heading {
     pub line: u32,
 }
 
+/// Whether the note's body participates in the derived content index.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentIndexStatus {
+    #[default]
+    Full,
+    SizeLimited,
+}
+impl ContentIndexStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::SizeLimited => "size_limited",
+        }
+    }
+}
+
 /// Indexed metadata of a note (everything except the raw markdown).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteMeta {
@@ -79,6 +96,8 @@ pub struct NoteMeta {
     pub reserved: bool,
     pub has_frontmatter: bool,
     pub parse_error: bool,
+    #[serde(default)]
+    pub content_index_status: ContentIndexStatus,
 }
 
 /// An outgoing link of a note.

@@ -117,17 +117,45 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn fixture() -> (WorkflowsRepo, WorkflowCheckpoint) {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+    async fn fixture() -> (tempfile::TempDir, WorkflowsRepo, Id, WorkflowCheckpoint) {
+        let dir = tempfile::tempdir().unwrap();
+        // Use the daemon's bootstrap so checkpoint tests include every current
+        // migration, projection trigger and foreign-key dependency.
+        let pool = otto_state::open(&dir.path().join("state.sqlite"))
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE workflow_runs(id TEXT PRIMARY KEY, status TEXT DEFAULT 'error', finished_at TEXT, error TEXT, resume_scope_json TEXT, rev INTEGER DEFAULT 0); INSERT INTO workflow_runs(id) VALUES ('run');").execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../otto-state/migrations/0127_workflow_checkpoints.sql"
-        ))
-        .execute(&pool)
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("checkpoint-fixture", "", "Checkpoint fixture", false)
+            .await
+            .unwrap();
+        let workspace = otto_state::WorkspacesRepo::new(pool.clone())
+            .create("Checkpoint fixture", dir.path().to_str().unwrap(), &user.id)
+            .await
+            .unwrap();
+        let repo = WorkflowsRepo::new(pool);
+        let workflow = repo
+            .create(
+                &workspace.id,
+                "Checkpoint fixture",
+                "",
+                "",
+                &Default::default(),
+                &user.id,
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&workflow.id, &workspace.id, &json!({}), Some(&user.id))
+            .await
+            .unwrap();
+        // Explicit retry is only admitted for a settled run, as in production.
+        repo.update_run(
+            &run.id,
+            otto_core::workflows::RunStatus::Error,
+            &[],
+            None,
+            true,
+        )
         .await
         .unwrap();
         let cp = WorkflowCheckpoint {
@@ -145,17 +173,17 @@ mod tests {
             logs: vec![],
             updated_at: chrono::Utc::now(),
         };
-        (WorkflowsRepo::new(pool), cp)
+        (dir, repo, run.id, cp)
     }
 
     #[tokio::test]
     async fn completed_external_step_is_not_executed_after_reentry() {
-        let (repo, cp) = fixture().await;
+        let (_dir, repo, run_id, cp) = fixture().await;
         let calls = AtomicUsize::new(0);
         for _ in 0..2 {
             let (out, _) = execute(
                 &repo,
-                &"run".into(),
+                &run_id,
                 cp.clone(),
                 &RetryPolicy::default(),
                 false,
@@ -173,13 +201,13 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_external_outcome_stops_until_operator_retry() {
-        let (repo, mut cp) = fixture().await;
+        let (_dir, repo, run_id, mut cp) = fixture().await;
         cp.status = NodeStatus::Running;
         cp.attempts = 1;
-        repo.save_checkpoint(&"run".into(), &cp).await.unwrap();
+        repo.save_checkpoint(&run_id, &cp).await.unwrap();
         let result = execute(
             &repo,
-            &"run".into(),
+            &run_id,
             cp.clone(),
             &RetryPolicy::default(),
             false,
@@ -187,12 +215,12 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(Error::Conflict(_))));
-        repo.prepare_retry(&"run".into(), &["loop".into()], false, &Default::default())
+        repo.prepare_retry(&run_id, &["loop".into()], false, &Default::default())
             .await
             .unwrap();
         execute(
             &repo,
-            &"run".into(),
+            &run_id,
             cp,
             &RetryPolicy::default(),
             false,
@@ -204,13 +232,13 @@ mod tests {
 
     #[tokio::test]
     async fn inner_retry_budget_and_attempts_are_durable() {
-        let (repo, cp) = fixture().await;
+        let (_dir, repo, run_id, cp) = fixture().await;
         let calls = AtomicUsize::new(0);
         let policy = RetryPolicy {
             max_attempts: 1,
             ..Default::default()
         };
-        execute(&repo, &"run".into(), cp, &policy, true, || async {
+        execute(&repo, &run_id, cp, &policy, true, || async {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Err(Error::Upstream("transient".into()))
             } else {
@@ -219,7 +247,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let saved = repo.checkpoints(&"run".into()).await.unwrap();
+        let saved = repo.checkpoints(&run_id).await.unwrap();
         assert_eq!(saved[0].attempts, 2);
         assert_eq!(saved[0].status, NodeStatus::Success);
     }

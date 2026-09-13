@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use otto_core::{Error, Result};
 use rustix::fd::OwnedFd;
@@ -15,10 +15,10 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::parse::{self, parse_note};
+use crate::parse;
 use crate::resolve::ResolveIndex;
 use crate::scan::{self, WalkResult, MAX_FTS_BYTES};
-use crate::store::{NoteRow, Store};
+use crate::store::Store;
 use crate::types::*;
 
 /// Reads served without a rescan for this long after the last one (freshness
@@ -27,18 +27,41 @@ const STALE_AFTER_SECS: i64 = 5;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
-/// In-memory switcher index (rebuilt after every scan): fuzzy match over
-/// title, aliases and path without shipping the note list to the client.
-struct SwitcherIx {
-    /// (path, title, aliases)
-    rows: Vec<(String, String, Vec<String>)>,
-}
-
 type VaultWriteKey = (i64, String);
 type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
 
+/// Created only while publication is held, and dropped before that lock. Errors
+/// or cancellation after a durable write invalidate derived caches, never source.
+struct IndexRepair<'a> {
+    state: &'a crate::index::IndexState,
+    last_scan: Arc<AtomicI64>,
+    complete: bool,
+}
+impl Drop for IndexRepair<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.state.invalidate();
+            self.state.links_dirty.store(true, Ordering::Relaxed);
+            self.last_scan.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 pub struct VaultEngine {
     store: Store,
+    preparation: crate::prepare::Preparation,
+    indexes: Mutex<HashMap<i64, Arc<crate::index::IndexState>>>,
+    #[cfg(test)]
+    walks: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    scan_pause: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
+    scan_override: Mutex<Option<WalkResult>>,
     /// Per-vault scan serialization + coalescing (a kick while a scan runs is
     /// dropped — the running scan picks up the changes anyway).
     scans: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
@@ -49,7 +72,6 @@ pub struct VaultEngine {
     /// Serialize vault mutations, including folder moves and link rewrites.
     /// Scans have their own lock; mutation holders may await a scan.
     writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
-    switcher: RwLock<HashMap<i64, Arc<SwitcherIx>>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
 }
 
@@ -57,12 +79,19 @@ impl VaultEngine {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             store: Store::new(pool),
+            preparation: Default::default(),
+            indexes: Default::default(),
+            #[cfg(test)]
+            walks: Default::default(),
+            #[cfg(test)]
+            scan_pause: Default::default(),
+            #[cfg(test)]
+            scan_override: Default::default(),
             scans: Mutex::new(HashMap::new()),
             pending_scans: Mutex::new(HashSet::new()),
             last_scan: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
-            switcher: RwLock::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
         }
     }
@@ -165,7 +194,114 @@ impl VaultEngine {
     /// Unregister — index rows only; the files on disk are untouched.
     pub async fn unregister(&self, ws: &str, id: i64) -> Result<()> {
         self.get_scoped(ws, id).await?;
-        self.store.delete_vault(id).await
+        let write = self.write_lock(id, "");
+        let _write = write.lock().await;
+        let state = self.index_state(id);
+        let _publication = state.publication.lock().await;
+        self.store.delete_vault(id).await?;
+        state.retire();
+        self.indexes.lock().unwrap().remove(&id);
+        self.last_scan.lock().unwrap().remove(&id);
+        self.generations.lock().unwrap().remove(&id);
+        Ok(())
+    }
+
+    pub(crate) fn index_state(&self, id: i64) -> Arc<crate::index::IndexState> {
+        self.indexes.lock().unwrap().entry(id).or_default().clone()
+    }
+
+    /// Caller owns publication. Ordinary note updates never load global links.
+    async fn index_prepared(
+        &self,
+        id: i64,
+        state: &crate::index::IndexState,
+        mut note: crate::prepare::PreparedNote,
+        reconcile_added: bool,
+    ) -> Result<bool> {
+        state.check_active()?;
+        let (added, resolver) = {
+            let cached = state.cache.read().unwrap();
+            let index = cached
+                .as_ref()
+                .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?;
+            let added = !index.records.contains_key(&note.row.path);
+            if added && reconcile_added {
+                let mut resolver = index.resolver.clone();
+                resolver.insert(note.row.path.clone());
+                for link in &mut note.links {
+                    link.dst_path = resolver.resolve(&note.row.path, &link.raw_target);
+                }
+                (true, Some(resolver))
+            } else {
+                for link in &mut note.links {
+                    link.dst_path = index.resolver.resolve(&note.row.path, &link.raw_target);
+                }
+                (added, None)
+            }
+        };
+        let mut incoming = vec![];
+        if added && reconcile_added {
+            let resolver = resolver.as_ref().unwrap();
+            for (rowid, source, raw, dst) in self.store.all_links_full(id).await? {
+                if source == note.row.path {
+                    continue;
+                }
+                let next = resolver.resolve(&source, &raw);
+                if next != dst {
+                    incoming.push((rowid, next));
+                }
+            }
+        }
+        if added && !reconcile_added {
+            state.links_dirty.store(true, Ordering::Relaxed);
+        }
+        let record = crate::index::IndexRecord::note(&note.row);
+        let mut repair = IndexRepair {
+            state,
+            last_scan: self.last_scan_cell(id),
+            complete: false,
+        };
+        self.store
+            .index_note(id, &note, &incoming, self.fts_ready().await)
+            .await?;
+        #[cfg(test)]
+        Self::pause_publication(state).await;
+        state
+            .cache
+            .write()
+            .unwrap()
+            .as_mut()
+            .expect("publication owns cache")
+            .upsert(record);
+        self.generation(id).fetch_add(1, Ordering::Relaxed);
+        repair.complete = true;
+        Ok(added)
+    }
+
+    #[cfg(test)]
+    async fn pause_publication(state: &crate::index::IndexState) {
+        let pause = state.publication_pause.lock().unwrap().take();
+        if let Some((started, resume)) = pause {
+            let _ = started.send(());
+            let _ = resume.await;
+        }
+    }
+
+    async fn reconcile_links(&self, id: i64, state: &crate::index::IndexState) -> Result<()> {
+        let rows = self.store.all_links_full(id).await?;
+        let changed = {
+            let cache = state.cache.read().unwrap();
+            let index = cache
+                .as_ref()
+                .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?;
+            rows.into_iter()
+                .filter_map(|(rowid, src, raw, dst)| {
+                    let next = index.resolver.resolve(&src, &raw);
+                    (next != dst).then_some((rowid, next))
+                })
+                .collect::<Vec<_>>()
+        };
+        self.store.update_link_destinations(id, &changed).await
     }
 
     // -- scanning ---------------------------------------------------------------
@@ -268,152 +404,174 @@ impl VaultEngine {
     }
 
     async fn scan_inner(&self, id: i64, root: &Path) -> Result<()> {
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let epoch = {
+            let _publication = state.publication.lock().await;
+            state.start_scan()
+        };
+        struct Finish(Arc<crate::index::IndexState>);
+        impl Drop for Finish {
+            fn drop(&mut self) {
+                self.0.finish_scan();
+            }
+        }
+        let _finish = Finish(state.clone());
+        #[cfg(test)]
+        self.walks.fetch_add(1, Ordering::Relaxed);
         let root_owned = root.to_path_buf();
         let walk: WalkResult = tokio::task::spawn_blocking(move || scan::walk(&root_owned))
             .await
             .map_err(|e| Error::Internal(format!("walk join: {e}")))?
             .map_err(|e| Error::Internal(format!("walk: {e}")))?;
-
+        #[cfg(test)]
+        let walk = self.scan_override.lock().unwrap().take().unwrap_or(walk);
+        #[cfg(test)]
+        {
+            let pause = self.scan_pause.lock().unwrap().take();
+            if let Some((started, resume)) = pause {
+                let _ = started.send(());
+                let _ = resume.await;
+            }
+        }
         let note_sigs = self.store.note_sigs(id).await?;
         let file_sigs = self.store.file_sigs(id).await?;
-        let (changed_notes, removed_notes) = scan::diff(&walk.notes, &note_sigs);
+        let (mut changed_notes, removed_notes) = scan::diff(&walk.notes, &note_sigs);
         let (changed_files, removed_files) = scan::diff(&walk.files, &file_sigs);
-        let structure_changed = !changed_notes.is_empty()
-            || !removed_notes.is_empty()
-            || !changed_files.is_empty()
-            || !removed_files.is_empty();
-
-        let fts = self.fts_ready().await;
-        let sizes: HashMap<&str, (i64, i64)> = walk
-            .notes
-            .iter()
-            .map(|e| (e.rel.as_str(), (e.size, e.mtime_ns)))
-            .collect();
-
-        // Parse + upsert changed notes; collect their links for resolution.
-        let mut pending_links: Vec<(String, Vec<OutgoingLink>)> = Vec::new();
-        for rel in &changed_notes {
-            let abs = root.join(rel);
-            let (size, mtime_ns) = sizes.get(rel.as_str()).copied().unwrap_or((0, 0));
-            let content = match tokio::fs::read(&abs).await {
-                Ok(b) => b,
-                Err(_) => continue, // raced away — the removal shows next scan
-            };
-            let text = String::from_utf8_lossy(&content).into_owned();
-            let parsed = parse_note(&text);
-            let base = rel.rsplit('/').next().unwrap_or(rel);
-            let stem = base
-                .strip_suffix(".md")
-                .or_else(|| base.strip_suffix(".MD"))
-                .unwrap_or(base);
-            let reserved = matches!(stem.to_ascii_lowercase().as_str(), "index" | "log")
-                && base.to_ascii_lowercase().ends_with(".md");
-            let title = parse::derive_title(&parsed, rel);
-            let hash = hex_sha256(&content);
-            let row = NoteRow {
-                path: rel.clone(),
-                title: title.clone(),
-                okf_type: parsed.okf_type.clone(),
-                description: parsed.description.clone(),
-                frontmatter_json: serde_json::to_string(&parsed.frontmatter)
-                    .unwrap_or_else(|_| "null".into()),
-                tags_json: serde_json::to_string(&parsed.tags).unwrap_or_else(|_| "[]".into()),
-                aliases_json: serde_json::to_string(&parsed.aliases)
-                    .unwrap_or_else(|_| "[]".into()),
-                headings_json: serde_json::to_string(&parsed.headings)
-                    .unwrap_or_else(|_| "[]".into()),
-                word_count: parsed.word_count as i64,
-                size,
-                mtime_ns,
-                hash,
-                reserved,
-                has_frontmatter: parsed.has_frontmatter,
-                parse_error: parsed.parse_error,
-            };
-            self.store.upsert_note(id, &row).await?;
-            self.store.replace_tags(id, rel, &parsed.tags).await?;
-            if fts {
-                let body = if size as u64 <= MAX_FTS_BYTES {
-                    text.as_str()
-                } else {
-                    ""
-                };
-                self.store.fts_index(id, rel, &title, body).await;
+        let legacy: Vec<String>=sqlx::query_scalar("SELECT path FROM vault_notes WHERE vault_id=? AND size>? AND content_index_status='full'").bind(id).bind(MAX_FTS_BYTES as i64).fetch_all(self.store.pool()).await.map_err(|e| Error::Internal(e.to_string()))?;
+        let present: HashSet<_> = walk.notes.iter().map(|e| e.rel.as_str()).collect();
+        let mut changed: HashSet<_> = changed_notes.iter().cloned().collect();
+        for path in legacy {
+            if present.contains(path.as_str()) && changed.insert(path.clone()) {
+                changed_notes.push(path);
             }
-            pending_links.push((rel.clone(), parsed.links));
         }
-        for rel in &removed_notes {
-            self.store.remove_note(id, rel).await?;
+        let mut incomplete = !walk.complete;
+        // A sequential stream retains one prepared body, never N tasks/bodies.
+        // Added paths resolve all incoming links once after the entire scan.
+        for rel in changed_notes {
+            if state.changed_since(&rel, epoch) {
+                continue;
+            }
+            let prepared = match self.preparation.file(root.join(&rel), rel.clone()).await {
+                Ok(note) => note,
+                Err(_) => {
+                    incomplete = true;
+                    continue;
+                }
+            };
+            let _publication = state.publication.lock().await;
+            state.check_active()?;
+            if state.changed_since(&rel, epoch) {
+                continue;
+            }
+            if state.cache.read().unwrap().is_none() {
+                incomplete = true;
+                continue;
+            }
+            self.index_prepared(id, &state, prepared, false).await?;
         }
-        let file_sizes: HashMap<&str, (i64, i64)> = walk
+        let file_sizes: HashMap<_, _> = walk
             .files
             .iter()
             .map(|e| (e.rel.as_str(), (e.size, e.mtime_ns)))
             .collect();
-        for rel in &changed_files {
-            let (size, mtime) = file_sizes.get(rel.as_str()).copied().unwrap_or((0, 0));
-            self.store.upsert_file(id, rel, size, mtime).await?;
-        }
-        for rel in &removed_files {
-            self.store.remove_file(id, rel).await?;
-        }
-
-        // Resolution index over the CURRENT tree.
-        let mut ix = ResolveIndex::default();
-        for e in &walk.notes {
-            ix.insert(e.rel.clone());
-        }
-        for e in &walk.files {
-            ix.insert(e.rel.clone());
-        }
-
-        // Store the changed notes' links (resolved).
-        for (src, mut links) in pending_links {
-            for l in &mut links {
-                l.dst_path = ix.resolve(&src, &l.raw_target);
+        for rel in changed_files {
+            let _publication = state.publication.lock().await;
+            state.check_active()?;
+            if state.changed_since(&rel, epoch) {
+                continue;
             }
-            self.store.replace_links(id, &src, &links).await?;
-        }
-
-        // Global re-resolve when the file SET changed: a new file can fix a
-        // broken link OR make a previously-unique basename ambiguous; a removal
-        // breaks links pointing at it. Only changed rows are written.
-        if structure_changed {
-            for (rowid, src, raw, dst) in self.store.all_links_full(id).await? {
-                let new_dst = ix.resolve(&src, &raw);
-                if new_dst != dst {
-                    self.store
-                        .update_link_dst(rowid, new_dst.as_deref())
-                        .await?;
+            let Some(&(size, mtime)) = file_sizes.get(rel.as_str()) else {
+                continue;
+            };
+            let current = match tokio::fs::symlink_metadata(root.join(&rel)).await {
+                Ok(meta) => meta,
+                Err(_) => {
+                    incomplete = true;
+                    continue;
                 }
+            };
+            if current.len() as i64 != size || crate::prepare::mtime(&current) != mtime {
+                incomplete = true;
+                continue;
+            }
+            let added = state
+                .cache
+                .read()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|cache| !cache.records.contains_key(&rel));
+            if added {
+                state.links_dirty.store(true, Ordering::Relaxed);
+            }
+            let mut repair = IndexRepair {
+                state: &state,
+                last_scan: self.last_scan_cell(id),
+                complete: false,
+            };
+            self.store.upsert_file(id, &rel, size, mtime).await?;
+            #[cfg(test)]
+            Self::pause_publication(&state).await;
+            let mut cached = state.cache.write().unwrap();
+            if let Some(cache) = cached.as_mut() {
+                cache.upsert(crate::index::IndexRecord::file(rel));
+            } else {
+                incomplete = true;
+            }
+            self.generation(id).fetch_add(1, Ordering::Relaxed);
+            repair.complete = true;
+        }
+        // Any enumeration/preparation error suppresses pruning for this scan.
+        if !incomplete {
+            for (rel, note) in removed_notes
+                .into_iter()
+                .map(|p| (p, true))
+                .chain(removed_files.into_iter().map(|p| (p, false)))
+            {
+                let _publication = state.publication.lock().await;
+                state.check_active()?;
+                if state.changed_since(&rel, epoch) {
+                    continue;
+                }
+                match tokio::fs::symlink_metadata(root.join(&rel)).await {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => {
+                        incomplete = true;
+                        continue;
+                    }
+                }
+                state.links_dirty.store(true, Ordering::Relaxed);
+                let mut repair = IndexRepair {
+                    state: &state,
+                    last_scan: self.last_scan_cell(id),
+                    complete: false,
+                };
+                if note {
+                    self.store.remove_note(id, &rel).await?;
+                } else {
+                    self.store.remove_file(id, &rel).await?;
+                }
+                #[cfg(test)]
+                Self::pause_publication(&state).await;
+                if let Some(cache) = state.cache.write().unwrap().as_mut() {
+                    cache.remove(&rel);
+                }
+                self.generation(id).fetch_add(1, Ordering::Relaxed);
+                repair.complete = true;
             }
         }
-
-        if structure_changed {
-            self.generation(id).fetch_add(1, Ordering::Relaxed);
+        if state.links_dirty.load(Ordering::Relaxed) {
+            let _publication = state.publication.lock().await;
+            state.check_active()?;
+            self.reconcile_links(id, &state).await?;
+            state.links_dirty.store(false, Ordering::Relaxed);
         }
-
-        // Rebuild the switcher index.
-        let notes = self.store.all_notes(id).await?;
-        let aliases: HashMap<String, Vec<String>> = self
-            .store
-            .all_aliases(id)
-            .await?
-            .into_iter()
-            .map(|(p, a)| (p, serde_json::from_str(&a).unwrap_or_default()))
-            .collect();
-        let rows = notes
-            .into_iter()
-            .filter(|(_, _, _, reserved)| !reserved)
-            .map(|(p, t, _, _)| {
-                let al = aliases.get(&p).cloned().unwrap_or_default();
-                (p, t, al)
-            })
-            .collect();
-        self.switcher
-            .write()
-            .unwrap()
-            .insert(id, Arc::new(SwitcherIx { rows }));
+        if incomplete {
+            return Err(Error::Conflict(
+                "Vault scan incomplete; existing index entries were preserved, retry scan".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -606,79 +764,16 @@ impl VaultEngine {
         } else {
             Self::check_rel(path)?
         };
-        let notes = self.store.all_notes(id).await?;
-        let files = self.store.all_file_paths(id).await?;
-        let prefix = if rel.is_empty() {
-            String::new()
-        } else {
-            format!("{rel}/")
-        };
-        let mut dirs: HashMap<String, i64> = HashMap::new();
-        let mut entries: Vec<DirEntry> = Vec::new();
-        let mut seen_dirs: HashSet<String> = HashSet::new();
-        let note_meta: HashMap<&str, (&str, Option<&str>, bool)> = notes
-            .iter()
-            .map(|(p, t, ty, r)| (p.as_str(), (t.as_str(), ty.as_deref(), *r)))
-            .collect();
-        for p in notes
-            .iter()
-            .map(|(p, ..)| p.as_str())
-            .chain(files.iter().map(|s| s.as_str()))
-        {
-            let Some(rest) = p.strip_prefix(&prefix) else {
-                continue;
-            };
-            if rest.is_empty() {
-                continue;
-            }
-            match rest.split_once('/') {
-                Some((d, _)) => {
-                    *dirs.entry(d.to_string()).or_default() += 1;
-                    seen_dirs.insert(d.to_string());
-                }
-                None => {
-                    let is_note = p.to_ascii_lowercase().ends_with(".md");
-                    let (title, ty, reserved) = note_meta
-                        .get(p)
-                        .map(|(t, ty, r)| (Some(t.to_string()), ty.map(String::from), *r))
-                        .unwrap_or((None, None, false));
-                    entries.push(DirEntry {
-                        name: rest.to_string(),
-                        path: p.to_string(),
-                        kind: if is_note { "note" } else { "file" }.to_string(),
-                        children: 0,
-                        title,
-                        okf_type: ty,
-                        reserved,
-                    });
-                }
-            }
-        }
-        let mut out: Vec<DirEntry> = dirs
-            .into_iter()
-            .map(|(d, n)| DirEntry {
-                name: d.clone(),
-                path: if prefix.is_empty() {
-                    d.clone()
-                } else {
-                    format!("{prefix}{d}")
-                },
-                kind: "dir".to_string(),
-                children: n,
-                title: None,
-                okf_type: None,
-                reserved: false,
-            })
-            .collect();
-        out.sort_by_key(|e| e.name.to_lowercase());
-        // Reserved scaffolding (index.md, log.md) leads its folder — it's the
-        // entry point a reader wants first, not an alphabetical mid-list row.
-        entries.sort_by_key(|e| (!e.reserved, e.name.to_lowercase()));
-        out.extend(entries);
-        Ok(DirListing {
-            path: rel,
-            entries: out,
-        })
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let entries = state
+            .cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?
+            .dir(&rel);
+        Ok(DirListing { path: rel, entries })
     }
 
     pub async fn note(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<NoteFull> {
@@ -695,41 +790,35 @@ impl VaultEngine {
             .ok_or_else(|| Error::NotFound(format!("note {rel}")))?;
         let raw =
             String::from_utf8(bytes).map_err(|_| Error::Invalid("note is not UTF-8".into()))?;
-        // Parse the bytes actually served. Disk readers must not combine a new
-        // body with an old indexed hash (a false conflict on the next save).
-        let mut parsed = parse_note(&raw);
-        let mut ix = ResolveIndex::default();
-        for (p, ..) in self.store.all_notes(id).await? {
-            ix.insert(p);
+        // Metadata and hash describe these exact response bytes, even if an
+        // external scan has not indexed them yet. Parsing uses the same limit.
+        let mut prepared = self
+            .preparation
+            .bytes(rel.clone(), raw.as_bytes(), 0)
+            .await?;
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        {
+            let cache = state.cache.read().unwrap();
+            let index = cache
+                .as_ref()
+                .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?;
+            if index.records.contains_key(&rel) {
+                for link in &mut prepared.links {
+                    link.dst_path = index.resolver.resolve(&rel, &link.raw_target);
+                }
+            } else {
+                let mut resolver = index.resolver.clone();
+                resolver.insert(rel.clone());
+                for link in &mut prepared.links {
+                    link.dst_path = resolver.resolve(&rel, &link.raw_target);
+                }
+            }
         }
-        for p in self.store.all_file_paths(id).await? {
-            ix.insert(p);
-        }
-        ix.insert(rel.clone());
-        for link in &mut parsed.links {
-            link.dst_path = ix.resolve(&rel, &link.raw_target);
-        }
-        let base = rel.rsplit('/').next().unwrap_or(&rel).to_ascii_lowercase();
-        let meta = NoteMeta {
-            path: rel.clone(),
-            title: parse::derive_title(&parsed, &rel),
-            okf_type: parsed.okf_type,
-            description: parsed.description,
-            frontmatter: parsed.frontmatter,
-            tags: parsed.tags,
-            aliases: parsed.aliases,
-            headings: parsed.headings,
-            word_count: parsed.word_count as i64,
-            size: raw.len() as i64,
-            hash: hex_sha256(raw.as_bytes()),
-            reserved: matches!(base.as_str(), "index.md" | "log.md"),
-            has_frontmatter: parsed.has_frontmatter,
-            parse_error: parsed.parse_error,
-        };
         Ok(NoteFull {
-            meta,
+            meta: prepared.meta(),
             raw,
-            outgoing: parsed.links,
+            outgoing: prepared.links,
         })
     }
 
@@ -748,6 +837,18 @@ impl VaultEngine {
         }
         let lock = self.write_lock(id, &rel);
         let _guard = lock.lock().await;
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let mut prepared = self
+            .preparation
+            .bytes(rel.clone(), content.as_bytes(), 0)
+            .await?;
+        let _publication = state.publication.lock().await;
+        if state.cache.read().unwrap().is_none() {
+            return Err(Error::Conflict(
+                "Vault index is refreshing; retry save".into(),
+            ));
+        }
         let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
         let before = Self::text_file_bytes(&parent, &name).await?;
         if let Some(expected) = if_hash {
@@ -766,9 +867,19 @@ impl VaultEngine {
             "note write",
         )
         .await?;
+        state.mutated(&[&rel]);
+        let mut repair = IndexRepair {
+            state: &state,
+            last_scan: self.last_scan_cell(id),
+            complete: false,
+        };
         Self::atomic_replace_at(&parent, &name, content.as_bytes()).await?;
         Self::commit_revision(&v.root_path, revision).await?;
-        self.scan(id).await?;
+        let written = rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| Error::Internal(format!("written note metadata: {e}")))?;
+        prepared.row.mtime_ns = stat_mtime_ns(&written);
+        self.index_prepared(id, &state, prepared, true).await?;
+        repair.complete = true;
         self.store.note_meta(id, &rel).await
     }
 
@@ -807,6 +918,17 @@ impl VaultEngine {
         }
         let lock = self.write_lock(id, &rel);
         let _guard = lock.lock().await;
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let _publication = state.publication.lock().await;
+        let added = !state
+            .cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?
+            .records
+            .contains_key(&rel);
         let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
         let before = Self::text_file_bytes(&parent, &name).await?;
         if let Some(expected) = if_hash {
@@ -831,9 +953,31 @@ impl VaultEngine {
             "artifact write",
         )
         .await?;
+        state.mutated(&[&rel]);
+        let mut repair = IndexRepair {
+            state: &state,
+            last_scan: self.last_scan_cell(id),
+            complete: false,
+        };
         Self::atomic_replace_at(&parent, &name, bytes).await?;
         Self::commit_revision(&v.root_path, revision).await?;
-        self.scan(id).await?;
+        let written = rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| Error::Internal(format!("written artifact metadata: {e}")))?;
+        self.store
+            .upsert_file(id, &rel, written.st_size, stat_mtime_ns(&written))
+            .await?;
+        state
+            .cache
+            .write()
+            .unwrap()
+            .as_mut()
+            .expect("publication owns cache")
+            .upsert(crate::index::IndexRecord::file(rel.clone()));
+        if added {
+            self.reconcile_links(id, &state).await?;
+        }
+        self.generation(id).fetch_add(1, Ordering::Relaxed);
+        repair.complete = true;
         Ok(VaultTextFile {
             path: rel,
             size: bytes.len() as i64,
@@ -847,6 +991,10 @@ impl VaultEngine {
         let lock = self.write_lock(id, "");
         let _guard = lock.lock().await;
         let rel = Self::check_rel(path)?;
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let publication = state.publication.lock().await;
+        state.mutated(&[&rel]);
         let abs = Self::abs_guarded(&v.root_path, &rel)?;
         if !abs.exists() {
             return Err(Error::NotFound(format!("note {rel}")));
@@ -884,6 +1032,7 @@ impl VaultEngine {
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(|e| Error::Internal(format!("trash move: {e}")))?;
+        drop(publication);
         self.scan(id).await?;
         Ok(())
     }
@@ -917,6 +1066,10 @@ impl VaultEngine {
         if from_rel == to_rel {
             return Err(Error::Invalid("from and to are the same path".into()));
         }
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let publication = state.publication.lock().await;
+        state.mutated(&[&from_rel, &to_rel]);
         let root = v.root_path.clone();
         let from_abs = Self::abs_guarded(&root, &from_rel)?;
         let to_abs = Self::abs_guarded(&root, &to_rel)?;
@@ -1043,6 +1196,7 @@ impl VaultEngine {
                 )
                 .await?;
                 let (parent, name) = Self::text_parent(&root, &src_now)?;
+                state.mutated(&[&src_now]);
                 Self::atomic_replace_at(&parent, &name, new_content.as_bytes()).await?;
                 Self::commit_revision(&root, revision).await?;
                 links_updated += count_here;
@@ -1051,6 +1205,7 @@ impl VaultEngine {
 
         // One scan picks up the moved files, rewritten sources, and re-resolves
         // everything (including newly-ambiguous basenames).
+        drop(publication);
         self.scan(id).await?;
         Ok(RenameResult {
             from: from_rel,
@@ -1171,22 +1326,24 @@ impl VaultEngine {
     pub async fn switcher(self: &Arc<Self>, ws: &str, id: i64, q: &str) -> Result<Vec<SwitchHit>> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        let ix = { self.switcher.read().unwrap().get(&id).cloned() };
-        let ix = match ix {
-            Some(ix) => ix,
-            None => {
-                self.scan(id).await.ok();
-                self.switcher
-                    .read()
-                    .unwrap()
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(SwitcherIx { rows: Vec::new() }))
-            }
-        };
+        let state = self.index_state(id);
+        state.ensure(&self.store, id).await?;
+        let cached = state.cache.read().unwrap();
+        let ix = cached
+            .as_ref()
+            .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?;
         let ql = q.trim().to_lowercase();
         let mut out: Vec<SwitchHit> = Vec::new();
-        for (path, title, aliases) in &ix.rows {
+        for record in ix
+            .records
+            .values()
+            .filter(|r| r.kind == "note" && !r.reserved)
+        {
+            let (path, title, aliases) = (
+                &record.path,
+                record.title.as_ref().unwrap(),
+                &record.aliases,
+            );
             if ql.is_empty() {
                 out.push(SwitchHit {
                     path: path.clone(),
@@ -1703,6 +1860,15 @@ fn fts_expr(text: &str) -> String {
         .join(" ")
 }
 
+/// rustix uses signed nanoseconds on macOS, unsigned c_ulong/u32 on Linux.
+/// Valid stat nanoseconds are below one billion, so both fit our signed index.
+#[allow(clippy::unnecessary_cast)] // Stat field widths/signedness vary by target.
+fn stat_mtime_ns(stat: &rustix::fs::Stat) -> i64 {
+    (stat.st_mtime as i64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(stat.st_mtime_nsec as i64)
+}
+
 fn hex_sha256(b: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(b);
@@ -1729,3 +1895,7 @@ fn shellexpand_home(p: &str) -> String {
     }
     p.to_string()
 }
+
+#[cfg(test)]
+#[path = "performance_tests.rs"]
+mod performance_tests;

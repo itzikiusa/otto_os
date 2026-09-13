@@ -1,28 +1,12 @@
 <script lang="ts">
-  // Transcript tails: keep EVERY live session of the current workspace armed
-  // while this window is visible (60 s ping; immediately on workspace switch
-  // and when the window regains focus). Switching workspace lets the old one's
-  // tails lapse (2 min); coming back re-arms them all on the first ping.
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
-  import { ws as wsStore } from '../lib/stores/workspace.svelte';
   $effect(() => {
-    const wid = wsStore.currentId;
-    if (!wid) return;
-    const ping = (): void => {
-      if (document.hidden) return;
-      void transcriptStore.touchWorkspace(wid);
-    };
-    ping();
-    const id = setInterval(ping, 60_000);
-    const onVis = (): void => {
-      if (!document.hidden) transcriptStore.resyncAll(wid);
-    };
+    const onVis = (): void => transcriptStore.setVisible(!document.hidden);
+    onVis();
     document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('focus', ping);
     return () => {
-      clearInterval(id);
       document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('focus', ping);
+      transcriptStore.reset();
     };
   });
   import { untrack } from 'svelte';
@@ -101,7 +85,8 @@
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry } from '../lib/commands.svelte';
-  import { api } from '../lib/api/client';
+  import { api, baseUrl } from '../lib/api/client';
+  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
   import { now } from '../lib/stores/now.svelte';

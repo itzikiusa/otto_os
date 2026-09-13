@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt as _};
 
+use crate::resource_cache::{Lifecycle, ResourceCache};
 use otto_core::domain::Connection;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
@@ -29,7 +30,6 @@ use otto_state::{
     Widget,
 };
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::config::{self};
 use crate::driver::Driver;
@@ -117,9 +117,36 @@ const IMPORT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const SCHEMA_CONTEXT_MAX_TABLES: usize = 300;
 
 /// A cached SSH tunnel kept alive between operations.
+#[derive(Clone)]
 struct CachedTunnel {
     tunnel: Arc<SshTunnel>,
-    last_used: Instant,
+    last_used: Arc<std::sync::Mutex<Instant>>,
+}
+#[derive(Default)]
+struct ConnectionLifecycle {
+    token: Lifecycle,
+    closing: Option<tokio::sync::watch::Sender<bool>>,
+}
+struct CloseCompletion {
+    registry: Arc<std::sync::Mutex<HashMap<Id, ConnectionLifecycle>>>,
+    conn_id: Id,
+    token: Lifecycle,
+    done: tokio::sync::watch::Sender<bool>,
+}
+impl Drop for CloseCompletion {
+    fn drop(&mut self) {
+        if let Some(state) = self
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&self.conn_id)
+        {
+            if state.token.same(&self.token) {
+                *state = ConnectionLifecycle::default();
+            }
+        }
+        self.done.send_replace(true);
+    }
 }
 
 /// One in-flight, cancellable query. Holds the engine-native handle slot (filled
@@ -207,12 +234,12 @@ pub struct DbViewerService {
     repo: DbExplorerRepo,
     registry: Registry,
     /// Live SSH tunnels, keyed by connection id, reused across operations.
-    tunnels: Arc<Mutex<HashMap<Id, CachedTunnel>>>,
+    tunnels: Arc<ResourceCache<CachedTunnel>>,
     /// In-flight cancellable queries, keyed by the client's `query_id`. Populated
     /// for the duration of a `run` that carries a `query_id`; a `cancel` request
     /// looks the target up here to issue engine-native cancellation. A plain
     /// `std::sync::Mutex` (held only for the brief map insert/remove/lookup, never
-    /// across an await) — distinct from the tokio `Mutex` guarding `tunnels`.
+    /// across an await). Tunnel initialization has independent per-key guards.
     in_flight: Arc<std::sync::Mutex<HashMap<String, InFlightQuery>>>,
     /// Outcomes of detached queries that finished with no HTTP waiter left,
     /// keyed by `query_id`, kept for [`FINISHED_TTL`] so the client can
@@ -226,6 +253,8 @@ pub struct DbViewerService {
     /// connection — previously the old pool leaked for the daemon's lifetime.
     /// Plain `std::sync::Mutex`: held only for map ops, never across an await.
     active_keys: Arc<std::sync::Mutex<HashMap<Id, (Engine, String)>>>,
+    lifecycles: Arc<std::sync::Mutex<HashMap<Id, ConnectionLifecycle>>>,
+    close_phase_timeout: Duration,
 }
 
 /// Removes an in-flight query from the registry when a `run` ends — on success,
@@ -282,6 +311,18 @@ struct Resolved {
     _tunnel: Option<Arc<SshTunnel>>,
 }
 
+impl Resolved {
+    async fn with_lifecycle<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        match self.config.lifecycle.as_ref() {
+            Some(token) => token.run(work).await,
+            None => work.await,
+        }
+    }
+}
+
 impl DbViewerService {
     pub fn new(
         connections: ConnectionsRepo,
@@ -293,7 +334,9 @@ impl DbViewerService {
             secrets,
             repo,
             registry: Registry::new(),
-            tunnels: Arc::new(Mutex::new(HashMap::new())),
+            tunnels: Arc::new(ResourceCache::default()),
+            lifecycles: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            close_phase_timeout: Duration::from_secs(5),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
             active_keys: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -371,7 +414,7 @@ impl DbViewerService {
         if user.is_root {
             return Ok(());
         }
-        let grants = r.driver.native_grants(&r.config).await?;
+        let grants = r.with_lifecycle(r.driver.native_grants(&r.config)).await?;
         for grant in grants {
             let decision = otto_rbac::resource_access::ResourceAccess::new(self.connections.pool())
                 .evaluate(
@@ -499,6 +542,7 @@ impl DbViewerService {
         r: &Resolved,
         execution: impl std::future::Future<Output = Result<T>>,
     ) -> Result<T> {
+        let execution = r.with_lifecycle(execution);
         tokio::pin!(execution);
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
@@ -538,6 +582,12 @@ impl DbViewerService {
         child: Option<&str>,
         operation: &str,
     ) -> Result<Resolved> {
+        let lifecycle = {
+            let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
+            let state = states.entry(conn_id.clone()).or_default();
+            state.token.check()?;
+            state.token.clone()
+        };
         let logical = self.connections.get(conn_id).await?;
         let (profile_id, scope) = crate::access::credential_profile(
             &self.connections.pool(),
@@ -573,6 +623,7 @@ impl DbViewerService {
         let engine = parsed.config.engine;
         let driver = self.registry.get(engine);
         let mut config = parsed.config;
+        config.lifecycle = Some(lifecycle.clone());
         if let Some(scope) = scope {
             let scope = format!(
                 "{}:{}:{}:{}",
@@ -595,7 +646,7 @@ impl DbViewerService {
             }
         }
         let tunnel = match parsed.ssh {
-            Some(ssh) => Some(self.tunnel_for(&profile_id, &ssh, &config, engine).await?),
+            Some(ssh) => Some(self.tunnel_for(conn_id, &ssh, &config, engine).await?),
             None => None,
         };
         if let Some(t) = &tunnel {
@@ -643,6 +694,8 @@ impl DbViewerService {
         // loops are retained for the daemon's lifetime.
         let key = config.cache_key();
         let stale = {
+            let _states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
+            lifecycle.check()?;
             let mut keys = self
                 .active_keys
                 .lock()
@@ -653,12 +706,19 @@ impl DbViewerService {
                 conn_id.clone()
             };
             match keys.insert(owner, (engine, key.clone())) {
-                Some((old_engine, old_key)) if old_key != key => Some((old_engine, old_key)),
+                Some((old_engine, old_key)) if old_key != key => self
+                    .registry
+                    .get(old_engine)
+                    .detach(&old_key)
+                    .map(|captured| (old_key, captured)),
                 _ => None,
             }
         };
-        if let Some((old_engine, old_key)) = stale {
-            self.registry.get(old_engine).close(&old_key).await;
+        if let Some((old_key, captured)) = stale {
+            tokio::spawn(async move {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), captured.close(&old_key)).await;
+            });
         }
         Ok(Resolved {
             driver,
@@ -676,46 +736,96 @@ impl DbViewerService {
     /// tab was purely client-side and the warm pool made a "closed" connection
     /// reconnect instantly (and hold backend connections forever).
     pub async fn close_connection(&self, conn_id: &Id) -> Result<()> {
-        // Cancel in-flight queries scoped to this connection.
-        let queries: Vec<_> = self
-            .in_flight
-            .lock()
-            .map(|m| {
-                m.values()
+        // All admission/ownership transitions are synchronous: cancellation of
+        // this caller cannot strand a retired slot between detach and cleanup.
+        let mut completion = {
+            let mut states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
+            let state = states.entry(conn_id.clone()).or_default();
+            if let Some(done) = &state.closing {
+                done.subscribe()
+            } else {
+                let queries: Vec<_> = self
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
                     .filter(|q| &q.conn_id == conn_id)
                     .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        for query in queries {
-            if let (Some(handle), Some(r)) = (query.token.handle(), query.resolved) {
-                let _ = r.driver.cancel(&r.config, &handle).await;
+                    .collect();
+                state.token.retire();
+                let (done, receiver) = tokio::sync::watch::channel(false);
+                state.closing = Some(done.clone());
+                let completion = CloseCompletion {
+                    registry: self.lifecycles.clone(),
+                    conn_id: conn_id.clone(),
+                    token: state.token.clone(),
+                    done,
+                };
+                let prefix = format!("{conn_id}\0");
+                let entries = {
+                    let mut keys = self.active_keys.lock().unwrap_or_else(|e| e.into_inner());
+                    let owners: Vec<_> = keys
+                        .keys()
+                        .filter(|k| *k == conn_id || k.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    owners
+                        .into_iter()
+                        .filter_map(|owner| keys.remove(&owner))
+                        .collect::<Vec<_>>()
+                };
+                let captured: Vec<_> = entries
+                    .into_iter()
+                    .filter_map(|(engine, key)| {
+                        self.registry
+                            .get(engine)
+                            .detach(&key)
+                            .map(|driver| (engine, key, driver))
+                    })
+                    .collect();
+                let tunnels = self.tunnels.remove_where(|key| key.starts_with(&prefix));
+                let phase_timeout = self.close_phase_timeout;
+                tokio::spawn(async move {
+                    let _completion = completion;
+                    let _tunnels = tunnels;
+                    let _ = tokio::time::timeout(phase_timeout, async {
+                        for query in queries {
+                            if let (Some(handle), Some(resolved)) =
+                                (query.token.handle(), query.resolved)
+                            {
+                                if let Some((_, _, driver)) =
+                                    captured.iter().find(|(engine, key, _)| {
+                                        *engine == resolved.config.engine
+                                            && *key == resolved.config.cache_key()
+                                    })
+                                {
+                                    let _ = driver.cancel(&resolved.config, &handle).await;
+                                }
+                            }
+                        }
+                    })
+                    .await;
+                    let _ = tokio::time::timeout(phase_timeout, async {
+                        for (_, key, driver) in &captured {
+                            driver.close(key).await;
+                        }
+                    })
+                    .await;
+                    // On timeout dropping this bundle releases only retired
+                    // ownership. No registry lookup can touch a fresh generation.
+                    drop(captured);
+                });
+                receiver
+            }
+        };
+        loop {
+            if *completion.borrow_and_update() {
+                return Ok(());
+            }
+            if completion.changed().await.is_err() {
+                return Ok(());
             }
         }
-        // Evict + close the driver-side cached handle for the key this
-        // connection last resolved to.
-        let entries = {
-            let mut keys = self
-                .active_keys
-                .lock()
-                .map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
-            let prefix = format!("{conn_id}\0");
-            let owners: Vec<_> = keys
-                .keys()
-                .filter(|key| *key == conn_id || key.starts_with(&prefix))
-                .cloned()
-                .collect();
-            owners
-                .into_iter()
-                .filter_map(|key| keys.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        for (engine, key) in entries {
-            self.registry.get(engine).close(&key).await;
-        }
-        // Drop the cached SSH tunnel — `SshTunnel::Drop` kills the ssh child.
-        self.tunnels.lock().await.remove(conn_id);
-        Ok(())
     }
 
     /// Get a live SSH tunnel for `conn_id`, reusing a cached one when it's still
@@ -732,10 +842,12 @@ impl DbViewerService {
     /// Returns the number of tunnels reaped.
     pub async fn reap_idle(&self) -> usize {
         let now = Instant::now();
-        let mut tunnels = self.tunnels.lock().await;
-        let before = tunnels.len();
-        tunnels.retain(|_, c| now.duration_since(c.last_used) <= TUNNEL_IDLE_TTL);
-        before - tunnels.len()
+        self.tunnels
+            .remove_ready_where(|_, cached| {
+                now.duration_since(*cached.last_used.lock().unwrap_or_else(|e| e.into_inner()))
+                    > TUNNEL_IDLE_TTL
+            })
+            .len()
     }
 
     async fn tunnel_for(
@@ -745,38 +857,49 @@ impl DbViewerService {
         config: &ResolvedConfig,
         engine: Engine,
     ) -> Result<Arc<SshTunnel>> {
-        let now = Instant::now();
-        let mut tunnels = self.tunnels.lock().await;
-
-        // Evict tunnels idle longer than the TTL (dropping kills their child).
-        tunnels.retain(|_, c| now.duration_since(c.last_used) <= TUNNEL_IDLE_TTL);
-
-        // Reuse a still-alive cached tunnel for this connection.
-        if let Some(cached) = tunnels.get_mut(conn_id) {
-            if cached.tunnel.is_alive() {
-                cached.last_used = now;
-                return Ok(Arc::clone(&cached.tunnel));
-            }
-            // Dead tunnel: drop it (kills the stale child) and fall through.
-            tunnels.remove(conn_id);
-        }
-
-        // Open a fresh tunnel and cache it. MongoDB uses a dynamic SOCKS5 proxy
-        // (the driver dials real hosts through it — see `resolve`); the
-        // single-endpoint engines use a local forward to the profile's endpoint.
-        let tunnel = Arc::new(if engine == Engine::Mongodb {
-            SshTunnel::open_socks(ssh).await?
-        } else {
-            SshTunnel::open(ssh, &config.host, config.port).await?
-        });
-        tunnels.insert(
-            conn_id.clone(),
-            CachedTunnel {
-                tunnel: Arc::clone(&tunnel),
-                last_used: now,
-            },
+        use sha2::{Digest, Sha256};
+        self.reap_idle().await;
+        let prefix = format!("{conn_id}\0");
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "{ssh:?}|{}|{}|{}",
+                engine.as_str(),
+                config.host,
+                config.port
+            ))
         );
-        Ok(tunnel)
+        let key = format!("{prefix}{fingerprint}");
+        // Fingerprint changes retire pending old setup; held query leases remain alive.
+        {
+            let _states = self.lifecycles.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(token) = config.lifecycle.as_ref() {
+                token.check()?;
+            }
+            self.tunnels
+                .remove_where(|old| old.starts_with(&prefix) && old != key);
+        }
+        let cached = self
+            .tunnels
+            .get_or_try_init(
+                key,
+                config.lifecycle.as_ref(),
+                |c| c.tunnel.is_alive(),
+                async {
+                    let tunnel = if engine == Engine::Mongodb {
+                        SshTunnel::open_socks(ssh).await?
+                    } else {
+                        SshTunnel::open(ssh, &config.host, config.port).await?
+                    };
+                    Ok(CachedTunnel {
+                        tunnel: Arc::new(tunnel),
+                        last_used: Arc::new(std::sync::Mutex::new(Instant::now())),
+                    })
+                },
+            )
+            .await?;
+        *cached.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        Ok(cached.tunnel)
     }
 
     pub async fn test(&self, conn_id: &Id, user_id: &Id) -> Result<TestResult> {
@@ -784,7 +907,7 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "configure")
             .await?;
-        r.driver.test(&r.config).await
+        r.with_lifecycle(r.driver.test(&r.config)).await
     }
 
     /// Probe an UNSAVED connection config — kind + params + optional plaintext
@@ -899,7 +1022,7 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
-        let nodes = r.driver.schema_root(&r.config).await?;
+        let nodes = r.with_lifecycle(r.driver.schema_root(&r.config)).await?;
         let mut visible = Vec::new();
         for node in nodes {
             if self
@@ -944,8 +1067,10 @@ impl DbViewerService {
         // An empty/whitespace filter is treated as "no filter".
         let filter = filter.map(str::trim).filter(|s| !s.is_empty());
         let result = r
-            .driver
-            .schema_children_with_counts(&r.config, &node, filter, counts)
+            .with_lifecycle(
+                r.driver
+                    .schema_children_with_counts(&r.config, &node, filter, counts),
+            )
             .await?;
         self.authorize(conn_id, user_id, Some(path), "db_browse")
             .await?;
@@ -970,7 +1095,9 @@ impl DbViewerService {
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "discover")
             .await?;
-        let mut result = r.driver.search_objects(&r.config, req).await?;
+        let mut result = r
+            .with_lifecycle(r.driver.search_objects(&r.config, req))
+            .await?;
         let mut visible = Vec::new();
         for hit in result.hits {
             if self
@@ -1010,8 +1137,10 @@ impl DbViewerService {
             .await?;
         let node = NodePath::parse(path);
         let mut result = r
-            .driver
-            .object_detail_with_opts(&r.config, &node, approx_row_count)
+            .with_lifecycle(
+                r.driver
+                    .object_detail_with_opts(&r.config, &node, approx_row_count),
+            )
             .await?;
         if self.is_enforced(conn_id).await? {
             let mut foreign_keys = Vec::new();
@@ -1133,11 +1262,17 @@ impl DbViewerService {
         let db_path = NodePath::parse(&format!("db:{schema}"));
         let mut object_nodes: Vec<SchemaNode> = Vec::new();
         let mut total_seen = 0usize;
-        for node in driver.schema_children(&cfg, &db_path, None).await? {
+        for node in r
+            .with_lifecycle(driver.schema_children(&cfg, &db_path, None))
+            .await?
+        {
             match node.kind {
                 NodeKind::Folder => {
                     let child = NodePath::parse(&node.id);
-                    for inner in driver.schema_children(&cfg, &child, None).await? {
+                    for inner in r
+                        .with_lifecycle(driver.schema_children(&cfg, &child, None))
+                        .await?
+                    {
                         // Only table-like objects belong on the ERD — skip routine
                         // folders (Procedures/Functions), whose children are
                         // stored procedures/functions, not diagrammable tables.
@@ -1181,7 +1316,12 @@ impl DbViewerService {
                 let cfg = cfg.clone();
                 async move {
                     let path = NodePath::parse(&node.id);
-                    let detail = driver.object_detail(&cfg, &path).await.ok();
+                    let operation = driver.object_detail(&cfg, &path);
+                    let detail = match cfg.lifecycle.as_ref() {
+                        Some(token) => token.run(operation).await,
+                        None => operation.await,
+                    }
+                    .ok();
                     (node, detail)
                 }
             })
@@ -1189,6 +1329,9 @@ impl DbViewerService {
             .collect()
             .await;
 
+        if let Some(token) = cfg.lifecycle.as_ref() {
+            token.check()?;
+        }
         let mut tables: Vec<GraphTable> = Vec::with_capacity(detail_results.len());
         let mut edges: Vec<GraphEdge> = Vec::new();
         for (node, maybe_detail) in detail_results {
@@ -1381,7 +1524,7 @@ impl DbViewerService {
         self.execution_access(conn_id, user_id, req).await?;
         self.check_resolved_scope(conn_id, user_id, req.node.as_deref(), "db_query", &r)
             .await?;
-        let execution = r.driver.run_tracked(&r.config, req, token);
+        let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, req, token));
         tokio::pin!(execution);
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         let result = loop {
@@ -1862,8 +2005,14 @@ impl DbViewerService {
                     .await?;
                 self.verify_native(conn_id, user_id, &r).await?;
                 let (inserted, batches) = r
-                    .driver
-                    .import_rows(&r.config, table, &parsed.columns, &rows, batch_size, None)
+                    .with_lifecycle(r.driver.import_rows(
+                        &r.config,
+                        table,
+                        &parsed.columns,
+                        &rows,
+                        batch_size,
+                        None,
+                    ))
                     .await?;
                 // Best-effort history entry (one row for the whole import).
                 let _ = self
@@ -1915,7 +2064,9 @@ impl DbViewerService {
         )
         .await?;
         self.verify_native(conn_id, user_id, &r).await?;
-        let result = r.driver.query_plan(&r.config, statement, node).await?;
+        let result = r
+            .with_lifecycle(r.driver.query_plan(&r.config, statement, node))
+            .await?;
         self.authorize(conn_id, user_id, node, "db_query").await?;
         Ok(result)
     }
@@ -2077,7 +2228,7 @@ impl DbViewerService {
             }
             return Ok(CompletionResponse { items });
         }
-        r.driver.completion(&r.config, ctx).await
+        r.with_lifecycle(r.driver.completion(&r.config, ctx)).await
     }
 
     /// Drop the cached completion snapshot for a connection so the next
@@ -2659,3 +2810,6 @@ mod tests {
         assert!(map.lock().unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

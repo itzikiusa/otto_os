@@ -20,6 +20,7 @@ use serde_json::json;
 
 fn cfg() -> ResolvedConfig {
     ResolvedConfig {
+        lifecycle: None,
         engine: Engine::Clickhouse,
         host: "127.0.0.1".into(),
         port: 18123,
@@ -291,6 +292,7 @@ async fn clickhouse_native_e2e() {
 
     // Native protocol, plaintext: docker forwards 9000 → 127.0.0.1:19000.
     let native_cfg = ResolvedConfig {
+        lifecycle: None,
         engine: Engine::Clickhouse,
         host: "127.0.0.1".into(),
         port: 19000,

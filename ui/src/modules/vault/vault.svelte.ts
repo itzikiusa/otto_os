@@ -1,3 +1,4 @@
+import { refreshVisibleTree } from './treeRefresh';
 // Vault module store — the docs home. One class instance holds the vault
 // list + selection, the lazy file tree, the open note (edit/read), panels,
 // and status polling (only while the page is visible).
@@ -357,27 +358,38 @@ class VaultStore {
 
   async loadRoot(): Promise<void> {
     if (!this.current) return;
-    const id = this.current.id;
-    const listing = await vaultDir(this.wsId, id, '');
-    if (this.current?.id !== id) return;
+    const id = this.current.id, wsId = this.wsId, sequence = ++this.treeRefreshSequence;
+    const listing = await vaultDir(wsId, id, '');
+    if (this.current?.id !== id || this.wsId !== wsId || sequence !== this.treeRefreshSequence) return;
     this.roots = mergeLevel(this.roots, listing.entries, 0);
   }
 
+  private directoryLoads = new WeakMap<TreeNode, object>();
+
   async toggleDir(node: TreeNode): Promise<void> {
+    this.invalidateTreeRefresh();
+    const owner = {};
+    this.directoryLoads.set(node, owner);
+    node.loading = false;
     node.open = !node.open;
     if (node.open && !node.loaded && this.current) {
+      const id = this.current.id, wsId = this.wsId, roots = this.roots;
+      const current = () => this.current?.id === id && this.wsId === wsId && this.roots === roots
+        && this.directoryLoads.get(node) === owner;
       node.loading = true;
       try {
-        const listing = await vaultDir(this.wsId, this.current.id, node.entry.path);
-        node.children = mergeLevel(node.children, listing.entries, node.depth + 1);
-        node.loaded = true;
+        const children = await refreshVisibleTree(node.children,
+          async path => (await vaultDir(wsId, id, path)).entries, current,
+          node.entry.path, node.depth + 1);
+        if (current()) { node.children = children; node.loaded = true; }
       } finally {
-        node.loading = false;
+        if (this.directoryLoads.get(node) === owner) node.loading = false;
       }
     }
   }
 
   collapseAll(): void {
+    this.invalidateTreeRefresh();
     const visit = (nodes: TreeNode[]) => {
       for (const n of nodes) {
         n.open = false;
@@ -393,24 +405,34 @@ class VaultStore {
     const visit = (nodes: TreeNode[]) => {
       for (const n of nodes) {
         out.push(n);
-        if (n.entry.kind === 'dir' && n.open) visit(n.children);
+        if (n.entry.kind === 'dir' && n.open && n.loaded) visit(n.children);
       }
     };
     visit(this.roots);
     return out;
   }
 
-  private treeRefreshing = false;
+  private invalidateTreeRefresh(): void {
+    ++this.treeRefreshSequence;
+    if (this.treeRefreshing) this.treeRefreshPending = true;
+  }
 
-  /** Refresh every loaded level (after create/rename/delete or a scan).
-   *  Overlap-guarded: during an agent write burst the 5s status poll can
-   *  request refreshes faster than a deep tree walks — drop, don't stack
-   *  (the next poll refreshes again anyway). */
+  private treeRefreshing = false;
+  private treeRefreshPending = false;
+  private treeRefreshSequence = 0;
+
+  /** Coalesce invalidations, keeping one follow-up if a generation arrives
+   * while requests are running. Collapsed branches reload when opened. */
   async refreshTree(): Promise<void> {
-    if (!this.current || this.treeRefreshing) return;
+    if (!this.current) return;
+    this.treeRefreshPending = true;
+    if (this.treeRefreshing) return;
     this.treeRefreshing = true;
     try {
-      await this.refreshTreeInner();
+      while (this.treeRefreshPending && this.current) {
+        this.treeRefreshPending = false;
+        await this.refreshTreeInner();
+      }
     } finally {
       this.treeRefreshing = false;
     }
@@ -418,19 +440,11 @@ class VaultStore {
 
   private async refreshTreeInner(): Promise<void> {
     if (!this.current) return;
-    const id = this.current.id;
-    const refresh = async (nodes: TreeNode[], path: string, depth: number): Promise<TreeNode[]> => {
-      const listing = await vaultDir(this.wsId, id, path);
-      const merged = mergeLevel(nodes, listing.entries, depth);
-      for (const n of merged) {
-        if (n.entry.kind === 'dir' && n.loaded) {
-          n.children = await refresh(n.children, n.entry.path, depth + 1);
-        }
-      }
-      return merged;
-    };
-    const roots = await refresh(this.roots, '', 0);
-    if (this.current?.id === id) this.roots = roots;
+    const id = this.current.id, wsId = this.wsId, sequence = ++this.treeRefreshSequence;
+    const current = () => this.current?.id === id && this.wsId === wsId && sequence === this.treeRefreshSequence;
+    const roots = await refreshVisibleTree(this.roots,
+      async path => (await vaultDir(wsId, id, path)).entries, current);
+    if (current()) this.roots = roots;
   }
 
   // -- note open / edit / save -----------------------------------------------------

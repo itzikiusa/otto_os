@@ -18,8 +18,15 @@
     overscan?: number;
     row: Snippet<[T, number]>;
     class?: string;
+    /** Optional keyboard-controlled row. Pinning keeps its ARIA target mounted. */
+    pinnedIndex?: number;
+    tabindex?: -1;
+    scrollIndex?: number;
+    scrollVersion?: number;
+    key?: (item: T, index: number) => string | number;
   }
-  let { items, estimateHeight, overscan = 6, row, class: cls = '' }: Props = $props();
+  let { items, estimateHeight, overscan = 6, row, class: cls = '', pinnedIndex = -1, scrollIndex = -1, scrollVersion = 0, key, tabindex }: Props = $props();
+  let viewport: HTMLDivElement | undefined = $state();
 
   let scrollTop = $state(0);
   let clientH = $state(0);
@@ -31,18 +38,35 @@
   );
   const slice = $derived(items.slice(start, start + count));
 
+  $effect(() => {
+    void scrollVersion;
+    const index = scrollIndex;
+    if (!viewport || index < 0 || index >= items.length) return;
+    const top = index * estimateHeight;
+    const bottom = top + estimateHeight;
+    if (top < viewport.scrollTop) viewport.scrollTop = top;
+    else if (bottom > viewport.scrollTop + (clientH || 600)) viewport.scrollTop = bottom - (clientH || 600);
+    scrollTop = viewport.scrollTop;
+  });
+
   function onScroll(e: Event): void {
     scrollTop = (e.currentTarget as HTMLElement).scrollTop;
   }
 </script>
 
-<div class="vlist {cls}" bind:clientHeight={clientH} onscroll={onScroll}>
+<!-- svelte-ignore a11y_no_noninteractive_tabindex (Only -1 is accepted to opt out of the browser scroll-container tab stop.) -->
+<div class="vlist {cls}" {tabindex} bind:this={viewport} bind:clientHeight={clientH} onscroll={onScroll}>
   <div class="vlist-sizer" style="height:{total}px">
     <div class="vlist-win" style="transform:translateY({start * estimateHeight}px)">
-      {#each slice as item, i (start + i)}
+      {#each slice as item, i (key ? key(item, start + i) : start + i)}
         {@render row(item, start + i)}
       {/each}
     </div>
+    {#if pinnedIndex >= 0 && pinnedIndex < items.length && (pinnedIndex < start || pinnedIndex >= start + count)}
+      <div class="vlist-pin" style="top:{pinnedIndex * estimateHeight}px">
+        {@render row(items[pinnedIndex], pinnedIndex)}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -55,6 +79,7 @@
     position: relative;
     width: 100%;
   }
+  .vlist-pin { position: absolute; inset-inline: 0; }
   .vlist-win {
     position: absolute;
     top: 0;

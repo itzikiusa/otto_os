@@ -342,7 +342,9 @@
         <p class="empty-line dim">Loading…</p>
       {:else if shown === 0}
         <p class="empty-line dim">
-          {history.entries.length === 0
+          {history.hasMore
+            ? 'No matches in this part of history. Load more to keep looking.'
+            : history.entries.length === 0
             ? 'No conversations yet. Run claude or codex in this workspace, or rescan to pick up transcripts already on disk.'
             : 'Nothing matches these filters.'}
         </p>
@@ -399,11 +401,11 @@
             {/if}
           </div>
         {/each}
-        {#if history.hasMore}
-          <button class="more" onclick={() => void history.loadMore()} disabled={history.loadingMore}>
-            {history.loadingMore ? 'Loading…' : 'Load older'}
-          </button>
-        {/if}
+      {/if}
+      {#if history.hasMore && !history.loading}
+        <button class="more" onclick={() => void history.loadMore()} disabled={history.loadingMore}>
+          {history.loadingMore ? 'Loading…' : 'Load more'}
+        </button>
       {/if}
     </div>
   </aside>

@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use otto_core::Result;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
@@ -44,12 +44,12 @@ use crate::types::{
 /// - Native: an `Arc<klickhouse::Client>` (a long-lived multiplexed connection;
 ///   reusing it across calls avoids re-handshaking the native protocol + TLS).
 ///
-/// Both caches are `Mutex<HashMap>` and so `Default`-constructible, keeping the
+/// Both caches use per-key initialization slots and are Default-constructible, keeping the
 /// `#[derive(Default)]` the registry relies on.
 #[derive(Default)]
 pub struct ClickhouseDriver {
-    clients: Mutex<HashMap<String, reqwest::Client>>,
-    native: Mutex<HashMap<String, Arc<klickhouse::Client>>>,
+    clients: ResourceCache<reqwest::Client>,
+    native: ResourceCache<Arc<klickhouse::Client>>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
 }
@@ -324,14 +324,11 @@ impl ClickhouseDriver {
     /// *first* builds for the same key; cache hits return immediately. A
     /// `reqwest::Client` clone is cheap (shares the inner connection pool).
     async fn client(&self, cfg: &ResolvedConfig) -> Result<reqwest::Client> {
-        let cache_key = cfg.cache_key();
-        let mut cache = self.clients.lock().await;
-        if let Some(client) = cache.get(&cache_key) {
-            return Ok(client.clone());
-        }
-        let client = build_client(cfg)?;
-        cache.insert(cache_key, client.clone());
-        Ok(client)
+        self.clients
+            .get_or_try_init(cfg.cache_key(), cfg.lifecycle.as_ref(), |_| true, async {
+                build_client(cfg)
+            })
+            .await
     }
 
     /// Build a [`Conn`] for one operation: the cached `reqwest::Client` plus the
@@ -359,7 +356,16 @@ impl ClickhouseDriver {
         timeout_secs: Option<u64>,
     ) -> Result<Conn> {
         let client = self.client(cfg).await?;
+        Self::connection_from_client(cfg, active_db, query_id, timeout_secs, client)
+    }
 
+    fn connection_from_client(
+        cfg: &ResolvedConfig,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+        client: reqwest::Client,
+    ) -> Result<Conn> {
         let scheme = if cfg.tls.enabled() { "https" } else { "http" };
         // Through an SSH tunnel the service rewrites host→127.0.0.1; use the
         // ORIGINAL hostname in the URL so the TLS SNI + Host header are the real
@@ -408,18 +414,14 @@ impl ClickhouseDriver {
     /// reuse it. A closed (dropped/broken) connection is transparently
     /// reopened: if the cached client reports closed, we discard and rebuild.
     async fn native_client(&self, cfg: &ResolvedConfig) -> Result<Arc<klickhouse::Client>> {
-        let cache_key = cfg.cache_key();
-        let mut cache = self.native.lock().await;
-        if let Some(client) = cache.get(&cache_key) {
-            if !client.is_closed() {
-                return Ok(client.clone());
-            }
-            // Stale handle — drop it and open a fresh connection below.
-            cache.remove(&cache_key);
-        }
-        let client = Arc::new(native_connect(cfg).await?);
-        cache.insert(cache_key, client.clone());
-        Ok(client)
+        self.native
+            .get_or_try_init(
+                cfg.cache_key(),
+                cfg.lifecycle.as_ref(),
+                |client| !client.is_closed(),
+                async { Ok(Arc::new(native_connect(cfg).await?)) },
+            )
+            .await
     }
 
     /// Run one SQL statement over the native protocol and normalize the decoded
@@ -1649,9 +1651,21 @@ impl Driver for ClickhouseDriver {
     /// a config change superseded them). Dropping the `reqwest::Client` releases
     /// its keep-alive pool; dropping the last `Arc<klickhouse::Client>` closes
     /// the native connection. Also drops the matching completion snapshot.
+    fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        let captured = Self::default();
+        for (key, value) in self.clients.take_where(|key| key == cache_key) {
+            captured.clients.insert_ready(key, value);
+        }
+        for (key, value) in self.native.take_where(|key| key == cache_key) {
+            captured.native.insert_ready(key, value);
+        }
+        self.completions.invalidate(cache_key);
+        Some(std::sync::Arc::new(captured))
+    }
+
     async fn close(&self, cache_key: &str) {
-        self.clients.lock().await.remove(cache_key);
-        self.native.lock().await.remove(cache_key);
+        self.clients.remove(cache_key);
+        self.native.remove(cache_key);
         self.completions.invalidate(cache_key);
     }
 
@@ -1732,7 +1746,10 @@ impl Driver for ClickhouseDriver {
         let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
         // Best-effort: a no-match KILL is a successful no-op; don't surface a
         // transient error as a cancel failure.
-        let _ = self.query_text(cfg, &sql).await;
+        if let Some(client) = self.clients.get_ready(&cfg.cache_key()) {
+            let conn = Self::connection_from_client(cfg, None, None, None, client)?;
+            let _ = conn.query_raw(&sql).await;
+        }
         Ok(())
     }
 
@@ -2165,6 +2182,7 @@ mod tests {
 
     fn base_cfg(port: u16) -> ResolvedConfig {
         ResolvedConfig {
+            lifecycle: None,
             engine: Engine::Clickhouse,
             host: "127.0.0.1".into(),
             port,

@@ -64,17 +64,37 @@ function varApi(vars: Record<string, string>) {
   };
 }
 
+export const SCRIPT_OUTPUT_ENTRIES = 1000;
+export const SCRIPT_OUTPUT_BYTES = 256 * 1024;
+
+class ScriptBudgetError extends Error {
+  constructor() { super('Script output budget exceeded (1000 entries / 256 KiB).'); this.name = 'ScriptBudgetError'; }
+}
+
 function run(code: string, pm: unknown): ScriptRun {
   const logs: string[] = [];
-  const consoleProxy = {
-    log: (...a: unknown[]) => logs.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
-    error: (...a: unknown[]) => logs.push('ERROR: ' + a.map(String).join(' ')),
-    warn: (...a: unknown[]) => logs.push('WARN: ' + a.map(String).join(' ')),
-    info: (...a: unknown[]) => logs.push(a.map(String).join(' ')),
-  };
   const tests: TestResult[] = [];
-  (pm as { __tests: TestResult[] }).__tests = tests;
+  let entries = 0, bytes = 0;
+  const charge = (text: string) => {
+    // UTF-16 size is a conservative retained-text budget, without allocating an
+    // encoded copy of an arbitrarily large console argument.
+    const size = text.length * 2;
+    if (entries >= SCRIPT_OUTPUT_ENTRIES || size > SCRIPT_OUTPUT_BYTES - bytes) throw new ScriptBudgetError();
+    entries++; bytes += size;
+  };
+  const log = (text: string) => { charge(text); logs.push(text); };
+  const consoleProxy = {
+    log: (...a: unknown[]) => log(a.map((x) => typeof x === 'string' ? x : JSON.stringify(x)).join(' ')),
+    error: (...a: unknown[]) => log('ERROR: ' + a.map(String).join(' ')),
+    warn: (...a: unknown[]) => log('WARN: ' + a.map(String).join(' ')),
+    info: (...a: unknown[]) => log(a.map(String).join(' ')),
+  };
+  (pm as { __recordTest: (test: TestResult) => void }).__recordTest = (test) => {
+    charge(test.name + (test.error ?? '')); tests.push(test);
+  };
   try {
+    // Executed in a dedicated Worker by interactive callers. This pure runtime
+    // also supports bounded unit fixtures; it is not a security sandbox.
     // eslint-disable-next-line no-new-func
     const fn = new Function('pm', 'console', code);
     fn(pm, consoleProxy);
@@ -129,20 +149,20 @@ export function runPostResponse(code: string, resp: ResponseCtx, vars: Record<st
     text: () => resp.bodyText,
     json: () => JSON.parse(resp.bodyText),
   };
-  const pm: { __tests: TestResult[]; [k: string]: unknown } = {
-    __tests: [],
+  const pm: { __recordTest: (test: TestResult) => void; [k: string]: unknown } = {
+    __recordTest: () => {},
     environment: v,
     variables: v,
     globals: v,
     expect,
     response,
     test: (name: string, fn: () => void) => {
-      try {
-        fn();
-        pm.__tests.push({ name, passed: true });
-      } catch (e) {
-        pm.__tests.push({ name, passed: false, error: e instanceof Error ? e.message : String(e) });
+      let result: TestResult = { name: String(name), passed: true };
+      try { fn(); } catch (e) {
+        if (e instanceof ScriptBudgetError) throw e;
+        result = { name: String(name), passed: false, error: e instanceof Error ? e.message : String(e) };
       }
+      pm.__recordTest(result);
     },
   };
   return run(code, pm);

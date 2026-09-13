@@ -850,27 +850,46 @@ impl LocalGit {
     /// probed for uncommitted changes (best-effort; prunable entries are
     /// skipped — their directory is gone). The first entry is the main worktree.
     pub async fn worktree_list(&self) -> Result<Vec<WorktreeInfo>> {
-        let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
-        let mut wts = crate::parse::parse_worktree_list(&out);
-        for wt in wts.iter_mut().filter(|w| !w.prunable) {
-            wt.dirty = self.path_has_changes(&wt.path).await;
-        }
-        Ok(wts)
+        self.worktree_list_with_budgets(
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(10),
+        )
+        .await
     }
 
-    /// True when the git tree at `path` has uncommitted changes (staged,
-    /// unstaged or untracked). Errors (missing dir, not a repo) read as clean —
-    /// this feeds a UI hint, not a safety gate (`worktree remove` re-checks).
-    async fn path_has_changes(&self, path: &str) -> bool {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(["status", "--porcelain", "--untracked-files=normal"])
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .output()
-            .await;
-        matches!(out, Ok(o) if o.status.success() && !o.stdout.is_empty())
+    async fn worktree_list_with_budgets(
+        &self,
+        probe_budget: std::time::Duration,
+        phase_budget: std::time::Duration,
+    ) -> Result<Vec<WorktreeInfo>> {
+        static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let admission = ADMISSION
+            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)))
+            .clone();
+        let out = self.run_read(&["worktree", "list", "--porcelain"]).await?;
+        let mut rows = crate::parse::parse_worktree_list(&out);
+        let bin = self.git_bin.clone();
+        crate::worktree_probe::probe(&mut rows, admission, phase_budget, move |path| {
+            let git = LocalGit::new(path)
+                .with_git_bin(bin.clone())
+                .with_budget(probe_budget);
+            async move {
+                // The subprocess itself checks the worktree. Avoid a separate
+                // filesystem metadata await before this optional bounded probe.
+                let mut cmd = git.base_cmd();
+                cmd.args(["status", "--porcelain", "--untracked-files=normal"]);
+                match git
+                    .spawn_output(cmd, SpawnClass::LocalRead, "status", None)
+                    .await
+                {
+                    Ok(out) if out.status.success() => Some(!out.stdout.is_empty()),
+                    _ => None,
+                }
+            }
+        })
+        .await;
+        Ok(rows)
     }
 
     /// User-facing worktree removal: surfaces git's error (unlike the reaper's
@@ -4808,6 +4827,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn worktree_probes_distinguish_known_clean_and_dirty() {
+        let (tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        let wt = tmp.path().join("linked");
+        git.worktree_add(wt.to_str().unwrap(), "other", "HEAD")
+            .await
+            .unwrap();
+        write(&wt, "untracked.txt", "changes");
+        let rows = git.worktree_list().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].dirty);
+        assert!(rows[1].dirty);
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap()["dirty_known"], true);
+        assert_eq!(serde_json::to_value(&rows[1]).unwrap()["dirty_known"], true);
+    }
+
+    #[tokio::test]
+    async fn worktree_probe_failure_is_unknown_and_uses_configured_git() {
+        let (tmp, dir) = fixture_on_branch("main");
+        let bin = shim(
+            tmp.path(),
+            "probe-git",
+            "if [ \"$1\" = status ]; then exit 1; fi\nexec git \"$@\"",
+        );
+        let rows = LocalGit::new(&dir)
+            .with_git_bin(bin)
+            .worktree_list()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].dirty);
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap()["dirty_known"],
+            false
+        );
+    }
+
     /// Write an executable `sh` shim and return its path. `body` runs with the
     /// repo as cwd (`base_cmd` sets `current_dir`).
     fn shim(tmp: &Path, name: &str, body: &str) -> PathBuf {
@@ -4856,6 +4913,25 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn worktree_probe_timeout_keeps_cleanup_after_response() {
+        let (tmp, dir) = fixture_on_branch("main");
+        let bin = shim(tmp.path(), "slow-status", "if [ \"$1\" != status ]; then exec git \"$@\"; fi\ntrap '' TERM\nsleep 30 &\necho $! > shim-pids\necho $$ >> shim-pids\nwait");
+        let rows = LocalGit::new(&dir)
+            .with_git_bin(bin)
+            .worktree_list_with_budgets(
+                SHIM_BUDGET,
+                SHIM_BUDGET + std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].dirty_known && !rows[0].dirty);
+        let pids = shim_pids(&dir.join("shim-pids"));
+        assert_eq!(pids.len(), 2);
+        wait_dead(&pids, std::time::Duration::from_secs(5)).await;
     }
 
     /// A spawn that overruns its budget is SIGTERMed as a GROUP, so the helper

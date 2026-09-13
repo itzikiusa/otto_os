@@ -2467,6 +2467,8 @@ export interface WorktreeInfo {
   prunable: boolean;
   /** Best-effort uncommitted-changes probe (false when unknown). */
   dirty: boolean;
+  /** False/absent when status could not be determined; never force-safe. */
+  dirty_known?: boolean;
 }
 
 /** One `git submodule status` entry + `.gitmodules` config. Fed by
@@ -4106,6 +4108,19 @@ export interface ApiEnvironment {
   created_at: string;
 }
 
+/** Metadata-only list item; fetch history/{id} before replaying a request. */
+export interface ApiHistorySummary {
+  id: Id;
+  workspace_id: Id;
+  method: string;
+  url: string;
+  status: number | null;
+  duration_ms: number | null;
+  executed_at: string;
+  request_id: string | null;
+  source: {kind: string; session_id: string | null; via: string | null};
+}
+
 export interface ApiHistoryEntry {
   id: Id;
   workspace_id: Id;
@@ -4776,6 +4791,10 @@ export interface NodeActivity {
 }
 
 export interface NodeRunState {
+  /** Present on a lightweight summary; expand to fetch this exact body version. */
+  detail_version?: string;
+  log_count?: number;
+  has_output?: boolean;
   node_id: string;
   status: NodeStatus;
   output?: unknown;
@@ -4794,6 +4813,12 @@ export interface NodeRunState {
 }
 
 export interface WorkflowRun {
+  /** Additive progress response; input/output/log bodies are absent. */
+  summary?: boolean;
+  checkpoint_rev?: number;
+  checkpoint_generation?: number;
+  checkpoint_count?: number;
+  checkpoint_done?: number;
   /** Durable loop attempt records; populated by the run detail endpoint. */
   checkpoints?: WorkflowCheckpoint[];
   id: Id;
@@ -4834,6 +4859,9 @@ export interface WorkflowRun {
 }
 
 export interface WorkflowCheckpoint {
+  detail_version?: string;
+  log_count?: number;
+  has_output?: boolean;
   node_id: string;
   loop_id: string;
   iteration: number;
@@ -5932,6 +5960,7 @@ export interface VaultNoteMeta {
   reserved: boolean;
   has_frontmatter: boolean;
   parse_error: boolean;
+  content_index_status?: 'full' | 'size_limited';
 }
 
 export interface VaultOutgoingLink {
@@ -7993,8 +8022,13 @@ export type Block =
 
 export type HistoryStatus = 'running' | 'idle' | 'exited' | 'reconnectable' | 'on_disk';
 
-/** One row of `GET /workspaces/{wid}/history` — Otto sessions merged with
- *  transcripts found on disk that no session row claims (`status: 'on_disk'`). */
+/** Bounded metadata page; a non-null cursor can accompany an empty result. */
+export interface HistoryPage {
+  entries: HistoryEntry[];
+  next_cursor: string | null;
+}
+
+/** One history row: an Otto session or an unclaimed on-disk transcript. */
 export interface HistoryEntry {
   session_id: string | null;
   provider: 'claude' | 'codex';
@@ -8517,3 +8551,13 @@ export interface ConnectionExportResult {
   warnings: string[];
   import_instructions: string;
 }
+
+/** Conditional workflow summaries use 200 for both changed and unchanged. */
+export type WorkflowProgressResponse = {changed: false; rev: number} | {changed: true; rev: number; run: WorkflowRun};
+export interface WorkflowCheckpointPage {
+  checkpoint_rev: number;
+  generation: number;
+  items: WorkflowCheckpoint[];
+  next_cursor: string | null;
+}
+export interface WorkflowDetail<T> {rev: number; detail_version: string; body: T}

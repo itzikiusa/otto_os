@@ -21,7 +21,7 @@
       if (r) apiClient.loadRequestIntoDraft(r);
     } else if (v.startsWith('h:')) {
       const h = apiClient.history.find((x) => x.id === v.slice(2));
-      if (h) apiClient.loadHistoryIntoDraft(h);
+      if (h) void apiClient.selectHistory(h.id);
     } else if (v === 'new') {
       apiClient.newDraft();
     }
@@ -30,6 +30,7 @@
 </script>
 
 <div class="panel">
+  {#if apiClient.historyLoadingId}<span role="status">Loading history request…</span>{/if}
   <div class="picker-row">
     <select class="input picker" onchange={onPick} aria-label="Load request">
       <option value="">Load…</option>

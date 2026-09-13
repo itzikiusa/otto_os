@@ -83,6 +83,7 @@ pub mod swarm_runtime;
 pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_workspace;
+pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod turn_oracle;
 pub mod vault_docs_agent;

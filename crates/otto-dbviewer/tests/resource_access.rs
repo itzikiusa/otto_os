@@ -280,6 +280,7 @@ async fn native_fixture(kind: ConnectionKind, env: &str) {
         .is_err());
     // Native direct driver query also fails: Otto's parser is not the boundary.
     let config = otto_dbviewer::ResolvedConfig {
+        lifecycle: None,
         engine: if kind == ConnectionKind::Mysql {
             otto_dbviewer::Engine::Mysql
         } else {

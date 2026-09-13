@@ -21,8 +21,8 @@ use otto_core::api::{
     UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq, UpsertApiRequestReq,
 };
 use otto_core::domain::{
-    ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiRequest, Connection,
-    ConnectionKind, WorkspaceRole,
+    ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySummary, ApiRequest,
+    Connection, ConnectionKind, WorkspaceRole,
 };
 use otto_core::event::Event;
 use otto_core::{Error, Id};
@@ -876,6 +876,34 @@ pub struct HistoryFilter {
     pub source: Option<String>,
 }
 
+fn history_query(filter: HistoryFilter) -> ApiHistoryQuery {
+    ApiHistoryQuery {
+        limit: filter
+            .limit
+            .unwrap_or(HISTORY_DEFAULT)
+            .clamp(1, HISTORY_MAX),
+        q: filter.q,
+        status: filter.status,
+        request_id: filter.request_id,
+        source: filter.source,
+    }
+}
+
+/// Additive metadata projection; retained replay bodies remain in detail/full history.
+pub async fn list_history_summaries(
+    Path(wid): Path<Id>,
+    Query(filter): Query<HistoryFilter>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<ApiHistorySummary>>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        repo(&ctx)
+            .list_history_summaries(&wid, &history_query(filter))
+            .await?,
+    ))
+}
+
 /// `GET /workspaces/{wid}/api-client/history` (optional filters)
 pub async fn list_history(
     Path(wid): Path<Id>,
@@ -884,22 +912,9 @@ pub async fn list_history(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<ApiHistoryEntry>>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let limit = filter
-        .limit
-        .unwrap_or(HISTORY_DEFAULT)
-        .clamp(1, HISTORY_MAX);
     Ok(Json(
         repo(&ctx)
-            .list_history_filtered(
-                &wid,
-                &ApiHistoryQuery {
-                    limit,
-                    q: filter.q,
-                    status: filter.status,
-                    request_id: filter.request_id,
-                    source: filter.source,
-                },
-            )
+            .list_history_filtered(&wid, &history_query(filter))
             .await?,
     ))
 }
@@ -3843,5 +3858,23 @@ mod tests {
         assert!(merged_auth_for_update(&Value::Null).is_none());
         let incoming = json!({"type":"none"});
         assert_eq!(merged_auth_for_update(&incoming), Some(incoming));
+    }
+    #[test]
+    fn history_summary_query_limits_keep_existing_contract() {
+        for (requested, expected) in [(None, 100), (Some(0), 1), (Some(-2), 1), (Some(800), 500)] {
+            let filter = HistoryFilter {
+                limit: requested,
+                q: Some("literal_a%".into()),
+                status: Some(201),
+                request_id: Some("req".into()),
+                source: Some("agent".into()),
+            };
+            let query = history_query(filter);
+            assert_eq!(query.limit, expected);
+            assert_eq!(query.q.as_deref(), Some("literal_a%"));
+            assert_eq!(query.status, Some(201));
+            assert_eq!(query.request_id.as_deref(), Some("req"));
+            assert_eq!(query.source.as_deref(), Some("agent"));
+        }
     }
 }

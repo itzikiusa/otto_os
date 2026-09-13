@@ -1,14 +1,17 @@
 <script lang="ts">
   // Reusable run detail: every step of a WorkflowRun with its status, duration,
   // logs, error, and rendered "work product" (agent reply / JSON).
+  import {untrack, onDestroy} from 'svelte';
+  import {RunBodyCache, mergeCheckpointPage} from './runProgress';
+  import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
   import { router } from '../../lib/router.svelte';
-  import { retryRunNode } from '../../lib/api/workflows';
-  import type { WorkflowRun, NodeRunState } from '../../lib/api/types';
+  import { workflowNodeDetail, workflowCheckpointDetail, workflowCheckpointPage, retryRunNode } from '../../lib/api/workflows';
+  import type { WorkflowRun, NodeRunState, WorkflowCheckpoint, WorkflowCheckpointPage } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
@@ -21,8 +24,9 @@
     /** Merge a fresh run snapshot into the viewed run (e.g. after a step retry
      *  flips it back to running). When omitted, the WS/poll sync catches up. */
     onRunUpdated?: (run: WorkflowRun) => void;
+    onRefresh?: () => void;
   }
-  let { run, nodeName = (id) => id, onOpenSession, onRunUpdated }: Props = $props();
+  let { run, nodeName = (id) => id, onOpenSession, onRunUpdated, onRefresh }: Props = $props();
 
   // Expansion is USER-owned, id-keyed state: a step that errors auto-opens once
   // (error visibility), but a manual toggle always wins afterward — live run
@@ -116,7 +120,10 @@
    *  so land the user in the repo's git view (which surfaces its reviews) when
    *  the repo is resolvable; otherwise the git module. The review id is in the
    *  link tooltip. */
-  function openReview(out: unknown): void {
+  async function openReview(out: unknown): Promise<void> {
+    if (!repoIdOf(out) && run.summary) {
+      try {const full = await api.get<WorkflowRun>(`/workflow-runs/${encodeURIComponent(run.id)}`); if (full.id === run.id) run.input = full.input;} catch { /* Fall back to the Git overview. */ }
+    }
     const repo = repoIdOf(out);
     router.go(repo ? `git/${repo}` : 'git');
   }
@@ -168,6 +175,111 @@
   // "Zoom in on a specific step" (R6): open the step's full logs + work product
   // in a large modal, so a big JSON config/output is actually readable.
   let zoomed = $state<NodeRunState | null>(null);
+
+  const bodies = new RunBodyCache();
+  let bodyTick = $state(0);
+  let bodyLoading = $state<Record<string,boolean>>({});
+  let bodyErrors = $state<Record<string,string>>({});
+  const attempted = new Set<string>();
+  let detailRun: string | null = null;
+  let detailGeneration: number | undefined;
+  let checkpointOpen = $state(false);
+  let checkpointPages = $state<{cursor?:string; page:WorkflowCheckpointPage}[]>([]);
+  let checkpointPageIndex = $state(0);
+  let checkpointLoading = $state(false);
+  let checkpointError = $state('');
+  let checkpointExpanded = $state<Record<string,boolean>>({});
+  let loadedCheckpoints = $state<WorkflowCheckpoint[]>([]);
+  const checkpointRowVersions = new Map<string, number>();
+  let checkpointRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  function queueCheckpointRefresh(): void {
+    if (checkpointRefreshTimer || !checkpointOpen) return;
+    checkpointRefreshTimer = setTimeout(() => {
+      checkpointRefreshTimer = null;
+      if (checkpointOpen) void loadCheckpointPage();
+    }, 1000);
+  }
+  onDestroy(() => { if (checkpointRefreshTimer) clearTimeout(checkpointRefreshTimer); checkpointRequest++; });
+  let checkpointRefreshQueued = false;
+  let checkpointRequest = 0;
+  const checkpointRows = $derived(checkpointPages[checkpointPageIndex]?.page.items ?? run.checkpoints ?? []);
+
+  function displayedNode(summary:NodeRunState):NodeRunState {
+    void bodyTick;
+    if (!summary.detail_version) return summary;
+    return bodies.get<NodeRunState>(run.id,`n:${summary.node_id}`,summary.detail_version) ?? summary;
+  }
+  function displayedCheckpoint(summary:WorkflowCheckpoint):WorkflowCheckpoint {
+    void bodyTick;
+    return summary.detail_version ? bodies.get<WorkflowCheckpoint>(run.id,`c:${summary.node_id}`,summary.detail_version) ?? summary : summary;
+  }
+  async function loadBody(summary:NodeRunState | WorkflowCheckpoint, checkpoint=false, retry=false):Promise<void> {
+    const version=summary.detail_version;
+    if (!version) return;
+    const id=run.id, key=`${checkpoint?'c':'n'}:${summary.node_id}`, attempt=`${id}:${key}:${version}`;
+    if (bodies.get(id,key,version) || (!retry && attempted.has(attempt))) return;
+    attempted.add(attempt); bodyLoading[key]=true; delete bodyErrors[key];
+    try {
+      const result=checkpoint ? await workflowCheckpointDetail(id,summary.node_id) : await workflowNodeDetail(id,summary.node_id);
+      if (run.id !== id) return;
+      const current=checkpoint ? (run.summary ? loadedCheckpoints : run.checkpoints)?.find(c=>c.node_id===summary.node_id) : run.nodes.find(n=>n.node_id===summary.node_id);
+      if (current?.detail_version !== result.detail_version) {onRefresh?.();return;}
+      bodies.put(id,key,result.detail_version,result.body); attempted.delete(attempt); bodyTick++;
+    } catch(e) {if(run.id===id) bodyErrors[key]=e instanceof Error?e.message:String(e);}
+    finally {if(run.id===id) bodyLoading[key]=false;}
+  }
+  async function loadCheckpointPage(index=checkpointPageIndex):Promise<void> {
+    if (!run.summary) return;
+    if (checkpointLoading) {checkpointRefreshQueued=true;return;}
+    const id=run.id, generation=run.checkpoint_generation;
+    const cursor=index===0?undefined:checkpointPages[index]?.cursor ?? checkpointPages[index-1]?.page.next_cursor ?? undefined;
+    if(index>0 && !cursor) return;
+    const request=++checkpointRequest;
+    checkpointLoading=true;checkpointError='';
+    try {
+      const page=await workflowCheckpointPage(id,cursor);
+      if(run.id!==id || run.checkpoint_generation!==generation || checkpointRequest!==request) return;
+      if(page.generation !== generation) return;
+      const merged=mergeCheckpointPage(page,loadedCheckpoints,checkpointRowVersions);
+      checkpointPages[index]={cursor,page:{...page,items:merged.items}}; checkpointPageIndex=index;
+      loadedCheckpoints=merged.known;
+      if(page.checkpoint_rev < (run.checkpoint_rev??0)) checkpointRefreshQueued=true;
+    } catch(e) {if(run.id===id && checkpointRequest===request) checkpointError=e instanceof Error?e.message:String(e);}
+    finally {
+      if(run.id===id && checkpointRequest===request) {checkpointLoading=false;if(checkpointRefreshQueued && checkpointOpen){checkpointRefreshQueued=false;queueCheckpointRefresh();}}
+    }
+  }
+  $effect(() => {
+    const id=run.id, generation=run.checkpoint_generation;
+    if(detailRun!==id || detailGeneration!==generation) {
+      const newRun=detailRun!==id;
+      detailRun=id;detailGeneration=generation;
+      bodies.clear();attempted.clear();bodyLoading={};bodyErrors={};
+      if(checkpointRefreshTimer) clearTimeout(checkpointRefreshTimer); checkpointRefreshTimer=null;
+      loadedCheckpoints=[];checkpointRowVersions.clear();
+      checkpointPages=[];checkpointPageIndex=0;checkpointLoading=false;checkpointRequest++;checkpointRefreshQueued=false;
+      if(newRun) {zoomed=null;checkpointExpanded={};checkpointOpen=run.status==='running';}
+    }
+  });
+  $effect(() => {
+    const id=run.id, revision=run.checkpoint_rev, open=checkpointOpen;
+    void id;void revision;
+    if(open && run.summary) untrack(()=>queueCheckpointRefresh());
+  });
+  $effect(() => {
+    const nodes=run.nodes.filter(node=>isOpen(node));
+    const zoom=run.nodes.find(node=>node.node_id===zoomed?.node_id);
+    if(zoom && !nodes.some(node=>node.node_id===zoom.node_id)) nodes.push(zoom);
+    const checkpoints=checkpointOpen ? checkpointRows.filter(cp=>checkpointExpanded[cp.node_id]) : [];
+    // Version changes refresh expanded bodies; collapsed records stay metadata.
+    const versions=[...nodes,...checkpoints].map(value=>value.detail_version);
+    void versions;
+    untrack(()=>{
+      bodies.pin(run.id,[...nodes.map(n=>`n:${n.node_id}`),...checkpoints.map(cp=>`c:${cp.node_id}`),...(zoomed?[`n:${zoomed.node_id}`]:[])]);
+      for(const node of nodes) void loadBody(node);
+      for(const checkpoint of checkpoints) void loadBody(checkpoint,true);
+    });
+  });
 </script>
 
 {#if run.proof_pack_id || run.workflow_version != null}
@@ -187,21 +299,33 @@
   </div>
 {/if}
 
-{#if run.checkpoints?.length}
-  <details class="checkpoint-list" open={run.status === 'running'}>
-    <summary>Loop checkpoints · {run.checkpoints.filter((c) => c.status === 'success').length}/{run.checkpoints.length} complete</summary>
-    {#each run.checkpoints.filter((c) => c.iteration > 0) as checkpoint (checkpoint.node_id)}
-      <details>
-        <summary>{checkpoint.name} · iteration {checkpoint.iteration} · {checkpoint.status} · {checkpoint.attempts} attempt(s)</summary>
-        {#if checkpoint.error}<p class="err">{checkpoint.error}</p>{/if}
-        {#if checkpoint.logs.length}<pre>{checkpoint.logs.join('\n')}</pre>{/if}
-        <pre>{JSON.stringify(checkpoint.output ?? checkpoint.input, null, 2)}</pre>
-      </details>
-    {/each}
+{#if (run.checkpoint_count ?? run.checkpoints?.length ?? 0) > 0}
+  <details class="checkpoint-list" open={checkpointOpen} ontoggle={(event)=>checkpointOpen=event.currentTarget.open}>
+    <summary>Loop checkpoints · {run.checkpoint_done ?? run.checkpoints?.filter(c=>c.status==='success').length ?? 0}/{run.checkpoint_count ?? run.checkpoints?.length ?? 0} complete</summary>
+    {#if checkpointOpen}
+      {#if checkpointError}<p class="err">{checkpointError} <button onclick={()=>void loadCheckpointPage()}>Retry</button></p>{/if}
+      {#if checkpointLoading}<p>Loading checkpoints…</p>{/if}
+      {#each checkpointRows.filter(c=>c.iteration>0) as summary (summary.node_id)}
+        {@const checkpoint=displayedCheckpoint(summary)}
+        <details open={checkpointExpanded[summary.node_id]??false} ontoggle={(event)=>checkpointExpanded[summary.node_id]=event.currentTarget.open}>
+          <summary>{summary.name} · iteration {summary.iteration} · {summary.status} · {summary.attempts} attempt(s)</summary>
+          {#if checkpointExpanded[summary.node_id]}
+            {#if bodyLoading[`c:${summary.node_id}`]}<p>Loading details…</p>{/if}
+            {#if bodyErrors[`c:${summary.node_id}`]}<p class="err">{bodyErrors[`c:${summary.node_id}`]} <button onclick={()=>void loadBody(summary,true,true)}>Retry</button></p>{/if}
+            {#if checkpoint.error}<p class="err">{checkpoint.error}</p>{/if}
+            {#if checkpoint.logs.length}<pre>{checkpoint.logs.join('\n')}</pre>{/if}
+            {#if !summary.detail_version || checkpoint!==summary}<pre>{JSON.stringify(checkpoint.output??checkpoint.input,null,2)}</pre>{/if}
+          {/if}
+        </details>
+      {/each}
+      {#if checkpointPageIndex>0}<button onclick={()=>void loadCheckpointPage(checkpointPageIndex-1)} disabled={checkpointLoading}>Previous checkpoints</button>{/if}
+      {#if checkpointPages[checkpointPageIndex]?.page.next_cursor}<button onclick={()=>void loadCheckpointPage(checkpointPageIndex+1)} disabled={checkpointLoading}>More checkpoints</button>{/if}
+    {/if}
   </details>
 {/if}
 <div class="steps">
-  {#each run.nodes as ns (ns.node_id)}
+  {#each run.nodes as summary (summary.node_id)}
+    {@const ns = displayedNode(summary)}
     <details
       class="step"
       open={isOpen(ns)}
@@ -237,7 +361,8 @@
           onclick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            zoomed = ns;
+            zoomed = summary;
+            void loadBody(summary);
           }}
         >
           <Icon name="maximize" size={12} />
@@ -250,7 +375,10 @@
           <div class="phase" data-testid="step-phase">{ns.activity.hold_reason ?? ns.activity.phase}</div>
         {/if}
       </summary>
+      {#if isOpen(summary)}
       <div class="body">
+        {#if bodyLoading[`n:${summary.node_id}`]}<p>Loading details…</p>{/if}
+        {#if bodyErrors[`n:${summary.node_id}`]}<p class="err">{bodyErrors[`n:${summary.node_id}`]} <button onclick={()=>void loadBody(summary,false,true)}>Retry</button></p>{/if}
         {#if ns.error}
           <div class="err">{ns.error}</div>
         {/if}
@@ -313,18 +441,21 @@
               <pre class="json scrolly">{JSON.stringify(ns.output, null, 2)}</pre>
             {/if}
           </div>
-        {:else if ns.status === 'success'}
+        {:else if ns.status === 'success' && (!summary.detail_version || ns !== summary)}
           <div class="muted">No output.</div>
         {/if}
       </div>
+      {/if}
     </details>
   {/each}
 </div>
 
 {#if zoomed}
-  {@const z = zoomed}
+  {@const z = displayedNode(run.nodes.find(n=>n.node_id===zoomed?.node_id)??zoomed)}
   <Modal title={`Step · ${nodeName(z.node_id)}`} width={920} onclose={() => (zoomed = null)}>
     <div class="zoom">
+      {#if bodyLoading[`n:${z.node_id}`]}<p>Loading details…</p>{/if}
+      {#if bodyErrors[`n:${z.node_id}`]}<p class="err">{bodyErrors[`n:${z.node_id}`]} <button onclick={()=>void loadBody(zoomed!,false,true)}>Retry</button></p>{/if}
       {#if z.error}<div class="err">{z.error}</div>{/if}
       {#if z.logs?.length}
         <div class="zh"><span>Logs</span></div>

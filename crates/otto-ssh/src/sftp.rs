@@ -59,6 +59,8 @@ pub struct SftpParams {
 pub struct SftpSession {
     params: SftpParams,
     program: PathBuf,
+    #[cfg(test)]
+    probe_timeout: std::time::Duration,
     /// Unique temp dir holding the ControlMaster socket; removed on drop.
     ctl_dir: PathBuf,
     ctl_path: String,
@@ -90,6 +92,8 @@ impl SftpSession {
         Ok(Self {
             params,
             program,
+            #[cfg(test)]
+            probe_timeout: std::time::Duration::from_millis(500),
             ctl_dir,
             ctl_path,
         })
@@ -207,6 +211,68 @@ impl SftpSession {
         Ok(parse_longname_listing(&out))
     }
 
+    /// Best-effort exact-file metadata, bounded independently of transfers and
+    /// directory browsing. A stalled probe cannot hold progress for >500ms.
+    pub async fn file_size(&self, path: &str) -> Result<u64> {
+        let batch = file_probe_command(path)?;
+        let output = self.run_probe(&batch).await?;
+        parse_file_size(&output, path)
+            .ok_or_else(|| Error::Upstream("SFTP file size unavailable or ambiguous".into()))
+    }
+
+    async fn run_probe(&self, batch: &str) -> Result<String> {
+        let mut command = Command::new(&self.program);
+        command
+            .args(self.base_args())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command
+            .spawn()
+            .map_err(|e| Error::Upstream(format!("failed to start sftp probe: {e}")))?;
+        let mut owned = ProbeChild(Some(child));
+        let child = owned.0.as_mut().expect("probe child");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let work = async {
+            tokio::try_join!(
+                async move {
+                    stdin.write_all(batch.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.shutdown().await?;
+                    drop(stdin);
+                    Ok::<(), std::io::Error>(())
+                },
+                bounded_probe_output(stdout),
+                bounded_probe_output(stderr),
+                child.wait(),
+            )
+        };
+        #[cfg(not(test))]
+        let deadline = std::time::Duration::from_millis(500);
+        #[cfg(test)]
+        let deadline = self.probe_timeout;
+        let (_, stdout, stderr, status) = tokio::time::timeout(deadline, work)
+            .await
+            .map_err(|_| Error::Upstream("SFTP progress probe timed out".into()))?
+            .map_err(|e| Error::Upstream(format!("SFTP progress probe: {e}")))?;
+        // wait() completed, so this child has already been reaped.
+        owned.0.take();
+        if !status.success() {
+            let message = String::from_utf8_lossy(&stderr);
+            return Err(Error::Upstream(
+                message
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("SFTP progress probe failed")
+                    .to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
+
     /// Download a remote file to a local path (sftp `get`).
     pub async fn download(&self, remote: &str, local: &str) -> Result<()> {
         let batch = format!("get {} {}", quote_checked(remote)?, quote_checked(local)?);
@@ -291,6 +357,97 @@ fn uniq_token() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{pid}-{n}-{nanos}")
+}
+
+/// The caller can drop a probe while either pipe or wait is pending. Keep the
+/// child owned until kill + wait completes; never leave a zombie to the caller.
+struct ProbeChild(Option<tokio::process::Child>);
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.start_kill();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
+        }
+    }
+}
+async fn bounded_probe_output(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: usize = 32 * 1024;
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if output.len() + count > LIMIT {
+            return Err(std::io::Error::other("SFTP probe output limit exceeded"));
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn parse_file_size(output: &str, path: &str) -> Option<u64> {
+    let mut records = output
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| looks_like_mode(line));
+    let mut rest = records.next()?;
+    if records.next().is_some() || !rest.starts_with('-') {
+        return None;
+    }
+    let mut size = None;
+    for column in 0..8 {
+        let end = rest.find(char::is_whitespace)?;
+        if column == 4 {
+            size = rest[..end].parse::<u64>().ok();
+        }
+        rest = rest[end..].trim_start();
+    }
+    // Unlike general directory listing, retain repeated spaces in the path.
+    // Numeric OpenSSH listings supply the full path (relative if requested so).
+    use std::path::Component;
+    let visible = std::path::Path::new(rest)
+        .components()
+        .filter(|c| *c != Component::CurDir);
+    let requested = std::path::Path::new(path)
+        .components()
+        .filter(|c| *c != Component::CurDir);
+    if visible.eq(requested) {
+        size
+    } else {
+        None
+    }
+}
+
+/// OpenSSH makeargv escapes quoted ? [ * itself. Braces need one explicit
+/// escape preserved by makeargv for its subsequent GLOB_BRACE expansion.
+/// See openssh-portable/sftp.c makeargv and do_globbed_ls.
+fn file_probe_command(path: &str) -> Result<String> {
+    if path.is_empty() || path.chars().any(char::is_control) {
+        return Err(Error::Invalid("invalid SFTP progress path".into()));
+    }
+    let mut out = String::from("@ls -ln \"");
+    if !path.starts_with('/') {
+        out.push_str("./");
+    }
+    for ch in path.chars() {
+        if matches!(ch, '"' | '\\' | '{' | '}') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    if out.len() >= 8192 {
+        return Err(Error::Invalid("SFTP progress path is too long".into()));
+    }
+    Ok(out)
 }
 
 /// Double-quote a remote/local path for an sftp batch command, escaping the
@@ -600,5 +757,155 @@ drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
         assert!(!args.iter().any(|a| a == "-i"));
         assert!(!args.iter().any(|a| a == "-J"));
         assert_eq!(args.last().unwrap(), "h");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod file_size_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(script: &str) -> SftpSession {
+        let mut session = SftpSession::new(SftpParams {
+            host: "fixture.invalid".into(),
+            port: None,
+            user: None,
+            identity_file: None,
+            jump: None,
+        })
+        .unwrap();
+        let program = session.ctl_dir.join("fixture-sftp");
+        std::fs::write(
+            &program,
+            format!("#!/usr/bin/env python3\nimport sys,pathlib,os\n{script}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        session.program = program;
+        session.probe_timeout = std::time::Duration::from_secs(3);
+        session
+    }
+    #[tokio::test]
+    async fn file_size_probes_exact_staging_path_and_bounds_ambiguity() {
+        let session=fixture("pathlib.Path(__file__).with_name('batch').write_text(sys.stdin.read())\nprint('-rw-r--r-- 1 1000 1000 321 Sep 13 10:00 /remote/stage')");
+        assert_eq!(session.file_size("/remote/stage").await.unwrap(), 321);
+        assert_eq!(
+            std::fs::read_to_string(session.ctl_dir.join("batch")).unwrap(),
+            "@ls -ln \"/remote/stage\"\n"
+        );
+        let session=fixture("sys.stdin.read()\nprint('-rw-r--r-- 1 1 1 3 Sep 13 10:00 one\\n-rw-r--r-- 1 1 1 4 Sep 13 10:00 two')");
+        assert!(session.file_size("/remote/stage").await.is_err());
+        let session =
+            fixture("sys.stdin.read()\nprint('drwxr-xr-x 1 1 1 3 Sep 13 10:00 /remote/stage')");
+        assert!(session.file_size("/remote/stage").await.is_err());
+    }
+    #[test]
+    fn file_size_literal_path_does_not_add_glob_patterns() {
+        assert_eq!(
+            file_probe_command("-stage").unwrap(),
+            "@ls -ln \"./-stage\""
+        );
+        assert_eq!(
+            file_probe_command("/a/{b,c} [x]*?").unwrap(),
+            r#"@ls -ln "/a/\{b,c\} [x]*?""#
+        );
+        assert_eq!(
+            file_probe_command(r#"/a/"x\y"#).unwrap(),
+            r#"@ls -ln "/a/\"x\\y""#
+        );
+        assert!(file_probe_command("a\n!command").is_err());
+        assert!(file_probe_command("").is_err());
+    }
+    #[test]
+    fn file_size_parser_preserves_spaces_and_rejects_directory_child() {
+        let line = "-rw-r--r-- 1 1 1 42 Sep 13 10:00 /a  b/.stage";
+        assert_eq!(parse_file_size(line, "/a  b/.stage"), Some(42));
+        assert_eq!(parse_file_size(line, "/a b/.stage"), None);
+        assert_eq!(
+            parse_file_size("-rw-r--r-- 1 1 1 42 Sep 13 10:00 /stage/child", "/stage"),
+            None
+        );
+        assert_eq!(
+            parse_file_size("-rw-r--r-- 1 1 1 42 Sep 13 10:00 /.stage", "//.stage"),
+            Some(42)
+        );
+    }
+    /// Exercise the actual OpenSSH batch/glob parser over local stdio only:
+    /// no ssh process, listener, host credentials or network connection.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn file_size_real_openssh_literal_paths_over_local_stdio() {
+        let session =
+            fixture("os.execv('/usr/bin/sftp',['sftp','-b','-','-D','/usr/libexec/sftp-server'])");
+        for name in [
+            "a  b",
+            "{x,y}",
+            "[x]*?",
+            r"back\slash",
+            "quote\"",
+            "-option",
+        ] {
+            let path = session.ctl_dir.join(name);
+            std::fs::write(&path, b"fixture-data").unwrap();
+            assert_eq!(
+                session.file_size(path.to_str().unwrap()).await.unwrap(),
+                12,
+                "{name}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn file_size_rejects_stdout_and_stderr_over_budget() {
+        for fd in [1, 2] {
+            let session = fixture(&format!("sys.stdin.read()\nos.write({fd},b'x'*65536)"));
+            let error = session.file_size("/stage").await.unwrap_err().to_string();
+            assert!(error.contains("output limit"), "{error}");
+        }
+    }
+    #[tokio::test]
+    async fn file_size_timeout_and_cancellation_reap_owned_child() {
+        for abort in [false, true] {
+            let mut fixture = fixture("");
+            let pid_path = fixture.ctl_dir.join("pid");
+            let quoted = format!("'{}'", pid_path.to_string_lossy().replace('\'', "'\\''"));
+            std::fs::write(
+                &fixture.program,
+                format!(
+                    "#!/bin/sh\ncat >/dev/null\nprintf '%s' \"$$\" > {quoted}\nexec sleep 60\n"
+                ),
+            )
+            .unwrap();
+            // Budget includes cold executable startup under parallel crate tests.
+            // Production remains 500 ms; this fixture verifies cleanup, not startup latency.
+            fixture.probe_timeout = std::time::Duration::from_secs(3);
+            let session = std::sync::Arc::new(fixture);
+            let task_session = session.clone();
+            let mut task = tokio::spawn(async move { task_session.file_size("/stage").await });
+            let pid_path = session.ctl_dir.join("pid");
+            tokio::time::timeout(std::time::Duration::from_secs(4),async {while !pid_path.exists(){tokio::select!{result=&mut task=>panic!("probe exited before fixture readiness: {result:?}"),_=tokio::time::sleep(std::time::Duration::from_millis(5))=>{}}}}).await.unwrap();
+            if abort {
+                task.abort();
+                let _ = task.await;
+            } else {
+                assert!(task.await.unwrap().is_err());
+            }
+            let pid = std::fs::read_to_string(pid_path).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let status = tokio::process::Command::new("kill")
+                        .args(["-0", pid.trim()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .await
+                        .unwrap();
+                    if !status.success() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
     }
 }

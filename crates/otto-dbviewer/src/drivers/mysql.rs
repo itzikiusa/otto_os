@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -18,7 +19,6 @@ use otto_core::Result;
 use serde_json::Value;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
-use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
@@ -48,7 +48,7 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// still works.
 #[derive(Default)]
 pub struct MysqlDriver {
-    pools: Mutex<HashMap<String, sqlx::MySqlPool>>,
+    pools: ResourceCache<sqlx::MySqlPool>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
 }
@@ -548,8 +548,17 @@ impl Driver for MysqlDriver {
     /// config change superseded it). `Pool::close` drains the backend
     /// connections; in-flight queries on the pool error out. Also drops the
     /// completion snapshot keyed to the same config.
+    fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        let captured = Self::default();
+        for (key, value) in self.pools.take_where(|key| key == cache_key) {
+            captured.pools.insert_ready(key, value);
+        }
+        self.completions.invalidate(cache_key);
+        Some(std::sync::Arc::new(captured))
+    }
+
     async fn close(&self, cache_key: &str) {
-        let pool = self.pools.lock().await.remove(cache_key);
+        let pool = self.pools.remove(cache_key);
         if let Some(pool) = pool {
             pool.close().await;
         }
@@ -640,7 +649,9 @@ impl Driver for MysqlDriver {
         let QueryHandle::MysqlConnId(conn_id) = handle else {
             return Ok(());
         };
-        let pool = self.pool(cfg).await?;
+        let Some(pool) = self.pools.get_ready(&cfg.cache_key()) else {
+            return Ok(());
+        };
         // `KILL QUERY <id>` takes a bare integer; the id came from CONNECTION_ID()
         // (a u64), so there's nothing to escape.
         let sql = format!("KILL QUERY {conn_id}");
@@ -1525,18 +1536,17 @@ impl MysqlDriver {
     /// [`ResolvedConfig::cache_key`], so any session-affecting difference
     /// (endpoint/creds/db/TLS/timezone) gets its own pool. A `MySqlPool` clone
     /// is an `Arc` bump, so callers get a cheap handle to a shared pool and the
-    /// expensive handshake is paid once. We hold the tokio mutex across the
-    /// build await — that only briefly serializes concurrent *first* connects
-    /// to the same key; steady-state cache hits return immediately.
+    /// expensive handshake is paid once. Initializers serialize only their own
+    /// key; unrelated warm pools never wait for this handshake.
     async fn pool(&self, cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
-        let key = cfg.cache_key();
-        let mut cache = self.pools.lock().await;
-        if let Some(pool) = cache.get(&key) {
-            return Ok(pool.clone());
-        }
-        let pool = build_pool(cfg).await?;
-        cache.insert(key, pool.clone());
-        Ok(pool)
+        self.pools
+            .get_or_try_init(
+                cfg.cache_key(),
+                cfg.lifecycle.as_ref(),
+                |_| true,
+                build_pool(cfg),
+            )
+            .await
     }
 }
 
@@ -2370,5 +2380,48 @@ mod tests {
         );
         // Absent → Null (temporal column with NULL value).
         assert_eq!(temporal_to_json::<NaiveDateTime>(None), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod cache_isolation_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn cache_warm_mysql_pool_does_not_wait_for_other_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cfg = ResolvedConfig {
+            lifecycle: None,
+            engine: Engine::Mysql,
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            user: Some("fixture".into()),
+            password: None,
+            database: None,
+            tls: Default::default(),
+            params: serde_json::json!({}),
+        };
+        let mut warm_cfg = cfg.clone();
+        warm_cfg.port = 1;
+        let warm = sqlx::mysql::MySqlPoolOptions::new()
+            .connect_lazy("mysql://fixture@127.0.0.1:1")
+            .unwrap();
+        let driver = Arc::new(MysqlDriver::default());
+        driver.pools.insert_ready(warm_cfg.cache_key(), warm);
+        let slow_driver = driver.clone();
+        let slow = tokio::spawn(async move { slow_driver.pool(&cfg).await });
+        let (_socket, _) = listener.accept().await.unwrap();
+        // A has started its handshake and the fixture deliberately never replies.
+        // B must finish BEFORE A, not merely become a little faster.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), driver.pool(&warm_cfg)).await;
+        slow.abort();
+        let _ = slow.await;
+        assert!(
+            result.is_ok(),
+            "warm B waited behind unrelated pending handshake A"
+        );
+        assert!(result.unwrap().is_ok());
     }
 }

@@ -186,7 +186,7 @@ pub(crate) async fn resolve_transcript(
 
 /// Workspace Admin or root — the callers allowed to see transcripts they do
 /// not own (`on_disk` History rows, arbitrary paths under the roots).
-async fn is_ws_admin(ctx: &ServerCtx, user: &otto_core::domain::User, wid: &Id) -> bool {
+pub(crate) async fn is_ws_admin(ctx: &ServerCtx, user: &otto_core::domain::User, wid: &Id) -> bool {
     user.is_root
         || ctx
             .roles
@@ -312,6 +312,41 @@ pub(crate) fn fold_with(
     .map_err(|e| Error::Internal(format!("read transcript: {e}")))
 }
 
+/// Authorization/resolution have already completed before entering the cache.
+async fn cached_fold(
+    ctx: &ServerCtx,
+    provider: Provider,
+    path: &Path,
+    sub: Option<&str>,
+) -> ApiResult<std::sync::Arc<crate::transcript_cache::Snapshot>> {
+    if let Some(sub) = sub {
+        if subagent_path(path, sub).is_none() {
+            return Err(ApiError(Error::Invalid("bad subagent id".into())));
+        }
+    }
+    let key = crate::transcript_cache::CacheKey {
+        root: ctx.data_dir.clone(),
+        path: path.to_path_buf(),
+        provider,
+        sub: sub.map(str::to_string),
+    };
+    let cx = ctx.clone();
+    let path = path.to_path_buf();
+    let sub = sub.map(str::to_string);
+    ctx.transcript_cache
+        .get(key, move || {
+            let folded = fold_with(&cx, provider, &path, sub.as_deref())?;
+            let subagents = if sub.is_none() && provider == Provider::Claude {
+                read_subagents(&path)
+            } else {
+                Vec::new()
+            };
+            Ok(crate::transcript_cache::Snapshot { folded, subagents })
+        })
+        .await
+        .map_err(ApiError)
+}
+
 /// Page a fold into the wire `Transcript`. A subagent view keeps only turns
 /// and `stats.turns/tool_calls` (design §3).
 fn page(
@@ -419,22 +454,15 @@ pub async fn get_transcript(
         }
     };
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
-    let ctx2 = ctx.clone();
-    let path = resolved.path.clone();
     let provider = resolved.provider;
-    let sub_owned = sub.map(str::to_string);
-    let folded = tokio::task::spawn_blocking(move || {
-        fold_with(&ctx2, provider, &path, sub_owned.as_deref())
-    })
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("fold task: {e}"))))?
-    .map_err(ApiError)?;
-    let subagents = if sub.is_none() && provider == Provider::Claude {
-        read_subagents(&resolved.path)
-    } else {
-        Vec::new()
-    };
-    let mut t = page(&folded, before, limit, sub, subagents);
+    let snapshot = cached_fold(&ctx, provider, &resolved.path, sub).await?;
+    let mut t = page(
+        &snapshot.folded,
+        before,
+        limit,
+        sub,
+        snapshot.subagents.clone(),
+    );
     if t.session_id.is_none() {
         t.session_id = session.provider_session_id.clone();
     }
@@ -569,14 +597,8 @@ async fn session_artifacts(ctx: &ServerCtx, session: &Session) -> ApiResult<Vec<
     let Ok(resolved) = resolve_transcript(ctx, session).await else {
         return Ok(Vec::new());
     };
-    let ctx2 = ctx.clone();
-    let folded = tokio::task::spawn_blocking(move || {
-        fold_with(&ctx2, resolved.provider, &resolved.path, None)
-    })
-    .await
-    .map_err(|e| ApiError(Error::Internal(format!("fold task: {e}"))))?
-    .map_err(ApiError)?;
-    let mut arts = folded.artifacts;
+    let snapshot = cached_fold(ctx, resolved.provider, &resolved.path, None).await?;
+    let mut arts = snapshot.folded.artifacts.clone();
     arts.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
     Ok(arts)
 }
@@ -1126,7 +1148,7 @@ pub async fn history(
     Ok(Json(out))
 }
 
-fn repo_name(cwd: &str) -> Option<String> {
+pub(crate) fn repo_name(cwd: &str) -> Option<String> {
     Path::new(cwd)
         .file_name()
         .and_then(|n| n.to_str())
@@ -1160,20 +1182,14 @@ pub async fn history_transcript(
     let before = parse_before(q.before.as_deref())?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let sub = q.sub.as_deref().filter(|s| !s.is_empty());
-    let ctx2 = ctx.clone();
-    let p2 = path.clone();
-    let sub_owned = sub.map(str::to_string);
-    let folded =
-        tokio::task::spawn_blocking(move || fold_with(&ctx2, provider, &p2, sub_owned.as_deref()))
-            .await
-            .map_err(|e| ApiError(Error::Internal(format!("fold task: {e}"))))?
-            .map_err(ApiError)?;
-    let subagents = if sub.is_none() && provider == Provider::Claude {
-        read_subagents(&path)
-    } else {
-        Vec::new()
-    };
-    Ok(Json(page(&folded, before, limit, sub, subagents)))
+    let snapshot = cached_fold(&ctx, provider, &path, sub).await?;
+    Ok(Json(page(
+        &snapshot.folded,
+        before,
+        limit,
+        sub,
+        snapshot.subagents.clone(),
+    )))
 }
 
 #[derive(Debug, Deserialize)]

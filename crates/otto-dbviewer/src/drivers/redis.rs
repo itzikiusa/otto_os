@@ -10,9 +10,9 @@
 //! auto-reconnects — so the AUTH/handshake is paid once and reused across calls
 //! instead of re-dialing every time.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use otto_core::Result;
 use redis::aio::ConnectionManager;
@@ -21,7 +21,6 @@ use redis::{
     TlsCertificates, Value as RedisValue,
 };
 use serde_json::{json, Value as JsonValue};
-use tokio::sync::Mutex;
 
 use crate::driver::Driver;
 use crate::types::{
@@ -57,7 +56,7 @@ const PREVIEW_STRING_BYTES: isize = 1_048_575;
 /// by the registry) still works.
 #[derive(Default)]
 pub struct RedisDriver {
-    clients: Mutex<HashMap<String, ConnectionManager>>,
+    clients: ResourceCache<ConnectionManager>,
 }
 
 #[async_trait]
@@ -386,12 +385,20 @@ impl Driver for RedisDriver {
     /// (`<cache_key>|db=<n>`), so every db's manager for this config is dropped
     /// — dropping a `ConnectionManager` closes the multiplexed connection and
     /// stops its reconnect loop.
+    fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
+        let captured = Self::default();
+        for (key, value) in self
+            .clients
+            .take_where(|key| key.starts_with(&format!("{cache_key}|")))
+        {
+            captured.clients.insert_ready(key, value);
+        }
+        Some(std::sync::Arc::new(captured))
+    }
+
     async fn close(&self, cache_key: &str) {
         let prefix = format!("{cache_key}|");
-        self.clients
-            .lock()
-            .await
-            .retain(|k, _| !k.starts_with(&prefix));
+        self.clients.remove_where(|k| k.starts_with(&prefix));
     }
 
     async fn completion(
@@ -505,20 +512,17 @@ impl RedisDriver {
     /// `SELECT` + payload and land commands (including WRITES) in the wrong
     /// database. Each cached manager is instead PINNED to its db at handshake
     /// (`set_db`), so no `SELECT` is ever issued and a reconnect re-lands on
-    /// the same db. Holding the tokio mutex across the connect await only
-    /// briefly serializes concurrent *first* connects to the same key.
+    /// the same db. Only callers of this exact key wait for its handshake.
     async fn connect(&self, cfg: &ResolvedConfig, db: i64) -> Result<ConnectionManager> {
         let cache_key = format!("{}|db={db}", cfg.cache_key());
-        let mut cache = self.clients.lock().await;
-        if let Some(conn) = cache.get(&cache_key) {
-            return Ok(conn.clone());
-        }
-        let client = build_client(cfg, db)?;
-        let manager = ConnectionManager::new(client)
+        self.clients
+            .get_or_try_init(cache_key, cfg.lifecycle.as_ref(), |_| true, async {
+                let client = build_client(cfg, db)?;
+                ConnectionManager::new(client)
+                    .await
+                    .map_err(types::upstream)
+            })
             .await
-            .map_err(types::upstream)?;
-        cache.insert(cache_key, manager.clone());
-        Ok(manager)
     }
 }
 
