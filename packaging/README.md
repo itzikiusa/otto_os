@@ -118,13 +118,16 @@ The crash report (`~/Library/Logs/DiagnosticReports/ottod-*.ips`) says
 `SIGKILL (Code Signature Invalid)` / namespace `CODESIGNING` / indicator
 `Invalid Page` — **even though `codesign --verify <deployed ottod>` passes**.
 
-**Why:** the app self-deploys `ottod` by overwriting
+**Why (older installed versions):** the app self-deployed `ottod` by overwriting
 `~/Library/Application Support/Otto/bin/ottod` *in place*. If the launchd agent
 (`KeepAlive`) already had that binary mapped and running, overwriting the file
 mid-flight invalidates its mapped code pages → macOS kills it. The kernel then
 caches code-signing validity **per inode**, so that inode is rejected on every
 relaunch — a permanent loop. (Proof: a byte-identical copy at another path,
 e.g. `cp … /tmp/ottod && /tmp/ottod`, runs fine.)
+
+Current app supervisors already publish the daemon with an atomic rename.
+The deploy script retains recovery for inodes poisoned by older versions.
 
 **Fix (now automatic):** `deploy.sh` step 6 detects this and self-heals by
 giving the deployed binary a **fresh inode** (atomic rename of a clean copy of
@@ -137,3 +140,39 @@ mv -f "$BIN/ottod.fresh" "$BIN/ottod"     # atomic → NEW inode, fresh CS evalu
 launchctl kickstart -k "gui/$(id -u)/com.otto.daemon"
 curl -s localhost:7700/api/v1/health      # {"ok":true}
 ```
+
+
+## Staged local deployment from an Otto session
+
+Deploy from a clean, committed checkout. To finish the build and signing before
+interrupting the current daemon's sessions:
+
+```bash
+PRUNE=0 EMBED_UI=1 BUILD_ONLY=1 packaging/deploy.sh
+# After the build succeeds, queue the existing detached installer and return:
+PRUNE=0 EMBED_UI=1 OTTO_DEPLOY_PHASE=queue-finish FINISH_DELAY_SECONDS=15 packaging/deploy.sh
+# After restart, inspect the durable result:
+packaging/deploy.sh --status
+```
+
+`BUILD_ONLY=1` writes `apps/desktop/src-tauri/target/release/deploy-build.receipt`
+with the source commit, signed app/daemon SHA-256 hashes, and embedded-UI mode.
+Queuing checks that receipt against the current clean source tree and signed
+artifacts; the detached worker checks again immediately before installation.
+Rebuild if the source, artifacts, or `EMBED_UI` setting changes. `SKIP_UI=1` is
+rejected so a receipt cannot label an older frontend as the current source. The optional
+install delay accepts integers from 0 to 60 seconds. Queue mode returns after
+launchd accepts the job; that means **queued**, not installed successfully.
+
+The detached log records `DEPLOY-RECEIPT` only after the installed bundle matches
+the build, its signatures verify, the deployed daemon matches the sidecar,
+the app and daemon run from their installed paths, the daemon PID changes when
+the binary changes, the health API returns success, and the embedded SPA can be
+fetched when enabled. `DEPLOY-FINISH EXIT=0` marks successful completion;
+`--status` returns that exit code. No provider session is created to verify the
+installation. Replacing the daemon terminates its active PTYs, including an
+agent running this command; launchd and the durable log survive that interruption.
+
+Run the portable regression suite with `python3 packaging/tests/test_deploy.py`.
+It uses temporary files and mocks OS/process/network operations, without building,
+signing, installing, or contacting a running daemon. CI runs this suite on Ubuntu.
