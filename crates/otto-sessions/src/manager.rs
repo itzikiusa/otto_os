@@ -4737,9 +4737,17 @@ mod tests {
             .await
             .unwrap();
 
-        let probe = mgr.capture_probes.get(&id).unwrap();
-        assert!(probe.first_at.is_some(), "first input moment recorded");
-        assert_eq!(normalize_pty_input(&probe.raw), "hello world");
+        {
+            let probe = mgr.capture_probes.get(&id).unwrap();
+            assert!(probe.first_at.is_some(), "first input moment recorded");
+            assert_eq!(normalize_pty_input(&probe.raw), "hello world");
+        }
+        // A retained read guard deadlocks the next input when its session ID
+        // hashes to this shard. Check that shard without risking a hung test.
+        assert!(
+            mgr.capture_probes.try_get_mut(&id).is_present(),
+            "capture-probe inspection must release its shard before more input"
+        );
         // Sessions WITHOUT a pending capture don't accumulate probes.
         let other = seed_session(&repo, &ws, &user, Some("sid")).await;
         mgr.live
