@@ -414,3 +414,7 @@ Independent cross-reviews accepted the architecture with these required correcti
 8. Script input is checked before posting to the Worker; output is checked inside it before cloning back. Clone/message failures receive exactly-once termination/cleanup.
 
 Each resolution has an explicit regression in the implementation plan. Three independent reviews covered all four lanes; root accepted their material findings and owns integration verification. No app source changes preceded this gate. The plan receives its own independent review before source implementation.
+
+## Subsequent delivery authorization
+
+During implementation the user explicitly requested rebuilding, reinstalling and replacing the running app **after the new PR passes and merges**. This supersedes earlier deployment exclusions for the final delivery step only. Root owns that step after merge; all development and testing remain isolated and workers must not restart or deploy the app. This is current user authorization, so no repeated permission question is needed.
