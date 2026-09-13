@@ -593,6 +593,7 @@
   let reqSeq = 0;
   $effect(() => {
     const v = vault.current;
+    void (vault.status?.generation ?? vault.status?.last_scan_at); // content/link changes only
     const wsId = vault.wsId;
     const path = local ? vault.notePath : null;
     const q: VaultGraphQuery = {
@@ -706,6 +707,7 @@
   $effect(() => {
     const q = anchorQuery.trim();
     const v = vault.current;
+    void (vault.status?.generation ?? vault.status?.last_scan_at); // content/link changes only
     const wsId = vault.wsId;
     if (!q || !v || !wsId) {
       anchorHits = [];

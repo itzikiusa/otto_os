@@ -16,3 +16,7 @@ pub use http::{
 pub use service::{ConnectionsService, DbTester, Spawner};
 
 mod access;
+
+mod sftp_pool;
+
+mod transfers;

@@ -20,7 +20,18 @@ export interface FocusRequest {
   nonce: number;
 }
 
+export type RecoveryMode = 'history' | 'rebase' | 'bisect';
 class GitBridge {
+  recovery = $state<{ repoId: string; mode: RecoveryMode; onto?: string } | null>(null);
+  bisectTargets = $state<Record<string, { good?: string; bad?: string }>>({});
+  openRecovery(repoId: string, mode: RecoveryMode = 'history', onto?: string): void {
+    this.recovery = { repoId, mode, onto };
+  }
+  selectBisect(repoId: string, side: 'good' | 'bad', sha: string): void {
+    this.bisectTargets[repoId] = { ...this.bisectTargets[repoId], [side]: sha };
+    this.openRecovery(repoId, 'bisect');
+  }
+
   fileTool = $state<FileToolRequest | null>(null);
   focus = $state<FocusRequest | null>(null);
   private nonce = 0;

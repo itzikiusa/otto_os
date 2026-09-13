@@ -9,6 +9,7 @@ pub mod engine;
 pub mod http;
 pub mod okf;
 pub mod parse;
+mod recovery;
 pub mod resolve;
 pub mod scan;
 pub mod store;

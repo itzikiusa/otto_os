@@ -82,6 +82,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if matches!(p, "/health" | "/meta" | "/onboarding/root" | "/auth/login") {
         return Exempt;
     }
+    // OAuth provider redirect: public GET only, authenticated by a one-use
+    // PKCE state. The callback reloads the initiating user's workspace/feature
+    // grants before exchanging or storing credentials. No adjacent route is exempt.
+    if p == "/api-client/oauth2/callback" {
+        return Exempt;
+    }
     // Provider activity / usage / swarm-board ingest — gated by the per-session
     // token Otto sets on the agent PTY, not a user bearer token.
     if p.starts_with("/ingest/") {
@@ -412,7 +418,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Workspace-less (global) connection create — management tier.
         return Require(Connections, Admin);
     }
-    if p == "/connections/{id}" {
+    if p == "/connections/{id}" || p == "/connections/{id}/duplicate" {
         // PATCH / DELETE a connection profile — management tier (manage-all).
         return Require(Connections, Admin);
     }
@@ -1577,6 +1583,14 @@ mod tests {
 
     #[test]
     fn public_routes_exempt() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/api-client/oauth2/callback"),
+            Exempt
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/api-client/oauth2/authorize"),
+            Deny
+        );
         assert_eq!(pol(Method::POST, "/api/v1/auth/login"), Exempt);
         assert_eq!(pol(Method::GET, "/health"), Exempt);
         assert_eq!(pol(Method::GET, "/meta"), Exempt);

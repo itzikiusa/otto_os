@@ -14,7 +14,8 @@
 //! * Because the pre-image comes from a fresh diff, `git apply` succeeds by
 //!   construction — which means a client's stale `hunk_index` would silently
 //!   act on a DIFFERENT hunk. The rendered hunk's `@@` header travels with the
-//!   request and must match, or the call is a 409 with nothing applied.
+//!   request together with a SHA-256 fingerprint of the byte-exact file diff.
+//!   Both must match, or the call is a 409 with nothing applied.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -402,8 +403,10 @@ pub enum HunkOp {
 pub struct StageHunkReq {
     pub path: String,
     pub hunk_index: usize,
-    /// The `@@ … @@` line the client rendered — the staleness guard.
+    /// The `@@ … @@` line the client rendered; coordinates supplement the content fingerprint.
     pub hunk_header: String,
+    #[serde(default)]
+    pub fingerprint: String,
     /// Optional line selection inside the hunk (indices into `Hunk.lines`).
     #[serde(default)]
     pub lines: Option<Vec<usize>>,
@@ -446,6 +449,10 @@ pub(crate) async fn run_hunk_op(git: &LocalGit, req: &StageHunkReq) -> Result<St
         HunkOp::Stage | HunkOp::Discard => DiffTarget::Worktree,
     };
     let raw = git.diff_raw(target.clone(), &req.path).await?;
+    use sha2::{Digest, Sha256};
+    if req.fingerprint != hex::encode(Sha256::digest(raw.as_bytes())) {
+        return Err(Error::Conflict(STALE.into()));
+    }
     let patch = build_hunk_patch(
         &raw,
         &req.path,
@@ -929,10 +936,35 @@ index 1111111..2222222 100644
             path: path.to_string(),
             hunk_index,
             hunk_header: header.to_string(),
+            fingerprint: String::new(),
             lines: None,
             op,
             confirm: op == HunkOp::Discard,
         }
+    }
+
+    async fn run_test_hunk_op(git: &LocalGit, req: &StageHunkReq) -> Result<StageHunkResp> {
+        use sha2::{Digest, Sha256};
+        let raw = git
+            .diff_raw(
+                if req.op == HunkOp::Unstage {
+                    DiffTarget::Staged
+                } else {
+                    DiffTarget::Worktree
+                },
+                &req.path,
+            )
+            .await?;
+        let current = StageHunkReq {
+            path: req.path.clone(),
+            hunk_index: req.hunk_index,
+            hunk_header: req.hunk_header.clone(),
+            fingerprint: hex::encode(Sha256::digest(raw.as_bytes())),
+            lines: req.lines.clone(),
+            op: req.op,
+            confirm: req.confirm,
+        };
+        run_hunk_op(git, &current).await
     }
 
     /// Run `git` synchronously for fixture setup.
@@ -1013,7 +1045,7 @@ index 1111111..2222222 100644
     async fn stage_one_of_two_hunks() {
         let (_tmp, dir, git) = two_hunk_repo();
         let h0 = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
-        let resp = run_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Stage))
+        let resp = run_test_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
         assert!(resp.backup_stash.is_none());
@@ -1032,12 +1064,12 @@ index 1111111..2222222 100644
     async fn unstage_reverses() {
         let (_tmp, dir, git) = two_hunk_repo();
         let h0 = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
-        run_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Stage))
+        run_test_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
 
         let sh0 = header_of(&git, DiffTarget::Staged, "two.txt", 0).await;
-        run_hunk_op(&git, &req("two.txt", 0, &sh0, HunkOp::Unstage))
+        run_test_hunk_op(&git, &req("two.txt", 0, &sh0, HunkOp::Unstage))
             .await
             .unwrap();
 
@@ -1055,7 +1087,7 @@ index 1111111..2222222 100644
     async fn discard_restores_hunk_and_keeps_backup_stash() {
         let (_tmp, dir, git) = two_hunk_repo();
         let h0 = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
-        let resp = run_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Discard))
+        let resp = run_test_hunk_op(&git, &req("two.txt", 0, &h0, HunkOp::Discard))
             .await
             .unwrap();
         assert!(resp.backup_stash.is_some());
@@ -1074,6 +1106,84 @@ index 1111111..2222222 100644
     }
 
     #[tokio::test]
+    async fn displayed_fingerprint_authorizes_only_that_file_diff() {
+        let (_tmp, dir, git) = two_hunk_repo();
+        write(&dir, "other.txt", "other\r\n");
+        sh_git(&dir, &["add", "other.txt"]);
+        let display = git.diff(DiffTarget::Worktree, None).await.unwrap();
+        let file = display.files.iter().find(|f| f.path == "two.txt").unwrap();
+        let request = StageHunkReq {
+            path: file.path.clone(),
+            hunk_index: 0,
+            hunk_header: file.hunks[0].header.clone(),
+            fingerprint: file.fingerprint.clone(),
+            lines: None,
+            op: HunkOp::Stage,
+            confirm: false,
+        };
+        run_hunk_op(&git, &request).await.unwrap();
+        assert!(matches!(
+            run_hunk_op(&git, &request).await,
+            Err(Error::Conflict(_))
+        ));
+        let staged = git.diff(DiffTarget::Staged, None).await.unwrap();
+        let file = staged.files.iter().find(|f| f.path == "two.txt").unwrap();
+        let request = StageHunkReq {
+            path: file.path.clone(),
+            hunk_index: 0,
+            hunk_header: file.hunks[0].header.clone(),
+            fingerprint: file.fingerprint.clone(),
+            lines: None,
+            op: HunkOp::Unstage,
+            confirm: false,
+        };
+        run_hunk_op(&git, &request).await.unwrap();
+        assert_eq!(
+            git.diff(DiffTarget::Staged, None)
+                .await
+                .unwrap()
+                .files
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn same_coordinates_new_content_is_rejected() {
+        let (_tmp, dir, git) = two_hunk_repo();
+        let raw = git.diff_raw(DiffTarget::Worktree, "two.txt").await.unwrap();
+        use sha2::{Digest, Sha256};
+        let fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+        let header = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
+        let changed = std::fs::read_to_string(dir.join("two.txt"))
+            .unwrap()
+            .replace("LINE TWO", "UNREVIEWED");
+        write(&dir, "two.txt", &changed);
+        for op in ["stage", "discard"] {
+            let request: StageHunkReq = serde_json::from_value(serde_json::json!({
+                "path":"two.txt", "hunk_index":0, "hunk_header":header,
+                "fingerprint":fingerprint, "op":op, "confirm":true
+            }))
+            .unwrap();
+            assert!(matches!(
+                run_hunk_op(&git, &request).await,
+                Err(Error::Conflict(_))
+            ));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("two.txt")).unwrap(),
+            changed
+        );
+        assert!(git.stash_list().await.unwrap().is_empty());
+        assert!(git
+            .diff(DiffTarget::Staged, None)
+            .await
+            .unwrap()
+            .files
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn stage_hunk_stale_header_is_409() {
         let (_tmp, dir, git) = two_hunk_repo();
         let stale = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
@@ -1089,7 +1199,7 @@ index 1111111..2222222 100644
         write(&dir, "two.txt", &shifted);
         let before = std::fs::read(dir.join("two.txt")).unwrap();
 
-        let e = run_hunk_op(&git, &req("two.txt", 0, &stale, HunkOp::Stage))
+        let e = run_test_hunk_op(&git, &req("two.txt", 0, &stale, HunkOp::Stage))
             .await
             .unwrap_err();
         assert!(matches!(&e, Error::Conflict(m) if m == STALE), "{e:?}");
@@ -1097,7 +1207,7 @@ index 1111111..2222222 100644
         assert!(staged.trim().is_empty(), "nothing may be staged: {staged}");
 
         // Same for discard: bytes untouched AND no stray backup stash.
-        let e = run_hunk_op(&git, &req("two.txt", 0, &stale, HunkOp::Discard))
+        let e = run_test_hunk_op(&git, &req("two.txt", 0, &stale, HunkOp::Discard))
             .await
             .unwrap_err();
         assert!(matches!(&e, Error::Conflict(m) if m == STALE), "{e:?}");
@@ -1114,7 +1224,7 @@ index 1111111..2222222 100644
         write(&dir, "-notes.md", "n1\nN2\nn3\n");
 
         let h0 = header_of(&git, DiffTarget::Worktree, "-notes.md", 0).await;
-        run_hunk_op(&git, &req("-notes.md", 0, &h0, HunkOp::Stage))
+        run_test_hunk_op(&git, &req("-notes.md", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
         let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
@@ -1130,7 +1240,7 @@ index 1111111..2222222 100644
         write(&dir, "crlf.txt", "c1\r\nC2\r\nc3\r\nc4\r\n");
 
         let h0 = header_of(&git, DiffTarget::Worktree, "crlf.txt", 0).await;
-        run_hunk_op(&git, &req("crlf.txt", 0, &h0, HunkOp::Stage))
+        run_test_hunk_op(&git, &req("crlf.txt", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
 
@@ -1156,7 +1266,7 @@ index 1111111..2222222 100644
         write(&dir, "nl.txt", "a\nb\nc\nd");
 
         let h0 = header_of(&git, DiffTarget::Worktree, "nl.txt", 0).await;
-        run_hunk_op(&git, &req("nl.txt", 0, &h0, HunkOp::Stage))
+        run_test_hunk_op(&git, &req("nl.txt", 0, &h0, HunkOp::Stage))
             .await
             .unwrap();
 

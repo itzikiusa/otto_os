@@ -762,7 +762,18 @@ impl super::GitProvider for Github {
         // deleting the source branch, and the PR payload is the only place the
         // ref name is available.
         let head_ref = if delete_source_branch {
-            vstr(&self.pr_raw(r, number).await?, &["head", "ref"])
+            {
+                let pr = self.pr_raw(r, number).await?;
+                // Fork cleanup needs credentials/authority for the fork. Never
+                // substitute a same-named branch in the base repository.
+                if vstr(&pr, &["head", "repo", "full_name"])
+                    .eq_ignore_ascii_case(&format!("{}/{}", r.owner, r.repo))
+                {
+                    vstr(&pr, &["head", "ref"])
+                } else {
+                    String::new()
+                }
+            }
         } else {
             String::new()
         };

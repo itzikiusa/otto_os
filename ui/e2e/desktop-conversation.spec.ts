@@ -86,6 +86,55 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
+test('chat drafts stay with their session when switching in the same pane', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'SecondDraft', cwd: '/tmp',
+      meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: pickFixture() } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const second = (await r.json()).id as string;
+  await page.evaluate(({ second }) => {
+    localStorage.setItem(`otto_session_view:${second}`, 'chat');
+    sessionStorage.setItem(`otto_chat_draft:${second}`, 'Draft for B');
+  }, { second });
+  const composer = page.locator('.composer textarea');
+  await composer.fill('Draft for A');
+  await page.evaluate((id) => { location.hash = `#/agents/${id}`; }, second);
+  await expect(composer).toHaveValue('Draft for B');
+  await page.evaluate((id) => { location.hash = `#/agents/${id}`; }, sessionId);
+  await expect(composer).toHaveValue('Draft for A');
+});
+
+test('a pending send cannot erase a reopened session draft', async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let arrived!: () => void;
+  const submitted = new Promise<void>((resolve) => { arrived = resolve; });
+  let inputCalls = 0;
+  await page.route(`**/sessions/${sessionId}/input`, async (route) => {
+    inputCalls++; arrived(); await held; await route.fulfill({ status: 204 });
+  });
+  const composer = page.locator('.composer textarea');
+  await composer.fill('Submitted draft');
+  await composer.press('Enter');
+  await submitted;
+  await page.locator('.view-seg button', { hasText: 'Terminal' }).click();
+  await expect(composer).toHaveCount(0);
+  await page.locator('.view-seg button', { hasText: 'Chat' }).click();
+  await expect(composer).toHaveValue('Submitted draft');
+  await composer.fill('New work after reopening');
+  await expect(page.locator('.composer').getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
+  await composer.press('Enter');
+  const completed = page.waitForResponse(`**/sessions/${sessionId}/input`);
+  release();
+  await completed;
+  expect(inputCalls).toBe(1);
+  await expect(composer).toHaveValue('New work after reopening');
+  await expect.poll(() => page.evaluate((id) => sessionStorage.getItem(`otto_chat_draft:${id}`), sessionId)).toBe('New work after reopening');
+  await page.reload();
+  await expect(composer).toHaveValue('New work after reopening');
+});
+
 test('sanitizer renders hostile markdown HTML inert (WebFetch output path)', async ({ page }) => {
   // No TS unit runner in this repo — Vite serves the module, so exercise the
   // real sanitizer in the browser with the bypasses the review named.

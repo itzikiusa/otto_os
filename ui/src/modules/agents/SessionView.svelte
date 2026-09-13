@@ -8,6 +8,7 @@
   import AttachIssue from './AttachIssue.svelte';
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
+  import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -798,6 +799,7 @@
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
+  {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
     {#if effView !== 'terminal'}
       <div class="pane-chat" style={effView === 'split' ? `flex: 0 0 ${(chatFrac * 100).toFixed(2)}%` : ''}>

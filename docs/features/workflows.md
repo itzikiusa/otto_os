@@ -69,7 +69,7 @@ API-client automations are a thin, self-contained feature covered in §8.
 ui/src/modules/workflows/WorkflowsPage.svelte   — the page: generate / list / edit / run / inspect
 ui/src/modules/workflows/WorkflowCanvas.svelte  — n8n-style pan/zoom node-graph canvas (SVG + cards)
 ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status, logs, "work product")
-ui/src/modules/workflows/TriggersPanel.svelte   — list/add/toggle/delete schedule|webhook|event triggers
+ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
 crates/otto-server/src/workflow_engine.rs              — the executor: node catalog, run loop, per-node exec, branching/retry, proof
@@ -161,8 +161,10 @@ parse or evaluate is treated as **not taken** (and logged), never a crash.
 
 ### Retry/backoff (`WorkflowNode.retry`)
 `{ max_attempts (extra attempts after the first, clamped ≤5), backoff_ms (initial
-sleep, clamped ≤60000), factor (multiplier, default 2.0) }`. Default is **no
-retry** (single attempt), so existing graphs are unchanged. The policy can also be
+sleep, clamped ≤60000), factor (multiplier, default 2.0) }`. An absent policy gives
+`agent_prompt` and `prepare_context` with a nonempty prompt two retries; other kinds default to zero.
+An explicit zero always means one attempt, even for transient failures. The UI
+keeps zero distinct from **Use default**. The policy can also be
 supplied as a `params.retry` object. `human_approval` and `manual_trigger` are
 never retried. `NodeRunState.attempts` records how many attempts ran.
 
@@ -532,9 +534,24 @@ interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; create
 | **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled, prompt? }` (the **shared cadence** format — same as Scheduled Tasks; `prompt` is new — see *Prompts & chat bindings*) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }`, plus `"prompt"` when `spec.prompt` is set. | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
 | **chat** | `{ channel: "slack"\|"telegram", chat: "<id>", thread?: "<ts>", mention_only?: bool }` | Any inbound message that matches the binding (channel/chat exact, thread pinned or open, `@mention` if `mention_only`) — see *Prompts & chat bindings* below. | `{ trigger: "chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw }` | **Yes** — evaluated **live** by the channels `Bridge` on every inbound message (not polled, unlike the other three kinds). |
 
+### Editing and previewing triggers
+
+The Triggers panel can add and edit all four trigger kinds. Schedules expose
+interval, daily, weekly and five-field cron, IANA timezone and prompt. Events
+expose canonical event names and a JSON object filter. Chat bindings expose the
+channel, chat, thread and mention setting. Result destinations support Slack or
+Telegram chat/thread and an HTTP(S) webhook. Editing retains server tokens,
+cursors and extension fields; clearing a destination removes it from use.
+
+**Preview / validate** validates the draft without saving or firing anything.
+For schedules it displays the next five fire times using the scheduler's cadence
+engine and the selected timezone. Invalid timezone, cadence, event filter or
+result destination returns an actionable validation error.
+
 ### Event-kind mapping (configure by string in the trigger spec)
 The event listener maps daemon `Event` variants to stable strings; the UI default
-in the add-trigger form is `ReviewChanged` (which maps to `review_changed`):
+in the add-trigger form is the supported canonical value `review_changed`.
+The UI offers the canonical identifiers from this mapping:
 
 | Daemon event | `event_kind` you type |
 |---|---|
@@ -853,6 +870,30 @@ FIFO gate (`workflow_engine::spawn_run`):
 - **Stop** on a queued run works: the gate re-checks the run's status when a
   slot frees and a canceled run never starts.
 
+### Validation, pinned versions and durable loops
+
+Use **Validate** in the editor to check the working graph. Run also validates it
+before execution. Diagnostics identify nodes or edges and highlight them on the
+canvas: duplicate ids, missing endpoints, cycles, unsupported kinds, missing
+required static parameters and malformed expressions. Incomplete drafts can be
+saved. Loop steps are checked too; nested loops remain unsupported.
+
+A run pins its definition when queued. Queue delays, workflow edits, restarts and
+step retries all keep that same graph, instructions and restart policy. The run
+view shows when the current editor differs from the pinned version. Use a fresh
+Run to execute the latest saved graph. A missing pinned snapshot fails the run
+instead of silently executing a different definition.
+
+Loop attempts now have durable checkpoints (migration **0127**). The run view
+shows each iteration's inner step, status, attempts, logs and output. Completed
+steps retain their output through recovery, and inner failures use their own
+retry policy. An interrupted external action has an unknown outcome and stops
+for inspection; it is never automatically repeated. **Retry step** acknowledges
+that outcome, resets failed attempts and retains successful inner work.
+**Re-run from here** intentionally clears the selected loop checkpoints and can
+repeat completed actions. Old interrupted loops without checkpoints fail safely.
+Recovered handoff files retain their contents and their step numbering.
+
 ### Restart resume
 
 A daemon restart (or a computer reboot) no longer cancels executing runs.
@@ -861,8 +902,8 @@ Per-node progress is persisted after every step, so on startup a reconciler
 failing it:
 
 - **Adoption**: steps that already finished keep their status/output/sessions
-  (the same in-place re-entry retry-node uses); the run re-enters at the
-  interrupted step, reusing its context dir and `otto-wf/<run_id>` worktrees
+  and run scope. The run continues all unfinished nodes, including pending
+  sibling branches, reusing its context dir and `otto-wf/<run_id>` worktrees
   (the startup worktree sweep runs after reconciliation, so resumable runs
   keep theirs).
 - **Side-effect safety**: a step with external side effects (`git_pr`,
@@ -1142,6 +1183,7 @@ build on.
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |
 | `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run |
+| `POST /workflows/{id}/validate` | ws viewer | `{graph?}` → `{valid, issues}`; no execution |
 | `GET /workflows/{id}/versions` | ws viewer | `WorkflowVersion[]` (snapshot history, newest first) |
 | `GET /workflows/{id}/versions/{v}` | ws viewer | one snapshot (404 if unknown) |
 | `POST /workflows/{id}/versions/{v}/restore` | ws editor | `{note?}` → copies `v`'s graph in as a **new** version |
@@ -1156,6 +1198,7 @@ Trigger / webhook / approval routes (api.md Wave-3 additions):
 |---|---|---|
 | `POST /workflows/{id}/webhook/{token}` | **public-by-token** | run input = body; token matched against `workflow_triggers`; returns `{run_id}` |
 | `GET /workflows/{id}/triggers` | ws viewer (Workflows:View) | `WorkflowTrigger[]` |
+| `POST /workflows/{id}/triggers/preview` | ws viewer | `{kind, spec}` → `{kind, next_fire_times}`; no save/fire |
 | `POST /workflows/{id}/triggers` | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` |
 | `PATCH /workflow-triggers/{id}` | ws editor (Workflows:Edit) | toggle/enable, update spec |
 | `DELETE /workflow-triggers/{id}` | ws editor (Workflows:Edit) | 204 |
@@ -1355,7 +1398,7 @@ are **append-only** — never edit or renumber an existing one.
 | Step log: `⚠ background task b5gvqf675 never finished after 15m — moving on` | The parent went idle with only a `run_in_background` bash left (a dev server, a `--watch`, a `tail`). The engine completes the step after 15 min and suspends the session, which hangs up the task. Add "stop every background process you started" work to the step, or don't background it. |
 | Step log: `⚠ no completion signal for this provider — accepted after 150s of silence` | agy / custom providers have no transcript artifact, so they still fall back to 150 s of PTY silence (§10). Use claude or codex for steps that delegate. |
 | Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
-| Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts regardless of the node's policy (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
+| Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts when retries are enabled (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
 | Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. The trip is never consulted while a bounded hold (idle confirm / handoff grace / linger) is running. |
 | A review in **orchestrator** mode shows 2 agent rows instead of 6 | That is the mode working: one agent per **provider**, each running every lens as its own sub-agents, plus the summarizer (§4 *Execution mode*). The row reads `claude · orchestrator (3 lenses)` and its note counts the lenses (`lenses 3/6 done · …`). Switch the node's *Execution mode* to Fan-out — or start the run with `review_mode: "fan_out"` — to get one row per lens × provider. |
 | A branch I expected to run was `skipped (branch not taken)` | An incoming edge's `condition` evaluated false (or its upstream was branch-skipped). Inspect the `edge → … not taken` log line and the source node's output the condition tested. |

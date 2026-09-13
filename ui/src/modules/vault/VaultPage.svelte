@@ -11,6 +11,7 @@
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
   import GraphView from './GraphView.svelte';
+  import RecoveryView from './RecoveryView.svelte';
   import NewNoteDialog from './NewNoteDialog.svelte';
   import NoteView from './NoteView.svelte';
   import RightPanel from './RightPanel.svelte';
@@ -204,6 +205,8 @@
     {/if}
     <div class="spacer"></div>
     {#if vault.current}
+      <button class="tool" title="Trash and restore" onclick={() => void vault.openTrash()}><Icon name="trash" size={14} /></button>
+      <button class="tool" title="Edit history" onclick={() => void vault.openHistory()}><Icon name="clock" size={14} /></button>
       <div class="counts">
         {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ??
           vault.current.links} links
@@ -349,7 +352,15 @@
           </div>
         {/if}
         {#if vault.centerMode === 'graph'}
-          <GraphView />
+          <div class="graph-scope">
+            <label>Graph scope <select aria-label="Graph scope" bind:value={vault.graphLocal} onchange={() => vault.persistView()}>
+              <option value={false}>Whole vault</option><option value={true} disabled={!vault.notePath}>Around current note</option>
+            </select></label>
+            {#if vault.graphLocal}<span>{vault.notePath}</span>{/if}
+          </div>
+          <GraphView local={vault.graphLocal} />
+        {:else if vault.centerMode === 'trash' || vault.centerMode === 'history'}
+          {#key vault.centerMode}<RecoveryView mode={vault.centerMode} />{/key}
         {:else if vault.centerMode === 'docs-agents'}
           <DocsAgentsView />
         {:else if vault.centerMode === 'file' && vault.filePath}
@@ -438,6 +449,8 @@
 <Switcher />
 
 <style>
+  .graph-scope { display: flex; align-items: center; gap: 12px; padding: 8px 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .graph-scope select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 4px; border-radius: 4px; }
   .vault-page {
     display: flex;
     flex-direction: column;

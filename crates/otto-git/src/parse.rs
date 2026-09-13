@@ -527,19 +527,29 @@ pub fn parse_diff(text: &str) -> DiffResp {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileState> = None;
 
-    for line in text.lines() {
+    use sha2::{Digest, Sha256};
+    let mut raw = String::new();
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
         if line.starts_with("diff --git ") {
             if let Some(f) = cur.take() {
-                files.push(f.finish());
+                let mut file = f.finish();
+                file.fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+                files.push(file);
             }
+            raw.clear();
+            raw.push_str(raw_line);
             cur = Some(FileState::new(line));
             continue;
         }
         let Some(state) = cur.as_mut() else { continue };
+        raw.push_str(raw_line);
         state.feed(line);
     }
     if let Some(f) = cur.take() {
-        files.push(f.finish());
+        let mut file = f.finish();
+        file.fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+        files.push(file);
     }
     DiffResp { files }
 }
@@ -693,6 +703,7 @@ impl FileState {
             });
         let language = lang_from_ext(&path);
         FileDiff {
+            fingerprint: String::new(),
             path,
             old_path,
             is_binary: self.is_binary,

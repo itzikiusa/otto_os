@@ -192,7 +192,7 @@ async fn rescan<C: VaultCtx>(
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
     c.vault().get_scoped(&ws, id).await?;
     c.vault().scan(id).await?;
-    Ok(Json(c.vault().store().status(id).await?))
+    Ok(Json(c.vault().status(&ws, id).await?))
 }
 
 async fn status<C: VaultCtx>(
@@ -355,6 +355,85 @@ async fn okf_indexes<C: VaultCtx>(
     }))
 }
 
+#[derive(Deserialize)]
+struct RecoveryPath {
+    ws: Id,
+    id: i64,
+    entry: String,
+}
+#[derive(Deserialize)]
+struct RestoreTrashReq {
+    destination: Option<String>,
+}
+#[derive(Deserialize, Default)]
+struct HistoryQ {
+    path: Option<String>,
+    before: Option<String>,
+}
+#[derive(Deserialize)]
+struct RestoreRevisionReq {
+    version: String,
+    if_hash: String,
+}
+
+async fn trash<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+) -> ApiResult<Json<Vec<VaultTrashEntry>>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(c.vault().trash_entries(&ws, id).await?))
+}
+async fn restore_trash<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(RecoveryPath { ws, id, entry }): Path<RecoveryPath>,
+    Json(req): Json<RestoreTrashReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        serde_json::json!({"path": c.vault().restore_trash(&ws, id, &entry, req.destination.as_deref()).await?}),
+    ))
+}
+async fn history<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+    Query(q): Query<HistoryQ>,
+) -> ApiResult<Json<Vec<VaultRevision>>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(
+        c.vault()
+            .revisions_page(
+                &ws,
+                id,
+                q.path.as_deref().filter(|p| !p.is_empty()),
+                q.before.as_deref(),
+            )
+            .await?,
+    ))
+}
+async fn revision<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(RecoveryPath { ws, id, entry }): Path<RecoveryPath>,
+) -> ApiResult<Json<VaultRevisionDetail>> {
+    require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
+    Ok(Json(c.vault().revision(&ws, id, &entry).await?))
+}
+async fn restore_revision<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(RecoveryPath { ws, id, entry }): Path<RecoveryPath>,
+    Json(req): Json<RestoreRevisionReq>,
+) -> ApiResult<StatusCode> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    c.vault()
+        .restore_revision(&ws, id, &entry, &req.version, &req.if_hash)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Stream an attachment (image/pdf/…) with a best-effort content type.
 async fn asset<C: VaultCtx>(
     State(c): State<C>,
@@ -381,6 +460,23 @@ async fn asset<C: VaultCtx>(
 /// Build the vault router. Paths are relative to the `/api/v1` mount point.
 pub fn router<C: VaultCtx>() -> Router<C> {
     Router::new()
+        .route("/workspaces/{ws}/vault/vaults/{id}/trash", get(trash::<C>))
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/trash/{entry}/restore",
+            post(restore_trash::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/history",
+            get(history::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/history/{entry}",
+            get(revision::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/history/{entry}/restore",
+            post(restore_revision::<C>),
+        )
         .route(
             "/workspaces/{ws}/vault/vaults",
             get(list_vaults::<C>).post(create_vault::<C>),

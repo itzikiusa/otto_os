@@ -1366,7 +1366,10 @@ impl MongoDriver {
             // on below.
             Some(conn_string) => {
                 let uri = match cfg.password.as_deref() {
-                    Some(secret) => conn_string.replace("{secret}", secret),
+                    Some(secret) => conn_string.replace(
+                        "{secret}",
+                        &otto_core::connection_credentials::encode_password(secret),
+                    ),
                     None => conn_string,
                 };
                 ClientOptions::parse(&uri).await.map_err(types::upstream)?
@@ -1590,7 +1593,10 @@ fn pct(s: &str) -> String {
 fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
     let mut uri = match cfg.param_str("conn_string") {
         Some(conn_string) => match cfg.password.as_deref() {
-            Some(secret) => conn_string.replace("{secret}", secret),
+            Some(secret) => conn_string.replace(
+                "{secret}",
+                &otto_core::connection_credentials::encode_password(secret),
+            ),
             None => conn_string,
         },
         None => {

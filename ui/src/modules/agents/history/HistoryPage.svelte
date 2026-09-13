@@ -9,7 +9,7 @@
   // through its session. "Resume in Otto" imports an on_disk transcript as a
   // reconnectable session and then rides the existing restart/resume path.
   import { untrack } from 'svelte';
-  import { ws } from '../../../lib/stores/workspace.svelte';
+  import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { router } from '../../../lib/router.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
@@ -31,8 +31,9 @@
   } from './history.svelte';
   import type { Artifact, HistoryEntry, HistoryStatus, Transcript } from '../../../lib/api/types';
 
-  const wsId = $derived(ws.currentId);
-  const canEdit = $derived(ws.myRole !== 'viewer');
+  let scope = $state<'workspace' | 'scratch'>('workspace');
+  const wsId = $derived(scope === 'scratch' ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
+  const canEdit = $derived(wsId === SCRATCH_WORKSPACE_ID || ws.myRole !== 'viewer');
   const sel = $derived(history.selected);
   const selKey = $derived(sel ? entryKey(sel) : null);
 
@@ -306,6 +307,10 @@
       </button>
     </div>
     <div class="filters">
+      <select class="sel" bind:value={scope} aria-label="History workspace">
+        {#if ws.currentId}<option value="workspace">Current workspace</option>{:else}<option value="workspace">No workspace</option>{/if}
+        {#if ws.currentId}<option value="scratch">No workspace</option>{/if}
+      </select>
       <select class="sel" bind:value={history.provider} aria-label="Provider">
         {#each PROVIDERS as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
       </select>

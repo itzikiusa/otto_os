@@ -167,3 +167,42 @@ async fn text_file_route_requires_editor_role() {
     assert_eq!(status, StatusCode::FORBIDDEN, "response: {response}");
     assert!(!td.path().join("denied.json").exists());
 }
+
+#[tokio::test]
+async fn recovery_routes_require_editor_for_restore_and_allow_viewer_reads() {
+    let (app, _td, id) = fixture(WorkspaceRole::Viewer).await;
+    for suffix in ["trash", "history"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/workspaces/{WS}/vault/vaults/{id}/{suffix}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    for (suffix, body) in [
+        ("trash/example/restore", json!({})),
+        (
+            "history/example/restore",
+            json!({"version":"before", "if_hash":""}),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/workspaces/{WS}/vault/vaults/{id}/{suffix}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}

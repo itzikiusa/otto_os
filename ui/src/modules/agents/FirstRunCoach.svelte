@@ -15,7 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
-  import { agentProviders as registryAgentProviders } from '../../lib/providers';
+  import { agentProviders as registryAgentProviders, providerReadiness } from '../../lib/providers';
 
   interface Props {
     /** Called when the user dismisses the coach (falls back to the bare empty state). */
@@ -28,9 +28,9 @@
   // regardless of what's installed, so it can't gate the launch. Real detection
   // lives in /meta.tools: a coding agent is usable only when its tool is `found`.
   const agentProviders = $derived(registryAgentProviders());
-  // Tool rows for claude/codex from /meta.tools (shows version when found).
+  // Use the same registry and readiness model as New Session and Handover.
   const agentTools = $derived(
-    (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex'),
+    agentProviders.map((name) => ({ name, found: providerReadiness(name).available, checked: providerReadiness(name).checked, version: providerReadiness(name).version })),
   );
   // The gate: at least one agent CLI is actually installed on PATH.
   const hasAgentCli = $derived(agentTools.some((t) => t.found));
@@ -201,9 +201,9 @@
         {#if hasAgentCli}
           <div class="tool-chips">
             {#each agentTools as t (t.name)}
-              <span class="chip" class:found={t.found}>
-                <Icon name={t.found ? 'check' : 'x'} size={10} />
-                {t.name}{t.found && t.version ? ` ${t.version}` : ''}
+              <span class="chip" class:found={t.found && t.checked} title={providerReadiness(t.name).message}>
+                <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={10} />
+                {t.name}{!t.checked ? ' · unchecked' : t.found && t.version ? ` ${t.version}` : ''}
               </span>
             {/each}
             {#if agentTools.length === 0}

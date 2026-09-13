@@ -2,6 +2,8 @@
   // Shared request builder used by both the full API page and the compact
   // right-panel. Method + URL + Send, plus a Params/Headers/Body/Auth tab strip,
   // an "Import curl" paste box, "Copy as curl", and "Save".
+  import { openExternal } from '../../lib/external';
+  import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { apiClient, HTTP_METHODS, defaultSettings, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
@@ -394,13 +396,38 @@
     const wid = ws.currentId;
     if (!wid) return;
     const a = draft.auth;
+    const tabId = draft.tabId;
     if (!a.token_url.trim()) { toasts.error('No token URL', 'Set the OAuth2 token URL first.'); return; }
     fetchingToken = true;
     try {
+      if (a.grant === 'authorization_code') {
+        // Save first so the daemon owns the resulting token under this request's Keychain reference.
+        const saved = await apiClient.saveDraft(draft.name || 'OAuth request',apiClient.requests.find(r=>r.id===draft.requestId)?.collection_id ?? null);
+        if (!saved || ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
+        const flow = await api.post<{flow_id:string;authorization_url:string;redirect_uri:string}>(`/workspaces/${wid}/api-client/oauth2/authorize`,{request_id:saved.id});
+        await openExternal(flow.authorization_url);
+        const deadline = Date.now()+600_000;
+        while (Date.now()<deadline) {
+          await new Promise(resolve=>setTimeout(resolve,1000));
+          const result=await api.get<{status:string;error?:string}>(`/workspaces/${wid}/api-client/oauth2/flows/${flow.flow_id}`);
+          if (result.status==='failed') throw new Error(result.error || 'Authorization failed');
+          if (result.status==='completed') {
+            const requests = await api.get<import('../../lib/api/types').ApiRequest[]>(`/workspaces/${wid}/api-client/requests`);
+            const request = requests.find(r=>r.id===saved.id);
+            if (request) {
+              apiClient.applySavedAuth(wid,request,saved.auth);
+              toasts.success('Authorization complete','Token stored in Keychain.');
+            }
+            return;
+          }
+        }
+        return;
+      }
       const res = await api.post<{ access_token: string; token_type?: string; refresh_token?: string; expires_in?: number }>(
         `/workspaces/${wid}/api-client/oauth2/token`,
         { grant: a.grant, token_url: a.token_url, client_id: a.client_id, client_secret: a.client_secret, scope: a.scope, username: a.username, password: a.password, refresh_token: a.refresh_token },
       );
+      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
       setAuth({ access_token: res.access_token, token_type: res.token_type || 'Bearer', refresh_token: res.refresh_token || a.refresh_token });
       toasts.success('Token acquired', `${res.token_type || 'Bearer'} · expires in ${res.expires_in ?? '?'}s`);
     } catch (e) {
@@ -419,13 +446,13 @@
   const isStreaming = $derived(draft.kind === 'sse' || draft.kind === 'websocket');
   function setKind(k: ApiRequestKind): void {
     if (apiStream.active) apiStream.disconnect();
-    apiClient.draft = { ...draft, kind: k };
+    apiClient.draft = { ...draft, kind: k, ...(k === 'websocket' ? {method:'GET',body_mode:'none',body:''} : {}) };
   }
   // Keep the active tab valid for the current kind's tab strip.
   $effect(() => {
     const allowed =
       draft.kind === 'grpc' ? ['body', 'headers']
-      : draft.kind === 'websocket' ? ['headers', 'auth', 'settings']
+      : draft.kind === 'websocket' ? ['params', 'headers', 'auth', 'settings']
       : ['params', 'auth', 'headers', 'body', 'scripts', 'docs', 'settings'];
     if (!allowed.includes(tab)) tab = allowed[0] as Tab;
   });
@@ -452,10 +479,13 @@
     const wid = ws.currentId;
     if (!wid) return;
     if (!draft.proto?.trim()) { toasts.error('No .proto', 'Upload or paste a .proto first.'); return; }
+    const tabId = draft.tabId;
+    const proto = draft.proto;
     grpcParsing = true;
     try {
       const res = await api.post<{ services: GrpcService[] }>(
         `/workspaces/${wid}/api-client/grpc/describe`, { proto: draft.proto });
+      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId || apiClient.draft.proto !== proto) return;
       grpcServices = res.services;
       const first = res.services.find((s) => s.methods.length);
       if (first && !draft.grpc_method) selectGrpcMethod(first.methods[0]);
@@ -471,6 +501,7 @@
     const wid = ws.currentId;
     if (!wid) return;
     if (!draft.url.trim()) { toasts.error('No URL', 'Enter the gRPC server URL first.'); return; }
+    const tabId = draft.tabId;
     grpcReflecting = true;
     try {
       // Reflection-based: clear any uploaded proto so invoke uses reflection too.
@@ -479,6 +510,7 @@
         `/workspaces/${wid}/api-client/grpc/reflect`,
         { url: draft.url, headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== '') },
       );
+      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
       grpcServices = res.services;
       const first = res.services.find((s) => s.methods.length);
       if (first) selectGrpcMethod(first.methods[0]);
@@ -489,6 +521,8 @@
       grpcReflecting = false;
     }
   }
+  let grpcTabId = $state<string | undefined>();
+  $effect(() => {if (draft.tabId !== grpcTabId) {grpcTabId = draft.tabId;grpcServices = [];}});
   function selectGrpcMethod(m: GrpcMethod): void {
     apiClient.draft = {
       ...apiClient.draft,
@@ -504,6 +538,7 @@
     const wid = ws.currentId;
     if (!wid) return;
     if (!draft.grpc_method) { toasts.error('No method', 'Pick a gRPC method to call.'); return; }
+    const tabId = draft.tabId;
     grpcInvoking = true;
     try {
       const res = await api.post<ApiResponse>(`/workspaces/${wid}/api-client/grpc/invoke`, {
@@ -513,13 +548,19 @@
         body: draft.body,
         headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== ''),
       });
-      apiClient.lastResponse = res;
+      if (ws.currentId === wid && apiClient.draft.tabId === tabId) apiClient.lastResponse = res;
     } catch (e) {
       toasts.error('gRPC call failed', e instanceof Error ? e.message : String(e));
     } finally {
       grpcInvoking = false;
     }
   }
+
+  $effect(() => {
+    if (apiStream.workspaceId && apiStream.workspaceId !== ws.currentId) {
+      apiStream.disconnect(); apiStream.clear();
+    }
+  });
 
   // ── actions ────────────────────────────────────────────────────────────────
 
@@ -530,7 +571,15 @@
       case 'sse':
       case 'websocket':
         if (apiStream.active) apiStream.disconnect();
-        else apiStream.connect(draft.kind, draft.url, draft.method, draft.headers, draft.body);
+        else if (ws.currentId) apiStream.connect(ws.currentId, draft.kind, {
+          method: draft.method, url: draft.url, headers: draft.headers, query: draft.query,
+          body: draft.body, body_mode: draft.body_mode, auth: draft.auth,
+          environment_id: apiClient.activeEnv?.id ?? null, vars: {...apiClient.runtimeVars},
+          timeout_ms: draft.settings?.timeout_ms ?? null,
+          follow_redirects: draft.settings?.follow_redirects ?? true,
+          verify_ssl: draft.settings?.verify_ssl ?? true,
+          ssh_connection_id: draft.ssh_connection_id ?? null,
+        });
         break;
     }
   }
@@ -882,15 +931,18 @@
           </select>
         {/if}
       </div>
-      {#if grpcServices.length === 0}
+      {#if grpcServices.length === 0 && draft.grpc_method}<p class="empty-mini">Saved method: <code>{draft.grpc_method}</code>. Re-parse to choose another method.</p>{/if}
+      {#if grpcServices.length === 0 && !draft.grpc_method}
         <div class="empty-mini">Upload a <code>.proto</code> to list services &amp; methods. Unary calls are invoked through the daemon.</div>
       {/if}
     </div>
   {/if}
 
+  {#if draft.kind === 'websocket'}<p class="empty-mini">WebSocket supports query, headers, authorization and connection timeout. TLS verification is required; SSH, request bodies and redirects are unavailable.</p>{/if}
+  {#if isStreaming && (draft.pre_request_script?.trim() || draft.post_response_script?.trim())}<p class="empty-mini">Scripts run with HTTP requests. Streaming connections do not execute scripts.</p>{/if}
   <!-- tab strip -->
   <div class="tabstrip" role="tablist">
-    {#each (draft.kind === 'grpc' ? [['body', 'Message', 1], ['headers', 'Metadata', draft.headers.length]] : draft.kind === 'websocket' ? [['headers', 'Headers', draft.headers.length], ['auth', 'Authorization', draft.auth.type !== 'none' ? 1 : 0], ['settings', 'Settings', settingsBadge]] : [['params', 'Params', draft.query.length], ['auth', 'Authorization', draft.auth.type !== 'none' ? 1 : 0], ['headers', 'Headers', draft.headers.length], ['body', 'Body', draft.body_mode !== 'none' ? 1 : 0], ['scripts', 'Scripts', (draft.pre_request_script?.trim() || draft.post_response_script?.trim()) ? 1 : 0], ['docs', 'Docs', draft.docs?.trim() ? 1 : 0], ['settings', 'Settings', settingsBadge]]) as [id, label, count] (id)}
+    {#each (draft.kind === 'grpc' ? [['body', 'Message', 1], ['headers', 'Metadata', draft.headers.length]] : draft.kind === 'websocket' ? [['params', 'Params', draft.query.length], ['headers', 'Headers', draft.headers.length], ['auth', 'Authorization', draft.auth.type !== 'none' ? 1 : 0], ['settings', 'Settings', settingsBadge]] : [['params', 'Params', draft.query.length], ['auth', 'Authorization', draft.auth.type !== 'none' ? 1 : 0], ['headers', 'Headers', draft.headers.length], ['body', 'Body', draft.body_mode !== 'none' ? 1 : 0], ['scripts', 'Scripts', (draft.pre_request_script?.trim() || draft.post_response_script?.trim()) ? 1 : 0], ['docs', 'Docs', draft.docs?.trim() ? 1 : 0], ['settings', 'Settings', settingsBadge]]) as [id, label, count] (id)}
       <button
         class="tab"
         class:active={tab === id}
@@ -1066,12 +1118,17 @@
         {:else if draft.auth.type === 'oauth2'}
           <div class="field-row">
             <label for="auth-grant">Grant type</label>
-            <select id="auth-grant" class="input" value={draft.auth.grant} onchange={(e) => setAuth({ grant: (e.currentTarget as HTMLSelectElement).value as 'client_credentials' | 'password' | 'refresh_token' })}>
+            <select id="auth-grant" class="input" value={draft.auth.grant} onchange={(e) => setAuth({ grant: (e.currentTarget as HTMLSelectElement).value as 'client_credentials' | 'password' | 'refresh_token' | 'authorization_code' })}>
+              <option value="authorization_code">Authorization Code + PKCE (browser)</option>
               <option value="client_credentials">Client Credentials</option>
               <option value="password">Password</option>
               <option value="refresh_token">Refresh Token</option>
             </select>
           </div>
+          {#if draft.auth.grant === 'authorization_code'}
+            <div class="field-row"><label for="auth-aurl">Authorization URL</label><input id="auth-aurl" class="input mono grow" value={draft.auth.authorization_url ?? ''} oninput={(e) => setAuth({authorization_url:e.currentTarget.value})} placeholder="https://auth.example.com/oauth/authorize" /></div>
+            <p class="empty-mini">Register this callback with your provider: <code>{baseUrl().replace(/\/$/,'')}/api/v1/api-client/oauth2/callback</code>. Get New Token saves this request, opens the browser, and stores tokens in Keychain.</p>
+          {/if}
           <div class="field-row">
             <label for="auth-turl">Token URL</label>
             <input id="auth-turl" class="input mono grow" value={draft.auth.token_url} oninput={(e) => setAuth({ token_url: (e.currentTarget as HTMLInputElement).value })} placeholder="https://auth.example.com/oauth/token" />

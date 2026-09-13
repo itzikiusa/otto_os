@@ -110,7 +110,7 @@ pub async fn update_workflow(
         .map_err(ApiError)?;
     // A graph- or instructions-changing edit bumps the version and snapshots
     // the new state (an instructions-only edit is treated like a graph edit).
-    if graph_changed || instructions_changed {
+    if graph_changed || instructions_changed || req.on_restart.is_some() {
         let v = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
         repo(&ctx)
             .snapshot_version(
@@ -509,6 +509,17 @@ pub async fn run_workflow(
 ) -> ApiResult<Json<WorkflowRun>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    crate::workflow_validation::ensure_valid(&wf.graph).map_err(ApiError)?;
+    if req
+        .start_node
+        .as_ref()
+        .is_some_and(|id| !wf.graph.nodes.iter().any(|node| &node.id == id))
+        || (req.only_node && req.start_node.is_none())
+    {
+        return Err(ApiError(Error::Invalid(
+            "Select an existing start step for a partial run".into(),
+        )));
+    }
     let ws = ctx
         .workspaces
         .get(&wf.workspace_id)
@@ -522,22 +533,23 @@ pub async fn run_workflow(
         .await
         .map_err(ApiError)?;
 
+    let scope = otto_core::workflows::RunScope {
+        continue_unfinished: false,
+        start_node: req.start_node.clone(),
+        only_node: req.only_node,
+        adopt_start: false,
+    };
+    let scope_json =
+        serde_json::to_string(&scope).map_err(|e| ApiError(Error::Internal(e.to_string())))?;
+    repo(&ctx)
+        .set_run_resume_scope(&run.id, Some(&scope_json))
+        .await
+        .map_err(ApiError)?;
+
     // Execute in the background (gated to the daemon-wide parallel-run cap;
     // beyond it the run queues as this `pending` row). The UI polls
     // GET /workflow-runs/{id}.
-    workflow_engine::spawn_run(
-        ctx.clone(),
-        ws,
-        wf,
-        run.id.clone(),
-        input,
-        otto_core::workflows::RunScope {
-            start_node: req.start_node.clone(),
-            only_node: req.only_node,
-            adopt_start: false,
-        },
-        None,
-    );
+    workflow_engine::spawn_run(ctx.clone(), ws, wf, run.id.clone(), input, scope, None);
 
     Ok(Json(run))
 }
@@ -588,25 +600,39 @@ pub async fn retry_run_node(
             target.status
         ))));
     }
-    let wf = repo(&ctx).get(&run.workflow_id).await.map_err(ApiError)?;
+    let wf = repo(&ctx)
+        .definition_for_run(&run)
+        .await
+        .map_err(ApiError)?;
     let ws = ctx
         .workspaces
         .get(&wf.workspace_id)
         .await
         .map_err(ApiError)?;
-    repo(&ctx).reopen_run(&id).await.map_err(ApiError)?;
-
+    let retry_nodes: Vec<String> = if req.include_downstream {
+        workflow_engine::descendants_inclusive(&wf.graph, node_id)
+            .into_iter()
+            .collect()
+    } else {
+        vec![node_id.to_string()]
+    };
+    let scope = otto_core::workflows::RunScope {
+        continue_unfinished: false,
+        start_node: Some(node_id.to_string()),
+        only_node: !req.include_downstream,
+        adopt_start: false,
+    };
+    repo(&ctx)
+        .prepare_retry(&id, &retry_nodes, req.include_downstream, &scope)
+        .await
+        .map_err(ApiError)?;
     workflow_engine::spawn_run(
         ctx.clone(),
         ws,
         wf,
         run.id.clone(),
         run.input.clone(),
-        otto_core::workflows::RunScope {
-            start_node: Some(node_id.to_string()),
-            only_node: !req.include_downstream,
-            adopt_start: false,
-        },
+        scope,
         Some(run.nodes.clone()),
     );
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
@@ -678,8 +704,9 @@ pub async fn get_run(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<WorkflowRun>> {
-    let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
+    let mut run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
+    run.checkpoints = repo(&ctx).checkpoints(&id).await.map_err(ApiError)?;
     Ok(Json(with_context_dir(&ctx, run)))
 }
 
@@ -1233,6 +1260,55 @@ fn triggers(ctx: &ServerCtx) -> TriggersRepo {
     TriggersRepo::new(ctx.pool.clone())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ValidateGraphReq {
+    pub graph: Option<WorkflowGraph>,
+}
+
+/// Validate a working copy without persisting it or executing any node.
+pub async fn validate_graph(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ValidateGraphReq>,
+) -> ApiResult<Json<Value>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
+    let issues = crate::workflow_validation::validate(req.graph.as_ref().unwrap_or(&wf.graph));
+    Ok(Json(json!({"valid": issues.is_empty(), "issues": issues})))
+}
+
+/// Preview uses the scheduler's cadence/timezone evaluator; never advances the
+/// cursor or creates a run. Non-schedule previews only validate the spec.
+pub async fn preview_trigger(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<CreateTriggerReq>,
+) -> ApiResult<Json<Value>> {
+    let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
+    validate_trigger_spec(&req.kind, &req.spec)?;
+    let mut next = Vec::new();
+    if req.kind == "schedule" {
+        let tz = crate::cadence::task_tz(
+            req.spec
+                .get("timezone")
+                .and_then(Value::as_str)
+                .unwrap_or("UTC"),
+        );
+        let mut cursor = chrono::Utc::now();
+        for _ in 0..5 {
+            let Some(at) = crate::cadence::next_run(&req.spec, cursor, tz) else {
+                break;
+            };
+            next.push(at.to_rfc3339());
+            cursor = at;
+        }
+    }
+    Ok(Json(json!({"next_fire_times": next, "kind": req.kind})))
+}
+
 /// `GET /workflows/{id}/triggers`
 pub async fn list_triggers(
     Path(id): Path<Id>,
@@ -1342,6 +1418,46 @@ pub async fn update_trigger(
 ///   never `workflow_run_updated` (the engine emits it per node transition —
 ///   triggering on it is a recursive run explosion).
 fn validate_trigger_spec(kind: &str, spec: &Value) -> Result<(), ApiError> {
+    if !matches!(kind, "schedule" | "event" | "webhook" | "chat") {
+        return Err(ApiError(Error::Invalid("unsupported trigger kind".into())));
+    }
+    if let Some(timezone) = spec.get("timezone").and_then(Value::as_str) {
+        if timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(ApiError(Error::Invalid(format!(
+                "Unknown IANA timezone '{timezone}'"
+            ))));
+        }
+    }
+    if let Some(channel) = spec
+        .get("result_channel")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if !matches!(channel, "slack" | "telegram")
+            || spec
+                .get("result_chat")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err(ApiError(Error::Invalid(
+                "Result delivery needs slack|telegram and a chat/channel ID".into(),
+            )));
+        }
+    }
+    if let Some(url) = spec
+        .get("result_webhook")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if reqwest::Url::parse(url)
+            .ok()
+            .is_none_or(|url| !matches!(url.scheme(), "http" | "https") || url.host_str().is_none())
+        {
+            return Err(ApiError(Error::Invalid(
+                "Result webhook must be an HTTP(S) URL".into(),
+            )));
+        }
+    }
     match kind {
         "schedule" => crate::cadence::validate(spec).map_err(ApiError),
         "event" => {
@@ -1373,6 +1489,21 @@ fn validate_trigger_spec(kind: &str, spec: &Value) -> Result<(), ApiError> {
                         "filter_json must be a flat object of field: expected-value pairs".into(),
                     )));
                 }
+            }
+            Ok(())
+        }
+        "chat" => {
+            if !matches!(
+                spec.get("channel").and_then(Value::as_str),
+                Some("slack" | "telegram")
+            ) || spec
+                .get("chat")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(ApiError(Error::Invalid(
+                    "Chat binding needs slack|telegram and a chat/channel ID".into(),
+                )));
             }
             Ok(())
         }
@@ -1614,6 +1745,27 @@ fn emit_run_decision(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, node_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_trigger_validation_accepts_canonical_events_and_rejects_bad_destinations() {
+        assert!(validate_trigger_spec(
+            "event",
+            &json!({"event_kind":"review_changed","filter_json":{"status":"done"}})
+        )
+        .is_ok());
+        assert!(validate_trigger_spec("event", &json!({"event_kind":"ReviewChanged"})).is_err());
+        assert!(validate_trigger_spec("schedule", &json!({"cadence":"cron","expr":"0 9 * * 1-5","timezone":"Asia/Jerusalem","result_channel":"slack","result_chat":"C123"})).is_ok());
+        for spec in [
+            json!({"timezone":"Invalid/Zone"}),
+            json!({"result_channel":"slack"}),
+            json!({"result_webhook":"file:///tmp/result"}),
+        ] {
+            assert!(
+                validate_trigger_spec("webhook", &spec).is_err(),
+                "invalid destination accepted: {spec}"
+            );
+        }
+    }
 
     #[test]
     fn templates_cover_the_three_games() {

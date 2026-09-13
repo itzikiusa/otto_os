@@ -13,6 +13,8 @@
     editable?: boolean;
     selectedId?: string | null;
     selectedEdgeId?: string | null;
+    invalidNodes?: string[];
+    invalidEdges?: string[];
     onchange?: (graph: WorkflowGraph) => void;
     onselect?: (id: string | null) => void;
     onedgeselect?: (id: string | null) => void;
@@ -24,6 +26,8 @@
     editable = true,
     selectedId = null,
     selectedEdgeId = null,
+    invalidNodes = [],
+    invalidEdges = [],
     onchange,
     onselect,
     onedgeselect,
@@ -250,7 +254,7 @@
         {@const s = nodeOf(e.source)}
         {@const t = nodeOf(e.target)}
         {#if s && t}
-          <path class="edge" class:selected={selectedEdgeId === e.id} class:conditional={!!e.condition} d={edgePath(s, t)} />
+          <path class="edge" class:invalid={invalidEdges.includes(e.id)} class:selected={selectedEdgeId === e.id} class:conditional={!!e.condition} d={edgePath(s, t)} />
           <path
             class="edge-hit"
             d={edgePath(s, t)}
@@ -281,6 +285,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="node"
+        class:invalid={invalidNodes.includes(n.id)}
         class:selected={selectedId === n.id}
         class:loop={n.kind === 'loop'}
         data-status={st}
@@ -339,6 +344,8 @@
 </div>
 
 <style>
+  .node.invalid { outline: 2px solid var(--status-exited, #e55); }
+  .edge.invalid { stroke: var(--status-exited, #e55); stroke-width: 3; }
   .canvas {
     position: relative;
     width: 100%;

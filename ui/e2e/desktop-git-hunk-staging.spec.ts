@@ -181,3 +181,21 @@ test('a CRLF file staged by hunk leaves no follow-up worktree diff', async ({ pa
   await ctx.dispose();
   expect(gitOut(dir, 'show', ':crlf.txt')).toBe('c1\r\nC2\r\nc3\r\nc4\r\nc5\r\n');
 });
+
+test('same-coordinate edit after rendering rejects the stale hunk token', async ({ page }) => {
+  const name = 'e2e-hunk-stale-content';
+  const { dir, repoId } = await seedRepo(name, { 'two.txt': lines(false) }, { 'two.txt': lines(true) });
+  const panel = await openWipFile(page, name, 'two.txt');
+  const updated = lines(true).replace('LINE TWO', 'UNREVIEWED');
+  await page.route(`**/repos/${repoId}/stage-hunk`, async route => {
+    // Change the bytes at the request boundary so a background UI refresh
+    // cannot accidentally replace the snapshot under test before the click.
+    writeFileSync(join(dir, 'two.txt'), updated);
+    await route.continue();
+  });
+  const response = page.waitForResponse(r => r.url().endsWith(`/repos/${repoId}/stage-hunk`));
+  await panel.locator('.hunk-header').first().getByRole('button', { name: 'Stage hunk' }).click();
+  expect((await response).status()).toBe(409);
+  expect(gitOut(dir, 'diff', '--cached')).toBe('');
+  expect(readFileSync(join(dir, 'two.txt'), 'utf8')).toBe(updated);
+});

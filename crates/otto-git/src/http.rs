@@ -194,6 +194,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .merge(crate::pr_checks::router::<S>())
         .merge(crate::history::router::<S>())
         .merge(crate::ops::router::<S>())
+        .merge(crate::recovery::router::<S>())
 }
 
 // ---------------------------------------------------------------------------

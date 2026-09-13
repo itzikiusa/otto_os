@@ -29,7 +29,7 @@ use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::workflows::{
     NodeActivity, NodeRunState, NodeStatus, NodeTypeSpec, RunScope, RunStatus, SubagentActivity,
-    Workflow, WorkflowGraph, WorkflowNode, WorkflowRun,
+    Workflow, WorkflowCheckpoint, WorkflowGraph, WorkflowNode, WorkflowRun,
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
@@ -443,7 +443,6 @@ fn is_restart_resumable_kind(kind: &str) -> bool {
             | "delay"
             | "log"
             | "condition"
-            | "loop"
             | "budget_gate"
             | "human_approval"
             | "review_run"
@@ -537,7 +536,20 @@ pub fn classify_resume(
                 ),
             };
         };
-        if !is_restart_resumable_kind(kind) {
+        let checkpointed_loop = kind == "loop"
+            && run.checkpoints.iter().any(|cp| cp.node_id == entry_id)
+            && run
+                .checkpoints
+                .iter()
+                .filter(|cp| {
+                    cp.node_id == entry_id || cp.node_id.starts_with(&format!("{entry_id}#"))
+                })
+                .all(|cp| {
+                    cp.status != NodeStatus::Running
+                        || cp.kind == "loop"
+                        || is_restart_resumable_kind(&cp.kind)
+                });
+        if !is_restart_resumable_kind(kind) && !checkpointed_loop {
             // Unknown outcome: mark the step itself, settle the rest.
             for n in nodes.iter_mut() {
                 if n.node_id == entry_id {
@@ -566,17 +578,9 @@ pub fn classify_resume(
         }
         // Preserve a single-step retry scope when the restart caught exactly
         // that step; otherwise re-enter at the step and run its downstream.
-        let only_node = prior_scope
-            .as_ref()
-            .is_some_and(|s| s.only_node && s.start_node.as_deref() == Some(entry_id.as_str()));
-        return ResumeDecision::Resume {
-            scope: RunScope {
-                start_node: Some(entry_id),
-                only_node,
-                adopt_start: false,
-            },
-            nodes,
-        };
+        let mut scope = prior_scope.unwrap_or_default();
+        scope.continue_unfinished = true;
+        return ResumeDecision::Resume { scope, nodes };
     }
 
     // No node mid-flight. A re-queued scoped re-entry that never started
@@ -594,19 +598,14 @@ pub fn classify_resume(
     // Executing, but between node boundaries: resume at the first
     // still-pending node in topo order, or finish the run if none remain.
     if let Ok(order) = topo_order(graph) {
-        if let Some(next) = order.iter().find(|id| {
+        if order.iter().any(|id| {
             nodes
                 .iter()
-                .any(|n| &&n.node_id == id && n.status == NodeStatus::Pending)
+                .any(|n| &n.node_id == id && n.status == NodeStatus::Pending)
         }) {
-            return ResumeDecision::Resume {
-                scope: RunScope {
-                    start_node: Some(next.clone()),
-                    only_node: false,
-                    adopt_start: false,
-                },
-                nodes,
-            };
+            let mut scope = prior_scope.unwrap_or_default();
+            scope.continue_unfinished = true;
+            return ResumeDecision::Resume { scope, nodes };
         }
     }
     let any_error = nodes.iter().any(|n| n.status == NodeStatus::Error);
@@ -640,12 +639,19 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
         }
     };
     let (mut resumed, mut settled) = (0, 0);
-    for (run, scope_json) in rows {
+    for (mut run, scope_json) in rows {
+        match repo.checkpoints(&run.id).await {
+            Ok(checkpoints) => run.checkpoints = checkpoints,
+            Err(error) => {
+                tracing::warn!(run = %run.id, "cannot inspect loop checkpoints: {error}");
+                // No evidence permits replay; the classifier rejects loops.
+            }
+        }
         let prior_scope: Option<RunScope> = scope_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
         // Workflow-level gates first: policy, retry cap, orphaned definition.
-        let loaded = match repo.get(&run.workflow_id).await {
+        let loaded = match repo.definition_for_run(&run).await {
             Ok(wf) => match ctx.workspaces.get(&wf.workspace_id).await {
                 Ok(ws) => Ok((wf, ws)),
                 Err(e) => Err(e),
@@ -788,7 +794,13 @@ async fn apply_done_file_oracle(
     scope: &mut RunScope,
     nodes: &mut [NodeRunState],
 ) {
-    let Some(entry_id) = scope.start_node.clone() else {
+    let Some(entry_id) = run
+        .nodes
+        .iter()
+        .find(|n| n.status == NodeStatus::Running)
+        .map(|n| n.node_id.clone())
+        .or_else(|| scope.start_node.clone())
+    else {
         return;
     };
     let Some(node) = graph.nodes.iter().find(|n| n.id == entry_id) else {
@@ -839,7 +851,9 @@ async fn apply_done_file_oracle(
     state
         .logs
         .push("✓ adopted after daemon restart — the step's handoff file shows it finished".into());
-    scope.adopt_start = true;
+    if !scope.continue_unfinished {
+        scope.adopt_start = true;
+    }
 }
 
 /// Locate the interrupted step's handoff file: `step{N}-{slug(name)}.md` in
@@ -942,13 +956,23 @@ pub fn spawn_run(
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
     tokio::spawn(async move {
-        if scope.start_node.is_some() {
+        {
             let scope_json = serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into());
             if let Err(e) = WorkflowsRepo::new(ctx.pool.clone())
                 .set_run_resume_scope(&run_id, Some(&scope_json))
                 .await
             {
-                tracing::warn!(%run_id, "persisting run scope failed: {e}");
+                tracing::error!(%run_id, "persisting run scope failed: {e}");
+                let _ = WorkflowsRepo::new(ctx.pool.clone())
+                    .update_run(
+                        &run_id,
+                        RunStatus::Error,
+                        prior_nodes.as_deref().unwrap_or(&[]),
+                        Some(&format!("cannot persist execution scope: {e}")),
+                        true,
+                    )
+                    .await;
+                return;
             }
         }
         let gate = run_gate();
@@ -980,8 +1004,25 @@ pub fn spawn_run(
             }
         };
         // Canceled (or otherwise settled) while it sat in the queue → skip.
-        match WorkflowsRepo::new(ctx.pool.clone()).get_run(&run_id).await {
-            Ok(r) if r.status == RunStatus::Pending => {}
+        let pinned_repo = WorkflowsRepo::new(ctx.pool.clone());
+        let workflow = match pinned_repo.get_run(&run_id).await {
+            Ok(r) if r.status == RunStatus::Pending => {
+                match pinned_repo.definition_for_run(&r).await {
+                    Ok(definition) => definition,
+                    Err(error) => {
+                        let _ = pinned_repo
+                            .update_run(
+                                &run_id,
+                                RunStatus::Error,
+                                &r.nodes,
+                                Some(&error.to_string()),
+                                true,
+                            )
+                            .await;
+                        return;
+                    }
+                }
+            }
             Ok(r) => {
                 tracing::info!(%run_id, status = ?r.status, "queued workflow run settled before start — skipping");
                 return;
@@ -990,7 +1031,7 @@ pub fn spawn_run(
                 tracing::warn!(%run_id, "queued workflow run unavailable — skipping: {e}");
                 return;
             }
-        }
+        };
         run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes).await;
         drop(permit);
     });
@@ -1016,7 +1057,7 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
         };
         // Workflow/workspace gone (deleted while queued) → the run can never
         // execute; settle it instead of leaving a forever-pending row.
-        let loaded = match repo.get(&run.workflow_id).await {
+        let loaded = match repo.definition_for_run(&run).await {
             Ok(wf) => match ctx.workspaces.get(&wf.workspace_id).await {
                 Ok(ws) => Ok((wf, ws)),
                 Err(e) => Err(e),
@@ -1025,13 +1066,28 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
         };
         match loaded {
             Ok((wf, ws)) => {
+                let scope = match repo.run_scope(&run.id).await {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        let _ = repo
+                            .update_run(
+                                &run.id,
+                                RunStatus::Error,
+                                &[],
+                                Some(&error.to_string()),
+                                true,
+                            )
+                            .await;
+                        continue;
+                    }
+                };
                 spawn_run(
                     ctx.clone(),
                     ws,
                     wf,
                     run.id.clone(),
                     run.input.clone(),
-                    RunScope::default(),
+                    scope,
                     None,
                 );
                 resumed += 1;
@@ -1295,7 +1351,10 @@ pub async fn run_workflow(
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
-    let order = match topo_order(&workflow.graph) {
+    let order = match crate::workflow_validation::ensure_valid(&workflow.graph)
+        .map_err(|e| e.to_string())
+        .and_then(|_| topo_order(&workflow.graph))
+    {
         Ok(o) => o,
         Err(e) => {
             let rev = repo
@@ -1327,6 +1386,7 @@ pub async fn run_workflow(
         start_node,
         only_node,
         adopt_start,
+        continue_unfinished,
     } = scope;
     let run_set: Option<std::collections::HashSet<String>> = match &start_node {
         None => None,
@@ -1645,7 +1705,11 @@ pub async fn run_workflow(
     if let Some(prior) = &prior_nodes {
         for ps in prior {
             let out_of_scope = run_set.as_ref().is_some_and(|s| !s.contains(&ps.node_id));
-            if !out_of_scope {
+            let settled = matches!(
+                ps.status,
+                NodeStatus::Success | NodeStatus::Skipped | NodeStatus::Error
+            );
+            if !(out_of_scope || continue_unfinished && settled) {
                 continue;
             }
             if let Some(idx) = states.iter().position(|s| s.node_id == ps.node_id) {
@@ -1656,6 +1720,35 @@ pub async fn run_workflow(
                     errored.insert(ps.node_id.clone());
                 }
                 states[idx] = ps.clone();
+            }
+        }
+    }
+
+    // Reconstruct adopted branch decisions without rerunning their nodes.
+    for id in &order {
+        let Some(node) = workflow.graph.nodes.iter().find(|n| &n.id == id) else {
+            continue;
+        };
+        if let Some(output) = outputs.get(id) {
+            let sources: Vec<String> = incoming_edges(&workflow.graph, id)
+                .iter()
+                .filter(|e| outputs.contains_key(&e.source) && !inactive_edges.contains(&e.id))
+                .map(|e| e.source.clone())
+                .collect();
+            let adopted_input = assemble_input(&sources, &outputs, &input);
+            let (pruned, _) = eval_outgoing(&workflow.graph, node, output, &adopted_input, &input);
+            inactive_edges.extend(pruned);
+        } else if states
+            .iter()
+            .any(|s| &s.node_id == id && s.status == NodeStatus::Skipped)
+        {
+            if incoming_edges(&workflow.graph, id)
+                .iter()
+                .any(|e| errored.contains(&e.source))
+            {
+                errored.insert(id.clone());
+            } else {
+                branch_skipped.insert(id.clone());
             }
         }
     }
@@ -1748,6 +1841,24 @@ pub async fn run_workflow(
         };
         let idx = states.iter().position(|s| s.node_id == node_id).unwrap();
 
+        let adopted = states[idx].status != NodeStatus::Pending
+            && (continue_unfinished || run_set.as_ref().is_some_and(|set| !set.contains(&node_id)));
+        if adopted {
+            if matches!(states[idx].status, NodeStatus::Success | NodeStatus::Error) {
+                step_counter += 1;
+                if states[idx].status == NodeStatus::Success {
+                    let base = crate::workflow_context::step_base_name(
+                        step_counter,
+                        node_display_name(node),
+                        None,
+                        None,
+                    );
+                    files.adopt_step(&base, &node.kind);
+                }
+            }
+            continue;
+        }
+
         // Outside the run scope (start-from-here) → skip without running. A
         // retry re-entry already adopted the node's prior state — keep it.
         if run_set.as_ref().is_some_and(|set| !set.contains(&node_id)) {
@@ -1778,10 +1889,9 @@ pub async fn run_workflow(
         // edges whose source is within the run scope constrain control flow (a
         // start-from-here run leaves ancestors out of scope; their edges don't
         // poison or branch-skip the entry node — it falls back to the run input).
-        let in_scope = |n: &str| run_set.as_ref().map(|s| s.contains(n)).unwrap_or(true);
         let views: Vec<EdgeView> = incoming_edges(&workflow.graph, &node_id)
             .iter()
-            .filter(|e| in_scope(&e.source))
+            .filter(|e| dependency_is_relevant(&e.source, run_set.as_ref(), prior_nodes.as_deref()))
             .map(|e| EdgeView {
                 source: e.source.clone(),
                 errored: errored.contains(&e.source),
@@ -1910,19 +2020,49 @@ pub async fn run_workflow(
         let result = loop {
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
-            let fut = execute_node(
-                &ctx,
-                &ws,
-                &user,
-                node,
-                node_input.clone(),
-                &env,
-                &scope,
-                &sess_tx,
-                &log_tx,
-                &activity_tx,
-                &progress,
-            );
+            let fut = async {
+                if node.kind == "loop" {
+                    let checkpoint = loop_checkpoint(node, &node.id, 0, 0, node_input.clone());
+                    crate::workflow_checkpoint::execute(
+                        &repo,
+                        &run_id,
+                        checkpoint,
+                        &policy,
+                        true,
+                        || {
+                            execute_node(
+                                &ctx,
+                                &ws,
+                                &user,
+                                node,
+                                node_input.clone(),
+                                &env,
+                                &scope,
+                                &sess_tx,
+                                &log_tx,
+                                &activity_tx,
+                                &progress,
+                            )
+                        },
+                    )
+                    .await
+                } else {
+                    execute_node(
+                        &ctx,
+                        &ws,
+                        &user,
+                        node,
+                        node_input.clone(),
+                        &env,
+                        &scope,
+                        &sess_tx,
+                        &log_tx,
+                        &activity_tx,
+                        &progress,
+                    )
+                    .await
+                }
+            };
             tokio::pin!(fut);
             let attempt_res = loop {
                 tokio::select! {
@@ -2691,7 +2831,10 @@ async fn deliver_run_result(
 }
 
 /// `start` plus every node reachable from it via edges.
-fn descendants_inclusive(graph: &WorkflowGraph, start: &str) -> std::collections::HashSet<String> {
+pub(crate) fn descendants_inclusive(
+    graph: &WorkflowGraph,
+    start: &str,
+) -> std::collections::HashSet<String> {
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for e in &graph.edges {
         adj.entry(e.source.clone())
@@ -2719,6 +2862,19 @@ fn descendants_inclusive(graph: &WorkflowGraph, start: &str) -> std::collections
 /// output), so it falls back to the run `input` — this is what lets you re-run
 /// from a specific step (e.g. start at `game`) while feeding in an earlier
 /// step's product (e.g. the already-generated image) instead of rerunning it.
+fn dependency_is_relevant(
+    source: &str,
+    run_set: Option<&std::collections::HashSet<String>>,
+    prior: Option<&[NodeRunState]>,
+) -> bool {
+    run_set.is_none_or(|set| set.contains(source))
+        || prior.is_some_and(|nodes| {
+            nodes
+                .iter()
+                .any(|node| node.node_id == source && node.status != NodeStatus::Pending)
+        })
+}
+
 fn assemble_input(
     upstream: &[String],
     outputs: &HashMap<String, Value>,
@@ -3935,19 +4091,30 @@ async fn execute_node(
                         sub_scope.inner_idx,
                     );
                     let sub_attempt_started = std::time::SystemTime::now();
-                    match Box::pin(execute_node(
-                        ctx,
-                        ws,
-                        user,
-                        &sub,
-                        step_input,
-                        env,
-                        &sub_scope,
-                        session_tx,
-                        log_tx,
-                        activity_tx,
-                        progress,
-                    ))
+                    let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
+                    let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
+                    match crate::workflow_checkpoint::execute(
+                        &checkpoint_repo,
+                        run_id,
+                        checkpoint,
+                        &resolve_retry(&sub),
+                        sub.kind == "loop" || is_restart_resumable_kind(&sub.kind),
+                        || {
+                            Box::pin(execute_node(
+                                ctx,
+                                ws,
+                                user,
+                                &sub,
+                                step_input.clone(),
+                                env,
+                                &sub_scope,
+                                session_tx,
+                                log_tx,
+                                activity_tx,
+                                progress,
+                            ))
+                        },
+                    )
                     .await
                     {
                         Ok((out, mut slogs)) => {
@@ -5670,6 +5837,30 @@ const WF_STEP_STALL_DEFAULT: Duration = Duration::from_secs(5 * 60);
 /// the vault docs agent's value.
 const WF_QUIET_DONE: Duration = Duration::from_secs(150);
 
+fn loop_checkpoint(
+    node: &WorkflowNode,
+    loop_id: &str,
+    iteration: u64,
+    step_index: usize,
+    input: Value,
+) -> WorkflowCheckpoint {
+    WorkflowCheckpoint {
+        node_id: node.id.clone(),
+        loop_id: loop_id.into(),
+        iteration,
+        step_index,
+        kind: node.kind.clone(),
+        name: node_display_name(node).into(),
+        status: NodeStatus::Pending,
+        attempts: 0,
+        input,
+        output: None,
+        error: None,
+        logs: vec![],
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     if let Some(p) = &node.retry {
         return p.clamped();
@@ -5745,6 +5936,10 @@ pub(crate) fn retry_backoff(
     cur_backoff_ms: u64,
     jitter_ms: u64,
 ) -> Option<(u64, u32, String)> {
+    // An explicit zero is a hard no-retry policy, including transient errors.
+    if policy.max_attempts == 0 {
+        return None;
+    }
     let (sleep_ms, max_eff, reason) = match retry_class(err) {
         Some(label) => (
             cur_backoff_ms.max(20_000) + jitter_ms,
@@ -7267,6 +7462,7 @@ mod tests {
 
     fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
         WorkflowRun {
+            checkpoints: vec![],
             id: "r1".into(),
             workflow_id: "wf1".into(),
             workspace_id: "ws1".into(),
@@ -7312,7 +7508,8 @@ mod tests {
         );
         match classify_resume(&g, &run, None) {
             ResumeDecision::Resume { scope, nodes } => {
-                assert_eq!(scope.start_node.as_deref(), Some("b"));
+                assert_eq!(scope.start_node, None);
+                assert!(scope.continue_unfinished);
                 assert!(!scope.only_node && !scope.adopt_start);
                 assert_eq!(
                     nodes[1].status,
@@ -7327,6 +7524,111 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn retry_consumer_receives_adopted_output_but_fresh_partial_run_uses_input() {
+        let scope = std::collections::HashSet::from(["consumer".to_string()]);
+        let prior = vec![nstate("fetch", NodeStatus::Success)];
+        let outputs = HashMap::from([("fetch".to_string(), json!({"fetched":42}))]);
+        assert!(dependency_is_relevant("fetch", Some(&scope), Some(&prior)));
+        assert!(!dependency_is_relevant("fetch", Some(&scope), None));
+        assert_eq!(
+            assemble_input(&["fetch".into()], &outputs, &json!({"seed":1})),
+            json!({"fetched":42})
+        );
+        assert_eq!(
+            assemble_input(&[], &outputs, &json!({"seed":1})),
+            json!({"seed":1})
+        );
+    }
+
+    #[test]
+    fn restart_keeps_pending_sibling_in_original_scope() {
+        let g = WorkflowGraph {
+            nodes: vec![
+                node("start", "manual_trigger"),
+                node("a", "delay"),
+                node("b", "log"),
+            ],
+            edges: vec![edge("start", "a"), edge("start", "b")],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("start", NodeStatus::Success),
+                nstate("a", NodeStatus::Running),
+                nstate("b", NodeStatus::Pending),
+            ],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Resume { scope, .. } => assert_eq!(
+                scope.start_node, None,
+                "restart must preserve whole-graph scope, including pending sibling b"
+            ),
+            other => panic!("expected continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interrupted_loop_requires_checkpoint_before_replay() {
+        let mut loop_node = node("loop", "loop");
+        loop_node.params =
+            json!({"steps":[{"kind":"channel_notify","params":{"text":"once"}}, {"kind":"delay"}]});
+        let graph = WorkflowGraph {
+            nodes: vec![loop_node],
+            edges: vec![],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![nstate("loop", NodeStatus::Running)],
+        );
+        assert!(
+            matches!(
+                classify_resume(&graph, &run, None),
+                ResumeDecision::Fail { .. }
+            ),
+            "a legacy loop has no checkpoint proving which external actions completed"
+        );
+    }
+
+    #[test]
+    fn checkpointed_loop_resumes_safe_inner_work_and_preserves_siblings() {
+        let loop_node = node("loop", "loop");
+        let graph = WorkflowGraph {
+            nodes: vec![loop_node.clone(), node("sibling", "log")],
+            edges: vec![],
+        };
+        let mut run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("loop", NodeStatus::Running),
+                nstate("sibling", NodeStatus::Pending),
+            ],
+        );
+        let mut root = loop_checkpoint(&loop_node, "loop", 0, 0, json!({}));
+        root.status = NodeStatus::Running;
+        let mut sent = loop_checkpoint(&node("loop#1.0", "http_request"), "loop", 1, 0, json!({}));
+        sent.status = NodeStatus::Success;
+        let mut waiting = loop_checkpoint(&node("loop#1.1", "delay"), "loop", 1, 1, json!({}));
+        waiting.status = NodeStatus::Running;
+        run.checkpoints = vec![root, sent, waiting];
+        match classify_resume(&graph, &run, None) {
+            ResumeDecision::Resume { scope, nodes } => {
+                assert!(scope.continue_unfinished);
+                assert_eq!(scope.start_node, None);
+                assert_eq!(nodes[1].status, NodeStatus::Pending);
+            }
+            other => panic!("expected safe continuation, got {other:?}"),
+        }
+        run.checkpoints[1].status = NodeStatus::Running;
+        assert!(
+            matches!(
+                classify_resume(&graph, &run, None),
+                ResumeDecision::Fail { .. }
+            ),
+            "unknown external outcome still prevents automatic replay"
+        );
     }
 
     /// A restart that caught a SIDE-EFFECT step mid-flight must NOT replay it —
@@ -7383,7 +7685,8 @@ mod tests {
         run.approval_node_id = Some("gate".into());
         match classify_resume(&g, &run, None) {
             ResumeDecision::Resume { scope, .. } => {
-                assert_eq!(scope.start_node.as_deref(), Some("gate"));
+                assert_eq!(scope.start_node, None);
+                assert!(scope.continue_unfinished);
             }
             other => panic!("expected Resume, got {other:?}"),
         }
@@ -7405,6 +7708,7 @@ mod tests {
             ],
         );
         let scope = RunScope {
+            continue_unfinished: false,
             start_node: Some("b".into()),
             only_node: true,
             adopt_start: false,
@@ -7473,7 +7777,8 @@ mod tests {
         );
         match classify_resume(&g, &run, None) {
             ResumeDecision::Resume { scope, .. } => {
-                assert_eq!(scope.start_node.as_deref(), Some("b"));
+                assert_eq!(scope.start_node, None);
+                assert!(scope.continue_unfinished);
             }
             other => panic!("expected Resume, got {other:?}"),
         }
@@ -7500,7 +7805,6 @@ mod tests {
             "condition",
             "delay",
             "log",
-            "loop",
             "human_approval",
             "review_run",
             "prepare_context",
@@ -7638,6 +7942,15 @@ mod tests {
         g.edges.clear();
         let (inactive, _) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
         assert!(inactive.is_empty(), "no edges → nothing pruned");
+    }
+
+    #[test]
+    fn explicit_zero_disables_even_transient_retries() {
+        let mut node = node("agent", "agent_prompt");
+        node.retry = Some(otto_core::workflows::RetryPolicy::default());
+        let policy = resolve_retry(&node);
+        assert_eq!(policy.max_attempts, 0);
+        assert!(retry_backoff("529 overloaded", &policy, 1, 0, 0).is_none());
     }
 
     #[test]

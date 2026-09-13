@@ -2,6 +2,7 @@
   // Right panel: Backlinks (linked mentions) · Outgoing links · Outline ·
   // Properties (frontmatter) · OKF validation card (OKF vaults only).
   import { vault } from './vault.svelte';
+  import PropertiesEditor from './PropertiesEditor.svelte';
   import { slugifyHeading } from './mdRender';
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
@@ -96,6 +97,7 @@
       {#if vault.note?.meta.parse_error}
         <div class="none warn">Frontmatter is not parseable YAML</div>
       {/if}
+      {#key vault.notePath}<PropertiesEditor />{/key}
       <table class="props">
         <tbody>
           {#each props as [k, v] (k)}

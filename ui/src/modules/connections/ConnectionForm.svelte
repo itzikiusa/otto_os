@@ -51,7 +51,7 @@
   // svelte-ignore state_referenced_locally
   let fUser       = $state((existing?.params?.user        as string)  ?? '');
   // svelte-ignore state_referenced_locally
-  let fDb         = $state((existing?.params?.db          as string)  ?? '');
+  let fDb         = $state(((existing?.params?.db ?? existing?.params?.database) as string) ?? '');
   // svelte-ignore state_referenced_locally
   let fTimezone   = $state((existing?.params?.timezone    as string)  ?? 'UTC');
   // svelte-ignore state_referenced_locally
@@ -88,7 +88,7 @@
   const existingSsh = (existing?.params?.ssh as Record<string, unknown> | undefined) ?? undefined;
 
   // svelte-ignore state_referenced_locally
-  let tlsMode = $state<TlsMode>(((existingTls?.mode as TlsMode) ?? 'disabled'));
+  let tlsMode = $state<TlsMode>(((existingTls?.mode as TlsMode) ?? (existing?.params?.secure === true ? 'required' : 'disabled')));
   // svelte-ignore state_referenced_locally
   let tlsVerify = $state(existingTls?.verify !== undefined ? !!existingTls.verify : true);
   // svelte-ignore state_referenced_locally
@@ -183,7 +183,14 @@
   }
 
   function buildParams(): Record<string, unknown> {
-    const p: Record<string, unknown> = {};
+    const p: Record<string, unknown> = existing?.kind === kind ? { ...existing.params } : {};
+    // Preserve fields this form does not own (custom placeholders, driver
+    // options). Only explicitly controlled fields are replaced or cleared.
+    const controlled = kind === 'mongodb' ? ['conn_string'] : kind === 'custom' ? ['command_template'] : ['host', 'port', 'user', 'db', 'database'];
+    for (const key of controlled) delete p[key];
+    for (const key of ['jump', 'identity_file']) delete p[key];
+    if (tzKinds.has(kind)) delete p.timezone;
+    if (tlsKinds.has(kind)) { delete p.tls; delete p.ssh; if (tlsMode === 'disabled') delete p.secure; }
 
     if (kind === 'mongodb') {
       if (fConnString) p['conn_string'] = fConnString;
@@ -210,7 +217,8 @@
 
     // TLS (DB engines only). Persist when explicitly enabled with a mode.
     if (tlsKinds.has(kind) && tlsMode !== 'disabled') {
-      const tls: Record<string, unknown> = { mode: tlsMode, verify: tlsVerify };
+      const tls: Record<string, unknown> = { ...(existing?.params?.tls as Record<string, unknown> ?? {}), mode: tlsMode, verify: tlsVerify };
+      for (const key of ['ca_cert', 'client_cert', 'client_key', 'server_name']) delete tls[key];
       if (tlsCaCert)     tls['ca_cert']     = tlsCaCert;
       if (tlsClientCert) tls['client_cert'] = tlsClientCert;
       if (tlsClientKey)  tls['client_key']  = tlsClientKey;
@@ -220,7 +228,8 @@
 
     // SSH tunnel (DB engines only). Requires at least a host.
     if (tlsKinds.has(kind) && tunnelOpen && tunHost.trim()) {
-      const ssh: Record<string, unknown> = { host: tunHost.trim() };
+      const ssh: Record<string, unknown> = { ...(existing?.params?.ssh as Record<string, unknown> ?? {}), host: tunHost.trim() };
+      for (const key of ['port', 'user', 'identity_file']) delete ssh[key];
       if (tunPort !== '') ssh['port'] = Number(tunPort);
       if (tunUser)        ssh['user'] = tunUser;
       if (tunIdentity)    ssh['identity_file'] = tunIdentity;
@@ -270,8 +279,9 @@
     setKind(mapped);
 
     if (mapped === 'mongodb') {
-      // For Mongo keep the whole URI as conn_string.
-      fConnString = s;
+      // Keep topology/options intact but move credentials to the secret field.
+      secret = url.password ? decodeURIComponent(url.password) : '';
+      fConnString = url.password ? s.replace(`:${url.password}@`, ':{secret}@') : s;
     } else {
       if (url.hostname) fHost = url.hostname;
       if (url.port)     fPort = url.port;
@@ -280,6 +290,17 @@
       // The first path segment is the database/db-index.
       const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
       if (dbPart) fDb = decodeURIComponent(dbPart);
+    }
+
+    if (scheme === 'rediss' || scheme === 'clickhouse+https') tlsMode = 'required';
+    const ssl = url.searchParams.get('sslmode') ?? url.searchParams.get('tls') ?? url.searchParams.get('ssl');
+    if (ssl && ['true', '1', 'require', 'verify-ca', 'verify-full'].includes(ssl)) tlsMode = 'required';
+    if (ssl && ['false', '0', 'disable'].includes(ssl)) tlsMode = 'disabled';
+    if (url.searchParams.get('tlsAllowInvalidCertificates') === 'true') tlsVerify = false;
+    if (mapped !== 'mongodb') {
+      const supported = new Set(['sslmode', 'tls', 'ssl', 'tlsAllowInvalidCertificates']);
+      const ignored = [...url.searchParams.keys()].filter((key) => !supported.has(key));
+      if (ignored.length) toasts.warn('URI options need review', `Not imported: ${ignored.join(', ')}`);
     }
 
     // Auto-fill name from host+db if the name field is still empty.
@@ -317,9 +338,9 @@
         kind,
         params: buildParams(),
       };
-      // For an existing profile with an unchanged (blank) password the probe
-      // has no secret to use — the saved secret is intentionally never read
-      // back into the form. The user re-enters it to test credentials.
+      // The server resolves the saved credential after checking root/configure
+      // authority; it never returns the credential to this form.
+      if (existing) body.connection_id = existing.id;
       if (auth.isRoot && secret !== '') body.secret = secret;
       const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
         '/connections/unsaved/db/test',

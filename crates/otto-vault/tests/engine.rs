@@ -831,3 +831,195 @@ async fn external_edit_is_picked_up_by_rescan() {
         .unwrap();
     assert_eq!(l.dst_path.as_deref(), Some("runbooks/deploy.md"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_note_read_returns_hash_and_metadata_for_the_bytes_served() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let path = "services/orders-api.md";
+    let content = "---\ntitle: External title\n---\n# New heading\n[[deploy]]\n";
+    std::fs::write(td.path().join(path), content).unwrap();
+    let note = eng.note(WS, id, path).await.unwrap();
+    assert_eq!(note.raw, content);
+    assert_eq!(note.meta.title, "External title");
+    assert_eq!(note.outgoing[0].raw_target, "deploy");
+    eng.write_note(WS, id, path, "edited after reading", Some(&note.meta.hash))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_concurrent_markdown_compare_and_set_accepts_one_writer() {
+    let eng = engine().await;
+    let (_td, id) = fixture_vault(&eng).await;
+    let path = "concurrent.md";
+    let meta = eng
+        .write_note(WS, id, path, &"base ".repeat(200_000), Some(""))
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Barrier::new(17));
+    let mut tasks = Vec::new();
+    for i in 0..16 {
+        let engine = eng.clone();
+        let barrier = gate.clone();
+        let hash = meta.hash.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            engine
+                .write_note(WS, id, path, &format!("writer {i}"), Some(&hash))
+                .await
+        }));
+    }
+    gate.wait().await;
+    let mut accepted = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(_) => accepted += 1,
+            Err(otto_core::Error::Conflict(_)) => {}
+            other => panic!("unexpected write result: {other:?}"),
+        }
+    }
+    assert_eq!(accepted, 1, "one hash must authorize exactly one write");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_trash_never_replaces_a_previous_deleted_version() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let trash = td.path().join(".trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    std::fs::write(trash.join("repeat.md"), "first deleted version").unwrap();
+    // Reserve every legacy timestamp over this test's execution window.
+    let now = chrono::Utc::now();
+    let mut prior = Vec::new();
+    for second in 0..30 {
+        let stamp = (now + chrono::Duration::seconds(second)).format("%Y%m%d%H%M%S");
+        let p = trash.join(format!("repeat.md-{stamp}"));
+        std::fs::write(&p, "prior deleted version").unwrap();
+        prior.push(p);
+    }
+    std::fs::write(td.path().join("repeat.md"), "latest version").unwrap();
+    eng.delete_note(WS, id, "repeat.md").await.unwrap();
+    for path in prior {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "prior deleted version"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trash_restore_preserves_paths_and_refuses_to_overwrite() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    eng.delete_note(WS, id, "services/orders-api.md")
+        .await
+        .unwrap();
+    let items = eng.trash_entries(WS, id).await.unwrap();
+    let item = items
+        .iter()
+        .find(|e| e.original_path == "services/orders-api.md")
+        .unwrap();
+    std::fs::write(td.path().join("services/orders-api.md"), "replacement").unwrap();
+    assert!(matches!(
+        eng.restore_trash(WS, id, &item.id, None).await,
+        Err(otto_core::Error::Conflict(_))
+    ));
+    eng.restore_trash(WS, id, &item.id, Some("restored/orders.md"))
+        .await
+        .unwrap();
+    assert!(td.path().join("restored/orders.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(td.path().join("services/orders-api.md")).unwrap(),
+        "replacement"
+    );
+    assert!(eng
+        .trash_entries(WS, id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|e| e.id != item.id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revision_history_records_before_after_and_restores_with_conflict_guard() {
+    let eng = engine().await;
+    let (_td, id) = fixture_vault(&eng).await;
+    eng.write_note(WS, id, "history.md", "before", Some(""))
+        .await
+        .unwrap();
+    let old = eng.note(WS, id, "history.md").await.unwrap();
+    let updated = eng
+        .write_note(WS, id, "history.md", "after", Some(&old.meta.hash))
+        .await
+        .unwrap();
+    let entries = eng.revisions(WS, id, Some("history.md")).await.unwrap();
+    let change = eng.revision(WS, id, &entries[0].id).await.unwrap();
+    assert_eq!(change.before.as_deref(), Some("before"));
+    assert_eq!(change.after, "after");
+    assert!(change.revision.committed);
+    assert!(matches!(
+        eng.restore_revision(WS, id, &entries[0].id, "before", "stale")
+            .await,
+        Err(otto_core::Error::Conflict(_))
+    ));
+    eng.restore_revision(WS, id, &entries[0].id, "before", &updated.hash)
+        .await
+        .unwrap();
+    assert_eq!(eng.note(WS, id, "history.md").await.unwrap().raw, "before");
+    assert_eq!(
+        eng.revisions(WS, id, Some("history.md"))
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(eng.revision(WS, id, "../escape").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn content_generation_changes_for_edits_but_not_unchanged_scans() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let first = eng.status(WS, id).await.unwrap().generation;
+    eng.scan(id).await.unwrap();
+    assert_eq!(first, eng.status(WS, id).await.unwrap().generation);
+    std::fs::write(
+        td.path().join("services/orders-api.md"),
+        "changed without changing note count",
+    )
+    .unwrap();
+    eng.scan(id).await.unwrap();
+    assert_ne!(first, eng.status(WS, id).await.unwrap().generation);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_records_survive_engine_restart_and_guard_hidden_symlinks() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    eng.write_note(WS, id, "recover.md", "saved", Some(""))
+        .await
+        .unwrap();
+    let other = engine().await;
+    let registered = other
+        .register(
+            WS,
+            "Reopened",
+            Some(td.path().to_string_lossy().into_owned()),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        other
+            .revisions(WS, registered.id, Some("recover.md"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let escape = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(escape.path(), td.path().join(".trash")).unwrap();
+    assert!(eng.delete_note(WS, id, "recover.md").await.is_err());
+    assert!(td.path().join("recover.md").exists());
+}

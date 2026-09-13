@@ -419,6 +419,7 @@ impl super::GitProvider for Gitlab {
                 crate::parse::parse_hunks(&diff_text)
             };
             files.push(FileDiff {
+                fingerprint: String::new(),
                 path: new_path,
                 old_path: if renamed { Some(old_path) } else { None },
                 is_binary: is_binary && !diff_text.is_empty(),

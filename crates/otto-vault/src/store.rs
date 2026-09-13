@@ -14,7 +14,7 @@ fn dberr(op: &'static str) -> impl Fn(sqlx::Error) -> Error {
 }
 
 fn now() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 /// A note row as the scanner writes it.
@@ -222,6 +222,7 @@ impl Store {
                 .map_err(dberr("vault.status"))?
                 .get("c");
         Ok(VaultStatus {
+            generation: None,
             id,
             scan_state: v.scan_state,
             last_scan_at: v.last_scan_at,

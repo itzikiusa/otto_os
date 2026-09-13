@@ -139,10 +139,22 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
             "/connections/{id}",
             axum::routing::patch(update_connection::<S>).delete(delete_connection::<S>),
         )
+        .route(
+            "/connections/{id}/duplicate",
+            post(duplicate_connection::<S>),
+        )
         .route("/connections/{id}/open", post(open_connection::<S>))
         .route("/connections/{id}/test", post(test_connection::<S>))
         .route("/connections/{id}/pin", patch(pin_connection::<S>))
         // --- SFTP file browser (SSH connections only) ---
+        .route(
+            "/connections/{id}/sftp/transfers",
+            get(crate::transfers::list::<S>).post(crate::transfers::start::<S>),
+        )
+        .route(
+            "/connections/{id}/sftp/transfers/{transfer_id}/cancel",
+            post(crate::transfers::cancel::<S>),
+        )
         .route("/connections/{id}/sftp/list", get(sftp_list::<S>))
         .route("/connections/{id}/sftp/read", get(sftp_read::<S>))
         .route("/connections/{id}/sftp/download", post(sftp_download::<S>))
@@ -173,7 +185,7 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
 /// on root alone made the whole library unusable for every other account. The
 /// feature axis is the right one for a row with no workspace; see
 /// [`otto_state::capability_for_role`] for the mapping.
-async fn check_conn_role<S: ConnectionsCtx>(
+pub(crate) async fn check_conn_role<S: ConnectionsCtx>(
     ctx: &S,
     user: &User,
     conn: &Connection,
@@ -343,9 +355,22 @@ async fn import_create<S: ConnectionsCtx>(
         .await?;
     let mut created = Vec::new();
     let mut failed = Vec::new();
+    let mut updated = Vec::new();
+    let mut skipped = Vec::new();
     for item in req.connections {
         let name = item.name.clone();
-        let create_req = UpsertConnectionReq {
+        if item.action == "skip" {
+            skipped.push(name);
+            continue;
+        }
+        if !matches!(item.action.as_str(), "create" | "update") {
+            failed.push(ImportFailure {
+                name,
+                error: "action must be create, update or skip".into(),
+            });
+            continue;
+        }
+        let mut create_req = UpsertConnectionReq {
             name: item.name,
             kind: item.kind,
             params: item.params,
@@ -358,7 +383,34 @@ async fn import_create<S: ConnectionsCtx>(
         };
         // Connections are a global library — created workspace-independent
         // (mirrors `create_connection`; the path workspace only authorizes).
-        match ctx.connections().create(None, &user.id, create_req).await {
+        let result = async {
+            if item.action == "update" {
+                let id = item
+                    .target_id
+                    .ok_or_else(|| Error::Invalid("update requires target_id".into()))?;
+                let existing = ctx.connections().get(&id).await?;
+                ctx.connections()
+                    .authorize(&id, &user.id, "configure")
+                    .await?;
+                if existing.kind != create_req.kind {
+                    return Err(Error::Invalid("import target kind does not match".into()));
+                }
+                let mut params = existing.params.as_object().cloned().unwrap_or_default();
+                params.extend(create_req.params.as_object().cloned().unwrap_or_default());
+                create_req.params = serde_json::Value::Object(params);
+                create_req.first_command = existing.first_command;
+                create_req.section_id = req.section_id.clone().or(existing.section_id);
+                ctx.connections().update(&id, &user.id, create_req).await
+            } else {
+                if item.target_id.is_some() {
+                    return Err(Error::Invalid("create must not include target_id".into()));
+                }
+                ctx.connections().create(None, &user.id, create_req).await
+            }
+        }
+        .await;
+        match result {
+            Ok(conn) if item.action == "update" => updated.push(conn),
             Ok(conn) => created.push(conn),
             Err(e) => failed.push(ImportFailure {
                 name,
@@ -366,7 +418,12 @@ async fn import_create<S: ConnectionsCtx>(
             }),
         }
     }
-    Ok(Json(ImportCreateResult { created, failed }))
+    Ok(Json(ImportCreateResult {
+        created,
+        updated,
+        skipped,
+        failed,
+    }))
 }
 
 /// #27 PATCH /connections/{id} — ws editor (global: `Connections:Admin`)
@@ -382,6 +439,16 @@ async fn update_connection<S: ConnectionsCtx>(
         require_conn_owner_or_root(&user, &conn)?;
     }
     Ok(Json(ctx.connections().update(&id, &user.id, req).await?))
+}
+
+async fn duplicate_connection<S: ConnectionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Connection>> {
+    let source = ctx.connections().get(&id).await?;
+    check_conn_manage(&ctx, &user, &source).await?;
+    Ok(Json(ctx.connections().duplicate(&id, &user.id).await?))
 }
 
 /// #28 DELETE /connections/{id} — ws editor (global: `Connections:Admin`)
@@ -530,16 +597,23 @@ fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
     let host = conn_param(conn, "host").ok_or_else(|| {
         Error::Invalid("connection has no host — SFTP requires an SSH host".into())
     })?;
-    // Port: accept a JSON number or numeric string; default 22.
+    // Omission lets the system SSH configuration choose the port.
     let port = match conn.params.get("port") {
-        Some(serde_json::Value::Number(n)) => n
-            .as_u64()
-            .and_then(|v| u16::try_from(v).ok())
-            .ok_or_else(|| Error::Invalid("connection port is not a valid port number".into()))?,
-        Some(serde_json::Value::String(s)) if !s.is_empty() => s
-            .parse::<u16>()
-            .map_err(|_| Error::Invalid("connection port is not a valid port number".into()))?,
-        _ => 22,
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if s.is_empty() => None,
+        Some(v) => {
+            let number = v
+                .as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()));
+            Some(
+                number
+                    .and_then(|v| u16::try_from(v).ok())
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| {
+                        Error::Invalid("connection port is not a valid port number".into())
+                    })?,
+            )
+        }
     };
     Ok(SftpParams {
         host: host.to_string(),
@@ -552,13 +626,25 @@ fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
 
 /// Resolve the connection, enforce the workspace role, ensure it's SSH, and
 /// build a live `SftpSession`. Shared by every SFTP handler.
-async fn open_sftp<S: ConnectionsCtx>(
+pub(crate) async fn open_sftp<S: ConnectionsCtx>(
     ctx: &S,
     user: &User,
     id: &Id,
     min: WorkspaceRole,
     operation: &str,
-) -> Result<SftpSession, ApiErr> {
+) -> Result<Arc<SftpSession>, ApiErr> {
+    Ok(open_sftp_with_connection(ctx, user, id, min, operation)
+        .await?
+        .1)
+}
+
+pub(crate) async fn open_sftp_with_connection<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    id: &Id,
+    min: WorkspaceRole,
+    operation: &str,
+) -> Result<(Connection, Arc<SftpSession>), ApiErr> {
     let conn = ctx.connections().get(id).await?;
     check_conn_role(ctx, user, &conn, min).await?;
     if owner_private_enabled(ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
@@ -566,11 +652,16 @@ async fn open_sftp<S: ConnectionsCtx>(
     }
     ctx.connections().authorize(id, &user.id, operation).await?;
     let params = sftp_params_for(&conn)?;
-    Ok(SftpSession::new(params)?)
+    let session = ctx
+        .connections()
+        .sftp_pool
+        .acquire(&user.id, id, params)
+        .await?;
+    Ok((conn, session))
 }
 
 /// Expand a leading `~` to the daemon user's `$HOME`.
-fn expand_home(path: &str) -> String {
+pub(crate) fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}{rest}")

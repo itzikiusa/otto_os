@@ -56,7 +56,7 @@ connection library unusable for every non-root account.)
 | 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp (`warn_key_perms?: string` — set when the connection's SSH private key file is group/other-readable; carries the `chmod 600 <path>` fix, independent of `ok`) |
 | 30a | GET /api/v1/workspaces/{id}/connections/import/sources | ws editor | — | `SourceStatus[]` — detects MySQL Workbench / DBeaver / DataGrip / NoSQLBooster at their default macOS config paths (the daemon runs locally and reads the files itself; the user picks a tool, never a file) |
 | 30b | POST /api/v1/workspaces/{id}/connections/import/scan | ws editor | `{source: ImportSource}` | ImportScanResult — locates + reads + parses the chosen tool's default config into `ParsedConnection[]` (ready-to-create Otto params; unsupported engines listed with `supported:false`) |
-| 30c | POST /api/v1/workspaces/{id}/connections/import/create | ws editor | ImportCreateReq | ImportCreateResult `{created: Connection[], failed: {name,error}[]}` — best-effort batch create through the normal create path with `secret:null` (tools keep passwords encrypted/in an OS keychain — unrecoverable; the user adds them later via edit) |
+| 30c | POST /api/v1/workspaces/{id}/connections/import/create | ws editor | ImportCreateReq | ImportCreateResult `{created: Connection[], updated: Connection[], skipped: string[], failed: {name,error}[]}` — best-effort batch create through the normal create path with `secret:null` (tools keep passwords encrypted/in an OS keychain — unrecoverable; the user adds them later via edit) |
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
 | 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
@@ -83,7 +83,7 @@ connection library unusable for every non-root account.)
 | 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
-| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?}` | 204 — `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
+| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?}` | 204 — `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
 | 56 | POST /api/v1/repos/{id}/prs/{number}/decline | ws editor | — | 204 |
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
@@ -562,8 +562,8 @@ Endpoints: see rows 30a–30c in the main table.
   supported by Otto") — still listed so the user sees why it wasn't importable.
 - `ImportScanResult` = `{source, path?: string, connections: ParsedConnection[], warnings: string[]}`.
 - `ImportCreateReq` = `{connections: ImportCreateItem[], section_id?: id}` where
-  `ImportCreateItem` = `{name, kind: ConnectionKind, params, environment?, read_only?}`.
-- `ImportCreateResult` = `{created: Connection[], failed: {name, error}[]}` — best-effort; one
+  `ImportCreateItem` = `{name, kind: ConnectionKind, params, environment?, read_only?, action?: "create"|"update"|"skip", target_id?: id}`. Action defaults to create; update requires an explicit same-kind target. Root and configure authority are checked. Updates preserve the existing secret, advanced parameters absent from import, command, folder and omitted environment/read-only fields. Skip has no side effect.
+- `ImportCreateResult` = `{created: Connection[], updated: Connection[], skipped: string[], failed: {name, error}[]}` — best-effort; one
   failure never aborts the batch.
 
 Default macOS config paths probed (all under `~/Library`):
@@ -622,7 +622,7 @@ Notes:
 
 File browse / read / transfer over an **SSH** connection's existing auth. Otto
 drives the system `sftp` binary (one `ControlMaster`/`ControlPersist` socket per
-op-session), reusing the connection's keys/ssh-agent/`~/.ssh/config` and
+user/profile transport lease), reusing the connection's keys/ssh-agent/`~/.ssh/config` and
 `ProxyJump` exactly as the terminal `open` does — there is no separate password.
 Because the daemon runs on the user's machine, `download`/`upload` read/write the
 **daemon host's** real local disk. All routes require `kind == ssh` (else 400).
@@ -644,6 +644,60 @@ existing directory, the remote file's basename is used.
 `SftpEntry { name, kind: "dir"|"file"|"symlink"|"other", size, mtime?, perms,
 symlink_target? }`. Errors surface the `sftp` client's stderr (e.g. permission
 denied, no such file) as a `502 upstream`.
+
+### Transfer lifecycle and connection editing
+
+`POST /connections/{id}/duplicate` requires root plus connection configure authority.
+Returns a new `Connection` named `"<source> (copy)"`, with copied configuration and
+protection flags, a fresh owner access policy, and `secret_ref:null`. No password
+or delegated grants are copied; any `{secret}` template requires a new password.
+
+MongoDB `params.conn_string` URI passwords are extracted on create/update and
+stored through the secret store. The persisted URI has `{secret}` instead of
+password userinfo; substitution percent-encodes the stored password. Existing
+plaintext URI rows are normalized before Connections-service get/list exposure.
+A failed secret-store write leaves the original row untouched and fails the read
+rather than returning a password. Form edits preserve unknown parameter keys,
+`database` aliases and legacy `secure` TLS semantics; explicit field clears remove
+only the controlled field. `rediss` and `clickhouse+https` enable required TLS.
+
+| Method & path | Authorization | Request | Response |
+|---|---|---|---|
+| POST /connections/{id}/sftp/transfers | Connections Edit, sftp_read for download or sftp_write for upload; governed daemon-local paths require current root | `SftpTransferReq {direction:"download"|"upload",local_path,remote_path,timeout_secs?:1..600}` | 202 JSON `SftpTransfer` |
+| GET /connections/{id}/sftp/transfers | Connections Edit plus each transfer's operation | Current actor's jobs for this connection only | `SftpTransfer[]` |
+| POST /connections/{id}/sftp/transfers/{transfer_id}/cancel | Initiating actor only; remains allowed to stop own work after resource revocation | `{}` | 204; idempotent when terminal/finalizing; 404 for another actor/connection |
+
+`SftpTransfer {id,direction,local_path,remote_path,status,bytes,total_bytes:number|null,
+elapsed_secs,error:string|null}`. Status is `running`, `finalizing`, `completed`,
+`cancelled`, `failed`, `timed_out`, or `outcome_unknown`. Copy timeout defaults to
+600 seconds and bounds the copy phase including progress/authorization checks;
+each SFTP subprocess also has a 600-second operation bound. Bytes reflect the
+partial local download or remote upload file. Downloads may have unknown total
+until completion. Jobs and progress are in memory, retained up to 30 minutes and
+bounded to 128 records. A daemon restart does not resume jobs.
+
+Transfers stage under unique `.otto-transfer-<id>.part` names. Downloads refuse an
+existing destination and atomically publish by linking beside the partial file.
+Uploads publish through SFTP rename. Cancellation kills the active subprocess and
+removes its owned partial file; cleanup is best-effort after transport failure.
+Current actor, role, policy, local-path authority and unchanged profile settings
+are checked during copying and immediately before publication. `finalizing` is a
+commit phase: cancellation no longer claims to undo publication. A remote rename
+whose outcome cannot be confirmed is `outcome_unknown`; inspect the destination
+before retrying. Legacy synchronous upload/download routes remain available.
+
+SFTP transport reuse is scoped by actor, connection ID and exact SSH parameters,
+with at most 32 cached sessions. Idle, unleased transports expire after 60 seconds
+with cleanup swept every 10 seconds. Every request reauthorizes before borrowing a
+transport. Omitted `params.port` omits SFTP `-P`, honoring `~/.ssh/config`; explicit
+ports must be 1–65535. Control directories are mode 0700.
+
+`POST /connections/unsaved/db/test` (form proposed-configuration probe) accepts
+`{workspace_id,kind,params,secret?,connection_id?}`. With `connection_id`, root and
+configure authority plus matching kind are required. An omitted secret is fetched
+internally from that profile's Keychain reference; a provided secret overrides it
+for this probe only. Neither proposed edits nor credentials are persisted or
+returned. Delegated users cannot forward stored credentials to a proposed host.
 
 ## DB Explorer — engine access (`/connections/{id}/db/*`)
 
@@ -923,7 +977,7 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | PUT /repos/{id}/cleanup-base | ws editor | `SetCleanupBaseReq {base_branch?}` | `CleanupBaseResp` — set/clear (empty/null clears) the per-repo cleanup base override. Indicator-only: never deletes or moves any branch. |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
 | POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp |
-| POST /repos/{id}/stage-hunk | ws editor | `StageHunkReq {path, hunk_index, hunk_header, lines?, op:"stage"\|"unstage"\|"discard", confirm?}` | `StageHunkResp {status, diff, backup_stash?}` — the patch is rebuilt server-side from the server's own fresh `git diff` (byte-exact: CRLF and missing-trailing-newline round-trip); `hunk_header` must equal the located hunk's `@@` line or → 409 "the file changed since the diff was shown — refresh and retry" (nothing applied); 400 for renamed/binary ("stage the whole file"), `lines` out of range, or discard without `confirm:true`; discard records a backup stash `otto: backup before hunk discard`. 400 when a line selection would split a file's last line (no-newline marker) — stage the whole hunk. |
+| POST /repos/{id}/stage-hunk | ws editor | `StageHunkReq {path, hunk_index, hunk_header, fingerprint, lines?, op:"stage"\|"unstage"\|"discard", confirm?}` | `StageHunkResp {status, diff, backup_stash?}` — the patch is rebuilt server-side from the server's own fresh `git diff` (byte-exact: CRLF and missing-trailing-newline round-trip); `fingerprint` must equal SHA-256 of the byte-exact rendered file diff (`FileDiff.fingerprint`), and `hunk_header` must equal the located hunk's `@@` line, or → 409 "the file changed since the diff was shown — refresh and retry" (nothing applied); 400 for renamed/binary ("stage the whole file"), `lines` out of range, or discard without `confirm:true`; discard records a backup stash `otto: backup before hunk discard`. 400 when a line selection would split a file's last line (no-newline marker) — stage the whole hunk. |
 | POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome). 409 when ANY operation (merge/rebase/cherry-pick/revert) is already in progress — resolve or abort it first. |
 | POST /repos/{id}/merge/preview | ws viewer | MergePreviewReq | MergePreview (dry-run via `git merge-tree`; no tree mutation) |
 | GET /repos/{id}/merge/status | ws viewer | — | `MergeConflictStatus` — in-progress RESOLVABLE state: `merging` is true for any op (merge/rebase/cherry-pick/revert, named in `op`) AND for conflicted files with no state file (`op` absent — a conflicting stash pop / squash); `conflicted_files` lists the unmerged paths. |
@@ -1586,6 +1640,8 @@ workspace from the workflow/run row.
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
 | DELETE /workflows/{id} | ws editor | — | 204 |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`) |
+| POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
+| POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
@@ -1607,7 +1663,7 @@ Backed by migration **0096** (`instructions` column on `workflows` and
 `workflow_versions`).
 
 **Versioning.** A `Workflow` carries a monotonic `version` (default 1). A snapshot
-is written on create (v1) and on **every graph- or instructions-changing PATCH**
+is written on create (v1) and on **every graph-, instructions-, or restart-policy-changing PATCH**
 (`bump_version` + `snapshot_version`, note `"edited"`); restoring writes a new
 version equal to the chosen one rather than rewinding the counter (note
 `"restored from v{n}"`) and restores the graph **and** instructions to the live
@@ -1617,12 +1673,38 @@ graph, note, created_by, created_at}`. Backed by migration **0089**
 (`workflows.version`, `workflow_versions` table).
 
 **Run fields (0089).** A `WorkflowRun` now also carries `workflow_version` (the
-version snapshot it executed) and `proof_pack_id` (the Proof Pack assembled on
+version snapshot pinned when its queue row is created) and `proof_pack_id` (the Proof Pack assembled on
 completion — each node output becomes a `log` artifact, each `human_approval` an
 `approval` artifact). Each `NodeRunState` gains `attempts` (retry count; `0` =
 cache hit) and `sessions` (openable Otto session ids the node spawned — agent /
 product / canvas / loop-inner turns — reported live as they are created;
 `review_run` additionally surfaces a `review_id` in its output).
+
+**Pinned execution and preflight.** Queued execution, restart recovery and explicit
+step retry load the recorded version's graph, instructions and restart policy.
+Editing the workflow cannot change a queued/in-flight run. Missing recorded
+snapshots fail execution; legacy rows without a version use the current definition.
+A fresh Run uses the latest saved version. Before any execution, graph preflight
+checks unique node/edge ids, endpoints, cycles, supported kinds, required static
+parameters, loop steps and expression syntax. Invalid execution returns 400 (or
+fails a trigger-started run); incomplete drafts can still be saved.
+
+**Loop checkpoints (0127).** Run detail (`GET /workflow-runs/{id}`) includes
+`checkpoints?: WorkflowCheckpoint[]`, omitted when empty/listing runs.
+`WorkflowCheckpoint = {node_id, loop_id, iteration, step_index, kind, name,
+status: NodeStatus, attempts, input, output?, error?, logs: string[], updated_at}`.
+Root loop records use iteration 0; inner ids include iteration and step index.
+Attempts are persisted before execution and successful output before continuing.
+Completed inner work is adopted after restart; an interrupted side-effecting
+inner step fails with unknown outcome and requires explicit operator retry.
+Legacy loops without records are not automatically replayed. Single-step retry
+resets failed attempts while retaining successes; `include_downstream: true`
+clears checkpoints for selected loops and intentionally repeats their work.
+Retry preparation, scope and checkpoint resets commit atomically. Inner retries
+use the same policy as outer nodes. Explicit `max_attempts: 0` always disables
+retries, including transient errors; an absent policy gives `agent_prompt` and
+`prepare_context` with a nonempty prompt two retries, other kinds zero. The UI distinguishes zero from
+Use default and displays inner status, attempts, logs and output.
 
 **Run fields (0092).** A `WorkflowRun` additionally carries `rev` — a monotonic
 revision bumped on **every** persisted progress write (node transitions, the
@@ -1665,14 +1747,14 @@ runs. On startup a reconciler classifies every run left in flight
 `on_restart` policy (`'resume'` default | `'fail'` legacy hard-fail;
 settable via `UpdateWorkflowReq.on_restart`, snapshot/restore round-trips
 it): finished steps are **adopted** from the persisted `nodes_json`, and the
-run re-enters at the interrupted step — the same in-place re-entry as
-retry-node, reusing the run's context dir + `otto-wf/<run_id>` worktrees
+run continues unfinished work across its original scope (including pending
+sibling branches), reusing the run's context dir + `otto-wf/<run_id>` worktrees
 (the startup worktree sweep runs after reconciliation, so resumable runs
 keep theirs). Safety rules: a step with external side effects (`git_pr`,
 `channel_notify`, `swarm_task`, `product_publish`, `api_run`,
 `http_request`, `self_improve`, product writes) caught mid-flight is
 **never replayed** — it is marked `error` ("outcome unknown") and the run
-fails with a pointer at retry-node; only idempotent/agent kinds auto-resume
+fails with a pointer at retry-node; only idempotent/agent kinds or checkpointed loops with safe interrupted inner work auto-resume
 (an interrupted `agent_prompt` whose handoff step file proves it finished
 is adopted as `success` instead of re-running). A run paused at
 `human_approval` resumes AT the approval node and re-parks (the operator
@@ -1854,7 +1936,15 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
-| POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | — | run an automation |
+| POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
+| POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background |
+| GET /workspaces/{wid}/api-client/automation-runs?automation_id=&before= | ws editor | — | latest 50 `ApiAutomationRun` rows, newest id first; `before` is the last run id |
+| GET /workspaces/{wid}/api-client/automation-runs/{id} | ws editor | — | `ApiAutomationRun`; foreign workspace is 404 |
+| POST /workspaces/{wid}/api-client/automation-runs/{id}/cancel | ws editor | `{}` | current `ApiAutomationRun`; cancellation is asynchronous/idempotent |
+| POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
+| GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
+| GET /api-client/oauth2/callback?state=&code=&error= | one-use state | provider redirect | static HTML; code exchanged with PKCE, tokens stored in Keychain |
+| GET /ws/api-client/stream?token=&workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
 
@@ -1870,7 +1960,7 @@ carry resolved secret values.
 **Durable request extras.** `CreateRequestReq` / `UpdateRequestReq` → `Request` carry an
 optional `extras` object persisting the once-draft-only fields:
 `{v, transport?, graphql_variables?, docs_md?, scripts:{pre?,post?}?, settings:{timeout_ms?,
-follow_redirects?, tls_verify?}?}`. The UI owns the inner shape (like `auth`); the server
+follow_redirects?, tls_verify?}?, grpc:{proto,method}?}`. The UI owns the inner shape (like `auth`); the server
 validates only that it is a JSON object ≤ 256 KiB (else 400). `NULL`/absent = never set.
 Automation runs honour `extras`: pre/post scripts execute server-side with the same `pm` API
 as the interactive runner, `settings` map onto the per-request execution options, and
@@ -1911,6 +2001,16 @@ its params (auth flows through the system `ssh` client). The SSRF guard stays in
 force — the target host is still resolved/classified locally — so this is for
 **public, IP-restricted** upstreams, not for reaching private hosts. A
 resolution or tunnel failure is reported as a `502` and recorded in history.
+
+**Automation execution.** `StartApiAutomationRunReq = {environment_id?:Id, stop_on_failure?:bool=false, dataset?:object[]=[]}`. The chosen environment (or active at start), automation steps and saved request definitions are pinned. Each dataset row starts from the same environment and overlays its own variables; extraction chains only within a row. Empty automations, datasets over 1 MiB, and runs over 1000 total step executions return 400. Missing/foreign requests or environments reject start. Non-HTTP steps fail explicitly.
+
+`ApiAutomationRun = {id,workspace_id,automation_id,environment_id,created_by,status,created_at,finished_at,stop_on_failure,dataset_rows,snapshot,report:{automation_id,steps,passed},result_rows,result_ids,error}`. Status is `running|passed|failed|cancelled|interrupted`; `result_rows` parallels `report.steps` with zero-based dataset row indices; `result_ids` supplies stable step execution IDs in the same order. Snapshot contains ordered redacted request ids/names/method/URL/updated_at/assertions/extract metadata. Dataset values and credentials are not persisted. Each result is saved before the next request starts, with a correlated history row (`request.source="automation_run"`, `automation_run_id`, `automation_id`, `request_id`, `dataset_row`). Cancel drops the in-flight wait and skips remaining steps; already-sent requests may have reached the upstream. Startup marks unfinished runs interrupted without replaying them.
+
+**Browser OAuth.** Saved auth accepts `grant:"authorization_code"`, `authorization_url`, `token_url`, `client_id`, optional `client_secret`/`scope`, and existing token members. Start returns a generated authorization URL with single-use random state and S256 PKCE; reserved provider query keys are replaced. Register `redirect_uri` exactly (daemon loopback `/api/v1/api-client/oauth2/callback`). Callback rechecks the current user, workspace and feature access before exchange and persistence. Both provider endpoints require HTTPS except loopback HTTP development endpoints; token DNS is pinned to checked addresses and redirects are disabled. A changed request revision/auth/secret fingerprint rejects completion. The callback task continues if the browser disconnects. Access/refresh tokens use the saved request's Keychain reference; status never returns token values. Invalid/expired/replayed callbacks do not exchange tokens. Pending flows are memory-only and expire after 600s or daemon restart.
+
+**Streaming open frame.** Send `{action:"open",kind:"sse"|"websocket",request:ExecuteApiReq}`; follow with `{action:"send",data}` for WebSocket or `{action:"close"}`. SSE uses shared HTTP environment/runtime variables, query, Keychain auth, body, timeout, redirect, TLS and SSH settings. SSH requires governed connection `shell` authorization for the initiating actor. WebSocket supports GET/query/headers/auth/connection timeout; bodies, SSH, and disabling TLS verification produce explicit errors; no redirects. Scripts are HTTP-only. Daemon messages remain `open|event|message|error|closed`; SSE buffered events and WS frames/messages are capped at 1 MiB. UI keeps at most 1000 messages / 4 MiB, clips each message at 64 KiB, and reports dropped messages.
+
+**Output limits and redaction.** HTTP download stops at 25 MiB plus one byte; `too_large:true` means `size_bytes` is a lower bound and body/base64 are empty. Saved execution scrubs known secret values from script labels, warnings and nested response metadata as well as bodies/headers. An explicit `{v:1}` extras object clears previously saved extensions; null/omitted PATCH extras still preserve them. Saved gRPC proto/method use `extras.grpc` within the existing 256 KiB extras limit.
 
 ## Notifications (notification center)
 
@@ -2310,7 +2410,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
-| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
@@ -2325,6 +2425,11 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | GET /workspaces/{ws}/vault/vaults/{id}/graph | ws viewer | `?mode=full\|local&path=&depth=&tags=&orphans=&reserved=&ghosts=&edge_budget=` | `VaultGraphPayload` — compact parallel arrays (`paths,titles,types,type_labels,services,service_labels,tag_off,tag_ids,tag_labels,flags,edges`) with a flat `[src,dst,…]` edge index list; `flags` bits: 1=ghost, 2=tag, 4=reserved; `types`/`services` are label-table indices per node (types are case-folded, so `Flow`/`flow` share one bucket; `untyped`/`unresolved`/`tag` are synthetic buckets), tags are CSR-encoded (`tag_ids[tag_off[i]..tag_off[i+1]]`, `tag_off` has `n+1` entries) and load regardless of `tags`, which only controls whether tag NODES are drawn. The client filters, rolls up and colors on these attributes without refetching. Full mode enforces a degree-prioritized edge budget (default 2M) with `truncated` |
 | POST /workspaces/{ws}/vault/vaults/{id}/okf/validate | ws viewer | — | `OkfReport{conformant, errors[], warnings[], checked_notes}` — deterministic OKF v0.1 conformance: E1 no/unparseable frontmatter, E2 missing `type`, E3 reserved-file structure; W1 title/description, W2 broken link, W3 timestamp, W4 dir missing index.md, W5 log dates |
 | POST /workspaces/{ws}/vault/vaults/{id}/okf/indexes | ws editor | — | `{written}` — regenerate per-directory `index.md` files (frontmatter descriptions; root index carries `okf_version`) |
+| GET /workspaces/{ws}/vault/vaults/{id}/trash | ws viewer | — | `VaultTrashEntry[]` — original/stored paths, deletion time, kind, opaque ID; includes legacy trash files |
+| POST /workspaces/{ws}/vault/vaults/{id}/trash/{entry}/restore | ws editor | `{destination?}` | `{path}` — restore original or new vault-relative destination; existing targets → 409, missing entries → 404; files/folders preserved |
+| GET /workspaces/{ws}/vault/vaults/{id}/history | ws viewer | `?path=&before=` | `VaultRevision[]` — newest first, up to 200; optional exact path; `before` is the last ID from the previous page |
+| GET /workspaces/{ws}/vault/vaults/{id}/history/{entry} | ws viewer | — | `VaultRevisionDetail` — revision metadata plus `before: string|null`, `after: string`; snapshot checksum mismatch → 409 |
+| POST /workspaces/{ws}/vault/vaults/{id}/history/{entry}/restore | ws editor | `{version: "before"|"after", if_hash: string}` | 204 — guarded restore, creates a new revision; stale current hash → 409; `if_hash: ""` requires absent destination; missing before-version → 400 |
 | GET /workspaces/{ws}/vault/vaults/{id}/asset | ws viewer | `?path=` | attachment bytes with sniffed content type (traversal-guarded) |
 
 Notes:
@@ -2337,6 +2442,35 @@ Notes:
 - `index.md`/`log.md` are OKF reserved files: flagged `reserved`, excluded from
   the switcher and (by default) the graph.
 - Notes >4 MiB are indexed metadata-only (no FTS body).
+
+
+Recovery and freshness details:
+- `generation` is an opaque string token that changes after indexed content,
+  metadata, links or attachments change (and after daemon restart); unchanged
+  scans keep it stable. `last_scan_at` uses nanosecond-precision RFC3339.
+  Clients should compare tokens, not parse or order them. Clean open notes
+  refresh on changes; dirty drafts keep their base hash and show conflicts.
+- Note reads derive raw/hash/parsed metadata/outgoing links from the same bytes.
+  Markdown and text-artifact writes share a per-vault mutation gate with
+  rename/delete/restore; writes atomically replace files and eagerly rescan.
+- `VaultTrashEntry` contains `{id, original_path, stored_path, deleted_at,
+  kind: "file"|"dir"}`. Manifest records live in `.trash/.otto-index/`.
+  Collision names are unique, and moves/restores use no-replace semantics.
+  Legacy trash files lack reliable original-name metadata; their stored name
+  is the default restore path, which the caller can change.
+- `VaultRevision` contains `{id,path,created_at,before_hash,after_hash,reason,
+  committed}`; `before_hash` is null for creations. UTF-8 before/after snapshots
+  and manifests live in `.otto-history/`, outside the index. Records survive
+  unregister/re-register and daemon restart. No automatic history pruning.
+  `committed:false` means recovery snapshots were saved but successful write
+  completion was not confirmed; it is never presented as a successful edit.
+- History records guarded editor/agent note and artifact writes and link rewrites.
+  Direct external filesystem edits are not versioned. Each restore verifies
+  snapshot checksums and applies optimistic concurrency to the current file.
+  History begins when this functionality is installed; it cannot reconstruct
+  earlier overwritten content. Listing is paginated; content is fetched only
+  for a selected revision. Restores of new-file revisions use the after version;
+  deletion remains an explicit soft-delete operation.
 
 ### Docs agents (AI writers + optional iterative reviewers)
 
@@ -3817,3 +3951,71 @@ operators, casts, and view/routine evaluation; a function name allowlist alone i
 not the execution boundary. Transaction cleanup uses rollback-on-drop. Reviewed
 approved changes retain their separate writable execution path. Client JSON or
 stored profile parameters cannot set the internal execution mode.
+
+
+## Git recovery tools
+
+All routes below are under `/api/v1`. Read endpoints require workspace Viewer;
+mutations require workspace Editor and use the existing per-repository operation lock.
+
+| Endpoint | Request | Response / behavior |
+|---|---|---|
+| `GET /repos/{id}/reflog?limit=50&skip=0` | `limit` clamped to 1–200 | `GitRecoveryEntry[] {sha, selector, subject}` from HEAD reflog, newest first. Page via `skip`. Recover using existing `POST /branch {name,start_point:sha,checkout:false}`; never rewrites or checks out the existing branch. |
+| `GET /repos/{id}/rebase/plan?onto=<rev>` | revision | `GitInteractivePlan {head_sha,onto_sha,base_sha,commits:[{sha,subject,action:"pick"}]}` oldest first. Preview performs no mutation. Merge-containing ranges return 400; the planner currently supports linear history. |
+| `POST /repos/{id}/rebase/plan` | same plan with reordered commits and `action:"pick"\|"squash"\|"edit"` | `RepoStatusResp`. Requires a clean, idle worktree; 409 if HEAD/base changed since preview. Target is pinned to the previewed `onto_sha`. Every previewed commit must appear exactly once; 400 for omissions/duplicates/unknown commits or first-position squash. Only validated actions and SHAs enter Git's sequence editor. Conflicts return normal status with `op_in_progress:"rebase"`. Edit pauses keep the operation active. Request cancellation does not remove the pending editor input. |
+| `POST /repos/{id}/rebase/skip` | empty | `RepoStatusResp`. Requires a rebase in progress; skips its current commit and discards uncommitted work, so UI explicitly confirms. Next conflicts return normal status. Continue and abort use existing `/merge/commit` and `/merge/abort`. |
+| `GET /repos/{id}/bisect` | — | `GitBisectState {active,current_sha,current_subject,finished,first_bad?,remaining?,log,output}`. State is read from the repository's Git directory and survives application restarts; remaining is the reachable candidate count. |
+| `POST /repos/{id}/bisect` | `{op:"start"\|"good"\|"bad"\|"skip"\|"reset",good?,bad?,expected_head?}` | `GitBisectState`. Start requires idle/clean state and distinct good/bad commits with good an ancestor of bad. Marks require `expected_head` equal the current candidate (409 otherwise) and clean worktree. Reset requires active bisect and clean worktree, then restores the original branch/revision. An all-skipped result preserves Git's inconclusive diagnostic in `output`. No command execution/run-script option is exposed. |
+
+`POST /repos/{id}/merge/commit` now returns `status:"conflicts"` and the next
+conflicted paths when continuation reaches another conflict, including the same file.
+A later edit stop returns `status:"paused"`, an explanatory `note`, and active
+`repo_status.op_in_progress`. A fully resolved operation can be continued with zero
+unmerged paths even after reopening the UI.
+
+Conflict reads add `ours_present`, `theirs_present`, `worktree_present`, and
+`trailing_newline` booleans. A missing file on a conflicted path returns a valid
+segmented response rather than 404; index stages distinguish a deleted side from an
+empty file. `POST /conflict/resolve` additionally accepts `side:"keep"|"delete"`.
+`ours`/`theirs` with an absent index stage resolves as a deletion; binary sides are
+checked out byte-for-byte. All whole-side actions require an actually unmerged path
+(409 if already resolved). Keep stages existing working bytes; Delete removes the
+file and stages deletion. Deletion actions explicitly confirm in the UI.
+
+### Agent handover delivery and recovery (2026-09)
+
+`POST /sessions/{id}/handover` accepts reasoning-agent sources and targets; plain
+`shell` sessions are rejected, including shells carrying `nested_provider` metadata.
+The new-agent target also rejects provider `shell`. Existing workspace Editor and
+source/target owner-or-admin checks apply. Only one delivery operation may be active
+per target (409 on a concurrent delivery/retry/acknowledgement).
+
+The returned target `Session.meta.handover` is a durable record:
+`{id, source_id, state, brief, focus, archive_source, include_git, fast, error?, updated_at}`.
+`state` is `preparing | awaiting_target | sent | acknowledged | failed`.
+The brief is saved before PTY submission. `sent` proves paste/Enter completed, not
+that a provider accepted a turn. `SessionMetaUpdated` carries each state change;
+`handover_pending` remains a compatibility badge for preparing/awaiting_target.
+
+| Method and route | Authorization | Request / response |
+|---|---|---|
+| POST `/sessions/{id}/handover/retry` | workspace Editor + source/target owner-or-admin | `{delivery_id}` → target Session; retries a saved failed/interrupted delivery, 409 if active, stale, sent, or acknowledged |
+| POST `/sessions/{id}/handover/acknowledge` | workspace Editor + target owner-or-admin; source owner-or-admin for requested archival | `{delivery_id}` → target Session; sent→acknowledged after the operator confirms receipt; idempotent for the same acknowledged record; 409 for stale IDs or unsent state |
+
+`archive_source: true` now archives the source only during successful explicit
+acknowledgement. A daemon interruption retains the record/brief; the operator inspects
+the target before choosing Retry. The session handover panel exposes the saved brief,
+error, Retry delivery, and Confirm received controls.
+
+### Agent readiness and saved views (2026-09)
+
+`GET /meta` retains its schema; `tools` now includes registry provider names and probes
+their configured executables, including custom providers and command overrides. Custom
+programs are checked for existence without running arbitrary version commands. The
+onboarding, New Session, and Handover pickers share this readiness model.
+
+Mission saved-view `filter` supports combined `bucket`, `provider`, `repo`, and
+`min_cost_usd` controls. Provider/repository filtering uses the session's provider/cwd
+where the item has no explicit repo. History offers the hidden `scratch` workspace as
+“No workspace.” Broadcast resolves its workspace from all selected sessions; mixed or
+missing scopes are refused by the UI rather than silently dropping recipients.

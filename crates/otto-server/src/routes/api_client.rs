@@ -300,10 +300,15 @@ async fn resolve_socks_proxy(
     ctx: &ServerCtx,
     wid: &Id,
     ssh_connection_id: Option<&Id>,
+    actor: &Id,
 ) -> Result<Option<String>, String> {
     let Some(conn_id) = ssh_connection_id else {
         return Ok(None);
     };
+    ctx.connections
+        .authorize(conn_id, actor, "shell")
+        .await
+        .map_err(|e| e.to_string())?;
     let conn = ctx
         .connections
         .get(conn_id)
@@ -631,6 +636,7 @@ pub async fn update_request(
     Json(mut req): Json<UpsertApiRequestReq>,
 ) -> ApiResult<Json<ApiRequest>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let _credential_guard = api_secrets::request_guard(&id).await;
     let repo = repo(&ctx);
     let existing = repo.get_request(&id).await?;
     ensure_in_workspace(&existing.workspace_id, &wid)?;
@@ -647,9 +653,11 @@ pub async fn update_request(
 
     // Lazy secret migration: plaintext secret members move to the Keychain;
     // markers sent back unchanged keep their stored values.
+    let previous_blob =
+        api_secrets::load_blob_checked(ctx.secrets.as_ref(), &api_secrets::request_ref(&id))?;
     let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
         let own_ref = api_secrets::request_ref(&id);
-        let existing_blob = api_secrets::load_blob(ctx.secrets.as_ref(), &own_ref);
+        let existing_blob = api_secrets::load_blob_checked(ctx.secrets.as_ref(), &own_ref)?;
         let (auth_row, blob) = api_secrets::split_auth_secrets(
             &normalize_json_object(incoming),
             &own_ref,
@@ -665,7 +673,17 @@ pub async fn update_request(
     req.auth = auth_row.clone();
     let mut new = req_to_new(&wid, req, existing.position, extras);
     new.auth = auth_row;
-    let updated = repo.update_request(&id, new).await?;
+    let updated = match repo.update_request(&id, new).await {
+        Ok(updated) => updated,
+        Err(error) => {
+            api_secrets::store_blob(
+                ctx.secrets.as_ref(),
+                &api_secrets::request_ref(&id),
+                &previous_blob,
+            )?;
+            return Err(error.into());
+        }
+    };
     Ok(Json(updated))
 }
 
@@ -681,6 +699,7 @@ pub async fn delete_request(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let _credential_guard = api_secrets::request_guard(&id).await;
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_request(&id).await?.workspace_id, &wid)?;
     repo.delete_request(&id).await?;
@@ -1514,6 +1533,8 @@ pub async fn run_saved_request(
         let svars = string_vars(&vars);
         let out = api_scripts::run_pre_request(pre_code, &script_req, &svars);
         if let Some(error) = out.error {
+            let error =
+                api_secrets::scrub_str(&error, &env_blob.values().cloned().collect::<Vec<_>>());
             return Err(ApiError(Error::Invalid(format!(
                 "pre-request script failed: {error}"
             ))));
@@ -1596,30 +1617,31 @@ pub async fn run_saved_request(
         "ssh_connection_id": exec.ssh_connection_id,
     });
     let (source, session_id) = caller_source(&headers);
-    let proxy = match resolve_socks_proxy(&ctx, &wid, exec.ssh_connection_id.as_ref()).await {
-        Ok(proxy) => proxy,
-        Err(error) => {
-            let error = api_secrets::scrub_str(&error, &secret_values);
-            record_history(
-                &ctx,
-                &repo,
-                NewApiHistory {
-                    workspace_id: wid.clone(),
-                    method: method.clone(),
-                    url: resolved_url,
-                    status: None,
-                    duration_ms: None,
-                    request: request_snapshot,
-                    response: json!({"error": error}),
-                },
-                &source,
-                session_id,
-                Some(request.id.clone()),
-            )
-            .await;
-            return Err(ApiError(Error::Upstream(error)));
-        }
-    };
+    let proxy =
+        match resolve_socks_proxy(&ctx, &wid, exec.ssh_connection_id.as_ref(), &user.id).await {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                let error = api_secrets::scrub_str(&error, &secret_values);
+                record_history(
+                    &ctx,
+                    &repo,
+                    NewApiHistory {
+                        workspace_id: wid.clone(),
+                        method: method.clone(),
+                        url: resolved_url,
+                        status: None,
+                        duration_ms: None,
+                        request: request_snapshot,
+                        response: json!({"error": error}),
+                    },
+                    &source,
+                    session_id,
+                    Some(request.id.clone()),
+                )
+                .await;
+                return Err(ApiError(Error::Upstream(error)));
+            }
+        };
     let allow_local = workspace_allows_local(&ctx, &wid).await;
     let mut response = match build_and_send(&wid, &exec, &vars, proxy.as_deref(), allow_local).await
     {
@@ -1724,7 +1746,7 @@ pub async fn run_saved_request(
     .await
     .unwrap_or_default();
 
-    Ok(Json(RunSavedRequestResp {
+    let result = RunSavedRequestResp {
         history_id,
         request_id: request.id,
         name: request.name,
@@ -1739,7 +1761,13 @@ pub async fn run_saved_request(
         jwt_claims,
         warnings,
         script_tests: Value::Array(tests),
-    }))
+    };
+    let mut serialized =
+        serde_json::to_value(result).map_err(|e| ApiError(Error::Internal(e.to_string())))?;
+    api_secrets::scrub_json(&mut serialized, &secret_values);
+    Ok(Json(
+        serde_json::from_value(serialized).map_err(|e| ApiError(Error::Internal(e.to_string())))?,
+    ))
 }
 
 /// `POST /workspaces/{wid}/api-client/execute`
@@ -1813,7 +1841,8 @@ pub async fn execute(
 
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.
-    let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref()).await {
+    let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref(), &user.id).await
+    {
         Ok(proxy) => {
             let allow_local = workspace_allows_local(&ctx, &wid).await;
             build_and_send(&wid, &exec_req, &vars, proxy.as_deref(), allow_local).await
@@ -1901,7 +1930,7 @@ async fn resolve_variables(
 
 /// Resolve variables together with the selected environment row and its
 /// Keychain blob. The latter two never leave the route layer.
-async fn resolve_environment(
+pub(crate) async fn resolve_environment(
     ctx: &ServerCtx,
     repo: &ApiClientRepo,
     wid: &Id,
@@ -2065,13 +2094,50 @@ fn guess_mime(filename: &str) -> Option<&'static str> {
     })
 }
 
-async fn build_and_send(
+/// Shared HTTP request preparation for long-lived transports. Secrets and
+/// environment selection stay workspace-checked exactly as in execute.
+pub(crate) async fn prepare_stream(
+    ctx: &ServerCtx,
+    wid: &Id,
+    request: &ExecuteApiReq,
+    actor: &Id,
+) -> Result<reqwest::RequestBuilder, String> {
+    let repo = repo(ctx);
+    let mut vars = resolve_variables(ctx, &repo, wid, request.environment_id.as_ref())
+        .await
+        .map_err(|e| e.0.to_string())?;
+    if let Some(Value::Object(overrides)) = &request.vars {
+        vars.extend(overrides.clone());
+    }
+    let req = resolve_exec_auth(&repo, ctx.secrets.as_ref(), wid, request).await?;
+    let proxy = resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), actor).await?;
+    let allow_local = workspace_allows_local(ctx, wid).await;
+    let values: Vec<String> = vars
+        .values()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .chain(
+            req.auth
+                .as_object()
+                .into_iter()
+                .flat_map(|o| o.values())
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        )
+        .collect();
+    prepare_request(wid, &req, &vars, proxy.as_deref(), allow_local)
+        .await
+        .map(|p| p.0)
+        .map_err(|e| api_secrets::scrub_str(&e, &values))
+}
+
+async fn prepare_request(
     wid: &Id,
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
     allow_local: bool,
-) -> Result<ApiResponse, String> {
+) -> Result<(reqwest::RequestBuilder, String, usize), String> {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
     // --- method ---
@@ -2176,6 +2242,17 @@ async fn build_and_send(
     let header_count = headers.len();
     builder = builder.headers(headers);
 
+    Ok((builder, url, header_count))
+}
+
+async fn build_and_send(
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    proxy: Option<&str>,
+    allow_local: bool,
+) -> Result<ApiResponse, String> {
+    let (builder, url, header_count) = prepare_request(wid, req, vars, proxy, allow_local).await?;
     // Trace: resolved request + per-phase timing for the response "Trace" tab.
     let method_str = req.method.to_uppercase();
     let body_desc = match req.body_mode.as_str() {
@@ -2247,7 +2324,19 @@ async fn build_and_send(
     const MAX_INLINE: usize = 25 * 1024 * 1024; // 25 MB raw → base64 inlined
     const MAX_TEXT_DISPLAY: usize = 512 * 1024; // 512 KB rendered as text
     let dl_start = Instant::now();
-    let bytes = resp.bytes().await.map_err(|e| describe_reqwest_error(&e))?;
+    let mut response = resp;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| describe_reqwest_error(&e))?
+    {
+        let remaining = (MAX_INLINE + 1).saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() > MAX_INLINE {
+            break;
+        }
+    }
     let download_ms = dl_start.elapsed().as_millis() as i64;
     let size_bytes = bytes.len() as i64;
     let duration_ms = started.elapsed().as_millis() as i64;
@@ -2507,41 +2596,39 @@ pub async fn run_automation(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    options: Option<Json<otto_core::api::StartApiAutomationRunReq>>,
 ) -> ApiResult<Json<ApiRunResult>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let repo = repo(&ctx);
-
-    let automation = repo.get_automation(&id).await?;
-    ensure_in_workspace(&automation.workspace_id, &wid)?;
-
-    // Seed the chained variable map from the workspace's active environment
-    // (Keychain-backed secret variables included).
-    let mut vars = resolve_variables(&ctx, &repo, &wid, None).await?;
-
-    let steps = automation.steps.as_array().cloned().unwrap_or_default();
-    let mut results: Vec<ApiRunStepResult> = Vec::with_capacity(steps.len());
-
-    for step in &steps {
-        results.push(run_step(&ctx, &repo, &wid, step, &mut vars).await);
+    let Json(run) = super::api_automation_runs::start(
+        Path((wid.clone(), id)),
+        State(ctx.clone()),
+        CurrentUser(user),
+        Json(options.map(|o| o.0).unwrap_or_default()),
+    )
+    .await?;
+    let reports = otto_state::api_runs::ApiRunsRepo(ctx.pool);
+    loop {
+        let report = reports
+            .get(&wid, &run.id)
+            .await
+            .map_err(|e| ApiError(Error::Internal(e.to_string())))?;
+        if report.status != "running" {
+            return Ok(Json(report.report));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
-    let passed = results.iter().all(|s| s.ok);
-    Ok(Json(ApiRunResult {
-        automation_id: id,
-        steps: results,
-        passed,
-    }))
 }
 
 /// Run one automation step against its saved request, evaluating assertions and
 /// applying extractions into `vars` for later steps. Resilient: any error is
 /// captured into the returned [`ApiRunStepResult`] rather than propagated.
-async fn run_step(
+pub(crate) async fn run_step(
     ctx: &ServerCtx,
     repo: &ApiClientRepo,
     wid: &Id,
     step: &Value,
     vars: &mut serde_json::Map<String, Value>,
+    pinned: Option<ApiRequest>,
+    actor: &Id,
 ) -> ApiRunStepResult {
     let request_id = step
         .get("request_id")
@@ -2550,7 +2637,10 @@ async fn run_step(
         .to_string();
 
     // Load the saved request (must belong to this workspace).
-    let request = match load_step_request(repo, wid, &request_id).await {
+    let request = match match pinned {
+        Some(request) => Ok(request),
+        None => load_step_request(repo, wid, &request_id).await,
+    } {
         Ok(r) => r,
         Err(msg) => {
             return ApiRunStepResult {
@@ -2566,7 +2656,8 @@ async fn run_step(
     };
 
     // Honour the saved request's SSH tunnel choice, if any.
-    let proxy = match resolve_socks_proxy(ctx, wid, request.ssh_connection_id.as_ref()).await {
+    let proxy = match resolve_socks_proxy(ctx, wid, request.ssh_connection_id.as_ref(), actor).await
+    {
         Ok(p) => p,
         Err(msg) => {
             return ApiRunStepResult {
@@ -2906,8 +2997,10 @@ async fn secure_all_sweep(
 ) -> Result<(usize, usize), ApiError> {
     let mut requests_secured = 0usize;
     for request in repo.list_requests(wid, None).await? {
+        let _credential_guard = api_secrets::request_guard(&request.id).await;
+        let request = repo.get_request(&request.id).await?;
         let own_ref = api_secrets::request_ref(&request.id);
-        let existing_blob = api_secrets::load_blob(secrets, &own_ref);
+        let existing_blob = api_secrets::load_blob_checked(secrets, &own_ref)?;
         let (auth_row, blob) =
             api_secrets::split_auth_secrets(&request.auth, &own_ref, &existing_blob)
                 .map_err(|m| ApiError(Error::Internal(m)))?;

@@ -619,6 +619,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         Err(e) => tracing::warn!("skill-eval recovery: {e}"),
     }
 
+    // Do not replay API requests with uncertain external outcomes after a crash.
+    otto_state::api_runs::ApiRunsRepo(ctx.pool.clone())
+        .recover_interrupted()
+        .await
+        .map_err(|e| e.to_string())?;
+
     // Workflow recovery: runs a dead daemon left EXECUTING are RESUMED from
     // their persisted per-node progress (adopting finished steps, re-entering
     // at the interrupted one) unless the workflow opts out via

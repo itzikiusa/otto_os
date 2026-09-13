@@ -16,6 +16,29 @@ use otto_core::api::ApiResponse;
 use otto_core::secrets::SecretStore;
 use serde_json::{json, Map, Value};
 
+/// Serialize the two-store request credential mutation across Save, secure-all,
+/// delete and OAuth completion. Weak entries do not retain deleted request ids.
+pub async fn request_guard(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(id.into(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    lock.lock_owned().await
+}
+
 /// Marker field name inside a `{"$secret": "<ref>"}` object.
 pub const MARKER_KEY: &str = "$secret";
 /// Mask used in every API-client shape that must not expose credentials.
@@ -271,6 +294,16 @@ pub fn scrub_str(input: &str, secrets: &[String]) -> String {
 }
 
 /// Remove resolved secrets from every response echo channel.
+/// Scrub every output field, including script labels/errors and nested metadata.
+pub fn scrub_json(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => *text = scrub_str(text, secrets),
+        Value::Array(items) => items.iter_mut().for_each(|v| scrub_json(v, secrets)),
+        Value::Object(map) => map.values_mut().for_each(|v| scrub_json(v, secrets)),
+        _ => {}
+    }
+}
+
 pub fn scrub_secrets(resp: &mut ApiResponse, secrets: &[String]) {
     resp.body = scrub_str(&resp.body, secrets);
     if let Some(headers) = resp.headers.as_array_mut() {
@@ -417,6 +450,23 @@ pub fn mask_jwts(input: &str) -> String {
     out
 }
 
+/// Read credentials for an operation that may replace them. Only an absent
+/// entry means empty; unavailable or corrupt storage must abort the mutation.
+/// Error text deliberately excludes the secret store's potentially sensitive
+/// payload and serde's offending-value diagnostics.
+pub fn load_blob_checked(
+    secrets: &dyn SecretStore,
+    r: &str,
+) -> otto_core::Result<BTreeMap<String, String>> {
+    let value = secrets.get(r).map_err(|_| otto_core::Error::Internal(
+        "Could not read saved credentials from Keychain. Unlock it and retry without replacing credentials.".into()))?;
+    match value {
+        None => Ok(BTreeMap::new()),
+        Some(value) => serde_json::from_str(&value).map_err(|_| otto_core::Error::Internal(
+            "Saved credentials are not a valid secret map. Repair the Keychain entry before replacing credentials.".into())),
+    }
+}
+
 /// Read a Keychain blob (`member → value`); absent/corrupt → empty.
 pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String> {
     secrets
@@ -459,6 +509,45 @@ pub fn strip_secret_variables(variables: &Value, secret_keys: &[String]) -> Valu
 
 #[cfg(test)]
 mod tests {
+    struct ReadFixture(Option<&'static str>, bool);
+    impl otto_core::secrets::SecretStore for ReadFixture {
+        fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
+            if self.1 {
+                Err(otto_core::Error::Internal(
+                    "fixture-private-credential".into(),
+                ))
+            } else {
+                Ok(self.0.map(str::to_string))
+            }
+        }
+        fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
+            panic!("checked read must never write credentials")
+        }
+        fn delete(&self, _: &str) -> otto_core::Result<()> {
+            panic!("checked read must never delete credentials")
+        }
+    }
+    #[test]
+    fn checked_secret_read_distinguishes_missing_valid_unavailable_and_corrupt() {
+        assert!(load_blob_checked(&ReadFixture(None, false), "own")
+            .unwrap()
+            .is_empty());
+        let saved = load_blob_checked(
+            &ReadFixture(Some(r#"{"refresh_token":"keep-me"}"#), false),
+            "own",
+        )
+        .unwrap();
+        assert_eq!(saved["refresh_token"], "keep-me");
+        for fixture in [
+            ReadFixture(None, true),
+            ReadFixture(Some("fixture-private-credential"), false),
+            ReadFixture(Some(r#"{"refresh_token":42}"#), false),
+        ] {
+            let error = load_blob_checked(&fixture, "own").unwrap_err().to_string();
+            assert!(!error.contains("fixture-private-credential"));
+            assert!(!error.contains("42"));
+        }
+    }
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
@@ -684,5 +773,13 @@ mod tests {
         assert_eq!(masked["base_url"], "https://api.test");
         assert_eq!(masked["api_token"], MASK);
         assert_eq!(masked["passwordHint"], MASK);
+    }
+    #[test]
+    fn scrubs_script_tests_warnings_and_nested_result_metadata() {
+        let mut result = json!({"script_tests":[{"desc":"secret-abc echoed","passed":false}],
+            "warnings":["failure: secret-abc"],"jwt_claims":{"nested":["secret-abc"]}});
+        scrub_json(&mut result, &["secret-abc".into()]);
+        assert!(!result.to_string().contains("secret-abc"));
+        assert_eq!(result["script_tests"][0]["passed"], false);
     }
 }

@@ -16,7 +16,9 @@
 //! brief is prepared (cleared via `SessionMetaUpdated` when done), and a `Notice`
 //! toast fires on completion/failure.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -41,6 +43,71 @@ const CONTEXT_CAP: usize = 24_000;
 /// ~25-30s before it starts answering, so this is deliberately generous.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
 
+// One delivery/acknowledgement at a time per target. Persistent state lives in
+// session metadata; this claim only prevents concurrent in-process workers.
+static DELIVERIES: OnceLock<Mutex<HashSet<Id>>> = OnceLock::new();
+struct DeliveryClaim(Id);
+impl DeliveryClaim {
+    fn acquire(id: &Id) -> Result<Self, ApiError> {
+        let mut active = DELIVERIES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !active.insert(id.clone()) {
+            return Err(ApiError(Error::Conflict(
+                "a handover operation is already active for this target".into(),
+            )));
+        }
+        Ok(Self(id.clone()))
+    }
+}
+impl Drop for DeliveryClaim {
+    fn drop(&mut self) {
+        DELIVERIES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Delivery {
+    id: Id,
+    source_id: Id,
+    state: String,
+    brief: String,
+    focus: String,
+    archive_source: bool,
+    include_git: bool,
+    fast: bool,
+    error: Option<String>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn save_delivery(
+    ctx: &ServerCtx,
+    target: &Id,
+    delivery: &mut Delivery,
+    state: &str,
+    error: Option<String>,
+) -> ApiResult<Session> {
+    delivery.state = state.into();
+    delivery.error = error;
+    delivery.updated_at = chrono::Utc::now();
+    ctx.manager
+        .update_meta(
+            target,
+            serde_json::json!({
+                "handover_from": delivery.source_id,
+                "handover_pending": matches!(state, "preparing" | "awaiting_target"),
+                "handover": delivery,
+            }),
+        )
+        .await
+        .map_err(ApiError)
+}
+
 // ---------------------------------------------------------------------------
 // Endpoint: deliver a handover
 // ---------------------------------------------------------------------------
@@ -51,6 +118,16 @@ pub async fn handover_session(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<HandoverReq>,
+) -> ApiResult<Json<Session>> {
+    begin_handover(source_id, ctx, user, req, None).await
+}
+
+async fn begin_handover(
+    source_id: Id,
+    ctx: ServerCtx,
+    user: otto_core::domain::User,
+    req: HandoverReq,
+    expected: Option<Id>,
 ) -> ApiResult<Json<Session>> {
     let source = ctx.manager.get(&source_id).await.map_err(ApiError)?;
     require_agent(&source)?;
@@ -65,9 +142,10 @@ pub async fn handover_session(
     let target = match &req.target {
         HandoverTarget::NewAgent { provider } => {
             let provider = provider.trim();
-            if provider.is_empty() {
+            if provider.is_empty() || provider == "shell" {
                 return Err(ApiError(Error::Invalid(
-                    "provider must not be empty".into(),
+                    "choose a reasoning agent provider; plain shells cannot receive handovers"
+                        .into(),
                 )));
             }
             let workspace = ctx
@@ -114,29 +192,56 @@ pub async fn handover_session(
             // The handover injects a prompt into the target's PTY — owner-or-admin
             // there too, or an Editor could drive another user's agent.
             crate::auth::require_session_owner_or_admin(&ctx, &user, &existing).await?;
-            // Records the breadcrumb + pending badge and broadcasts the change.
-            ctx.manager
-                .update_meta(
-                    session_id,
-                    serde_json::json!({
-                        "handover_from": source.id,
-                        "handover_pending": true,
-                    }),
-                )
-                .await
-                .map_err(ApiError)?
+            existing
         }
     };
 
+    let claim = DeliveryClaim::acquire(&target.id)?;
+    if let Some(expected) = expected {
+        let current = ctx.manager.get(&target.id).await.map_err(ApiError)?;
+        if current
+            .meta
+            .pointer("/handover/id")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected.as_str())
+        {
+            return Err(ApiError(Error::Conflict(
+                "handover changed; refresh before retrying".into(),
+            )));
+        }
+        if !matches!(
+            current
+                .meta
+                .pointer("/handover/state")
+                .and_then(serde_json::Value::as_str),
+            Some("failed" | "preparing" | "awaiting_target")
+        ) {
+            return Err(ApiError(Error::Conflict(
+                "this handover has already been sent; confirm receipt instead".into(),
+            )));
+        }
+    }
     let params = HandoverParams {
-        source_id: source.id.clone(),
         focus: req.focus.unwrap_or_default(),
         brief: req.brief.filter(|b| !b.trim().is_empty()),
         include_git: req.include_git.unwrap_or(true),
         fast: req.fast.unwrap_or(false),
         archive_source: req.archive_source.unwrap_or(false),
     };
-    spawn_handover_worker(ctx.clone(), source, target.clone(), params);
+    let mut delivery = Delivery {
+        id: otto_core::new_id(),
+        source_id: source.id.clone(),
+        state: "preparing".into(),
+        brief: params.brief.clone().unwrap_or_default(),
+        focus: params.focus.clone(),
+        archive_source: params.archive_source,
+        include_git: params.include_git,
+        fast: params.fast,
+        error: None,
+        updated_at: chrono::Utc::now(),
+    };
+    let target = save_delivery(&ctx, &target.id, &mut delivery, "preparing", None).await?;
+    spawn_handover_worker(ctx.clone(), source, target.clone(), params, delivery, claim);
 
     Ok(Json(target))
 }
@@ -175,9 +280,9 @@ pub async fn handover_brief(
 }
 
 fn require_agent(session: &Session) -> Result<(), ApiError> {
-    if session.kind != SessionKind::Agent {
+    if session.kind != SessionKind::Agent || session.provider == "shell" {
         return Err(ApiError(Error::Invalid(
-            "handover is only available for agent sessions".into(),
+            "handover requires a reasoning agent session; plain shells are not supported".into(),
         )));
     }
     Ok(())
@@ -188,7 +293,6 @@ fn require_agent(session: &Session) -> Result<(), ApiError> {
 // ---------------------------------------------------------------------------
 
 struct HandoverParams {
-    source_id: Id,
     focus: String,
     /// A pre-reviewed brief; when present, summarization is skipped.
     brief: Option<String>,
@@ -197,8 +301,16 @@ struct HandoverParams {
     archive_source: bool,
 }
 
-fn spawn_handover_worker(ctx: ServerCtx, source: Session, target: Session, params: HandoverParams) {
+fn spawn_handover_worker(
+    ctx: ServerCtx,
+    source: Session,
+    target: Session,
+    params: HandoverParams,
+    mut delivery: Delivery,
+    claim: DeliveryClaim,
+) {
     tokio::spawn(async move {
+        let _claim = claim;
         let brief = match &params.brief {
             Some(b) => b.trim().to_string(),
             None => {
@@ -215,27 +327,36 @@ fn spawn_handover_worker(ctx: ServerCtx, source: Session, target: Session, param
         };
         let prompt = compose_handover_prompt(&source.provider, &brief, &params.focus);
 
+        delivery.brief = brief;
+        if save_delivery(&ctx, &target.id, &mut delivery, "awaiting_target", None)
+            .await
+            .is_err()
+        {
+            return; // Never send context we failed to preserve for recovery.
+        }
+
         wait_for_ready(&ctx.manager, &target.id).await;
         let delivered = inject_handover_prompt(&ctx.manager, &target.id, &prompt).await;
 
-        // Clear the pending badge (broadcasts SessionMetaUpdated → live UI).
-        let _ = ctx
-            .manager
-            .update_meta(&target.id, serde_json::json!({ "handover_pending": null }))
-            .await;
-
         if delivered {
+            let _ = save_delivery(&ctx, &target.id, &mut delivery, "sent", None).await;
             let _ = ctx.events.send(Event::Notice {
                 level: "info".to_string(),
-                title: "Handover delivered".to_string(),
-                body: format!("Context handed to {}.", target.title),
+                title: "Handover sent".to_string(),
+                body: format!(
+                    "Brief sent to {}. Confirm receipt in the target's handover panel.",
+                    target.title
+                ),
             });
-            if params.archive_source {
-                if let Err(e) = ctx.manager.archive(&params.source_id).await {
-                    tracing::warn!(session = %params.source_id, "handover: archive source failed: {e}");
-                }
-            }
         } else {
+            let _ = save_delivery(
+                &ctx,
+                &target.id,
+                &mut delivery,
+                "failed",
+                Some("Could not submit the brief. Inspect the target before retrying.".into()),
+            )
+            .await;
             let _ = ctx.events.send(Event::Notice {
                 level: "error".to_string(),
                 title: "Handover failed".to_string(),
@@ -243,6 +364,105 @@ fn spawn_handover_worker(ctx: ServerCtx, source: Session, target: Session, param
             });
         }
     });
+}
+
+/// Retry a preserved failed/interrupted delivery. A sent delivery must be
+/// acknowledged instead, so a double click cannot silently paste it twice.
+#[derive(serde::Deserialize)]
+pub struct DeliveryActionReq {
+    pub delivery_id: Id,
+}
+
+pub async fn retry_handover(
+    Path(target_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<DeliveryActionReq>,
+) -> ApiResult<Json<Session>> {
+    let target = ctx.manager.get(&target_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &target.workspace_id, WorkspaceRole::Editor).await?;
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &target).await?;
+    let delivery: Delivery =
+        serde_json::from_value(target.meta.get("handover").cloned().unwrap_or_default())
+            .map_err(|_| ApiError(Error::Invalid("no saved handover to retry".into())))?;
+    if delivery.id != req.delivery_id {
+        return Err(ApiError(Error::Conflict(
+            "handover changed; refresh before retrying".into(),
+        )));
+    }
+    if !matches!(
+        delivery.state.as_str(),
+        "failed" | "preparing" | "awaiting_target"
+    ) {
+        return Err(ApiError(Error::Conflict(
+            "this handover has already been sent; confirm receipt instead".into(),
+        )));
+    }
+    begin_handover(
+        delivery.source_id,
+        ctx,
+        user,
+        HandoverReq {
+            target: HandoverTarget::ExistingSession {
+                session_id: target_id,
+            },
+            title: None,
+            focus: Some(delivery.focus),
+            brief: Some(delivery.brief),
+            include_git: Some(delivery.include_git),
+            fast: Some(delivery.fast),
+            archive_source: Some(delivery.archive_source),
+        },
+        Some(req.delivery_id),
+    )
+    .await
+}
+
+/// Explicit human confirmation establishes receipt, rather than pretending a
+/// successful PTY write proves the target agent accepted a turn.
+pub async fn acknowledge_handover(
+    Path(target_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<DeliveryActionReq>,
+) -> ApiResult<Json<Session>> {
+    let _claim = DeliveryClaim::acquire(&target_id)?;
+    let target = ctx.manager.get(&target_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &target.workspace_id, WorkspaceRole::Editor).await?;
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &target).await?;
+    let mut delivery: Delivery =
+        serde_json::from_value(target.meta.get("handover").cloned().unwrap_or_default())
+            .map_err(|_| ApiError(Error::Invalid("no saved handover to acknowledge".into())))?;
+    if delivery.id != req.delivery_id {
+        return Err(ApiError(Error::Conflict(
+            "handover changed; refresh before acknowledging".into(),
+        )));
+    }
+    if delivery.state == "acknowledged" {
+        return Ok(Json(target));
+    }
+    if delivery.state != "sent" {
+        return Err(ApiError(Error::Conflict(
+            "only a sent handover can be acknowledged".into(),
+        )));
+    }
+    if delivery.archive_source {
+        let source = ctx
+            .manager
+            .get(&delivery.source_id)
+            .await
+            .map_err(ApiError)?;
+        crate::auth::require_session_owner_or_admin(&ctx, &user, &source).await?;
+        if source.workspace_id != target.workspace_id {
+            return Err(ApiError(Error::Invalid(
+                "handover source workspace changed".into(),
+            )));
+        }
+        ctx.manager.archive(&source.id).await.map_err(ApiError)?;
+    }
+    Ok(Json(
+        save_delivery(&ctx, &target_id, &mut delivery, "acknowledged", None).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +864,42 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_has_only_one_delivery_claim_until_it_is_released() {
+        let id = otto_core::new_id();
+        let first = DeliveryClaim::acquire(&id).unwrap_or_else(|_| panic!("first claim"));
+        assert!(DeliveryClaim::acquire(&id).is_err());
+        drop(first);
+        assert!(DeliveryClaim::acquire(&id).is_ok());
+    }
+
+    #[test]
+    fn plain_shell_is_not_a_handover_agent() {
+        let session = Session {
+            id: "target".into(),
+            workspace_id: "workspace".into(),
+            kind: SessionKind::Agent,
+            provider: "shell".into(),
+            title: "Terminal".into(),
+            status: otto_core::domain::SessionStatus::Running,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "user".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({"nested_provider": "claude"}),
+        };
+        assert!(
+            require_agent(&session).is_err(),
+            "shell metadata is not proof of an active reasoning agent"
+        );
+        let mut reasoning = session;
+        reasoning.provider = "codex".into();
+        assert!(require_agent(&reasoning).is_ok());
+    }
 
     #[test]
     fn tail_cap_keeps_recent_and_marks_truncation() {

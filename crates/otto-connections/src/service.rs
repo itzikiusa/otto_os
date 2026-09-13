@@ -154,6 +154,22 @@ pub trait Spawner: Send + Sync {
     }
 }
 
+fn normalize_credentials(req: &mut UpsertConnectionReq) -> Result<()> {
+    if req.kind == ConnectionKind::Mongodb {
+        if let Some(uri) = req.params.get("conn_string").and_then(|v| v.as_str()) {
+            if let Some((template, password)) =
+                otto_core::connection_credentials::extract_password(uri)?
+            {
+                req.params["conn_string"] = template.into();
+                if req.secret.is_none() {
+                    req.secret = Some(password);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn secret_ref_for(id: &Id) -> String {
     format!("conn-{id}")
 }
@@ -163,6 +179,9 @@ pub struct ConnectionsService {
     repo: ConnectionsRepo,
     sections: ConnectionSectionsRepo,
     secrets: Arc<dyn SecretStore>,
+    pub(crate) transfers: crate::transfers::Transfers,
+    pub(crate) sftp_pool: Arc<crate::sftp_pool::SftpPool>,
+    credentials_lock: tokio::sync::Mutex<()>,
 }
 
 impl ConnectionsService {
@@ -175,6 +194,9 @@ impl ConnectionsService {
             repo,
             sections,
             secrets,
+            transfers: crate::transfers::Transfers::default(),
+            sftp_pool: Arc::new(crate::sftp_pool::SftpPool::default()),
+            credentials_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -250,7 +272,35 @@ impl ConnectionsService {
     }
 
     pub async fn get(&self, id: &Id) -> Result<Connection> {
-        self.repo.get(id).await
+        let _guard = self.credentials_lock.lock().await;
+        let mut conn = self.repo.get(id).await?;
+        if conn.kind == ConnectionKind::Mongodb {
+            if let Some(uri) = conn.params.get("conn_string").and_then(|v| v.as_str()) {
+                if let Some((template, password)) =
+                    otto_core::connection_credentials::extract_password(uri)?
+                {
+                    // Write a fresh secret first: a failed Keychain write leaves the row
+                    // untouched, and a failed DB write cannot replace its old secret.
+                    let key = format!("conn-{}-{}", id, otto_core::new_id());
+                    self.secrets.put(&key, &password)?;
+                    conn.params["conn_string"] = template.into();
+                    conn = self
+                        .repo
+                        .update(
+                            id,
+                            None,
+                            Some(&conn.params),
+                            Some(Some(&key)),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(conn)
     }
 
     pub async fn authorize(&self, id: &Id, user_id: &Id, operation: &str) -> Result<()> {
@@ -270,7 +320,7 @@ impl ConnectionsService {
         {
             return Ok(crate::access::redact(conn));
         }
-        Ok(conn)
+        self.get(&conn.id).await
     }
 
     /// Connections visible to a workspace (its own + global).
@@ -279,7 +329,7 @@ impl ConnectionsService {
         let mut visible = Vec::new();
         for conn in self.repo.list_visible(ws).await? {
             if !self.is_enforced(&conn.id).await? {
-                visible.push(conn);
+                visible.push(self.get(&conn.id).await?);
             }
         }
         Ok(visible)
@@ -305,8 +355,10 @@ impl ConnectionsService {
             {
                 continue;
             }
-            if let Ok(conn) = self.visible_connection(conn, user_id).await {
-                visible.push(conn);
+            match self.visible_connection(conn, user_id).await {
+                Ok(conn) => visible.push(conn),
+                Err(Error::Forbidden(_) | Error::NotFound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(visible)
@@ -317,7 +369,7 @@ impl ConnectionsService {
         &self,
         workspace_id: Option<Id>,
         user_id: &Id,
-        req: UpsertConnectionReq,
+        mut req: UpsertConnectionReq,
     ) -> Result<Connection> {
         let actor = otto_state::UsersRepo::new(self.repo.pool())
             .get(user_id)
@@ -325,6 +377,7 @@ impl ConnectionsService {
         if actor.disabled || !actor.is_root {
             return Err(Error::Forbidden("root must provision native connection identities and credentials before they can be delegated".into()));
         }
+        normalize_credentials(&mut req)?;
         validate_params(req.kind, &req.params, req.secret.is_some())?;
         let conn = self
             .repo
@@ -426,10 +479,11 @@ impl ConnectionsService {
         &self,
         id: &Id,
         user_id: &Id,
-        req: UpsertConnectionReq,
+        mut req: UpsertConnectionReq,
     ) -> Result<Connection> {
         self.authorize(id, user_id, "configure").await?;
-        let existing = self.repo.get(id).await?;
+        let existing = self.get(id).await?;
+        let _guard = self.credentials_lock.lock().await;
         if req.kind != existing.kind {
             return Err(Error::Invalid(
                 "connection kind cannot be changed — create a new connection".into(),
@@ -451,6 +505,7 @@ impl ConnectionsService {
                 return Err(Error::Forbidden("root must change connection identity, credentials, commands or environment protections".into()));
             }
         }
+        normalize_credentials(&mut req)?;
         let will_have_secret = req.secret.is_some() || existing.secret_ref.is_some();
         validate_params(req.kind, &req.params, will_have_secret)?;
 
@@ -476,6 +531,28 @@ impl ConnectionsService {
                 req.read_only,
             )
             .await
+    }
+
+    /// Copy configuration, never credentials or access grants. The new profile
+    /// starts with its own owner policy and requires a new password.
+    pub async fn duplicate(&self, id: &Id, user_id: &Id) -> Result<Connection> {
+        self.authorize(id, user_id, "configure").await?;
+        let source = self.get(id).await?;
+        self.create(
+            source.workspace_id,
+            user_id,
+            UpsertConnectionReq {
+                name: format!("{} (copy)", source.name),
+                kind: source.kind,
+                params: source.params,
+                secret: None,
+                first_command: source.first_command,
+                section_id: source.section_id,
+                environment: Some(source.environment),
+                read_only: Some(source.read_only),
+            },
+        )
+        .await
     }
 
     /// Delete the profile and its Keychain secret.

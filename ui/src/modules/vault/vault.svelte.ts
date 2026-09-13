@@ -42,7 +42,7 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 
 export type LeftMode = 'files' | 'search' | 'tags';
-export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file';
+export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file' | 'trash' | 'history';
 
 /** One open page in the vault center pane (persisted per vault). */
 export interface VaultTab {
@@ -78,6 +78,9 @@ class VaultStore {
 
   leftMode = $state<LeftMode>('files');
   centerMode = $state<CenterMode>('empty');
+  graphLocal = $state(false);
+  historyPath = $state('');
+  historySince = $state('');
 
   // File tree (roots of the current vault).
   roots = $state<TreeNode[]>([]);
@@ -185,6 +188,9 @@ class VaultStore {
   okfReport = $state<OkfReport | null>(null);
   okfBusy = $state(false);
 
+  private noteLoadSeq = 0;
+  private savePromise: Promise<boolean> | null = null;
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -230,7 +236,12 @@ class VaultStore {
       void this.refreshDocsRuns();
       return;
     }
+    if (!(await this.canLeaveNote())) return;
+    this.noteLoadSeq += 1;
     this.current = v;
+    this.status = null;
+    this.dirty = false;
+    this.conflict = false;
     this.note = null;
     this.notePath = null;
     this.backlinks = [];
@@ -271,27 +282,39 @@ class VaultStore {
 
   async refreshStatus(): Promise<void> {
     if (!this.current) return;
+    const id = this.current.id;
     try {
       const prev = this.status;
-      this.status = await vaultStatus(this.wsId, this.current.id);
-      // Refresh the visible tree when a scan just finished — OR when the
-      // note/link counts moved without us ever OBSERVING a 'scanning' state:
-      // agents writing over MCP trigger fast server-side scans that complete
-      // between two polls, which used to leave the tree stale until a manual
-      // refresh.
-      const scanFinished = prev?.scan_state === 'scanning' && this.status.scan_state === 'idle';
-      const countsMoved =
-        prev != null &&
-        (prev.notes !== this.status.notes ||
-          prev.links !== this.status.links ||
-          prev.unresolved !== this.status.unresolved);
-      if (scanFinished || countsMoved) {
+      const next = await vaultStatus(this.wsId, id);
+      if (this.current?.id !== id) return;
+      this.status = next;
+      // Completed timestamps cover content-only edits and scans too fast to
+      // observe the intermediate scanning state.
+      if (prev && ((next.generation != null ? prev.generation !== next.generation : prev.last_scan_at !== next.last_scan_at) ||
+          (prev.scan_state === 'scanning' && next.scan_state === 'idle') ||
+          prev.notes !== next.notes || prev.attachments !== next.attachments)) {
         void this.refreshTree();
         void this.loadTags();
+        await this.refreshOpenNote();
         if (this.notePath) void this.reloadBacklinks();
+        if (this.leftMode === 'search' && this.searchQuery) void this.runSearch();
       }
-    } catch {
-      /* transient — next poll retries */
+    } catch { /* transient — next poll retries */ }
+  }
+
+  /** Never advance a dirty buffer's base hash to an external version. */
+  async refreshOpenNote(): Promise<void> {
+    if (!this.current || !this.notePath || this.saving) return;
+    const id = this.current.id, path = this.notePath;
+    let n: VaultNote;
+    try { n = await vaultNote(this.wsId, id, path); } catch { return; }
+    if (this.current?.id !== id || this.notePath !== path || this.saving) return;
+    if (this.dirty) {
+      if (n.meta.hash !== this.note?.meta.hash) this.conflict = true;
+    } else {
+      this.note = n;
+      this.draft = n.raw;
+      this.conflict = false;
     }
   }
 
@@ -305,6 +328,7 @@ class VaultStore {
   }
 
   async unregister(id: number): Promise<void> {
+    if (this.current?.id === id && !(await this.canLeaveNote())) return;
     await deleteVault(this.wsId, id);
     this.vaults = this.vaults.filter((v) => v.id !== id);
     if (this.current?.id === id) await this.load();
@@ -333,7 +357,9 @@ class VaultStore {
 
   async loadRoot(): Promise<void> {
     if (!this.current) return;
-    const listing = await vaultDir(this.wsId, this.current.id, '');
+    const id = this.current.id;
+    const listing = await vaultDir(this.wsId, id, '');
+    if (this.current?.id !== id) return;
     this.roots = mergeLevel(this.roots, listing.entries, 0);
   }
 
@@ -403,35 +429,66 @@ class VaultStore {
       }
       return merged;
     };
-    this.roots = await refresh(this.roots, '', 0);
+    const roots = await refresh(this.roots, '', 0);
+    if (this.current?.id === id) this.roots = roots;
   }
 
   // -- note open / edit / save -----------------------------------------------------
 
   async open(path: string, opts: { edit?: boolean; newTab?: boolean } = {}): Promise<void> {
     if (!this.current) return;
+    if (!(await this.openNoteInPlace(path, opts))) return;
     this.claimTab({ kind: 'note', path }, opts.newTab);
-    await this.openNoteInPlace(path, opts);
     this.persistView();
   }
 
-  /** Load a note into the center pane WITHOUT touching tab bookkeeping. */
-  private async openNoteInPlace(path: string, opts: { edit?: boolean } = {}): Promise<void> {
-    if (!this.current) return;
-    if (this.dirty && this.notePath && !this.conflict) await this.saveNow();
+  private async canLeaveNote(): Promise<boolean> {
+    if (this.conflict && this.dirty) return false;
+    if (this.dirty || this.saving) return this.saveNow();
+    return true;
+  }
+
+  /** Commit navigation only after a successful save and read. */
+  private async openNoteInPlace(path: string, opts: { edit?: boolean } = {}): Promise<boolean> {
+    if (!this.current || !(await this.canLeaveNote())) return false;
+    const id = this.current.id, seq = ++this.noteLoadSeq;
     try {
-      const n = await vaultNote(this.wsId, this.current.id, path);
+      const n = await vaultNote(this.wsId, id, path);
+      if (this.current?.id !== id || this.noteLoadSeq !== seq) return false;
       this.note = n;
       this.notePath = path;
       this.draft = n.raw;
       this.dirty = false;
       this.conflict = false;
+      try {
+        const saved = JSON.parse(localStorage.getItem(this.draftKey(id, path)) ?? 'null');
+        if (saved && typeof saved.content === 'string' && saved.content !== n.raw) {
+          this.draft = saved.content;
+          this.dirty = true;
+          this.conflict = saved.hash !== n.meta.hash;
+        }
+      } catch { /* invalid recovery entry does not prevent reading */ }
       this.centerMode = 'note';
       if (opts.edit !== undefined) this.setView(opts.edit);
+      if (this.dirty) this.setView(true);
       void this.reloadBacklinks();
+      return true;
     } catch (e) {
       toasts.error(`Open ${path}: ${msg(e)}`);
+      return false;
     }
+  }
+
+  private draftKey(id: number, path: string): string {
+    return `otto_vault_draft:${id}:${path}`;
+  }
+
+  private persistDraft(): void {
+    if (!this.current || !this.notePath) return;
+    try {
+      localStorage.setItem(this.draftKey(this.current.id, this.notePath), this.dirty
+        ? JSON.stringify({content: this.draft, hash: this.note?.meta.hash}) : 'null');
+    } catch { /* storage quota must never interrupt editing or the save timer */ }
   }
 
   // -- tabs (persisted view) -----------------------------------------------------
@@ -457,9 +514,13 @@ class VaultStore {
   async activateTab(i: number): Promise<void> {
     const t = this.tabs[i];
     if (!t) return;
+    if (t.kind === 'note') {
+      if (!(await this.openNoteInPlace(t.path))) return;
+    } else {
+      if (!(await this.canLeaveNote())) return;
+      await this.loadFile(t.path);
+    }
     this.activeTab = i;
-    if (t.kind === 'note') await this.openNoteInPlace(t.path);
-    else await this.loadFile(t.path);
     this.persistView();
   }
 
@@ -467,6 +528,7 @@ class VaultStore {
     const t = this.tabs[i];
     if (!t) return;
     const wasActive = i === this.activeTab;
+    if (wasActive && !(await this.canLeaveNote())) return;
     this.tabs = this.tabs.filter((_, x) => x !== i);
     if (this.activeTab > i) this.activeTab -= 1;
     if (wasActive) {
@@ -493,13 +555,13 @@ class VaultStore {
     if (!this.current) return;
     localStorage.setItem(
       this.viewKey(),
-      JSON.stringify({ tabs: this.tabs, active: this.activeTab, mode: this.centerMode }),
+      JSON.stringify({ tabs: this.tabs, active: this.activeTab, mode: this.centerMode, graphLocal: this.graphLocal, historyPath: this.historyPath, historySince: this.historySince }),
     );
   }
 
   private async restoreView(): Promise<void> {
     if (!this.current) return;
-    let saved: { tabs?: unknown; active?: unknown; mode?: unknown } = {};
+    let saved: { tabs?: unknown; active?: unknown; mode?: unknown; graphLocal?: unknown; historyPath?: unknown; historySince?: unknown } = {};
     try {
       saved = JSON.parse(localStorage.getItem(this.viewKey()) ?? '{}');
     } catch {
@@ -515,8 +577,14 @@ class VaultStore {
     this.tabs = tabs;
     const active = typeof saved.active === 'number' ? saved.active : tabs.length - 1;
     this.activeTab = Math.min(Math.max(active, -1), tabs.length - 1);
+    this.graphLocal = saved.graphLocal === true;
+    this.historyPath = typeof saved.historyPath === 'string' ? saved.historyPath : '';
+    this.historySince = typeof saved.historySince === 'string' ? saved.historySince : '';
     if (saved.mode === 'graph') {
+      if (this.graphLocal && this.activeTab >= 0) await this.activateTab(this.activeTab);
       this.centerMode = 'graph';
+    } else if (saved.mode === 'trash' || saved.mode === 'history') {
+      this.centerMode = saved.mode;
     } else if (saved.mode === 'docs-agents') {
       this.centerMode = 'docs-agents';
     } else if (this.activeTab >= 0) {
@@ -529,7 +597,7 @@ class VaultStore {
   async openFile(path: string, opts: { newTab?: boolean } = {}): Promise<void> {
     if (!this.current) return;
     // Leaving a dirty note for a file view must not lose the edit.
-    if (this.dirty && this.notePath && !this.conflict) await this.saveNow();
+    if (!(await this.canLeaveNote())) return;
     this.claimTab({ kind: 'file', path }, opts.newTab);
     await this.loadFile(path);
     this.persistView();
@@ -600,44 +668,59 @@ class VaultStore {
   onDraftChange(content: string): void {
     this.draft = content;
     this.dirty = content !== (this.note?.raw ?? '');
+    this.persistDraft();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     if (this.dirty && !this.conflict) {
       this.saveTimer = setTimeout(() => void this.saveNow(), 800);
     }
   }
 
-  async saveNow(overwrite = false): Promise<void> {
-    if (!this.current || !this.notePath || !this.note || this.saving) return;
-    if (!this.dirty && !overwrite) return;
-    this.saving = true;
-    const savedDraft = this.draft;
-    try {
-      await writeVaultNote(this.wsId, this.current.id, {
-        path: this.notePath,
-        content: savedDraft,
-        if_hash: overwrite ? undefined : this.note.meta.hash,
-      });
-      // Refresh meta + outgoing from the index (the write ran a scan).
-      const n = await vaultNote(this.wsId, this.current.id, this.notePath);
-      this.note = n;
-      this.dirty = this.draft !== savedDraft;
-      this.conflict = false;
-      void this.reloadBacklinks();
-      void this.refreshStatus();
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        this.conflict = true;
-      } else {
-        toasts.error(`Save: ${msg(e)}`);
-      }
-    } finally {
-      this.saving = false;
+  async saveNow(overwrite = false): Promise<boolean> {
+    if (this.savePromise) {
+      if (!(await this.savePromise)) return false;
+      return this.dirty ? this.saveNow(overwrite) : true;
     }
+    if (!this.dirty && !overwrite) return true;
+    if (!this.current || !this.notePath || !this.note || (this.conflict && !overwrite)) return false;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    const id = this.current.id, path = this.notePath, wsId = this.wsId;
+    this.saving = true;
+    this.savePromise = (async () => {
+      try {
+        // Drain changes typed during a slow save as well as the initial draft.
+        do {
+          const savedDraft = this.draft;
+          const meta = await writeVaultNote(wsId, id, {
+            path, content: savedDraft,
+            if_hash: overwrite ? undefined : this.note!.meta.hash,
+          });
+          overwrite = false;
+          if (this.current?.id !== id || this.notePath !== path) return false;
+          this.note = { ...this.note!, raw: savedDraft, meta };
+          this.dirty = this.draft !== savedDraft;
+          this.conflict = false;
+          this.persistDraft();
+        } while (this.dirty);
+        void this.reloadBacklinks();
+        return true;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) this.conflict = true;
+        else toasts.error(`Save: ${msg(e)}`);
+        return false;
+      } finally {
+        this.saving = false;
+      }
+    })();
+    const success = await this.savePromise;
+    this.savePromise = null;
+    if (success) { void this.refreshOpenNote(); void this.refreshStatus(); }
+    return success;
   }
 
   /** Conflict banner: discard local edits and reload the disk version. */
   async conflictReload(): Promise<void> {
     if (this.notePath) {
+      if (this.current) localStorage.setItem(this.draftKey(this.current.id, this.notePath), 'null');
       this.dirty = false;
       this.conflict = false;
       await this.open(this.notePath);
@@ -668,6 +751,7 @@ class VaultStore {
 
   async rename(from: string, to: string): Promise<void> {
     if (!this.current) return;
+    if (!(await this.canLeaveNote())) return;
     try {
       const r = await renameVaultPath(this.wsId, this.current.id, from, to);
       toasts.success(r.links_updated === 1 ? '1 link updated' : `${r.links_updated} links updated`);
@@ -693,21 +777,41 @@ class VaultStore {
 
   async trash(path: string): Promise<void> {
     if (!this.current) return;
+    if (!(await this.canLeaveNote())) return;
     try {
       await deleteVaultNote(this.wsId, this.current.id, path);
       toasts.success(`Moved to .trash: ${path}`);
-      const i = this.tabs.findIndex((t) => t.path === path || t.path.startsWith(`${path}/`));
-      if (i >= 0) await this.closeTab(i);
-      if (this.notePath === path) {
-        this.note = null;
-        this.notePath = null;
-        this.centerMode = 'empty';
+      const removed = (p: string) => p === path || p.startsWith(`${path}/`);
+      const active = this.tabs[this.activeTab];
+      this.tabs = this.tabs.filter(t => !removed(t.path));
+      if (this.notePath && removed(this.notePath)) {
+        this.note = null; this.notePath = null; this.draft = ''; this.dirty = false; this.conflict = false;
       }
+      if (active && removed(active.path)) {
+        this.activeTab = -1;
+        this.centerMode = 'empty';
+        if (this.tabs.length) await this.activateTab(0);
+      } else this.activeTab = active ? this.tabs.findIndex(t => t.path === active.path) : -1;
+      this.persistView();
       await this.refreshTree();
       void this.refreshStatus();
     } catch (e) {
       toasts.error(`Delete: ${msg(e)}`);
     }
+  }
+
+  async openHistory(path = '', since = ''): Promise<void> {
+    if (!(await this.canLeaveNote())) return;
+    this.historyPath = path;
+    this.historySince = since;
+    this.centerMode = 'history';
+    this.persistView();
+  }
+
+  async openTrash(): Promise<void> {
+    if (!(await this.canLeaveNote())) return;
+    this.centerMode = 'trash';
+    this.persistView();
   }
 
   // -- docs agents -------------------------------------------------------------------

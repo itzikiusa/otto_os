@@ -34,14 +34,14 @@
   }
   let { sessionId, status, onresume, cwd = '', branch = null, model = null, termStatus = '', termInput = '' }: Props = $props();
 
-  // The draft survives leaving the page (store-backed, per session).
-  // eslint-disable-next-line svelte/valid-compile -- intentional: seed once; the effect below keeps the store in sync.
-  let text = $state(untrack(() => transcript.draft(sessionId)));
-  $effect(() => {
-    transcript.setDraft(sessionId, text);
-  });
+  // The keyed parent creates one instance per session. Capture ownership once
+  // so an upload or submit that finishes after navigation still updates A.
+  const ownerId = untrack(() => sessionId);
+  // Read the shared draft directly: an older pending send can finish after
+  // this same session is reopened, so component-local copies would go stale.
+  const text = $derived(transcript.draft(ownerId));
   const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
-  let sending = $state(false);
+  const sending = $derived(transcript.sending(ownerId));
   let uploading = $state(0);
   let ta = $state<HTMLTextAreaElement | null>(null);
 
@@ -51,7 +51,7 @@
     /** Object URL of the local file — preview only, never sent. */
     url: string;
   }
-  let attachments = $state<Attachment[]>([]);
+  const attachments = $derived(transcript.attachments(ownerId));
 
   const exited = $derived(status === 'exited' || status === 'reconnectable');
   const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
@@ -109,7 +109,7 @@
     el?.scrollIntoView({ block: 'nearest' });
   });
   function acceptCmd(c: SlashCommand): void {
-    text = `/${c.name} `;
+    transcript.setDraft(ownerId, `/${c.name} `);
     cmdDismissed = true;
     queueMicrotask(() => {
       autosize();
@@ -122,18 +122,21 @@
     const typed = text.replace(/\s+$/, '');
     const imgs = attachments.map((a) => `[Image: ${a.path}]`);
     const body = [typed, ...imgs].filter(Boolean).join('\n');
-    if (!body || sending) return;
-    sending = true;
+    if (!body || !transcript.tryBeginSend(ownerId)) return;
     try {
-      await submitPrompt(sessionId, body);
-      text = '';
-      for (const a of attachments) URL.revokeObjectURL(a.url);
-      attachments = [];
+      const submittedImages = [...attachments];
+      await submitPrompt(ownerId, body);
+      // Do not erase new text or files added while this send was in flight.
+      if (transcript.draft(ownerId).replace(/\s+$/, '') === typed) {
+        transcript.setDraft(ownerId, '');
+      }
+      for (const a of submittedImages) URL.revokeObjectURL(a.url);
+      transcript.setAttachments(ownerId, transcript.attachments(ownerId).filter((a) => !submittedImages.includes(a)));
       queueMicrotask(autosize);
     } catch (e) {
       toasts.error('Send failed', e instanceof Error ? e.message : String(e));
     } finally {
-      sending = false;
+      transcript.finishSend(ownerId);
       ta?.focus();
     }
   }
@@ -182,8 +185,8 @@
     for (const f of imgs) {
       try {
         const name = f.name && f.name !== 'image.png' ? f.name : `paste-${Date.now()}.${(f.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`;
-        const path = await uploadInboxImage(sessionId, f, name);
-        attachments = [...attachments, { path, name, url: URL.createObjectURL(f) }];
+        const path = await uploadInboxImage(ownerId, f, name);
+        transcript.setAttachments(ownerId, [...transcript.attachments(ownerId), { path, name, url: URL.createObjectURL(f) }]);
       } catch (e) {
         toasts.error('Image upload failed', e instanceof Error ? e.message : String(e));
       } finally {
@@ -195,7 +198,7 @@
 
   function removeAttachment(a: Attachment): void {
     URL.revokeObjectURL(a.url);
-    attachments = attachments.filter((x) => x !== a);
+    transcript.setAttachments(ownerId, attachments.filter((x) => x !== a));
   }
 
   function onPaste(e: ClipboardEvent): void {
@@ -248,7 +251,7 @@
       <div class="box">
         <textarea
           bind:this={ta}
-          bind:value={text}
+          bind:value={() => text, (value) => transcript.setDraft(ownerId, value)}
           rows="3"
           placeholder="Message the agent — ⏎ to send, ⇧⏎ for a newline, / for commands, paste an image to attach"
           spellcheck="false"
@@ -256,7 +259,6 @@
           autocapitalize="off"
           autocomplete="off"
           dir="auto"
-          disabled={sending}
           oninput={autosize}
           onkeydown={onKeydown}
           onpaste={onPaste}

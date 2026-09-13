@@ -21,6 +21,9 @@ pub struct VaultRec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultStatus {
+    /// Opaque change token; stable across unchanged scans, changes after restart.
+    #[serde(default)]
+    pub generation: Option<String>,
     pub id: i64,
     pub scan_state: String,
     pub last_scan_at: Option<String>,
@@ -241,4 +244,34 @@ pub struct OkfReport {
     pub errors: Vec<OkfFinding>,
     pub warnings: Vec<OkfFinding>,
     pub checked_notes: i64,
+}
+
+/// A recoverable write, stored with its before/after bytes in .otto-history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultRevision {
+    pub id: String,
+    pub path: String,
+    pub created_at: String,
+    pub before_hash: Option<String>,
+    pub after_hash: String,
+    pub reason: String,
+    /// False means the snapshots were saved but the write was not confirmed.
+    pub committed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultRevisionDetail {
+    #[serde(flatten)]
+    pub revision: VaultRevision,
+    pub before: Option<String>,
+    pub after: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultTrashEntry {
+    pub id: String,
+    pub original_path: String,
+    pub stored_path: String,
+    pub deleted_at: String,
+    pub kind: String,
 }

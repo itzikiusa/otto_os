@@ -42,9 +42,12 @@ pub struct VaultEngine {
     /// Per-vault scan serialization + coalescing (a kick while a scan runs is
     /// dropped — the running scan picks up the changes anyway).
     scans: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    pending_scans: Mutex<HashSet<i64>>,
     /// Unix seconds of the last completed scan per vault (staleness probe).
     last_scan: Mutex<HashMap<i64, Arc<AtomicI64>>>,
-    /// Hash-check + replace serialization for each writable vault path.
+    generations: Mutex<HashMap<i64, Arc<AtomicI64>>>,
+    /// Serialize vault mutations, including folder moves and link rewrites.
+    /// Scans have their own lock; mutation holders may await a scan.
     writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
     switcher: RwLock<HashMap<i64, Arc<SwitcherIx>>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
@@ -55,7 +58,9 @@ impl VaultEngine {
         Self {
             store: Store::new(pool),
             scans: Mutex::new(HashMap::new()),
+            pending_scans: Mutex::new(HashSet::new()),
             last_scan: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
             switcher: RwLock::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
@@ -178,20 +183,37 @@ impl VaultEngine {
             .clone()
     }
 
-    fn write_lock(&self, id: i64, path: &str) -> VaultWriteLock {
+    fn generation(&self, id: i64) -> Arc<AtomicI64> {
+        self.generations
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_insert_with(|| {
+                Arc::new(AtomicI64::new(
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                ))
+            })
+            .clone()
+    }
+
+    pub(crate) fn write_lock(&self, id: i64, _path: &str) -> VaultWriteLock {
         self.writes
             .lock()
             .unwrap()
-            .entry((id, path.to_string()))
+            .entry((id, String::new()))
             .or_default()
             .clone()
     }
 
     /// Fire-and-forget scan kick (coalesced).
     pub fn kick_scan(self: &Arc<Self>, id: i64) {
+        if !self.pending_scans.lock().unwrap().insert(id) {
+            return;
+        }
         let eng = self.clone();
         tokio::spawn(async move {
             let _ = eng.scan(id).await;
+            eng.pending_scans.lock().unwrap().remove(&id);
         });
     }
 
@@ -206,16 +228,12 @@ impl VaultEngine {
     }
 
     /// Incremental scan (parse changed, drop removed, re-resolve links).
-    /// Serialized per vault and COALESCED: if another scan completes after we
-    /// were called (it saw our changes — fs writes happen before scan()), the
-    /// queued pass is skipped instead of walking again.
+    /// Explicit scans always run after acquiring the lock: an older scan may
+    /// have walked a path before our write, even if it completed after it.
+    /// Background read kicks are coalesced separately in kick_scan().
     pub async fn scan(&self, id: i64) -> Result<()> {
-        let asked_at = chrono::Utc::now().timestamp();
         let lock = self.scan_lock(id);
         let _guard = lock.lock().await;
-        if self.last_scan_cell(id).load(Ordering::Relaxed) > asked_at {
-            return Ok(());
-        }
         let v = self.store.get_vault(id).await?;
         let root = PathBuf::from(&v.root_path);
         if !root.is_dir() {
@@ -371,6 +389,10 @@ impl VaultEngine {
             }
         }
 
+        if structure_changed {
+            self.generation(id).fetch_add(1, Ordering::Relaxed);
+        }
+
         // Rebuild the switcher index.
         let notes = self.store.all_notes(id).await?;
         let aliases: HashMap<String, Vec<String>> = self
@@ -398,14 +420,16 @@ impl VaultEngine {
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
         self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
-        self.store.status(id).await
+        let mut status = self.store.status(id).await?;
+        status.generation = Some(self.generation(id).load(Ordering::Relaxed).to_string());
+        Ok(status)
     }
 
     // -- path safety -------------------------------------------------------------
 
     /// Validate a client-supplied vault-relative path: no absolutes, no `..`,
     /// no backslashes, no NUL, not into `.trash`/hidden dirs.
-    fn check_rel(path: &str) -> Result<String> {
+    pub(crate) fn check_rel(path: &str) -> Result<String> {
         let p = path.trim().trim_start_matches("./");
         if p.is_empty() {
             return Err(Error::Invalid("empty path".into()));
@@ -428,7 +452,7 @@ impl VaultEngine {
 
     /// Absolute path of `rel` inside the vault, symlink-escape-guarded: the
     /// canonicalized parent must stay under the canonicalized root.
-    fn abs_guarded(root: &str, rel: &str) -> Result<PathBuf> {
+    pub(crate) fn abs_guarded(root: &str, rel: &str) -> Result<PathBuf> {
         let rootc = Path::new(root)
             .canonicalize()
             .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
@@ -448,7 +472,7 @@ impl VaultEngine {
     /// Open (and create where absent) every parent component relative to a held
     /// vault directory capability. `NOFOLLOW` on each hop prevents a concurrent
     /// symlink swap from redirecting later reads or the final rename.
-    fn text_parent(root: &str, rel: &str) -> Result<(OwnedFd, String)> {
+    pub(crate) fn text_parent(root: &str, rel: &str) -> Result<(OwnedFd, String)> {
         let mut parts = rel.split('/').peekable();
         let mut parent = rustix::fs::open(
             root,
@@ -495,7 +519,7 @@ impl VaultEngine {
         Err(Error::Invalid(format!("invalid path: {rel}")))
     }
 
-    async fn text_file_bytes(parent: &OwnedFd, name: &str) -> Result<Option<Vec<u8>>> {
+    pub(crate) async fn text_file_bytes(parent: &OwnedFd, name: &str) -> Result<Option<Vec<u8>>> {
         match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_symlink() => {
                 return Err(Error::Forbidden(
@@ -535,9 +559,15 @@ impl VaultEngine {
 
     /// Write a unique same-directory temp and rename it relative to the held
     /// parent capability. Parent path replacement cannot redirect either step.
-    async fn atomic_replace_at(parent: &OwnedFd, name: &str, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn atomic_replace_at(
+        parent: &OwnedFd,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         let temp = format!(".{name}.otto-tmp-{}", otto_core::new_id());
-        let mode = Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH;
+        let mode = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map(|stat| Mode::from_bits_truncate(stat.st_mode & 0o777))
+            .unwrap_or(Mode::RUSR | Mode::WUSR);
         let fd = rustix::fs::openat(
             parent,
             temp.as_str(),
@@ -656,23 +686,50 @@ impl VaultEngine {
         self.ensure_fresh(id);
         let rel = Self::check_rel(path)?;
         let abs = Self::abs_guarded(&v.root_path, &rel)?;
-        let raw = tokio::fs::read_to_string(&abs)
-            .await
-            .map_err(|_| Error::NotFound(format!("note {rel}")))?;
-        // Serve meta from the index when fresh; fall back to a live parse for a
-        // note the scanner hasn't seen yet.
-        let meta = match self.store.note_meta(id, &rel).await {
-            Ok(m) => m,
-            Err(_) => {
-                self.scan(id).await.ok();
-                self.store.note_meta(id, &rel).await?
-            }
+        if !abs.exists() {
+            return Err(Error::NotFound(format!("note {rel}")));
+        }
+        let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
+        let bytes = Self::text_file_bytes(&parent, &name)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("note {rel}")))?;
+        let raw =
+            String::from_utf8(bytes).map_err(|_| Error::Invalid("note is not UTF-8".into()))?;
+        // Parse the bytes actually served. Disk readers must not combine a new
+        // body with an old indexed hash (a false conflict on the next save).
+        let mut parsed = parse_note(&raw);
+        let mut ix = ResolveIndex::default();
+        for (p, ..) in self.store.all_notes(id).await? {
+            ix.insert(p);
+        }
+        for p in self.store.all_file_paths(id).await? {
+            ix.insert(p);
+        }
+        ix.insert(rel.clone());
+        for link in &mut parsed.links {
+            link.dst_path = ix.resolve(&rel, &link.raw_target);
+        }
+        let base = rel.rsplit('/').next().unwrap_or(&rel).to_ascii_lowercase();
+        let meta = NoteMeta {
+            path: rel.clone(),
+            title: parse::derive_title(&parsed, &rel),
+            okf_type: parsed.okf_type,
+            description: parsed.description,
+            frontmatter: parsed.frontmatter,
+            tags: parsed.tags,
+            aliases: parsed.aliases,
+            headings: parsed.headings,
+            word_count: parsed.word_count as i64,
+            size: raw.len() as i64,
+            hash: hex_sha256(raw.as_bytes()),
+            reserved: matches!(base.as_str(), "index.md" | "log.md"),
+            has_frontmatter: parsed.has_frontmatter,
+            parse_error: parsed.parse_error,
         };
-        let outgoing = self.store.outgoing(id, &rel).await?;
         Ok(NoteFull {
             meta,
             raw,
-            outgoing,
+            outgoing: parsed.links,
         })
     }
 
@@ -689,26 +746,28 @@ impl VaultEngine {
         if !rel.to_ascii_lowercase().ends_with(".md") {
             return Err(Error::Invalid("notes must end in .md".into()));
         }
-        let abs = Self::abs_guarded(&v.root_path, &rel)?;
+        let lock = self.write_lock(id, &rel);
+        let _guard = lock.lock().await;
+        let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
+        let before = Self::text_file_bytes(&parent, &name).await?;
         if let Some(expected) = if_hash {
-            let current = match tokio::fs::read(&abs).await {
-                Ok(b) => hex_sha256(&b),
-                Err(_) => String::new(), // creating — expected must be "" too
-            };
+            let current = before.as_deref().map(hex_sha256).unwrap_or_default();
             if current != expected {
                 return Err(Error::Conflict(format!(
                     "note changed on disk (hash {current})"
                 )));
             }
         }
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
-        }
-        tokio::fs::write(&abs, content)
-            .await
-            .map_err(|e| Error::Internal(format!("write: {e}")))?;
+        let revision = Self::prepare_revision(
+            &v.root_path,
+            &rel,
+            before.as_deref(),
+            content.as_bytes(),
+            "note write",
+        )
+        .await?;
+        Self::atomic_replace_at(&parent, &name, content.as_bytes()).await?;
+        Self::commit_revision(&v.root_path, revision).await?;
         self.scan(id).await?;
         self.store.note_meta(id, &rel).await
     }
@@ -749,11 +808,9 @@ impl VaultEngine {
         let lock = self.write_lock(id, &rel);
         let _guard = lock.lock().await;
         let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
+        let before = Self::text_file_bytes(&parent, &name).await?;
         if let Some(expected) = if_hash {
-            let current = match Self::text_file_bytes(&parent, &name).await? {
-                Some(bytes) => hex_sha256(&bytes),
-                None => String::new(),
-            };
+            let current = before.as_deref().map(hex_sha256).unwrap_or_default();
             if current != expected {
                 return Err(Error::Conflict(format!(
                     "text artifact changed on disk (hash {current})"
@@ -766,7 +823,16 @@ impl VaultEngine {
                 "text artifact target must not be a symlink".into(),
             ));
         }
+        let revision = Self::prepare_revision(
+            &v.root_path,
+            &rel,
+            before.as_deref(),
+            bytes,
+            "artifact write",
+        )
+        .await?;
         Self::atomic_replace_at(&parent, &name, bytes).await?;
+        Self::commit_revision(&v.root_path, revision).await?;
         self.scan(id).await?;
         Ok(VaultTextFile {
             path: rel,
@@ -778,6 +844,8 @@ impl VaultEngine {
     /// Soft delete → `<vault>/.trash/<path>` (never destroys user files).
     pub async fn delete_note(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<()> {
         let v = self.get_scoped(ws, id).await?;
+        let lock = self.write_lock(id, "");
+        let _guard = lock.lock().await;
         let rel = Self::check_rel(path)?;
         let abs = Self::abs_guarded(&v.root_path, &rel)?;
         if !abs.exists() {
@@ -785,26 +853,45 @@ impl VaultEngine {
         }
         let mut dest = Path::new(&v.root_path).join(".trash").join(&rel);
         if dest.exists() {
-            let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+            let stamp = otto_core::new_id();
             dest = dest.with_file_name(format!(
                 "{}-{stamp}",
                 dest.file_name().unwrap_or_default().to_string_lossy()
             ));
         }
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("trash mkdir: {e}")))?;
-        }
-        tokio::fs::rename(&abs, &dest)
-            .await
-            .map_err(|e| Error::Internal(format!("trash move: {e}")))?;
+        // Write the manifest before moving: a crash after the move still leaves
+        // the original destination and deletion timestamp recoverable.
+        let entry = VaultTrashEntry {
+            id: otto_core::new_id().to_string(),
+            original_path: rel.clone(),
+            stored_path: dest
+                .strip_prefix(Path::new(&v.root_path).join(".trash"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            deleted_at: chrono::Utc::now().to_rfc3339(),
+            kind: if abs.is_dir() { "dir" } else { "file" }.into(),
+        };
+        Self::record_trash(&v.root_path, &entry).await?;
+        let (source_parent, source_name) = Self::text_parent(&v.root_path, &rel)?;
+        let (trash_parent, trash_name) =
+            Self::text_parent(&v.root_path, &format!(".trash/{}", entry.stored_path))?;
+        rustix::fs::renameat_with(
+            &source_parent,
+            source_name.as_str(),
+            &trash_parent,
+            trash_name.as_str(),
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|e| Error::Internal(format!("trash move: {e}")))?;
         self.scan(id).await?;
         Ok(())
     }
 
     pub async fn create_folder(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<()> {
         let v = self.get_scoped(ws, id).await?;
+        let lock = self.write_lock(id, "");
+        let _guard = lock.lock().await;
         let rel = Self::check_rel(path)?;
         let abs = Self::abs_guarded(&v.root_path, &rel)?;
         tokio::fs::create_dir_all(&abs)
@@ -823,6 +910,8 @@ impl VaultEngine {
         to: &str,
     ) -> Result<RenameResult> {
         let v = self.get_scoped(ws, id).await?;
+        let lock = self.write_lock(id, "");
+        let _guard = lock.lock().await;
         let from_rel = Self::check_rel(from)?;
         let to_rel = Self::check_rel(to)?;
         if from_rel == to_rel {
@@ -945,9 +1034,17 @@ impl VaultEngine {
                 }
             });
             if new_content != content && count_here > 0 {
-                tokio::fs::write(&abs, new_content)
-                    .await
-                    .map_err(|e| Error::Internal(format!("rewrite {src_now}: {e}")))?;
+                let revision = Self::prepare_revision(
+                    &root,
+                    &src_now,
+                    Some(content.as_bytes()),
+                    new_content.as_bytes(),
+                    "rename links",
+                )
+                .await?;
+                let (parent, name) = Self::text_parent(&root, &src_now)?;
+                Self::atomic_replace_at(&parent, &name, new_content.as_bytes()).await?;
+                Self::commit_revision(&root, revision).await?;
                 links_updated += count_here;
             }
         }

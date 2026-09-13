@@ -117,7 +117,9 @@ pass.
 - **Reads self-heal**: `GET /status` and every read (search, backlinks, graph,
   dir, note — including the MCP tools) kick a **background incremental scan**
   when the index is **>5 s stale**, so agents with no UI open stay fresh too.
-- The UI polls `/status` every 5 s while the page is visible; **edits made
+- The UI polls `/status` every 5 s while the page is visible; a content-generation
+  token refreshes clean open notes, tree, tags, search and graph even if counts
+  are unchanged. Dirty drafts show a conflict instead of being replaced; **edits made
   externally (e.g. in Obsidian) appear within one poll cycle.** Concurrent scan
   kicks coalesce; a scan diffs `(size, mtime)` and re-parses only changes, then
   re-resolves links touching the changed paths.
@@ -237,8 +239,9 @@ tabs / persistence as notes):
 - **Outline** — the heading tree; click to scroll the reading view.
 - **Properties** — the frontmatter as a key/value table (OKF fields —
   `type`, `title`, `description`, `resource`, `tags`, `timestamp` — are
-  highlighted in OKF vaults; unparseable YAML shows a warning). Properties are
-  edited in the editor, not in the table.
+  highlighted in OKF vaults; unparseable YAML shows a warning). Use **Edit properties** to change common fields with a source preview. Unknown
+  YAML fields, comments and the Markdown body are preserved; malformed
+  frontmatter must first be repaired in the source editor.
 - **OKF card** (OKF vaults) — see §4.6.
 
 ### 4.4 Search & tags
@@ -339,13 +342,42 @@ limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
 - **Local graph** — the server does BFS neighborhoods (`mode=local`, `path=`,
   `depth ≤ 3`) so the common case never ships the whole graph; the GraphView
   component supports a local mode with a depth slider, and local is the
-  **default mode of the `otto_vault_graph` MCP tool**. The shipped Vault page
-  currently mounts the full-vault graph; local neighborhoods are served over
-  the API/MCP.
+  **default mode of the `otto_vault_graph` MCP tool**. The Vault page exposes **Graph scope** to switch between the whole vault
+  and the current note's local neighborhood; its depth slider controls hops.
 
 Clicking a (non-ghost, non-tag) node opens the note.
 
 ---
+
+### 4.8 Recovering deleted files and reviewing edits
+
+The toolbar's **Trash and restore** button opens the trash browser, including
+files deleted by earlier Otto versions. Each entry shows its path and deletion
+time. Restore to its original path or enter a new destination; an existing file
+is never overwritten. Folder restores preserve the folder contents. Legacy
+trash names may include old collision suffixes; edit the destination if needed.
+
+**Edit history** opens recoverable before/after versions of guarded editor and
+agent writes. A note also has **Note edit history**, and a docs run's written
+notes have **Review edits**, filtered to that path and the run's start time.
+These are timestamp/path filters, not claims of exclusive attribution when
+several writers edited the same file concurrently. Pick a revision to compare
+changes and restore its before or after content. Every restore checks the
+current hash and creates another revision; it never removes later history.
+Use **Load older edits** to browse beyond the newest 200 records.
+
+Snapshots live in the vault's hidden `.otto-history/` directory and survive
+restarts and unregister/re-register. Records marked **write not confirmed**
+retain snapshots after an interrupted write but do not claim the edit completed.
+History begins with this feature and captures guarded writes/link rewrites;
+direct filesystem changes from other editors are detected for freshness but
+are not versioned. No history is silently pruned.
+
+Failed or conflicting saves retain the current note and tab. Closing a dirty
+last tab or switching vaults first saves successfully. Draft recovery is saved
+per vault/path in local browser storage, and edits typed during a slow save are
+included before navigation completes. If disk changes while a draft is dirty,
+the conflict banner preserves the draft until Reload or Overwrite is chosen.
 
 ## 5. API surface
 
@@ -564,12 +596,12 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
   (by default) the graph; searchable but flagged.
 - **Graph LOD**: past the draw budget, edges are sampled/faded until you zoom
   in; `mode=full` may report `truncated` when the server edge budget is hit.
-- The shipped Vault page mounts the **full** graph; local neighborhoods are an
-  API/MCP capability (the component's local mode isn't currently mounted).
+- The graph opens in full mode; **Graph scope → Around current note** exposes
+  local neighborhoods and the depth control, with the selection remembered.
 - **No semantic search** — that's the point. Recall = FTS + links + tags +
   types. (The memory layer likewise accepts but coerces `semantic`/`hybrid`.)
-- Frontmatter is edited as text in the editor; the Properties panel is
-  read-only.
+- Structured Properties edits cover title, type, description, resource, tags,
+  aliases and timestamp; other fields remain editable in source mode.
 
 **Non-goals** (deliberate — plugin territory, not core parity): canvas boards
 (Otto has its own [Canvas](./canvas.md) module), daily notes, sync/publish,

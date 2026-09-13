@@ -434,6 +434,23 @@ class TranscriptStore {
   /** Unsent composer text per session — survives leaving the page and coming
    *  back (in-memory, mirrored to sessionStorage so a reload keeps it too). */
   private drafts: Record<string, string> = $state({});
+  private pendingSends: Record<string, boolean> = $state({});
+  sending(sessionId: string): boolean { return this.pendingSends[sessionId] === true; }
+  tryBeginSend(sessionId: string): boolean {
+    if (this.sending(sessionId)) return false;
+    this.pendingSends[sessionId] = true;
+    return true;
+  }
+  finishSend(sessionId: string): void { delete this.pendingSends[sessionId]; }
+  /** Uploaded inbox files stay with their session across composer remounts.
+   *  Object URLs are browser-local and are released on explicit remove/send. */
+  private draftImages: Record<string, { path: string; name: string; url: string }[]> = $state({});
+  attachments(sessionId: string): { path: string; name: string; url: string }[] {
+    return this.draftImages[sessionId] ?? [];
+  }
+  setAttachments(sessionId: string, images: { path: string; name: string; url: string }[]): void {
+    this.draftImages[sessionId] = images;
+  }
   draft(sessionId: string): string {
     const mem = this.drafts[sessionId];
     if (mem !== undefined) return mem;

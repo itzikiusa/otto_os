@@ -39,7 +39,24 @@
 
   // Initial load: resolve the remote home/working dir then list it.
   $effect(() => {
-    if (!view.loaded && !view.loading) void sftp.list(conn.id);
+    if (!view.attempted && !view.loading) void sftp.list(conn.id);
+  });
+
+  // Restore in-flight transfers after reopening the browser. A failed poll is
+  // surfaced once; authentication failures never create an automatic retry loop.
+  $effect(() => {
+    const id = conn.id;
+    if (!canWrite) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll(): Promise<void> {
+      try {
+        await sftp.loadTransfers(id);
+        if (!stopped) timer = setTimeout(() => void poll(), 1500);
+      } catch (error) { if (!stopped) toasts.error('Could not refresh transfers', String(error)); }
+    }
+    void poll();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
   });
 
   // Reset the filter whenever we navigate to a different directory.
@@ -214,6 +231,22 @@
       />
     </div>
 
+    {#if view.transfers.length > 0}
+      <div class="transfers" aria-label="File transfers">
+        {#each view.transfers as transfer (transfer.id)}
+          <div class="transfer">
+            <span class="ellipsis">{transfer.direction === 'upload' ? 'Upload' : 'Download'} {transfer.remote_path}</span>
+            <span>{transfer.status} · {humanSize(transfer.bytes)}{transfer.total_bytes !== null ? ` / ${humanSize(transfer.total_bytes)}` : ''} · {transfer.elapsed_secs}s</span>
+            {#if transfer.status === 'running'}
+              <progress max={transfer.total_bytes ?? undefined} value={transfer.total_bytes ? transfer.bytes : undefined} aria-label="Transferred bytes"></progress>
+              <button class="btn small" onclick={() => void sftp.cancelTransfer(conn.id, transfer.id).catch(e => toasts.error('Cancel failed', String(e)))}>Cancel</button>
+            {/if}
+            {#if transfer.error}<span class="err">{transfer.error}</span>{/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <!-- Breadcrumb -->
     <div class="crumbs mono">
       {#each crumbs as c, i (c.path)}
@@ -227,7 +260,7 @@
       {#if view.loading}
         <div class="dim pad">Loading…</div>
       {:else if view.error}
-        <div class="err pad">{view.error}</div>
+        <div class="err pad">{view.error} <button class="btn small" onclick={() => sftp.refresh(conn.id)}>Retry</button></div>
       {:else if view.entries.length === 0}
         <div class="dim pad">Empty directory.</div>
       {:else if shownEntries.length === 0}
@@ -335,6 +368,10 @@
 {/if}
 
 <style>
+  .transfers { max-height: 180px; overflow: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .transfer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; font-size: 12px; }
+  .transfer > .ellipsis { max-width: 45%; }
+  .transfer progress { width: 100px; }
   .sftp {
     display: flex;
     flex-direction: column;

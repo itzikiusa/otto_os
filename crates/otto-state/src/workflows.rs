@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use otto_core::workflows::{
-    ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowGraph, WorkflowRun,
-    WorkflowVersion,
+    ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowCheckpoint,
+    WorkflowGraph, WorkflowRun, WorkflowVersion,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{Row, SqlitePool};
@@ -71,6 +71,7 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
             .ok_or_else(|| Error::Internal("bad run status".into()))?,
         input,
         nodes,
+        checkpoints: vec![],
         error: r.get("error"),
         started_at: ts(&r.get::<String, _>("started_at"))?,
         finished_at: finished.as_deref().map(ts).transpose()?,
@@ -114,6 +115,111 @@ fn row_to_active_run(r: &sqlx::sqlite::SqliteRow) -> Result<ActiveWorkflowRun> {
 }
 
 impl WorkflowsRepo {
+    pub async fn checkpoint(
+        &self,
+        run_id: &Id,
+        node_id: &str,
+    ) -> Result<Option<WorkflowCheckpoint>> {
+        let json: Option<String> = sqlx::query_scalar(
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? AND node_id = ?",
+        )
+        .bind(run_id)
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("read loop checkpoint"))?;
+        json.map(|json| {
+            serde_json::from_str(&json)
+                .map_err(|e| Error::Internal(format!("invalid loop checkpoint: {e}")))
+        })
+        .transpose()
+    }
+
+    pub async fn checkpoints(&self, run_id: &Id) -> Result<Vec<WorkflowCheckpoint>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? ORDER BY node_id",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("read loop checkpoints"))?;
+        rows.into_iter()
+            .map(|(json,)| {
+                serde_json::from_str(&json)
+                    .map_err(|e| Error::Internal(format!("invalid loop checkpoint: {e}")))
+            })
+            .collect()
+    }
+
+    pub async fn save_checkpoint(
+        &self,
+        run_id: &Id,
+        checkpoint: &WorkflowCheckpoint,
+    ) -> Result<()> {
+        let json = serde_json::to_string(checkpoint).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query("INSERT INTO workflow_checkpoints (run_id, node_id, checkpoint_json) VALUES (?, ?, ?) ON CONFLICT(run_id, node_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json")
+            .bind(run_id).bind(&checkpoint.node_id).bind(json).execute(&self.pool).await
+            .map_err(dberr("save loop checkpoint"))?;
+        Ok(())
+    }
+
+    /// Atomically acknowledge a retry, persist its scope and reset only selected
+    /// failed inner attempts. A competing retry cannot reset an active run.
+    pub async fn prepare_retry(
+        &self,
+        run_id: &Id,
+        node_ids: &[String],
+        replay: bool,
+        scope: &otto_core::workflows::RunScope,
+    ) -> Result<()> {
+        let scope_json =
+            serde_json::to_string(scope).map_err(|e| Error::Internal(e.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin workflow retry"))?;
+        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, rev = rev + 1 WHERE id = ? AND status IN ('success','error','canceled')")
+            .bind(scope_json).bind(run_id).execute(&mut *tx).await.map_err(dberr("prepare workflow retry"))?.rows_affected();
+        if changed == 0 {
+            return Err(Error::Conflict("run is still active".into()));
+        }
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(dberr("read loop checkpoints"))?;
+        for (json,) in rows {
+            let mut cp: WorkflowCheckpoint =
+                serde_json::from_str(&json).map_err(|e| Error::Internal(e.to_string()))?;
+            if !node_ids
+                .iter()
+                .any(|id| cp.node_id == *id || cp.node_id.starts_with(&format!("{id}#")))
+            {
+                continue;
+            }
+            if replay {
+                sqlx::query("DELETE FROM workflow_checkpoints WHERE run_id = ? AND node_id = ?")
+                    .bind(run_id)
+                    .bind(&cp.node_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("reset loop checkpoint"))?;
+            } else if matches!(cp.status, NodeStatus::Error | NodeStatus::Running) {
+                cp.status = NodeStatus::Pending;
+                cp.attempts = 0;
+                cp.error = None;
+                let json =
+                    serde_json::to_string(&cp).map_err(|e| Error::Internal(e.to_string()))?;
+                sqlx::query("UPDATE workflow_checkpoints SET checkpoint_json = ? WHERE run_id = ? AND node_id = ?")
+                    .bind(json).bind(run_id).bind(&cp.node_id).execute(&mut *tx).await.map_err(dberr("reset loop checkpoint"))?;
+            }
+        }
+        tx.commit().await.map_err(dberr("commit workflow retry"))?;
+        Ok(())
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -286,8 +392,8 @@ impl WorkflowsRepo {
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow_id, workspace_id, status, input_json,
-                                        nodes_json, started_at, created_by)
-             VALUES (?, ?, ?, 'pending', ?, '[]', ?, ?)",
+                                        nodes_json, started_at, created_by, workflow_version)
+             VALUES (?, ?, ?, 'pending', ?, '[]', ?, ?, (SELECT version FROM workflows WHERE id = ?))",
         )
         .bind(&id)
         .bind(workflow_id)
@@ -295,6 +401,7 @@ impl WorkflowsRepo {
         .bind(input.to_string())
         .bind(&now)
         .bind(created_by)
+        .bind(workflow_id)
         .execute(&self.pool)
         .await
         .map_err(dberr("create run"))?;
@@ -396,6 +503,21 @@ impl WorkflowsRepo {
             .await
             .map_err(dberr("set run resume scope"))?;
         Ok(())
+    }
+
+    pub async fn run_scope(&self, id: &Id) -> Result<otto_core::workflows::RunScope> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT resume_scope_json FROM workflow_runs WHERE id = ?")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(dberr("read run scope"))?;
+        value
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|e| Error::Internal(format!("invalid run scope: {e}")))
+            })
+            .unwrap_or_else(|| Ok(Default::default()))
     }
 
     /// Re-queue an interrupted run for a restart resume: back to `pending`
@@ -634,9 +756,34 @@ impl WorkflowsRepo {
         self.current_version(workflow_id).await
     }
 
+    /// Load the immutable definition this run started with. Legacy rows without
+    /// a version use the current definition; a missing recorded snapshot fails
+    /// closed instead of silently running different instructions.
+    pub async fn definition_for_run(&self, run: &WorkflowRun) -> Result<Workflow> {
+        let mut wf = self.get(&run.workflow_id).await?;
+        if let Some(version) = run.workflow_version {
+            let snapshot = self
+                .get_version(&run.workflow_id, version)
+                .await?
+                .ok_or_else(|| {
+                    Error::NotFound(format!(
+                        "workflow version {version} for run {} is missing",
+                        run.id
+                    ))
+                })?;
+            wf.name = snapshot.name;
+            wf.description = snapshot.description;
+            wf.instructions = snapshot.instructions;
+            wf.graph = snapshot.graph;
+            wf.on_restart = snapshot.on_restart;
+            wf.version = snapshot.version;
+        }
+        Ok(wf)
+    }
+
     /// Record which workflow version a run executed.
     pub async fn set_run_version(&self, run_id: &Id, version: i64) -> Result<()> {
-        sqlx::query("UPDATE workflow_runs SET workflow_version = ? WHERE id = ?")
+        sqlx::query("UPDATE workflow_runs SET workflow_version = COALESCE(workflow_version, ?) WHERE id = ?")
             .bind(version)
             .bind(run_id)
             .execute(&self.pool)
@@ -761,6 +908,126 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn retry_scope_is_atomic_and_active_retry_cannot_reset_checkpoints() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+            .await
+            .unwrap();
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("failed"), true)
+            .await
+            .unwrap();
+        let cp = WorkflowCheckpoint {
+            node_id: "loop#1.0".into(),
+            loop_id: "loop".into(),
+            iteration: 1,
+            step_index: 0,
+            kind: "http_request".into(),
+            name: "write".into(),
+            status: NodeStatus::Success,
+            attempts: 1,
+            input: serde_json::Value::Null,
+            output: Some(serde_json::json!({"saved": true})),
+            error: None,
+            logs: vec![],
+            updated_at: Utc::now(),
+        };
+        repo.save_checkpoint(&run.id, &cp).await.unwrap();
+        let scope = otto_core::workflows::RunScope {
+            start_node: Some("loop".into()),
+            only_node: true,
+            ..Default::default()
+        };
+        repo.prepare_retry(&run.id, &["loop".into()], false, &scope)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().status,
+            RunStatus::Pending
+        );
+        assert_eq!(
+            repo.run_scope(&run.id).await.unwrap().start_node.as_deref(),
+            Some("loop")
+        );
+        assert!(repo
+            .prepare_retry(&run.id, &["loop".into()], true, &scope)
+            .await
+            .is_err());
+        assert_eq!(
+            repo.checkpoint(&run.id, &cp.node_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .output,
+            cp.output
+        );
+        repo.update_run(&run.id, RunStatus::Error, &[], None, true)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workflow_checkpoints SET checkpoint_json = 'invalid'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo
+            .prepare_retry(&run.id, &["loop".into()], false, &scope)
+            .await
+            .is_err());
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().status,
+            RunStatus::Error,
+            "failed checkpoint reset rolls back reopening"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_run_pins_the_definition_before_execution() {
+        let repo = WorkflowsRepo::new(mem_pool().await);
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "Original",
+                "",
+                "original instruction",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(run.workflow_version, Some(1));
+        repo.update(
+            &wf.id,
+            Some("Edited"),
+            None,
+            Some("different instructions"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.bump_version(&wf.id).await.unwrap();
+        let pinned = repo.definition_for_run(&run).await.unwrap();
+        assert_eq!(pinned.name, "Original");
+        assert_eq!(pinned.instructions, "original instruction");
+        assert_eq!(pinned.version, 1);
     }
 
     #[tokio::test]
@@ -1050,7 +1317,7 @@ mod tests {
             .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
             .await
             .unwrap();
-        assert_eq!(run.workflow_version, None);
+        assert_eq!(run.workflow_version, Some(1));
         assert_eq!(run.proof_pack_id, None);
 
         repo.set_run_version(&run.id, 1).await.unwrap();

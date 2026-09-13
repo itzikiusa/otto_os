@@ -2,6 +2,7 @@
   // Collection runner: pick/create an automation, build an ORDERED list of
   // steps (each runs a saved request, with assertions + variable extraction),
   // save, then Run and read the per-step pass/fail report.
+  import { editableSteps } from './automationInput';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
@@ -9,6 +10,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
+    ApiAutomationRun,
     ApiAssertion,
     ApiAutomation,
     ApiAutomationStep,
@@ -23,6 +25,15 @@
   let name = $state('');
   let steps: ApiAutomationStep[] = $state([]);
   let dirty = $state(false);
+  let environmentId = $state('');
+  let stopOnFailure = $state(false);
+  let datasetText = $state('');
+  let historyRun = $state<ApiAutomationRun | null>(null);
+  let ownerWorkspace = $state('');
+  $effect(() => {
+    const wid = ws.currentId ?? '';
+    if (ownerWorkspace !== wid) {ownerWorkspace = wid; selectedId = null; historyRun = null; datasetText = ''; environmentId = ''; steps = []; dirty = false;}
+  });
 
   const selected = $derived(
     apiClient.automations.find((a) => a.id === selectedId) ?? null,
@@ -43,12 +54,10 @@
   function loadInto(a: ApiAutomation): void {
     selectedId = a.id;
     name = a.name;
-    steps = a.steps.map((s) => ({
-      request_id: s.request_id,
-      assertions: s.assertions.map((x) => ({ ...x })),
-      extract: s.extract.map((x) => ({ ...x })),
-    }));
+    steps = editableSteps(a.steps);
     dirty = false;
+    historyRun = null;
+    void apiClient.loadAutomationRuns(a.id);
   }
 
   function select(a: ApiAutomation): void {
@@ -194,10 +203,18 @@
   async function run(): Promise<void> {
     if (!selectedId) return;
     if (dirty) await save();
-    await apiClient.runAutomation(selectedId);
+    if (dirty) return; // Saving failed; never run a different persisted definition.
+    let dataset: Record<string, unknown>[] = [];
+    try {
+      if (datasetText.trim()) dataset = JSON.parse(datasetText);
+      if (!Array.isArray(dataset) || dataset.some(r => !r || Array.isArray(r) || typeof r !== 'object')) throw new Error('Use a JSON array of objects.');
+    } catch (e) {toasts.error('Invalid dataset',e instanceof Error ? e.message : String(e));return;}
+    historyRun = null;
+    await apiClient.runAutomation(selectedId,{environment_id:environmentId || null,stop_on_failure:stopOnFailure,dataset});
   }
 
-  const lastRun = $derived(apiClient.lastRun);
+  const lastRun = $derived(historyRun?.report ?? apiClient.lastRun);
+  const runDetails = $derived(historyRun ?? apiClient.currentRun);
   const showRun = $derived(lastRun && lastRun.automation_id === selectedId ? lastRun : null);
 </script>
 
@@ -252,11 +269,30 @@
         <button class="btn small" disabled={!canEdit || apiClient.running} onclick={save}>
           <Icon name="check" size={12} />Save
         </button>
-        <button class="btn small primary" disabled={steps.length === 0 || apiClient.running} onclick={run}>
+        <button class="btn small primary" disabled={!canEdit || steps.length === 0 || apiClient.running} onclick={run}>
           <Icon name="play" size={12} />{apiClient.running ? 'Running…' : 'Run'}
         </button>
       </div>
 
+      <div class="ed-row">
+        <label>Environment <select class="input" bind:value={environmentId} disabled={apiClient.running}>
+          <option value="">Active environment at start</option>
+          {#each apiClient.environments as environment (environment.id)}<option value={environment.id}>{environment.name}</option>{/each}
+        </select></label>
+        <label><input type="checkbox" bind:checked={stopOnFailure} disabled={apiClient.running} /> Stop on first failure</label>
+        {#if runDetails?.status === 'running'}<button class="btn small" onclick={async () => {await apiClient.cancelAutomationRun(runDetails!.id); await apiClient.loadAutomationRuns(selectedId!);}}>Cancel run</button>{/if}
+      </div>
+      <details><summary>Dataset rows (JSON)</summary>
+        <textarea class="input" aria-label="Dataset rows" rows="5" bind:value={datasetText} placeholder={'[{"customer_id":"123"},{"customer_id":"456"}]'} disabled={apiClient.running}></textarea>
+        <p>Each row overlays the selected environment and runs all steps with its own chained variables. Dataset values stay in memory. Maximum 1 MiB and 1000 total requests.</p>
+      </details>
+      <details><summary>Run history ({apiClient.automationRuns.length})</summary>
+        <button class="btn small" onclick={async () => {await apiClient.loadAutomationRuns(selectedId!); if (historyRun) historyRun = apiClient.automationRuns.find(r=>r.id===historyRun?.id) ?? historyRun;}}>Refresh runs</button>
+        {#each apiClient.automationRuns.filter(r => r.automation_id === selectedId) as savedRun (savedRun.id)}
+          <button class="btn small" onclick={() => historyRun = savedRun}>{savedRun.created_at} · {savedRun.status} · {savedRun.report.steps.length} steps</button>
+        {/each}
+        {#if apiClient.automationRuns.length >= 50}<button class="btn small" onclick={() => apiClient.loadAutomationRuns(selectedId!,apiClient.automationRuns.at(-1)!.id)}>Load older runs</button>{/if}
+      </details>
       <div class="steps">
         {#each steps as step, i (i)}
           <div class="step">
@@ -352,6 +388,11 @@
       <!-- run report -->
       {#if showRun}
         <div class="report">
+          {#if runDetails && runDetails.automation_id === selectedId}
+            <p>Run {runDetails.id} · {runDetails.status} · {runDetails.dataset_rows} dataset row(s)</p>
+            {#if runDetails.error}<p role="status">{runDetails.error}</p>{/if}
+            <details><summary>Request versions at run start</summary><pre>{JSON.stringify(runDetails.snapshot,null,2)}</pre></details>
+          {/if}
           <div class="report-banner" class:ok={showRun.passed} class:fail={!showRun.passed}>
             <Icon name={showRun.passed ? 'check' : 'x'} size={13} />
             {showRun.passed ? 'All steps passed' : 'Run failed'}

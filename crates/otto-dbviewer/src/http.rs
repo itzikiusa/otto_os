@@ -369,6 +369,8 @@ async fn test<S: DbViewerCtx>(
 /// workspace, mirroring what saving the profile would require.
 #[derive(Debug, Deserialize)]
 struct TestUnsavedReq {
+    #[serde(default)]
+    connection_id: Option<Id>,
     workspace_id: Id,
     kind: otto_core::domain::ConnectionKind,
     params: Value,
@@ -385,12 +387,18 @@ async fn test_unsaved<S: DbViewerCtx>(
         .check(&user, &req.workspace_id, WorkspaceRole::Editor)
         .await
         .map_err(|_| otto_core::Error::Forbidden("editor role required".into()))?;
-    Ok(Json(
+    let result = if let Some(id) = req.connection_id {
+        let conn = ctx.db().get_connection(&id).await?;
+        check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+        ctx.db()
+            .test_saved_config(&id, &user.id, req.kind, req.params, req.secret)
+            .await?
+    } else {
         ctx.db()
             .test_config(req.kind, req.params, req.secret)
-            .await?,
-    )
-    .into_response())
+            .await?
+    };
+    Ok(Json(result).into_response())
 }
 
 async fn capabilities<S: DbViewerCtx>(

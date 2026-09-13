@@ -793,6 +793,40 @@ impl DbViewerService {
     /// BEFORE the profile (and its password) are stored. An SSH tunnel, when
     /// configured, opens ephemerally (never cached) and drops when the probe
     /// returns.
+    /// Root may probe proposed edits using a saved credential. It never leaves
+    /// the service. Delegated configuration rights cannot forward a credential
+    /// to an attacker-chosen host.
+    pub async fn test_saved_config(
+        &self,
+        id: &Id,
+        user_id: &Id,
+        kind: otto_core::domain::ConnectionKind,
+        params: Value,
+        secret: Option<String>,
+    ) -> Result<TestResult> {
+        let user = otto_state::UsersRepo::new(self.connections.pool())
+            .get(user_id)
+            .await?;
+        if user.disabled || !user.is_root {
+            return Err(Error::Forbidden(
+                "testing saved credentials against proposed settings requires root".into(),
+            ));
+        }
+        self.authorize(id, user_id, None, "configure").await?;
+        let conn = self.connections.get(id).await?;
+        if conn.kind != kind {
+            return Err(Error::Invalid("connection kind cannot change".into()));
+        }
+        let secret = match secret {
+            Some(value) => Some(value),
+            None => match conn.secret_ref {
+                Some(key) => self.secrets.get(&key)?,
+                None => None,
+            },
+        };
+        self.test_config(kind, params, secret).await
+    }
+
     pub async fn test_config(
         &self,
         kind: otto_core::domain::ConnectionKind,
