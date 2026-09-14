@@ -167,6 +167,12 @@ pub struct OracleClock {
     pub idle_ordinal: u64,
     /// Rule 5b: the parent went idle with only background `Bash` ids pending.
     pub bash_only_since: Option<Instant>,
+    /// The pending ids `bash_only_since` was started for. The clock is keyed
+    /// to THIS set, not to the tail: a user ping (or a peer's notification)
+    /// wakes the parent for one more turn and it goes idle again with the same
+    /// forgotten task — that must not hand it another full cap. Only a change
+    /// in what is pending restarts it.
+    pub bash_only_ids: Vec<String>,
     /// [`QUEUE_ONLY_BOUND`]: the tail has been queue-operation-only since here.
     pub queue_only_since: Option<Instant>,
     /// `last_message_at` when `queue_only_since` started — a new message line
@@ -292,6 +298,17 @@ pub fn scan_claude(jsonl: &str) -> ClaudeScan {
                     i,
                 );
             }
+            // `TaskStop` — the harness kills the task and NEVER sends a
+            // `<task-notification>` for it (a `docker info` that timed out into
+            // the background and was stopped 3s later held a step for the full
+            // linger cap). The stop result is the completion signal.
+            if let Some(id) = task_stopped_id(tur) {
+                s.pending.retain(|p| p.id != id);
+                s.notified.insert(id.clone(), "stopped".to_string());
+                if let Some(t) = ts {
+                    s.notified_at.insert(id, t);
+                }
+            }
         }
 
         // Notifications, wherever they ride (queue-operation line, user string
@@ -348,6 +365,18 @@ fn assistant_text(msg: Option<&serde_json::Value>) -> Option<String> {
     }
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The id a `TaskStop` result stopped: `{"message":"Successfully stopped task:
+/// <id> (...)","task_id":"<id>","task_type":"local_bash"|"local_agent",...}`.
+/// Matched on BOTH fields — a bare `task_id` also rides on other tool results
+/// (`TaskOutput`), and those are not completions.
+fn task_stopped_id(tur: &serde_json::Value) -> Option<String> {
+    let msg = tur.get("message").and_then(|m| m.as_str())?;
+    if !msg.starts_with("Successfully stopped task") {
+        return None;
+    }
+    task_id(tur.get("task_id"))
 }
 
 /// An opaque harness id: `[A-Za-z0-9_-]{1,64}`, never logged beyond the id.
@@ -730,24 +759,53 @@ pub fn verdict(
     }
     clock.end_turn_since = None;
 
+    // Rule 5's clock, shared with 5b. Back-dated to the file's own mtime: a
+    // handoff written before the daemon looked must not restart the cap.
+    let handoff_since = |clock: &mut OracleClock| -> Instant {
+        *clock.handoff_since.get_or_insert_with(|| {
+            let age = opts
+                .handoff_mtime
+                .and_then(|m| SystemTime::now().duration_since(m).ok())
+                .unwrap_or_default();
+            now.checked_sub(age).unwrap_or(now)
+        })
+    };
+
     // 5b (before 5). The parent is idle with only BACKGROUND tasks left — a dev
     // server it forgot to stop. The clock starts when that state is first seen,
-    // never at the task's launch (a 20-min test run is not cut short).
+    // never at the task's launch (a 20-min test run is not cut short), and it
+    // is keyed to the pending ids: a wake-up that leaves the same ids pending
+    // (a user ping, a peer's notification) does not restart it — the parent
+    // saying "done" twice about the same forgotten task is not new evidence.
     if let Some(c) = claude {
         let bash_only = c.tail_is_assistant_end_turn
             && !c.pending.is_empty()
             && c.pending.iter().all(|p| p.kind == TaskKind::Bash);
         if bash_only {
+            let ids: Vec<String> = c.pending.iter().map(|p| p.id.clone()).collect();
+            if clock.bash_only_ids != ids {
+                clock.bash_only_since = None;
+                clock.bash_only_ids = ids;
+            }
             let since = *clock.bash_only_since.get_or_insert(now);
             let elapsed = now.saturating_duration_since(since);
-            if elapsed >= BASH_LINGER_CAP {
+            // The handoff's own cap still applies here: the parent declared
+            // done at the file's mtime, and ending its turn afterwards must not
+            // buy the straggler a second 15 minutes on top of rule 5's.
+            let handoff_expired = handoff_text.is_some()
+                && now.saturating_duration_since(handoff_since(clock)) >= HANDOFF_LINGER_CAP;
+            if elapsed >= BASH_LINGER_CAP || handoff_expired {
                 let text = handoff_text
                     .clone()
                     .or_else(|| c.last_turn_text.clone())
                     .unwrap_or_default();
                 return Verdict::Complete {
                     text,
-                    via: CompleteVia::BashLingerCap,
+                    via: if elapsed >= BASH_LINGER_CAP {
+                        CompleteVia::BashLingerCap
+                    } else {
+                        CompleteVia::HandoffLingerCap
+                    },
                 };
             }
             return Verdict::Working(Phase::BashLinger {
@@ -755,21 +813,19 @@ pub fn verdict(
                 left: BASH_LINGER_CAP - elapsed,
             });
         }
-        clock.bash_only_since = None;
+        // Not idle-with-only-bash: the clock is left alone (it is keyed to the
+        // id set above), except that an EMPTY pending set means every task
+        // reported back — whatever comes next is a fresh state.
+        if c.pending.is_empty() {
+            clock.bash_only_since = None;
+            clock.bash_only_ids.clear();
+        }
     }
 
     // 5. The handoff says "done" while the turn is still open → wait for the
     // stragglers, bounded.
     if let Some(text) = handoff_text {
-        let since = *clock.handoff_since.get_or_insert_with(|| {
-            // Back-date to the file's own mtime: a handoff written before the
-            // daemon looked must not restart the 15-minute cap.
-            let age = opts
-                .handoff_mtime
-                .and_then(|m| SystemTime::now().duration_since(m).ok())
-                .unwrap_or_default();
-            now.checked_sub(age).unwrap_or(now)
-        });
+        let since = handoff_since(clock);
         if now.saturating_duration_since(since) >= HANDOFF_LINGER_CAP {
             return Verdict::Complete {
                 text,
@@ -1223,7 +1279,10 @@ mod tests {
             verdict("claude", Some(&scan), None, None, &mut clock, t, &opts()),
             Verdict::Working(Phase::BashLinger { pending: 1, .. })
         ));
-        // A notification waking the parent resets the clock.
+        // A notification waking the parent does NOT reset the clock while the
+        // same ids stay pending — only the pending set restarts it (below).
+        let started = clock.bash_only_since;
+        assert!(started.is_some());
         let woken = format!(
             "{idle}{}\n",
             notif_user("2026-09-12T08:22:00Z", "other", "completed")
@@ -1238,7 +1297,32 @@ mod tests {
             t,
             &opts(),
         );
-        assert!(clock.bash_only_since.is_none());
+        assert_eq!(clock.bash_only_since, started);
+        // A second background task launched after the wake changes the set:
+        // the next idle-with-only-bash tick starts a fresh clock.
+        let relaunched = format!(
+            "{woken}{}\n{}\n",
+            background("2026-09-12T08:23:00Z", "b6", "npm run watch"),
+            end_turn("2026-09-12T08:24:00Z", "still done"),
+        );
+        let later = t + Duration::from_secs(300);
+        assert!(matches!(
+            verdict(
+                "claude",
+                Some(&scan_claude(&relaunched)),
+                None,
+                None,
+                &mut clock,
+                later,
+                &opts()
+            ),
+            Verdict::Working(Phase::BashLinger { pending: 2, .. })
+        ));
+        assert_eq!(clock.bash_only_since, Some(later));
+        assert_eq!(
+            clock.bash_only_ids,
+            vec!["b5".to_string(), "b6".to_string()]
+        );
 
         // …and at the cap the step moves on, with and without a handoff.
         let mut clock = OracleClock::default();
@@ -1277,6 +1361,198 @@ mod tests {
                 via: CompleteVia::BashLingerCap
             }
         );
+    }
+
+    /// The `TaskStop` result line, verbatim shape from a 2026-09-14 run: a
+    /// `docker info` timed out into the background and was stopped 3s later.
+    /// No `<task-notification>` ever follows a stop.
+    fn task_stop(ts: &str, id: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":[{{"type":"tool_result","content":"{{\"message\":\"Successfully stopped task: {id} (docker info)\"}}"}}]}},"toolUseResult":{{"message":"Successfully stopped task: {id} (docker info)","task_id":"{id}","task_type":"local_bash","command":"docker info"}}}}"#
+        )
+    }
+
+    #[test]
+    fn task_stop_result_clears_the_pending_background_id() {
+        // 14:39:39 timeout → background `bzrspf8cu`; 14:39:42 TaskStop; the
+        // agent then worked 14 more minutes and wrote its handoff. Before the
+        // fix the id stayed pending and the step sat in the 15m bash linger.
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}\n",
+            background("2026-09-14T14:39:39Z", "bzrspf8cu", "docker info"),
+            task_stop("2026-09-14T14:39:42Z", "bzrspf8cu"),
+            tool_use("2026-09-14T14:45:00Z"),
+            end_turn("2026-09-14T14:53:42Z", "Step complete. Handoff written."),
+        );
+        let scan = scan_claude(&jsonl);
+        assert!(scan.pending.is_empty(), "{:?}", scan.pending);
+        assert_eq!(
+            scan.notified.get("bzrspf8cu").map(String::as_str),
+            Some("stopped")
+        );
+        assert!(scan.notified_at.contains_key("bzrspf8cu"));
+        assert!(scan.tail_is_assistant_end_turn);
+        // …so the turn counts as ended and rule 3 confirms within 20s, not 15m.
+        let mut clock = OracleClock::default();
+        let t = t0();
+        assert!(matches!(
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t,
+                &opts()
+            ),
+            Verdict::Working(Phase::IdleConfirming { .. })
+        ));
+        assert_eq!(
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t + IDLE_CONFIRM + Duration::from_secs(1),
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::HandoffAndIdleTurn
+            }
+        );
+        // A bare `task_id` on some other tool result is not a stop.
+        let not_a_stop = r#"{"type":"user","timestamp":"2026-09-14T14:40:00Z","message":{"role":"user","content":"x"},"toolUseResult":{"task_id":"bzrspf8cu","retrieval_status":"success"}}"#;
+        let jsonl = format!(
+            "{}\n{not_a_stop}\n",
+            background("2026-09-14T14:39:39Z", "bzrspf8cu", "docker info"),
+        );
+        assert_eq!(scan_claude(&jsonl).pending.len(), 1);
+    }
+
+    #[test]
+    fn bash_linger_clock_survives_a_user_ping() {
+        // The parent went idle with one forgotten bash id; the user pinged it
+        // ("did you finish?"), it answered and went idle again with the SAME
+        // id pending. The cap must run from the FIRST idle, not restart.
+        let idle = format!(
+            "{}\n{}\n",
+            background("2026-09-14T14:39:39Z", "b1", "npm run dev"),
+            end_turn("2026-09-14T14:53:42Z", "Step complete."),
+        );
+        let mut clock = OracleClock::default();
+        let t = t0();
+        assert!(matches!(
+            verdict(
+                "claude",
+                Some(&scan_claude(&idle)),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t,
+                &opts()
+            ),
+            Verdict::Working(Phase::BashLinger { pending: 1, .. })
+        ));
+        let pinged = format!(
+            "{idle}{}\n{}\n{}\n",
+            user("2026-09-14T14:57:48Z", "the agent did not get your done"),
+            tool_use("2026-09-14T14:57:56Z"),
+            end_turn("2026-09-14T14:58:07Z", "The step is done and re-signalled."),
+        );
+        let scan = scan_claude(&pinged);
+        // Mid-ping (turn open again): rule 5 holds, clock untouched.
+        let open = format!(
+            "{idle}{}\n{}\n",
+            user("2026-09-14T14:57:48Z", "the agent did not get your done"),
+            tool_use("2026-09-14T14:57:56Z"),
+        );
+        let t_ping = t + Duration::from_secs(4 * 60);
+        assert!(matches!(
+            verdict(
+                "claude",
+                Some(&scan_claude(&open)),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t_ping,
+                &opts()
+            ),
+            Verdict::Working(Phase::HandoffWrittenWaiting { pending: 1 })
+        ));
+        assert_eq!(clock.bash_only_since, Some(t));
+        // Idle again with the same id: still the original clock…
+        let t_idle2 = t + Duration::from_secs(5 * 60);
+        assert!(matches!(
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t_idle2,
+                &opts()
+            ),
+            Verdict::Working(Phase::BashLinger { pending: 1, .. })
+        ));
+        assert_eq!(clock.bash_only_since, Some(t));
+        // …so the cap fires 15m after the FIRST idle, not 20m.
+        let t_cap = t + BASH_LINGER_CAP + Duration::from_secs(1);
+        assert_eq!(
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t_cap,
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::BashLingerCap
+            }
+        );
+    }
+
+    #[test]
+    fn bash_linger_honors_the_handoff_cap() {
+        // The handoff was written 16 minutes ago while the turn was open (rule
+        // 5 would have released at 15m); the turn ending with a bash id left
+        // must not grant a fresh 15 minutes on top.
+        let idle = format!(
+            "{}\n{}\n",
+            background("2026-09-14T14:39:39Z", "b1", "npm run dev"),
+            end_turn("2026-09-14T14:53:42Z", "Step complete."),
+        );
+        let scan = scan_claude(&idle);
+        let mut clock = OracleClock::default();
+        let o = OracleOpts {
+            handoff_mtime: Some(SystemTime::now() - Duration::from_secs(16 * 60)),
+            ..OracleOpts::default()
+        };
+        assert_eq!(
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t0(),
+                &o
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::HandoffLingerCap
+            }
+        );
+        // Without a handoff the bash cap alone governs (unchanged).
+        let mut clock = OracleClock::default();
+        assert!(matches!(
+            verdict("claude", Some(&scan), None, None, &mut clock, t0(), &o),
+            Verdict::Working(Phase::BashLinger { pending: 1, .. })
+        ));
     }
 
     #[test]
