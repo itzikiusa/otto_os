@@ -664,8 +664,14 @@
     opacity: 1;
     border-color: var(--accent);
   }
+  /* The maximized tile is mounted straight into `.agents-body` (a block, not
+     the `.tiled-wrap` flex column the grid lives in), so `.tiled`'s `flex: 1`
+     is inert here and the pane's `height: 100%` would resolve against an
+     auto-height parent → the terminal collapsed to 0px (header only, black
+     body). Size it explicitly. */
   .tiled.single {
     display: block;
+    height: 100%;
     overflow: hidden;
   }
   .tiled-empty {

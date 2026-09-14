@@ -1250,6 +1250,20 @@ impl Drop for AttachGuard {
     }
 }
 
+/// RAII guard for an engine turn driver's watch on a session (see
+/// [`SessionManager::hold_for_turn`]): released on every return path of the
+/// driver, including the error ones, so a failed turn never pins a session.
+pub struct TurnHold {
+    manager: Arc<SessionManager>,
+    id: Id,
+}
+
+impl Drop for TurnHold {
+    fn drop(&mut self) {
+        self.manager.release_turn(&self.id);
+    }
+}
+
 /// Default daemon base URL agent hooks post activity back to. Overridden via
 /// [`SessionManager::with_ingest_base`] (ottod sets it from its bind port).
 const DEFAULT_INGEST_BASE: &str = "http://127.0.0.1:7700";
@@ -1299,6 +1313,14 @@ pub struct SessionManager {
     /// Last chat keep-alive ping per session (see [`VIEW_HOLD`]): a mounted
     /// conversation view is a viewer even though it holds no terminal WS.
     viewed: Arc<DashMap<Id, std::time::Instant>>,
+    /// Engine turn drivers currently WATCHING each session (see
+    /// [`Self::hold_for_turn`]). A workflow step / review agent / channel reply
+    /// whose owning engine is still polling its transcript is not "done", no
+    /// matter how quiet its PTY is — the oracle's bounded holds (handoff /
+    /// background-task linger, up to 15 min) are longer than the 5-min idle
+    /// grace, and suspending the session under the engine's feet made it
+    /// re-run the whole step in a fresh session.
+    engine_turns: Arc<DashMap<Id, usize>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
     /// Session ids whose PTY is being deliberately suspended (RAM release, not
@@ -1409,6 +1431,7 @@ impl SessionManager {
             attached: Arc::new(DashMap::new()),
             attached_conns: Arc::new(DashMap::new()),
             viewed: Arc::new(DashMap::new()),
+            engine_turns: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
             suspending: Arc::new(DashMap::new()),
             suspend_cpu: Arc::new(DashMap::new()),
@@ -2674,6 +2697,36 @@ impl SessionManager {
         self.viewed.insert(id.clone(), std::time::Instant::now());
     }
 
+    /// Register an engine turn driver as a watcher of `id` for as long as the
+    /// returned guard lives. The idle-suspend sweep treats it exactly like an
+    /// attached viewer: the session is never suspended or reaped while its
+    /// owning engine is still consuming the turn — an engine-owned session
+    /// "loses nothing when reclaimed" only AFTER its driver has returned. The
+    /// guard is in-memory: a daemon restart drops every hold along with the
+    /// drivers themselves.
+    pub fn hold_for_turn(self: &Arc<Self>, id: &Id) -> TurnHold {
+        *self.engine_turns.entry(id.clone()).or_insert(0) += 1;
+        TurnHold {
+            manager: Arc::clone(self),
+            id: id.clone(),
+        }
+    }
+
+    /// True while at least one engine turn driver holds `id`.
+    pub fn engine_turn_open(&self, id: &Id) -> bool {
+        self.engine_turns.get(id).is_some_and(|n| *n > 0)
+    }
+
+    fn release_turn(&self, id: &Id) {
+        if let Some(mut n) = self.engine_turns.get_mut(id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                drop(n);
+                self.engine_turns.remove(id);
+            }
+        }
+    }
+
     /// True when `id` was chat-pinged within `hold`.
     pub fn viewed_within(&self, id: &Id, hold: Duration) -> bool {
         self.viewed
@@ -2682,11 +2735,12 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
-    /// Somebody is looking at `id` right now: a terminal WS viewer OR a
-    /// conversation view that pinged within [`VIEW_HOLD`]. The idle-suspend
+    /// Somebody is looking at `id` right now: a terminal WS viewer, a
+    /// conversation view that pinged within [`VIEW_HOLD`], OR an engine turn
+    /// driver still polling it ([`Self::hold_for_turn`]). The idle-suspend
     /// sweep's "unattached" test.
     pub fn is_watched(&self, id: &Id) -> bool {
-        self.is_attached(id) || self.viewed_within(id, VIEW_HOLD)
+        self.is_attached(id) || self.viewed_within(id, VIEW_HOLD) || self.engine_turn_open(id)
     }
 
     /// Subscribe to the per-session forced-disconnect signal, lazily creating
@@ -3353,10 +3407,14 @@ impl SessionManager {
     /// **"Idle" means "no PTY output", which is not "done".** An agent that
     /// delegates work and then `sleep`-polls its watchers prints nothing, burns
     /// no descendant CPU and is squarely mid-turn; this sweep used to suspend
-    /// exactly that. Four guards now hold a session; the first hold (and every
+    /// exactly that. Five guards now hold a session; the first hold (and every
     /// later CHANGE of guard) is logged at `info` with the guard's name, so the
     /// daemon log explains itself without repeating a line a minute forever:
     ///
+    /// - `engine turn`    — an engine turn driver is still polling the
+    ///   session ([`Self::hold_for_turn`]): a workflow step in one of the
+    ///   oracle's bounded holds is quiet for longer than the idle grace, and
+    ///   suspending it there re-ran the whole step in a fresh session.
     /// - `keep_alive`     — the user pinned it (`meta.keep_alive`).
     /// - `origin=manual`  — the user started it from the Agents page
     ///   ([`is_user_started`]); only engine-owned sessions are ever
@@ -3422,9 +3480,14 @@ impl SessionManager {
             if last_output.elapsed() < grace {
                 continue;
             }
-            // Unattached: nobody is watching — no terminal WS viewer AND no
+            // Unattached: nobody is watching — no terminal WS viewer, no
             // chat keep-alive ping within VIEW_HOLD (an open conversation
-            // view mounts no terminal; its 60 s touch is its attachment).
+            // view mounts no terminal; its 60 s touch is its attachment),
+            // and no engine turn driver still consuming the turn.
+            if self.engine_turn_open(&id) {
+                self.note_hold(&id, "engine turn", "");
+                continue;
+            }
             if self.is_watched(&id) {
                 continue;
             }
@@ -5459,6 +5522,31 @@ mod tests {
         // A stale view (older than the hold) no longer counts.
         assert!(!mgr.viewed_within(&id, Duration::ZERO));
         assert_eq!(mgr.suspend_idle_unattached().await, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_suspend_skips_sessions_an_engine_turn_is_watching() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid")).await;
+        // A workflow step's driver polls the transcript with no terminal and
+        // no chat view; the oracle's linger holds outlast the idle grace.
+        // Observed live: the sweep suspended the step's session 8 min into a
+        // 15-min background-task linger and the engine re-ran the step.
+        assert!(!mgr.engine_turn_open(&id));
+        assert!(!mgr.is_watched(&id));
+        let hold = mgr.hold_for_turn(&id);
+        assert!(mgr.engine_turn_open(&id));
+        assert!(mgr.is_watched(&id));
+        // Nested drivers (a retry overlapping a slow teardown) count separately.
+        let hold2 = mgr.hold_for_turn(&id);
+        drop(hold);
+        assert!(mgr.engine_turn_open(&id));
+        assert_eq!(mgr.suspend_idle_unattached().await, 0);
+        // The last guard dropping — on ANY return path — releases the session.
+        drop(hold2);
+        assert!(!mgr.engine_turn_open(&id));
+        assert!(!mgr.is_watched(&id));
+        assert!(mgr.engine_turns.get(&id).is_none());
     }
 
     #[tokio::test]

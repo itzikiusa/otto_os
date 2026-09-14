@@ -502,7 +502,15 @@ when **all** of these hold:
 2. **Idle** — no PTY output for the full grace window. Default **5 minutes**
    (`SUSPEND_GRACE`), overridable via the `idle_suspend_grace_secs` setting.
 3. **Unattached** — no WS viewer is currently watching (tracked by an
-   `AttachGuard` reference count that decrements on every WS teardown path).
+   `AttachGuard` reference count that decrements on every WS teardown path),
+   no conversation view pinged within the last 3 minutes, **and no engine turn
+   driver is still consuming the session** (a `TurnHold` taken by the workflow
+   step / review / channel / assist drivers for the whole turn, dropped on
+   every return path). An engine-owned session "loses nothing when reclaimed"
+   only *after* its driver has returned: the turn oracle's bounded holds —
+   handoff linger, background-task linger — keep a quiet session open for up
+   to 15 minutes, three times this grace, and suspending it there made the
+   engine re-run the whole step in a fresh session.
 4. **Not pinned** — `meta.keep_alive` is not `true`.
 5. **Engine-owned** — the session was started by a background origin: a
    `meta.work.origin` of `workflow` / `review` / `swarm` / `delegation` /
@@ -535,8 +543,8 @@ when **all** of these hold:
 > `sleep`-polls them prints nothing, burns no descendant CPU and is squarely
 > mid-turn; the sweep used to suspend exactly that, yanking the PTY out from
 > under a live interactive session three times in one afternoon. Every guard
-> that holds a session names itself in the daemon log — `keep_alive`,
-> `origin=manual`, `turn open`, `descendant CPU` — at `info` the first time it
+> that holds a session names itself in the daemon log — `engine turn`,
+> `keep_alive`, `origin=manual`, `turn open`, `descendant CPU` — at `info` the first time it
 > applies and on every later change of guard, `debug` while it simply persists
 > (a held session is re-held every 60 s, for as long as it lives).
 
