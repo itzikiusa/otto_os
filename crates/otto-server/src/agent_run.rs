@@ -278,6 +278,10 @@ where
     G: FnMut(String) -> GFut,
     GFut: Future<Output = ()>,
 {
+    // This watcher IS the session's consumer: hold it against the idle-suspend
+    // sweep until we return (the guard drops on every path). A quiet reviewer
+    // inside its `waiting_idle` window is not "idle, unattached".
+    let _turn_hold = manager.hold_for_turn(sid);
     let deadline = Instant::now() + timeout;
     let guarded = guard.pending_aware && provider == "claude";
     let mut flagged_waiting = false;

@@ -203,6 +203,15 @@ pub async fn run_session_turn_with(
         }
     };
 
+    // This driver is the session's consumer for the rest of the turn: hold it
+    // against the idle-suspend sweep until we return (the guard drops on
+    // every path, error ones included). The oracle's bounded holds — handoff
+    // linger, background-task linger — keep a quiet, unattached session open
+    // for up to 15 min, three times the sweep's grace; without the hold the
+    // sweep SIGHUP'd a workflow step mid-linger and the engine re-ran the
+    // whole step in a fresh session (2026-09-14).
+    let _turn_hold = ctx.manager.hold_for_turn(&sid);
+
     // Session exists now — let the caller surface its id (e.g. attach the live
     // shell in the Canvas panel) BEFORE the long turn runs.
     on_ready(&sid);
