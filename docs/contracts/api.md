@@ -3008,7 +3008,7 @@ enforce the entity's workspace role.
 | CP18 | POST /api/v1/mcp/policies/import | mcp:admin | `{policies, replace?}` | `{imported, replaced}` |
 | CP19 | POST /api/v1/mcp/policies/evaluate | mcp:view | `{server_id, tool, workspace_id?}` | decision preview |
 | CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` |
-| CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin (approver≠requester) | `{approved, note?}` | McpApproval |
+| CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin (approver≠requester, except agent-raised requests) | `{approved, note?}` | McpApproval |
 | CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters | `McpCallLogRow[]` |
 | CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` |
 

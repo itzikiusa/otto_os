@@ -257,6 +257,28 @@ pub struct McpApproval {
     pub expires_at: Option<String>,
 }
 
+/// `requested_by_kind` values that mean "an agent acting on the requester's
+/// behalf" rather than the human themselves: the outward / in-session Otto MCP
+/// server (`mcp_server` — also `otto.ask_human_approval`, which is literally
+/// the agent asking its human), the live-agent gateway, and a bare agent
+/// caller. Mirrored in `ui/src/modules/mcp/ApprovalsTab.svelte`.
+pub const AGENT_REQUESTER_KINDS: &[&str] = &["mcp_server", "gateway", "agent"];
+
+impl McpApproval {
+    /// Whether the user recorded as the requester may decide this approval
+    /// themselves. Separation of duties exists so a human can't rubber-stamp
+    /// their OWN direct request (the UI tester, `requested_by_kind = "ui"`).
+    /// An approval raised by that user's agent session or MCP client is the
+    /// opposite case: the human-in-the-loop check was created precisely so the
+    /// owning human could weigh in, and every Otto session authorizes as its
+    /// owner, so refusing them would leave no one able to approve.
+    pub fn requester_may_decide(&self) -> bool {
+        self.requested_by_kind
+            .as_deref()
+            .is_some_and(|k| AGENT_REQUESTER_KINDS.contains(&k))
+    }
+}
+
 pub struct NewApproval {
     pub workspace_id: Option<String>,
     pub kind: String,
@@ -1257,7 +1279,9 @@ impl McpApprovalRepo {
     }
 
     /// Decide an approval. Enforces: still pending, and approver != requester
-    /// (separation of duties). Returns the updated row.
+    /// (separation of duties) unless the request was raised by an agent acting
+    /// on that user's behalf — see [`McpApproval::requester_may_decide`].
+    /// Returns the updated row.
     pub async fn decide(
         &self,
         id: &Id,
@@ -1272,7 +1296,7 @@ impl McpApprovalRepo {
                 cur.status
             )));
         }
-        if cur.requested_by.as_deref() == Some(decided_by) {
+        if cur.requested_by.as_deref() == Some(decided_by) && !cur.requester_may_decide() {
             return Err(otto_core::Error::Invalid(
                 "the requester cannot approve their own request (separation of duties)".into(),
             ));
@@ -1458,6 +1482,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requester_may_decide_an_approval_their_own_agent_raised() {
+        let pool = mem_pool().await;
+        let (ws, _user) = seed(&pool).await;
+        let repo = McpApprovalRepo::new(pool.clone());
+        let new = |kind: &str| NewApproval {
+            workspace_id: Some(ws.clone()),
+            kind: "tool_call".into(),
+            server_id: None,
+            server_name: Some("otto".into()),
+            tool: Some("otto.create_pr".into()),
+            title: "create_pr".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: Some("HASH_PR".into()),
+            risk_label: Some("dangerous".into()),
+            requested_by: Some("owner".into()),
+            requested_by_kind: Some(kind.into()),
+            expires_at: None,
+        };
+        // Every agent-originated kind: the owning user is the intended approver.
+        for kind in AGENT_REQUESTER_KINDS {
+            let a = repo.create(new(kind)).await.unwrap();
+            assert!(a.requester_may_decide(), "{kind} is agent-originated");
+            let decided = repo.decide(&a.id, true, "owner", None).await.unwrap();
+            assert_eq!(decided.status, "approved", "kind {kind}");
+            assert_eq!(decided.decided_by.as_deref(), Some("owner"));
+        }
+        // A human's own direct request (UI tester) and an unknown/missing kind
+        // keep the separation-of-duties rule.
+        for kind in ["ui", "something_else"] {
+            let a = repo.create(new(kind)).await.unwrap();
+            assert!(!a.requester_may_decide(), "{kind} is not agent-originated");
+            assert!(
+                repo.decide(&a.id, true, "owner", None).await.is_err(),
+                "kind {kind}"
+            );
+            // …and a different user may still decide it.
+            assert_eq!(
+                repo.decide(&a.id, false, "reviewer", None)
+                    .await
+                    .unwrap()
+                    .status,
+                "denied"
+            );
+        }
+        let mut none = new("ui");
+        none.requested_by_kind = None;
+        let a = repo.create(none).await.unwrap();
+        assert!(!a.requester_may_decide());
+        assert!(repo.decide(&a.id, true, "owner", None).await.is_err());
+    }
+
+    #[tokio::test]
     async fn approval_single_use_and_args_binding() {
         let pool = mem_pool().await;
         let (ws, _user) = seed(&pool).await;
@@ -1475,13 +1552,13 @@ mod tests {
                 args_hash: Some("HASH_A".into()),
                 risk_label: Some("dangerous".into()),
                 requested_by: Some("requester".into()),
-                requested_by_kind: Some("agent".into()),
+                requested_by_kind: Some("ui".into()),
                 expires_at: None,
             })
             .await
             .unwrap();
 
-        // Requester cannot self-approve.
+        // A human's own direct request: the requester cannot self-approve.
         assert!(repo.decide(&a.id, true, "requester", None).await.is_err());
         // A different user approves.
         let decided = repo

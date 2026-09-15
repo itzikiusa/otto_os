@@ -449,7 +449,12 @@ and evaluate are read-only (View).
   **redacted** args (never full/secret values), a risk pill, and **Approve** / **Deny**
   with an optional note; a *"Show decided too"* toggle reveals history. A decision
   requires **MCP Admin**, and the repo enforces **approver ≠ requester** (separation
-  of duties). Stale approvals expire (default TTL 120 min for tool-calls).
+  of duties) for a human's own direct request (`requested_by_kind = "ui"`). A request
+  raised by the user's **own agent** (`mcp_server`, `gateway`, `agent` — including
+  `otto.ask_human_approval`) is exempt: every Otto session authorizes as its owner,
+  and the human-in-the-loop check exists precisely so that owner can weigh in
+  (`McpApproval::requester_may_decide`). Stale approvals expire (default TTL 120 min
+  for tool-calls).
 - **Audit** (`mcp_call_log`) — the second **Activity** panel is the ledger of **every**
   governed call (UI tester, gateway, inbound `otto.*`, outbound downstream). Its
   server / tool / decision filters are collapsed by default. The **Log** view shows
