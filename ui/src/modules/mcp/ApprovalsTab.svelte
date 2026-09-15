@@ -2,9 +2,13 @@
   // The approval queue — dangerous tool calls and `otto.ask_human_approval`
   // requests waiting on a human. Shows the redacted args (never the full/secret
   // values; the server binds the hash of the FULL args). Approve/Deny with an
-  // optional note. The requester cannot approve their own request (enforced
-  // server-side). Polls every few seconds and on tab refocus so a new pending
-  // request appears without a manual reload.
+  // optional note. The requester cannot approve their own DIRECT request
+  // (enforced server-side) — but a request raised by their own agent session /
+  // MCP client on their behalf is exactly what they're meant to decide, since
+  // every Otto session authorizes as its owner (mirrors
+  // `AGENT_REQUESTER_KINDS` in crates/otto-state/src/mcp_control.rs). Polls
+  // every few seconds and on tab refocus so a new pending request appears
+  // without a manual reload.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -14,7 +18,9 @@
   import McpPill from './McpPill.svelte';
 
   let approvals = $state<McpApproval[]>([]);
-  const canDecide = (a:McpApproval) => a.requested_by!==auth.me?.id && (a.server_id ? resourceAccess.can('mcp_server',a.server_id,'approve','mcp','admin',a.tool ?? undefined) : auth.can('mcp','admin'));
+  const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
+  const requesterMayDecide = (a:McpApproval) => AGENT_REQUESTER_KINDS.includes(a.requested_by_kind ?? '');
+  const canDecide = (a:McpApproval) => (a.requested_by!==auth.me?.id || requesterMayDecide(a)) && (a.server_id ? resourceAccess.can('mcp_server',a.server_id,'approve','mcp','admin',a.tool ?? undefined) : auth.can('mcp','admin'));
   $effect(()=>{for(const approval of approvals){if(approval.server_id)void resourceAccess.load('mcp_server',approval.server_id,approval.tool ?? undefined);}});
   let loading = $state(false);
   let busy = $state<Record<string, boolean>>({});

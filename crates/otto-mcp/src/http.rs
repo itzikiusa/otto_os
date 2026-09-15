@@ -881,10 +881,15 @@ async fn decide_approval<S: McpCtx>(
     Json(req): Json<DecideReq>,
 ) -> ApiResult<Json<otto_state::McpApproval>> {
     let appr = ctx.mcp().approvals().get(&id).await.map_err(ApiErr)?;
-    if auth
-        .as_ref()
-        .is_some_and(|a| appr.requested_by.as_ref() == Some(&a.0.real_user.id))
-    {
+    // Impersonation can't launder a self-approval: the REAL user behind an
+    // impersonating token may not decide a request they themselves raised. A
+    // request raised by that user's own agent is exempt, exactly as in the
+    // repo's separation-of-duties check (`McpApproval::requester_may_decide`).
+    if auth.as_ref().is_some_and(|a| {
+        a.0.real_user.id != a.0.effective_user.id
+            && appr.requested_by.as_ref() == Some(&a.0.real_user.id)
+            && !appr.requester_may_decide()
+    }) {
         return Err(
             Error::Forbidden("requester cannot approve through impersonation".into()).into(),
         );
