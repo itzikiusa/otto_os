@@ -31,6 +31,17 @@
 //! the running daemon on 127.0.0.1 with the per-session token (which authorizes as
 //! the session's owner, so workspace RBAC applies).
 //!
+//! **Control-plane parity.** The operator's MCP → Otto server checklist
+//! (`GET /mcp/otto-server`, the governed `otto.*` catalog in
+//! `otto_server::mcp_outward`) is ALSO surfaced here: every enabled governed
+//! tool that this binary does not serve natively is advertised under the stdio
+//! naming (`otto.create_pr` → `otto_create_pr`) and its calls are proxied
+//! through `POST /mcp/otto-tools/invoke` — the same allow-list → approval →
+//! audit choke point the outward server uses, so a mutating tool such as
+//! `otto_create_pr` still waits on a human approval. Native tools win by name
+//! (see `governed_tools_for`), so what the control plane shows as enabled is
+//! what a session can call, with no second hand-maintained list to drift.
+//!
 //! Beyond Otto's own data, the DB tools (`otto_list_connections`,
 //! `otto_db_schema`/`_children`/`_object`, `otto_db_query`) expose the user's
 //! database **connections**: schema introspection and **read-only** queries.
@@ -422,6 +433,35 @@ impl Ctx {
                      (e.g. comment_pr) will NOT appear on this stdio surface"
                 );
                 vec![]
+            }
+        }
+    }
+
+    /// The full `otto.*` names the operator has ENABLED in the control plane
+    /// (`GET /mcp/otto-server`, MCP View). `None` when the daemon can't answer —
+    /// then no governed tool is advertised or callable, and the reason is on
+    /// stderr, so "the control plane says X but the session can't see it" is
+    /// always explainable from the daemon's log.
+    async fn governed_enabled(&self) -> Option<Vec<String>> {
+        match self.get_json("/mcp/otto-server").await {
+            Ok(v) => Some(
+                v["tools"]
+                    .as_array()
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter(|t| t["enabled"].as_bool().unwrap_or(false))
+                            .filter_map(|t| t["name"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ),
+            Err(e) => {
+                eprintln!(
+                    "ottod mcp-tools: control-plane tool list unavailable: {e} — governed \
+                     otto.* tools (e.g. otto_create_pr) will NOT appear on this stdio surface"
+                );
+                None
             }
         }
     }
@@ -1111,6 +1151,123 @@ fn tool_catalog_for_source(source: Option<&str>) -> Value {
         }
     }
     catalog
+}
+
+// ---------------------------------------------------------------------------
+// Control-plane (governed `otto.*`) tools on this stdio surface.
+//
+// The operator's MCP → Otto server checklist (`GET /mcp/otto-server`, backed
+// by `otto_tool_specs()`) is the ONE catalog the control plane manages. Before
+// this bridge existed, a session saw only the hand-written catalog above, so a
+// tool enabled in the control plane (`otto.create_pr`, `otto.open_pr_draft`,
+// `otto.run_workflow`…) was simply absent from the agent's `tools/list` — the
+// two catalogs drifted with nothing to grep for. Now every ENABLED governed
+// tool that this surface does not already serve natively is advertised under
+// the stdio naming (`otto.create_pr` → `otto_create_pr`) and its calls are
+// proxied through `POST /mcp/otto-tools/invoke`, the same allow-list →
+// approval → audit choke point the outward server and the HTTP transport use.
+// Native tools keep winning by name: they are session-aware (workspace
+// injection, reviewer scoping) and the governed twin would only add noise.
+// ---------------------------------------------------------------------------
+
+/// Governed tools (short name, no `otto.` prefix) whose capability this surface
+/// already serves natively under a DIFFERENT name. They are not re-advertised —
+/// the agent should see one tool per capability — and a call by their stdio
+/// name is still routed to the governed path, which is harmless (same RBAC).
+const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
+    ("get_usage_summary", "otto_usage_summary"),
+    ("get_product_story", "otto_product_story"),
+    ("query_db_readonly", "otto_db_query"),
+];
+
+/// How long a governed call waits for a human decision before returning
+/// `pending_approval`. Below [`CALL_TIMEOUT`] so the daemon answers before this
+/// bridge gives up; a later identical call reuses the approval once granted.
+const GOVERNED_WAIT_SECS: u64 = 15;
+
+/// The stdio-facing name of a governed catalog entry: `otto.create_pr` →
+/// `otto_create_pr`. Claude/Codex mangle a dotted tool name, and the native
+/// tools already use this underscore form.
+fn governed_stdio_name(spec_name: &str) -> String {
+    format!(
+        "otto_{}",
+        spec_name.strip_prefix("otto.").unwrap_or(spec_name)
+    )
+}
+
+/// Names of the tools served natively by this binary (the static catalog).
+fn native_tool_names() -> Vec<String> {
+    tool_catalog()["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The governed spec a stdio tool name proxies to, or `None` when the name is
+/// served natively (by the same or an aliased name) or is not a governed tool.
+fn governed_spec_for_stdio_name(name: &str) -> Option<Value> {
+    let short = name.strip_prefix("otto_")?;
+    let native = native_tool_names();
+    if native.iter().any(|n| n == name)
+        || GOVERNED_ALIASED_BY_NATIVE
+            .iter()
+            .any(|(g, n)| *g == short && native.iter().any(|x| x == n))
+    {
+        return None;
+    }
+    otto_server::mcp_outward::otto_tool_specs()
+        .into_iter()
+        .find(|s| s["name"].as_str() == Some(&format!("otto.{short}")))
+}
+
+/// The governed (`otto.*`) name a stdio tool name proxies to, if any.
+fn governed_tool_for_stdio_name(name: &str) -> Option<String> {
+    governed_spec_for_stdio_name(name).and_then(|s| s["name"].as_str().map(str::to_string))
+}
+
+/// The `tools/list` entries for the control-plane-enabled governed tools that
+/// have no native equivalent here. `enabled` holds full `otto.*` names.
+fn governed_tools_for(enabled: &[String]) -> Vec<Value> {
+    otto_server::mcp_outward::otto_tool_specs()
+        .into_iter()
+        .filter(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| enabled.iter().any(|e| e == n))
+        })
+        .filter_map(|s| {
+            let full = s["name"].as_str()?;
+            let stdio = governed_stdio_name(full);
+            governed_spec_for_stdio_name(&stdio)?;
+            Some(json!({
+                "name": stdio,
+                "description": s["description"],
+                "inputSchema": s["inputSchema"],
+            }))
+        })
+        .collect()
+}
+
+/// Arguments for a governed call: the agent's arguments plus this session's
+/// `workspace_id` when the tool's schema takes one and the agent omitted it —
+/// the same courtesy the native tools extend, so an agent needn't know its own
+/// workspace id to open a PR.
+fn governed_invoke_args(ctx: &Ctx, spec: &Value, args: &Value) -> Value {
+    let mut out = args.as_object().cloned().unwrap_or_default();
+    let takes_ws = spec["inputSchema"]["properties"]
+        .as_object()
+        .is_some_and(|p| p.contains_key("workspace_id"));
+    if takes_ws && !out.contains_key("workspace_id") {
+        if let Some(ws) = &ctx.workspace_id {
+            out.insert("workspace_id".into(), Value::String(ws.clone()));
+        }
+    }
+    Value::Object(out)
 }
 
 /// Map the compatibility names exposed by the in-session MCP bridge onto the
@@ -2753,6 +2910,41 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
     Ok((v, is_error))
 }
 
+/// Proxy a control-plane (`otto.*`) tool call through the governed choke point
+/// `POST /mcp/otto-tools/invoke`. `name` is the stdio name (`otto_create_pr`),
+/// already known to map to a governed spec. The tool must be ENABLED in the
+/// control plane right now — the invoke route itself exempts internal session
+/// tokens from the enabled list, but this surface promises to mirror the
+/// operator's checklist, so a disabled tool is refused here with a pointer to
+/// where to enable it. The governed envelope (`decision`, `content`,
+/// `approval_id`…) is returned whole so the agent can see a denial reason or a
+/// pending approval; the route audits the call itself.
+async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bool), String> {
+    let spec = governed_spec_for_stdio_name(name)
+        .ok_or_else(|| format!("`{name}` is not a governed Otto tool"))?;
+    let full = spec["name"].as_str().unwrap_or_default().to_string();
+    let enabled = ctx.governed_enabled().await.ok_or_else(|| {
+        format!("`{name}` is unavailable: the Otto MCP server tool list could not be read from the daemon")
+    })?;
+    if !enabled.contains(&full) {
+        return Err(format!(
+            "`{name}` ({full}) is not enabled on the Otto MCP server — enable it under \
+             MCP → Otto server in Otto, then call it again"
+        ));
+    }
+    let body = json!({
+        "tool": full,
+        "arguments": governed_invoke_args(ctx, &spec, args),
+        "wait_seconds": GOVERNED_WAIT_SECS,
+    });
+    let v = ctx.post_json("/mcp/otto-tools/invoke", &body).await?;
+    let is_error = matches!(
+        v.get("decision").and_then(Value::as_str),
+        Some("denied") | Some("error")
+    ) || v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+    Ok((v, is_error))
+}
+
 /// Apply the row cap then redaction to a tool result, returning the cleaned
 /// value and the audited row count (largest array length seen pre-cap).
 fn finalize(v: Value) -> (Value, Option<i64>) {
@@ -2806,12 +2998,24 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // The static first-party read-only catalog, plus — when the live-agent
             // gateway is enabled for this workspace — the governed downstream tools.
             let mut cat = tool_catalog_for_source(ctx.source.as_deref());
-            let gw = if is_vault_docs_reviewer(ctx.source.as_deref()) {
+            let reviewer = is_vault_docs_reviewer(ctx.source.as_deref());
+            let gw = if reviewer {
                 Vec::new()
             } else {
                 ctx.gateway_tools().await
             };
+            // …plus the control-plane-enabled otto.* tools this surface doesn't
+            // serve natively (what the operator ticked under MCP → Otto server).
+            let governed = if reviewer {
+                Vec::new()
+            } else {
+                match ctx.governed_enabled().await {
+                    Some(enabled) => governed_tools_for(&enabled),
+                    None => Vec::new(),
+                }
+            };
             if let Some(arr) = cat["tools"].as_array_mut() {
+                arr.extend(governed);
                 for t in gw {
                     arr.push(json!({
                         "name": t["name"],
@@ -2864,6 +3068,14 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // route it through the control-plane gateway (which audits it itself).
             if name.starts_with("mcp__") {
                 return Some(match gateway_call(ctx, &name, &args).await {
+                    Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
+                    Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
+                });
+            }
+            // A control-plane otto.* tool with no native twin — governed proxy
+            // (enabled-check, approval, audit all happen daemon-side).
+            if governed_tool_for_stdio_name(&name).is_some() {
+                return Some(match governed_call(ctx, &name, &args).await {
                     Ok((v, is_error)) => rpc_ok(id, tool_result(&v, is_error)),
                     Err(e) => rpc_ok(id, tool_result(&json!({ "error": e }), true)),
                 });
@@ -3340,6 +3552,117 @@ mod tests {
         .await
         .unwrap();
         assert!(resp["result"]["tools"].is_array());
+    }
+
+    // --- Control-plane (governed `otto.*`) tools on the stdio surface ---------
+    //
+    // What an operator enables under MCP → Otto server must be what a session
+    // sees: the enabled `otto.*` catalog is merged into `tools/list` (minus the
+    // tools this surface already serves natively) and calls are proxied through
+    // the governed invoke route.
+
+    #[test]
+    fn governed_stdio_name_maps_the_dotted_catalog_name() {
+        assert_eq!(governed_stdio_name("otto.create_pr"), "otto_create_pr");
+        assert_eq!(governed_stdio_name("create_pr"), "otto_create_pr");
+    }
+
+    #[test]
+    fn governed_tools_skip_native_and_aliased_names() {
+        let enabled: Vec<String> = [
+            "otto.create_pr",         // no native equivalent → advertised
+            "otto.list_repos",        // same name natively (otto_list_repos) → skipped
+            "otto.get_usage_summary", // native under another name → skipped
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let tools = governed_tools_for(&enabled);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(names, vec!["otto_create_pr"]);
+        assert!(
+            tools[0]["inputSchema"].is_object(),
+            "schema must be carried over"
+        );
+        assert!(tools[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pull request"));
+    }
+
+    #[test]
+    fn governed_tools_only_advertise_the_enabled_set() {
+        let none: Vec<String> = vec![];
+        assert!(governed_tools_for(&none).is_empty());
+        let enabled = vec!["otto.open_pr_draft".to_string()];
+        let names: Vec<String> = governed_tools_for(&enabled)
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(names, vec!["otto_open_pr_draft"]);
+    }
+
+    #[test]
+    fn every_governed_spec_is_native_aliased_or_uniquely_advertised() {
+        // Invariant: each control-plane tool either collides with a native tool
+        // of the same name (the native one wins), is explicitly aliased to a
+        // native tool, or maps to a stdio name no native tool uses.
+        let native = native_tool_names();
+        for spec in otto_server::mcp_outward::otto_tool_specs() {
+            let full = spec["name"].as_str().unwrap();
+            let short = full.strip_prefix("otto.").unwrap();
+            let stdio = governed_stdio_name(full);
+            let aliased = GOVERNED_ALIASED_BY_NATIVE
+                .iter()
+                .any(|(g, n)| *g == short && native.iter().any(|x| x == n));
+            let same_name = native.contains(&stdio);
+            match governed_tool_for_stdio_name(&stdio) {
+                Some(g) => assert_eq!(g, full, "{stdio} must resolve back to {full}"),
+                None => assert!(
+                    same_name || aliased,
+                    "{full} is neither advertised nor covered natively"
+                ),
+            }
+        }
+        // And a native tool is never re-routed to the governed path.
+        for n in &native {
+            assert!(governed_tool_for_stdio_name(n).is_none(), "{n} is native");
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_tool_call_surfaces_daemon_error_not_unknown_tool() {
+        // The daemon is unreachable (port 9) so the enabled-set fetch fails; the
+        // agent must get a tool error explaining that, not "unknown tool".
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": { "name": "otto_create_pr", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("unknown tool"), "got: {text}");
+        assert!(text.contains("otto_create_pr"), "got: {text}");
+    }
+
+    #[test]
+    fn governed_invoke_args_get_the_session_workspace() {
+        let ctx = test_ctx();
+        let spec = json!({"inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string"}}}});
+        let filled = governed_invoke_args(&ctx, &spec, &json!({"repo_id":"r1"}));
+        assert_eq!(filled["workspace_id"], json!("ws-test"));
+        assert_eq!(filled["repo_id"], json!("r1"));
+        // An explicit workspace_id is respected, and a schema without one is untouched.
+        let kept = governed_invoke_args(&ctx, &spec, &json!({"workspace_id":"other"}));
+        assert_eq!(kept["workspace_id"], json!("other"));
+        let no_ws =
+            json!({"inputSchema":{"type":"object","properties":{"days":{"type":"integer"}}}});
+        assert!(governed_invoke_args(&ctx, &no_ws, &json!({}))
+            .get("workspace_id")
+            .is_none());
     }
 
     #[tokio::test]

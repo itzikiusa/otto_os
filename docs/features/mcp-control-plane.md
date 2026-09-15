@@ -511,6 +511,22 @@ and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
 three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action`.
 
+**Control-plane parity.** The inward server *also* mirrors the operator's
+MCP → Otto server checklist: every `otto.*` tool enabled there (`GET /mcp/otto-server`)
+that the inward server does not already serve natively is advertised under the
+stdio naming (`otto.create_pr` → `otto_create_pr`, `otto.open_pr_draft` →
+`otto_open_pr_draft`, `otto.run_workflow` → `otto_run_workflow`, …) and each
+call is proxied through `POST /mcp/otto-tools/invoke` — the same
+allow-list → approval → audit choke point the outward server and the HTTP
+transport use, so a mutating tool still waits on a human approval. Native tools
+win by name; a governed twin of a native capability under a different name
+(`otto.get_usage_summary` vs `otto_usage_summary`, `otto.get_product_story`,
+`otto.query_db_readonly`) is not re-advertised. The session's `workspace_id` is
+injected when the tool's schema takes one and the agent omitted it. A tool
+disabled in the checklist is refused by name with a pointer to where to enable
+it. If the daemon can't answer `GET /mcp/otto-server`, no governed tool is
+advertised and the reason is logged to the bridge's stderr.
+
 **The gateway.** The inward server *also* surfaces the workspace's **governed
 downstream tools** — fetched from `GET /mcp/gateway/tools?workspace_id=` and
 namespaced `mcp__<server>__<tool>` — and proxies each such call through
