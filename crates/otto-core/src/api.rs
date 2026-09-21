@@ -1294,6 +1294,12 @@ pub struct RefBranch {
     pub is_current: bool,
     pub upstream: Option<String>,
     pub remote: bool,
+    /// Commits relative to this local branch's upstream (zero without a live
+    /// upstream, and for remote refs). Computed without checking out the branch.
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
     /// True when this branch's tip is already contained in the repo's cleanup
     /// base branch (`git merge-base --is-ancestor`, surfaced as a bulk
     /// `git branch --merged <base>`). A hint that the branch is safe to delete;

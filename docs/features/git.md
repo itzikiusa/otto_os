@@ -209,6 +209,15 @@ From the Git landing page, **Add Repository** offers three modes:
   across all workspaces the caller may view (root sees all; a non-root user sees
   repos in workspaces they're a member of).
 - A `#/git/:id` or `#/git/:id/:tab` deep link opens that repo as a tab.
+- Auto-fetch stays active for open tabs while you work in other modules: by default
+  every two minutes, with the selected repo refreshed every thirty seconds. Opening
+  a tab or returning focus checks immediately if its fetch is due. Hidden or
+  unfocused windows pause automatic fetching. The tab-strip toggle pauses it.
+- At most two fetches run at once; manual Fetch joins an existing request for that
+  repo. Background errors retry quietly with backoff; manual failures still show
+  an error. Fetch never checks out or pulls a branch.
+- Every local branch displays its own ahead/behind counts in the branch tree and
+  graph chips, updated after fetch without having to check it out.
 
 ### The Graph view & branch chips
 

@@ -94,8 +94,7 @@
     if (restored) return;
     restored = true;
     void (async () => {
-      await git.loadAllRepos();
-      git.restoreOpenTabs();
+      await git.initializeOpenTabs();
       // A deep-link into a repo (#/git/:id or #/git/:id/:tab, non-PR) opens that
       // repo as a tab so the route still lands somewhere useful.
       if (routeRepoId && !isPr && git.allRepos.some((r) => r.id === routeRepoId)) {
@@ -117,13 +116,6 @@
     if (rid && !isPr && tab && known) {
       untrack(() => git.openRepoTab(rid, tab));
     }
-  });
-
-  // Run the background auto-fetch loop while the Git page is mounted; it polls
-  // only OPEN tabs (reading the live set each round) and stops on unmount.
-  $effect(() => {
-    git.startAutoFetch();
-    return () => git.stopAutoFetch();
   });
 
   function openRepo(repoId: string): void {

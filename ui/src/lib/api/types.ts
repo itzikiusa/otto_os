@@ -2441,6 +2441,10 @@ export interface RefBranch {
   is_current: boolean;
   upstream: string | null;
   remote: boolean;
+  /** Commits relative to this local branch's upstream; zero without a live
+   *  upstream and for remote refs. Optional for older daemon responses. */
+  ahead?: number;
+  behind?: number;
   /** True when this branch's tip is already contained in the repo's cleanup base
    *  branch — a hint that it's safe to delete. The base branch itself is never
    *  flagged. Absent on responses that predate the field → treat as false. */

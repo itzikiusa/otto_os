@@ -228,6 +228,20 @@ fn split_keep_lines(text: &str) -> Vec<&str> {
 // Branch list
 // ---------------------------------------------------------------------------
 
+/// Parse `%(upstream:track,nobracket)` from a bulk for-each-ref query.
+/// LocalGit pins LC_ALL=C; equal, absent and gone upstreams have no counts.
+pub fn parse_upstream_tracking(out: &str) -> (u32, u32) {
+    let (mut ahead, mut behind) = (0, 0);
+    for part in out.split(',').map(str::trim) {
+        if let Some(value) = part.strip_prefix("ahead ") {
+            ahead = value.parse().unwrap_or(0);
+        } else if let Some(value) = part.strip_prefix("behind ") {
+            behind = value.parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind)
+}
+
 /// Parse `git branch --format=%(refname:short)%09%(upstream:short)%09%(HEAD)`.
 pub fn parse_branches(out: &str) -> Vec<BranchInfo> {
     out.lines()
@@ -899,6 +913,15 @@ u UU N... 100644 100644 100644 100644 h1 h2 h3 conflict.rs
         assert!(st.upstream.is_none());
         assert_eq!((st.ahead, st.behind), (0, 0));
         assert!(st.changes.is_empty());
+    }
+
+    #[test]
+    fn upstream_tracking_counts() {
+        assert_eq!(parse_upstream_tracking("ahead 12, behind 3"), (12, 3));
+        assert_eq!(parse_upstream_tracking("ahead 2"), (2, 0));
+        assert_eq!(parse_upstream_tracking("behind 7"), (0, 7));
+        assert_eq!(parse_upstream_tracking(""), (0, 0));
+        assert_eq!(parse_upstream_tracking("gone"), (0, 0));
     }
 
     #[test]

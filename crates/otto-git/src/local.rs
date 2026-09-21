@@ -986,11 +986,11 @@ impl LocalGit {
     /// branch itself is never flagged (it always "contains" itself). `base_branch`
     /// in the response echoes the resolved base so the UI can exclude/label it.
     pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
-        // Local branches: name TAB upstream TAB HEAD-marker TAB sha
+        // Local branches: name TAB upstream TAB HEAD-marker TAB sha TAB tracking
         let local_out = self
             .run_read(&[
                 "for-each-ref",
-                "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)\t%(objectname)",
+                "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)\t%(objectname)\t%(upstream:track,nobracket)",
                 "refs/heads",
             ])
             .await?;
@@ -1005,11 +1005,12 @@ impl LocalGit {
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
-                let mut cols = line.splitn(4, '\t');
+                let mut cols = line.splitn(5, '\t');
                 let name = cols.next().unwrap_or("").to_string();
                 let upstream_raw = cols.next().unwrap_or("").trim().to_string();
                 let head = cols.next().unwrap_or("").trim();
                 let sha = cols.next().unwrap_or("").trim().to_string();
+                let (ahead, behind) = crate::parse::parse_upstream_tracking(cols.next().unwrap_or(""));
                 let merged =
                     base.as_deref() != Some(name.as_str()) && merged_local.contains(name.as_str());
                 RefBranch {
@@ -1021,6 +1022,8 @@ impl LocalGit {
                         Some(upstream_raw)
                     },
                     remote: false,
+                    ahead,
+                    behind,
                     merged_into_base: merged,
                     sha,
                 }
@@ -1055,6 +1058,8 @@ impl LocalGit {
                     is_current: false,
                     upstream: None,
                     remote: true,
+                    ahead: 0,
+                    behind: 0,
                     merged_into_base: merged,
                     sha,
                 }

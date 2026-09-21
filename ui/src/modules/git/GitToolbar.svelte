@@ -1,5 +1,6 @@
 <script lang="ts">
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
+  import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
   import type { PullMode, PullModeResp, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
@@ -30,9 +31,8 @@
   async function doFetch(): Promise<void> {
     busy = 'fetch';
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/fetch`);
-      onstatus(s);
-      onrefresh?.();
+      const s = await git.fetchRepo(repoId);
+      onstatus(s); // Store refsRev quietly refreshes the graph without a remount.
       toasts.success('Fetched', `origin`);
     } catch (e) {
       toasts.error('Fetch failed', e instanceof Error ? e.message : String(e));

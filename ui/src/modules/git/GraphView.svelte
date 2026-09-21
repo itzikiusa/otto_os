@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { branchTracking } from './refTracking';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
   import { api, isDirtyGitRefusal } from '../../lib/api/client';
@@ -478,12 +479,13 @@
    *  only HEAD and its upstream), so the decision lives here, where the
    *  cheap-vs-expensive split is visible (investigation H4/WP3). */
   async function resyncRefs(): Promise<void> {
-    const next = await api.get<RefsResp>(`/repos/${repoId}/refs`).catch(() => null);
-    if (!next) return; // transient failure — keep what we have, try next round
+    const id = repoId;
+    const next = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    if (!next || id !== repoId) return; // transient failure — keep what we have, try next round
     const before = refsFingerprint(refs);
     const after = refsFingerprint(next);
-    if (before !== null && after !== null && before === after) return; // nothing moved
-    refs = next;
+    refs = next; // Tracking config/counts can change without moving any commit SHA.
+    if (before !== null && after !== null && before === after) return; // history unchanged
     await reloadGraph();
   }
 
@@ -1800,6 +1802,9 @@
     return m;
   });
   const worktreeBranches = $derived(new Set(worktreeByBranch.keys()));
+  const localBranchByName = $derived.by(() =>
+    new Map<string, RefBranch>((refs?.local ?? []).map((b) => [b.name, b])),
+  );
 
   /** Local branch DOUBLE-click: open foreign worktree, else checkout. Never try
    *  to checkout a branch already held by another worktree (git errors hard). */
@@ -2282,6 +2287,7 @@
 <!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
      (primary ref) renderings so they never drift apart. -->
 {#snippet chipView(chip: RefChip, label: string, laneColor: string)}
+  {@const tracking = branchTracking(chip.kind === 'head' || chip.kind === 'local' ? localBranchByName.get(chip.label) : undefined, status)}
   <span
     class="ref-chip kind-{chip.kind}"
     class:current-chip={chip.current}
@@ -2301,10 +2307,10 @@
     {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
     {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
     <span class="chip-label">{label}</span>
-    {#if chip.current && (status.ahead > 0 || status.behind > 0)}
-      <span class="chip-ab">
-        {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
-        {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+    {#if tracking.ahead > 0 || tracking.behind > 0}
+      <span class="chip-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
+        {#if tracking.ahead > 0}<span class="ab-ahead">↑{tracking.ahead}</span>{/if}
+        {#if tracking.behind > 0}<span class="ab-behind">↓{tracking.behind}</span>{/if}
       </span>
     {/if}
   </span>
@@ -2366,6 +2372,7 @@
            is the short leaf name; `b.name` stays the full ref for every action. -->
       {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
         <button
           class="ref-row"
@@ -2402,10 +2409,10 @@
           {#if wtElsewhere}
             <span class="wt-open-hint" title="Open worktree (do not switch branch)">open worktree</span>
           {/if}
-          {#if b.is_current && (status.ahead > 0 || status.behind > 0)}
-            <span class="ref-ab" title="{status.ahead} ahead · {status.behind} behind">
-              {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
-              {#if status.behind > 0}<span class="ab-behind">↓{status.behind}</span>{/if}
+          {#if tracking.ahead > 0 || tracking.behind > 0}
+            <span class="ref-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
+              {#if tracking.ahead > 0}<span class="ab-ahead">↑{tracking.ahead}</span>{/if}
+              {#if tracking.behind > 0}<span class="ab-behind">↓{tracking.behind}</span>{/if}
             </span>
           {/if}
           {#if b.upstream}

@@ -303,6 +303,24 @@
     };
   });
 
+  // Open Git tabs remain fresh while working in other modules. Only the
+  // visible, focused window schedules network work; focus resumes due repos.
+  $effect(() => {
+    let stopped = false;
+    void untrack(() => git.initializeOpenTabs()).then(() => {
+      if (!stopped) git.startAutoFetch();
+    });
+    const wake = (): void => git.requestAutoFetch();
+    window.addEventListener('focus', wake);
+    document.addEventListener('visibilitychange', wake);
+    return () => {
+      stopped = true;
+      window.removeEventListener('focus', wake);
+      document.removeEventListener('visibilitychange', wake);
+      git.stopAutoFetch();
+    };
+  });
+
   // keep git store in sync with workspace
   $effect(() => {
     if (ws.currentId) void git.loadRepos(ws.currentId);
