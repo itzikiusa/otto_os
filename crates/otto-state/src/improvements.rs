@@ -15,6 +15,20 @@ pub struct ImprovementsRepo {
     pool: SqlitePool,
 }
 
+/// A durable source claim. The token fences completion from expired owners.
+pub struct EvidenceClaim {
+    pub token: String,
+    pub checkpoint: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct LearningTrail {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub summary: String,
+}
+
 /// Insert payload for a new edit row.
 pub struct NewEdit {
     pub run_id: Id,
@@ -87,6 +101,82 @@ fn row_to_edit(r: &sqlx::sqlite::SqliteRow) -> Result<ImprovementEdit> {
 impl ImprovementsRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Claim one evidence stream for at most 30 minutes. A single SQL statement
+    /// prevents live/channel/narrative triggers from concurrently consuming it.
+    pub async fn claim_evidence(&self, source: &str) -> Result<Option<EvidenceClaim>> {
+        let token = new_id();
+        let now = Utc::now();
+        let row = sqlx::query(
+            "INSERT INTO learning_checkpoints(source,lease_token,lease_until,updated_at)
+             VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET
+             lease_token=excluded.lease_token, lease_until=excluded.lease_until,
+             updated_at=excluded.updated_at
+             WHERE learning_checkpoints.lease_until IS NULL OR learning_checkpoints.lease_until < ?
+             RETURNING checkpoint_json",
+        )
+        .bind(source)
+        .bind(&token)
+        .bind(fmt(now + chrono::Duration::minutes(30)))
+        .bind(fmt(now))
+        .bind(fmt(now))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("learning checkpoint"))?;
+        Ok(row.map(|r| EvidenceClaim {
+            token,
+            checkpoint: serde_json::from_str(&r.get::<String, _>("checkpoint_json"))
+                .unwrap_or_default(),
+        }))
+    }
+
+    /// `None` releases a failed/skipped attempt without consuming its evidence.
+    pub async fn finish_evidence(
+        &self,
+        source: &str,
+        token: &str,
+        checkpoint: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE learning_checkpoints SET checkpoint_json=COALESCE(?,checkpoint_json),
+                     lease_token=NULL,lease_until=NULL,updated_at=? WHERE source=? AND lease_token=?")
+            .bind(checkpoint.map(serde_json::Value::to_string)).bind(fmt(Utc::now()))
+            .bind(source).bind(token).execute(&self.pool).await.map_err(dberr("learning checkpoint"))?;
+        Ok(())
+    }
+
+    /// Only intentional user observations and skill names, never raw terminal
+    /// output/tool payloads. Filter before LIMIT so tool-heavy sessions retain
+    /// their latest corrections. Existing trail ownership remains unchanged.
+    pub async fn learning_trail(
+        &self,
+        session: &Id,
+        after: Option<&str>,
+        since: &str,
+    ) -> Result<Vec<LearningTrail>> {
+        let rows = sqlx::query(
+            "SELECT id,kind,source,summary FROM agent_trail
+            WHERE session_id=? AND id>COALESCE(?,'') AND ts>=?
+            AND (kind='skill' OR (source='user' AND kind IN ('prompt','note')))
+            ORDER BY id DESC LIMIT 100",
+        )
+        .bind(session)
+        .bind(after)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("learning trail"))?;
+        let mut out: Vec<_> = rows
+            .iter()
+            .map(|r| LearningTrail {
+                id: r.get("id"),
+                kind: r.get("kind"),
+                source: r.get("source"),
+                summary: r.get("summary"),
+            })
+            .collect();
+        out.reverse();
+        Ok(out)
     }
 
     // ---- runs ----

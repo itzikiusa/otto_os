@@ -69,19 +69,31 @@ timestamps in that block — `last_run_at` and `next_run_at` — are
 
 ### 3.1 What it reflects on
 
-A run gathers the workspace's sessions that were **active within the look-back
-window** (`lookback_hours`, default 24 h). For each session with a transcript,
-`build_digest` parses the claude JSONL transcript on disk into a `SessionDigest`:
+A run gathers the workspace's sessions active within the look-back window
+(`lookback_hours`, default 24 h). Claude and Codex evidence uses the same
+normalized transcript adapters as the conversation view. Persisted transcript
+paths preserve selected account profiles; discovery respects explicit and E2E
+transcript roots. Reads use at most the latest 2 MiB of complete JSONL lines.
 
-- **`turns`** — count of user/assistant messages.
-- **`skills_used`** — skills the session actually invoked, detected from:
-  - `Skill` tool-use blocks (`input.skill`),
-  - `/slash-command` mentions in user text,
-  - `ToolSearch` `select:` queries (the deferred-tool selection list).
-- **`tool_errors`** — count of failed tool calls (`tool_result.is_error == true`,
-  plus the older `toolUseResult.is_error` shape).
-- **`text`** — a truncated concatenation of user + assistant text turns (capped at
-  4000 chars/session to keep the prompt bounded).
+The digest includes recent user/assistant text, invoked skills (including
+`/slash-command` and `$skill` mentions), and failed tool counts. Text has a strict
+4,000-character budget. When both roles are present, up to 2,500 characters are
+reserved for recent user evidence and 1,500 for assistant context, so a verbose
+answer cannot erase the correction that prompted it.
+
+Recorded user prompts, notes and skill trail entries provide bounded evidence
+for every provider, including agy/Gemini and custom CLIs. Only the latest 100
+eligible entries inside the look-back window are considered; raw terminal
+output is not newly logged. A prompt is omitted only when its actual text is
+already in the transcript digest. Native agy database/protobuf conversation
+parsing remains unsupported, so its coverage depends on recorded trail entries.
+
+Approving or declining a review comment also triggers background learning when
+workspace self-improvement is enabled. The narrative identifies the review,
+comment and disposition. It treats the decision as feedback, not proof that a
+finding is true or false, and runs through the existing allow-list and autonomy
+policy. Repeating the same comment/disposition does not repeat a successful
+analysis. No new API fields or settings are required.
 
 The analyst skill (`workspace-self-reflection`) tells the model what to look for:
 **failures to fix** (the user corrected the agent, it repeated a failing action,
@@ -141,7 +153,7 @@ reminder before the provider is treated as failed.
 
 A run finishes in one of these states (`ImprovementRunStatus`):
 
-- **`skipped`** — no sessions in the window, or (for live/evolve) no transcript yet.
+- **`skipped`** — no sessions in the window, or (for live/evolve) no new evidence (or another analysis already owns that session).
 - **`done`** — at least one provider produced a proposal; `applied`/`pending`
   counts recorded.
 - **`failed`** — every provider failed; the error is stored on the run.
@@ -293,12 +305,23 @@ schedule advances to `now + cadence_minutes`.
 With `live_evolve` on (or a session carrying `meta.evolve == true`), the
 `LiveEvolver` watches that workspace's live **agent** sessions on the event bus.
 When a watched session goes **Idle**, it arms a **30 s debounce**; if the session
-stays idle (the interaction concluded) and the transcript has **grown** since the
-last evolve, it runs a single-session evolve pass focused narrowly on the
+stays idle (the interaction concluded) and there is **new evidence** since the
+last successful evolve, it runs a single-session evolve pass focused narrowly on the
 skill(s) that one session used. It re-arms when the session next goes Working.
 Live evolve uses **only the first configured provider** (not the full fan-out) to
 stay cheap per turn, and **does not touch the cron schedule**. It reuses the same
 gate, version log, and approval flow as a scheduled run.
+
+Live, channel and manual per-session runs share durable source checkpoints and
+exclusive claims. Successful analysis advances the complete-line boundary;
+failed analysis leaves it available for a later trigger to retry. File identity,
+size, modification time and boundary hashes detect truncation/replacement.
+An interrupted daemon's claim expires after 30 minutes; individual live analysis
+calls time out after 10 minutes. Workspace scheduled/manual runs still reflect
+on their selected recent window rather than consuming the per-session cursor.
+The evolver rechecks idle status and opt-in after its debounce, pauses new work
+on shutdown, and schedules a fresh pass when another interaction completed
+while analysis was running.
 
 You can also trigger a single-session evolve on demand from the **Evolve now**
 button (the focused session) → `POST /sessions/{id}/evolve` (see §8).
@@ -407,8 +430,9 @@ string | null }`.
 
 **It can edit, and only edit:**
 
-- **Skill files** — `SKILL.md` under the Otto **library** entry for an allow-listed
+- **Skill files** — `SKILL.md` under the Otto **library** entry for a candidate
   skill (or, if no library copy exists, the workspace's `.claude/skills/<ref>/`).
+  Edits outside the configured auto-apply allow-list require human approval.
 - **Memory files** — `MEMORY.md` and sibling `*.md` notes in the workspace's
   claude per-project memory dir.
 
@@ -423,9 +447,13 @@ absolute paths, symlinked leaves).
 
 - Prompt inputs are bounded: per-session transcript ≤ 4000 chars; each skill/memory
   file read ≤ 8 KiB; at most 20 memory files.
-- Candidate skills surfaced to the analyst are scoped to *allow-listed skills
-  actually used in the window* — keeping the prompt focused and bounding blast
-  radius.
+- Candidate discovery is separate from write permission: up to 16 used or explicitly
+  referenced skill bodies (8 KiB each) are read from the existing library/workspace.
+  Unallowlisted skills can receive proposals; their edits still queue for approval.
+  Review feedback additionally receives up to 100 skill names and short descriptions.
+  Reads reject paths or symlinks escaping the library/workspace skill roots. Up to
+  64 safe skill names persist in the session checkpoint so a later correction
+  need not repeat the skill invocation.
 - Multi-provider suggestions are **merged** (not voted/deduped across providers),
   each labeled by provider; the analyst's own dedup rule prevents re-proposing
   existing content within a provider's pass.
@@ -480,7 +508,7 @@ For the team-deployment view (who can see/configure/run this via the
 | No scheduled runs fire | Workspace not `enabled`, workspace archived, or daemon scheduler not running. Check **Next run** in the UI; it scans every 60 s. |
 | **Run now** / **Evolve** returns `409` | A run is already in progress for that workspace; wait for it to finish. |
 | **Evolve now** disabled / rejected | No focused live session — open and focus one. Archived/exited sessions are rejected. |
-| Live evolve never fires | `live_evolve` off and the session lacks `meta.evolve == true`, the session isn't a live agent session, or the transcript hasn't grown since the last pass. |
+| Live evolve never fires | `live_evolve` off and the session lacks `meta.evolve == true`, the session isn't a live agent session, or there is no new evidence since the last successful pass. |
 | No channel pings | `channels.notify_self_improvement` is off (default), or the workspace's integration has no default chat / bot token, or the run produced 0 applied + 0 queued. See §7. |
 | Settings pane not refreshing live | It relies on the `improvement_updated` WS event with a 30 s poll fallback; check the WS connection. |
 

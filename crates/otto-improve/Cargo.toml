@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+otto-transcript = { workspace = true }
+otto-sessions = { workspace = true }
+sha2 = { workspace = true }
 otto-orchestrator = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }

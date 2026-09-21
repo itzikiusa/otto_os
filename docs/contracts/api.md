@@ -4386,6 +4386,29 @@ All routes below require authentication and are scoped to the effective user's o
 `ProviderAccount = {id: Id, provider: string, label: string, created_at: RFC3339}`. Session creation accepts optional `meta.account_id`; the owner/provider must match the requested session. Otto persists the validated `account_label`. Omitting/null account ID uses existing default CLI behavior. Account ID/label are immutable on metadata patches. Resume/restart retains the selected home; invalid/missing profiles fail rather than changing identity. CLI sign-in secrets live in the provider's native storage, not in the profile table.
 
 
+### Self-improvement recent-evidence behavior
+
+`POST /sessions/{id}/evolve` retains its `{ run_id }` response and existing
+permission/liveness checks. Live, channel and manual per-session analysis share
+persisted source checkpoints; a run may finish `skipped` with `no new evidence`
+or `analysis already in progress`. Success advances the source boundary;
+analysis failure releases the claim without consuming evidence. Interrupted
+claims expire after 30 minutes. This changes no request/response or WS fields.
+
+Claude/Codex use normalized, complete-line transcript deltas (at most 2 MiB read,
+4,000 characters of evidence; user text retains its own budget). Recorded
+prompt/note/skill trail summaries provide provider-neutral fallback. Native agy
+SQLite/protobuf history is not parsed. Account-pinned transcript paths remain
+pinned; E2E/explicit roots are respected.
+
+`POST /pr-review-comments/{cid}/approve` and `/decline` additionally schedule
+best-effort feedback analysis only when workspace `self_improvement.enabled`
+is true. The saved comment ID, review source and disposition are untrusted
+observations, not authorization or technical proof. Successful comment/disposition
+analyses are deduplicated. Existing allow-list, proposal/auto-apply policy and
+version-log behavior apply unchanged; feedback failure does not undo the saved
+review decision. No new DTO fields are introduced.
+
 ## Session network profiles
 
 Workspace-scoped profiles expose explicit localhost TCP forwards through an existing SSH connection. No VPN/proxy environment is installed. JSON fields are snake_case. Profile reads require workspace Viewer and Connections View; writes require workspace Editor and Connections Edit. Profile use/read additionally checks the effective user's bastion `shell` access (legacy Connections Edit, or enforced discovery+shell permission). Unauthorized profiles are omitted from lists. Secrets are not stored in these records.
@@ -4418,3 +4441,8 @@ Session creation or metadata patch can set `network_profile_id` to an active sam
 
 Generated child variables are `OTTO_TUNNEL_<UPPERCASE_NAME>_HOST`, `_PORT`, and `OTTO_NETWORK_ENDPOINTS` (JSON array of the endpoint objects). Explicit mapped keys point to the same localhost endpoint and replace only those child environment keys. `connected` means the SSH forwards are listening, not that DB authentication/reachability succeeded. Mid-session tunnel death sets Error and retains its diagnostic; restart is required to obtain new ports. PTYexit, kill, suspend, archive, remove, restart and graceful shutdown release handles. No new WebSocket event; UI polls status. Abrupt daemon process death has no guaranteed orphan-SSH cleanup.
 
+Self-improvement candidate discovery may read used or explicitly referenced skills
+outside `skill_allowlist` (up to 16 × 8 KiB bodies and a 100-entry review catalog).
+This does not expand auto-apply authorization: edits to unallowlisted skills
+remain `pending`. Up to 64 safe skill names persist with each source checkpoint
+so subsequent corrections can refer to an earlier skill invocation.

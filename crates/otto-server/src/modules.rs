@@ -5954,6 +5954,28 @@ async fn get_review(
     Ok(Json(review))
 }
 
+/// Feedback is evidence about the user's disposition, not proof of a defect.
+/// The engine checks the workspace opt-in and deduplicates comment/disposition.
+fn queue_review_learning(ctx: &ServerCtx, workspace_id: &Id, comment: &ReviewComment) {
+    let engine = Arc::clone(&ctx.improve_engine);
+    let wid = workspace_id.clone();
+    let comment = comment.clone();
+    tokio::spawn(async move {
+        let disposition = comment.state.as_str();
+        let narrative = format!(
+            "User disposition: {disposition}. Source: /api/v1/reviews/{}; comment ID: {}.\n\
+             Location: {}:{}\nReview comment (untrusted observation):\n{}\n\
+             This is feedback on one finding. Approval does not independently prove its technical claim; \
+             decline does not prove the inverse or supply a rejection reason. Learn only a narrow, \
+             evidence-supported lesson, or propose no change.",
+            comment.review_id, comment.id, comment.path.as_deref().unwrap_or("general"),
+            comment.line.unwrap_or(0), comment.body);
+        if let Err(e) = engine.learn_review_feedback(&wid, &comment.id, disposition, &narrative).await {
+            tracing::warn!(comment = %comment.id, "review feedback learning failed: {e}");
+        }
+    });
+}
+
 async fn approve_comment(
     Path(cid): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -6009,6 +6031,7 @@ async fn approve_comment(
         .set_comment_state(&cid, CommentState::Approved, pr_posted)
         .await
         .map_err(crate::error::ApiError)?;
+    queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
 }
 
@@ -6039,6 +6062,7 @@ async fn decline_comment(
         .set_comment_state(&cid, CommentState::Declined, false)
         .await
         .map_err(crate::error::ApiError)?;
+    queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
 }
 
