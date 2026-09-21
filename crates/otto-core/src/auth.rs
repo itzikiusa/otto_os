@@ -176,6 +176,10 @@ pub struct AuthContext {
     /// Immutable session binding carried by an internal MCP credential. `None`
     /// for login/API/share/external-MCP tokens.
     pub mcp_session_id: Option<Id>,
+    /// Durable originating agent session for Otto-issued API/internal MCP tokens.
+    /// Human-only checkpoint actions reject this origin; normal user/PAT tokens
+    /// remain None. Labels never determine this trusted identity.
+    pub managed_session_id: Option<Id>,
 }
 
 impl AuthContext {
@@ -444,6 +448,7 @@ mod tests {
             mcp_scope: None,
             mcp_internal: false,
             mcp_session_id: None,
+            managed_session_id: None,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
@@ -471,6 +476,7 @@ mod tests {
             mcp_scope: None,
             mcp_internal: false,
             mcp_session_id: None,
+            managed_session_id: None,
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");

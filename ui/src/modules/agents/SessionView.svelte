@@ -3,6 +3,8 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import AttachIssue from './AttachIssue.svelte';
@@ -692,6 +694,9 @@
       {/if}
       <span class="provider-name">{session?.provider ?? '?'}</span>
     </span>
+    {#if typeof session?.meta?.account_label === 'string'}
+      <span class="chip" title="Subscription account pinned to this session">{session.meta.account_label}</span>
+    {/if}
     {#if needsYou}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
         <Icon name="bell" size={10} /> Needs you
@@ -795,6 +800,9 @@
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
+  {#if session && auth.can('connections', 'view')}
+    {#key sessionId}<SessionNetworkStatus {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
+  {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
     {#if effView !== 'terminal'}

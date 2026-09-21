@@ -11,6 +11,7 @@ otto-state = { workspace = true }
 # Conversation view: `UnavailableReason` for transcript resolution (design §4.2).
 otto-transcript = { workspace = true }
 otto-pty = { workspace = true }
+otto-ssh = { workspace = true }
 otto-sandbox = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }

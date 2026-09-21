@@ -84,6 +84,9 @@ pub struct TurnOpts {
     /// instruction to the prompt. Checked for every provider (a compliant
     /// claude just completes via whichever channel fires first).
     pub done_file: Option<std::path::PathBuf>,
+    /// Require a validated file result, including for Claude. Partial or invalid
+    /// files cannot end a turn; transcript completion alone is insufficient.
+    pub done_file_validator: Option<fn(&str) -> bool>,
     /// Quiet fallback for non-transcript providers only: once the prompt was
     /// dispatched, this much PTY silence counts as turn-complete (empty turn
     /// text). Working TUIs repaint (spinners/tool output), so silence this
@@ -215,6 +218,7 @@ pub async fn run_session_turn_with(
     // Session exists now — let the caller surface its id (e.g. attach the live
     // shell in the Canvas panel) BEFORE the long turn runs.
     on_ready(&sid);
+    let provider_home = ctx.manager.provider_home(&ctx.manager.get(&sid).await.map_err(ApiError)?);
 
     // 4. Submit the prompt AND confirm it actually landed on the CLI's input box.
     //    A startup/promo/onboarding banner is quiescent output, so wait_for_tui /
@@ -222,7 +226,7 @@ pub async fn run_session_turn_with(
     //    yet — swallowing the paste and leaving the step a no-op. Only claude
     //    writes a pollable transcript, so only there can we verify; other providers
     //    keep the best-effort single submit.
-    let can_confirm = transcript_path(provider, &cwd_canon, psid.as_deref()).is_some();
+    let can_confirm = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref()).is_some();
     let needle = confirm_needle(prompt);
 
     let phase = |p: crate::turn_oracle::Phase| {
@@ -246,7 +250,7 @@ pub async fn run_session_turn_with(
     // at the exact instant our prompt is seen as the latest user turn (below), so a
     // stray reply to an empty submit is already counted and can't be mistaken for
     // THIS turn's result.
-    let mut baseline = transcript_path(provider, &cwd_canon, psid.as_deref())
+    let mut baseline = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref())
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|c| otto_orchestrator::claude_pty::completed_turn_count(&c))
         .unwrap_or(0);
@@ -257,7 +261,7 @@ pub async fn run_session_turn_with(
         let mut attempts: u32 = 1;
         let mut entered = false;
         loop {
-            if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
+            if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref()) {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content)
                     {
@@ -341,12 +345,12 @@ pub async fn run_session_turn_with(
         if let Some(df) = &opts.done_file {
             if let Ok(s) = tokio::fs::read_to_string(df).await {
                 let t = s.trim();
-                if !t.is_empty() {
+                if !t.is_empty() && opts.done_file_validator.is_none_or(|valid| valid(t)) {
                     return Ok((t.to_string(), sid));
                 }
             }
         }
-        if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
+        if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref(), provider_home.as_deref()) {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content) {
                     return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
@@ -369,7 +373,9 @@ pub async fn run_session_turn_with(
                         tokio::time::sleep(POLL).await;
                         continue;
                     }
-                    return Ok((text, sid));
+                    if opts.done_file_validator.is_none() {
+                        return Ok((text, sid));
+                    }
                 }
             }
         }
@@ -384,7 +390,7 @@ pub async fn run_session_turn_with(
                 // WORKING keeps painting; this much silence means it's idle at
                 // its input box — the turn is over even if the agent never
                 // wrote the done-file. Claude keeps transcript-only detection.
-                if !can_confirm {
+                if !can_confirm && opts.done_file_validator.is_none() {
                     if let Some(q) = opts.quiet_done {
                         if h.last_output_at().elapsed() >= q {
                             return Ok((String::new(), sid));
@@ -472,11 +478,13 @@ async fn oracle_watch(
     use crate::turn_oracle as oracle;
 
     let started = Instant::now();
-    let tpath = transcript_path(provider, cwd_canon, psid);
+    let provider_home = ctx.manager.provider_home(&ctx.manager.get(sid).await.map_err(ApiError)?);
+    let tpath = transcript_path(provider, cwd_canon, psid, provider_home.as_deref());
     // Where the harness records this session's children (flat: a depth-2
     // grandchild sits beside its depth-1 parent) and its background-task output.
     let subagent_dir = psid.map(|p| {
-        otto_orchestrator::claude_pty::project_dir(cwd_canon)
+        tpath.as_ref().and_then(|path| path.parent()).map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| otto_orchestrator::claude_pty::project_dir(cwd_canon))
             .join(p)
             .join("subagents")
     });
@@ -526,7 +534,7 @@ async fn oracle_watch(
                     .await
                     .ok()
                     .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| !s.is_empty() && opts.done_file_validator.is_none_or(|valid| valid(s)));
                 let mtime = match &text {
                     Some(_) => tokio::fs::metadata(df)
                         .await
@@ -605,6 +613,9 @@ async fn oracle_watch(
                 };
             }
         }
+        // A strict result protocol never falls back to a transcript or silence,
+        // even after the oracle's normal missing-handoff grace expires.
+        v = gate_validated_result(v, opts.done_file_validator.is_some(), handoff.is_some());
         match v {
             oracle::Verdict::Complete { text, via } => {
                 // The reminder-echo guard stays in FRONT of the "no handoff,
@@ -666,7 +677,7 @@ async fn oracle_watch(
                         // Quiet fallback: only for providers with NO pollable
                         // artifact at all (agy/custom) — codex completes on
                         // `task_complete` now.
-                        if !matches!(provider, "claude" | "codex") {
+                        if !matches!(provider, "claude" | "codex") && opts.done_file_validator.is_none() {
                             if let Some(q) = opts.quiet_done {
                                 if h.last_output_at().elapsed() >= q {
                                     if let Some(tx) = opts.outcome_tx.take() {
@@ -827,16 +838,54 @@ fn is_injected_reminder_echo(text: &str) -> bool {
 
 /// The claude JSONL transcript path for this session, or `None` for non-claude
 /// providers (codex/agy don't write a JSONL transcript we can poll).
-fn transcript_path(provider: &str, cwd: &str, psid: Option<&str>) -> Option<std::path::PathBuf> {
+fn transcript_path(provider: &str, cwd: &str, psid: Option<&str>, provider_home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     match (provider, psid) {
-        ("claude", Some(p)) => Some(otto_orchestrator::claude_pty::session_jsonl_path(cwd, p)),
+        ("claude", Some(p)) => Some(match provider_home {
+            Some(home) => home.join("projects").join(otto_sessions::lifecycle::claude_project_dir_name(cwd)).join(format!("{p}.jsonl")),
+            None => otto_orchestrator::claude_pty::session_jsonl_path(cwd, p),
+        }),
         _ => None,
+    }
+}
+
+/// Keep oracle completion subject to the caller's strict file protocol while
+/// retaining its ordinary failure/stall handling and bounded polling.
+fn gate_validated_result(
+    verdict: crate::turn_oracle::Verdict,
+    requires_validated_result: bool,
+    has_validated_result: bool,
+) -> crate::turn_oracle::Verdict {
+    use crate::turn_oracle::{Phase, Verdict};
+    if requires_validated_result && !has_validated_result
+        && matches!(verdict, Verdict::Complete { .. })
+    {
+        Verdict::Working(Phase::HandoffMissingGrace { left: Duration::ZERO })
+    } else {
+        verdict
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_result_protocol_blocks_oracle_idle_and_quiet_completion() {
+        use crate::turn_oracle::{CompleteVia, Verdict};
+        for via in [CompleteVia::IdleTurnNoHandoff, CompleteVia::QuietFallback] {
+            let verdict = Verdict::Complete { text: "partial reply".into(), via };
+            assert!(matches!(gate_validated_result(verdict, true, false), Verdict::Working(_)));
+        }
+    }
+
+    #[test]
+    fn strict_result_protocol_accepts_validated_file_without_changing_legacy_completion() {
+        use crate::turn_oracle::{CompleteVia, Verdict};
+        for (required, present) in [(true, true), (false, false)] {
+            let verdict = Verdict::Complete { text: "[]".into(), via: CompleteVia::IdleTurnNoHandoff };
+            assert!(matches!(gate_validated_result(verdict, required, present), Verdict::Complete { .. }));
+        }
+    }
 
     #[test]
     fn normalize_ws_collapses_all_whitespace() {

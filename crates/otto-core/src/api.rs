@@ -113,6 +113,14 @@ pub struct ApiTokenInfo {
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Durable originating session, set only by Otto's session token minter.
+    #[serde(default)]
+    pub session_id: Option<Id>,
+    /// Legacy label matches a session ID; candidate only, never ownership proof.
+    #[serde(default)]
+    pub legacy_session_id: Option<Id>,
+    #[serde(default)]
+    pub session_exists: Option<bool>,
 }
 
 /// Response for `POST /api/v1/auth/tokens`: the raw secret is returned exactly
@@ -2468,6 +2476,20 @@ pub struct WorkspaceContextConfig {
     pub soul: Option<String>,
     #[serde(default)]
     pub extra_context_md: String,
+    /// Curated knowledge shared by every agent in this workspace. References
+    /// remain text; materialization never reads their filesystem/URL targets.
+    #[serde(default)]
+    pub goal_md: String,
+    #[serde(default)]
+    pub memory_md: String,
+    #[serde(default)]
+    pub decisions_md: String,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub context_version: i64,
     #[serde(default = "default_include_memory")]
     pub include_memory: bool,
     /// Machine-managed block of repo rules (from code review). Rendered from the
@@ -2499,6 +2521,12 @@ impl Default for WorkspaceContextConfig {
             skills: None,
             soul: None,
             extra_context_md: String::new(),
+            goal_md: String::new(),
+            memory_md: String::new(),
+            decisions_md: String::new(),
+            references: Vec::new(),
+            artifacts: Vec::new(),
+            context_version: 0,
             include_memory: true,
             repo_rules_md: String::new(),
             include_repo_map: false,
@@ -2508,19 +2536,32 @@ impl Default for WorkspaceContextConfig {
 }
 
 /// `PUT /workspaces/{id}/context`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateWorkspaceContextReq {
-    #[serde(default)]
-    pub skills: Option<Vec<String>>,
-    #[serde(default)]
-    pub soul: Option<String>,
-    #[serde(default)]
-    pub extra_context_md: String,
-    #[serde(default = "default_include_memory")]
-    pub include_memory: bool,
-    /// Inject the tree-sitter repo map (opt-in; absent ⇒ keep stored value).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    pub soul: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_context_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_repo_map: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<String>>,
+    /// Expected revision. Required when editing curated knowledge; legacy
+    /// clients may omit it while editing only legacy fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_version: Option<i64>,
 }
 
 /// One provider's result from a materialize action.
@@ -2628,6 +2669,16 @@ pub struct ContextPreviewReq {
     /// Override the extra-context markdown (`None` ⇒ use stored config).
     #[serde(default)]
     pub extra_context_md: Option<String>,
+    #[serde(default)]
+    pub goal_md: Option<String>,
+    #[serde(default)]
+    pub memory_md: Option<String>,
+    #[serde(default)]
+    pub decisions_md: Option<String>,
+    #[serde(default)]
+    pub references: Option<Vec<String>>,
+    #[serde(default)]
+    pub artifacts: Option<Vec<String>>,
     /// Override the include-memory toggle (`None` ⇒ use stored config).
     #[serde(default)]
     pub include_memory: Option<bool>,

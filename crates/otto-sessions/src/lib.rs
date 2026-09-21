@@ -3,6 +3,7 @@
 //! router and the terminal WebSocket.
 
 pub mod http;
+pub mod accounts;
 pub mod lifecycle;
 pub mod manager;
 pub mod mcp;
@@ -21,3 +22,5 @@ pub use manager::{OutputScanner, SessionManager};
 pub use prompt_guard::{CompositeScanner, PromptGuard};
 pub use providers::{ProviderRegistry, ProviderSpec};
 pub use ws::ws_router;
+
+pub mod network;

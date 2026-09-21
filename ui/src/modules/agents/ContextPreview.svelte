@@ -7,6 +7,7 @@
   //   • advisory — instruction files / skills: guidance the model MAY ignore.
   //   • enforced — hooks / settings the runtime imposes regardless.
   // See docs/contracts/api.md (POST /workspaces/{id}/context/preview).
+  import { onDestroy } from 'svelte';
   import { contextApi } from '../../lib/api/context';
   import type {
     ContextPreviewProvider,
@@ -26,28 +27,34 @@
 
   let result: ContextPreviewProvider | null = $state(null);
   let loading = $state(false);
-  let loadedKey = $state(''); // wsId|provider for the result currently shown
+  const requestKey = $derived(JSON.stringify([wsId, provider, overrides]));
+  let generation = 0;
+  onDestroy(() => { generation++; });
   // Which artifact's full content is expanded (path), if any.
   let openFile: string | null = $state(null);
 
   async function run(): Promise<void> {
     if (!wsId || loading) return;
+    const key = requestKey; const request = ++generation; const selectedProvider = provider;
     loading = true;
     try {
-      const resp = await contextApi.preview(wsId, { provider, ...overrides });
-      result = resp.providers.find((p) => p.provider === provider) ?? resp.providers[0] ?? null;
-      loadedKey = `${wsId}|${provider}`;
+      const resp = await contextApi.preview(wsId, { provider: selectedProvider, ...overrides });
+      if (request !== generation || requestKey !== key) return;
+      result = resp.providers.find((p) => p.provider === selectedProvider) ?? resp.providers[0] ?? null;
       openFile = null;
     } catch (e) {
-      toasts.error('Preview failed', e instanceof Error ? e.message : String(e));
+      if (request === generation && requestKey === key) toasts.error('Preview failed', e instanceof Error ? e.message : String(e));
     } finally {
-      loading = false;
+      if (request === generation && requestKey === key) loading = false;
     }
   }
 
-  // Invalidate a stale result when the workspace/provider changes.
+  // A preview belongs to the exact workspace, provider and draft that requested
+  // it. Changing any input invalidates both displayed and in-flight results.
   $effect(() => {
-    if (loadedKey && loadedKey !== `${wsId}|${provider}`) result = null;
+    void requestKey;
+    generation++;
+    result = null; loading = false; openFile = null;
   });
 
   function fmtBytes(n: number): string {

@@ -130,6 +130,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         p,
         "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities"
     ) || p.starts_with("/auth/tokens/")
+        || p == "/auth/provider-accounts" || p.starts_with("/auth/provider-accounts/")
         || p.starts_with("/auth/shares")
     {
         return Exempt;
@@ -434,6 +435,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // list/fetch images = View; capture/upload/annotate/copy/delete = Edit.
     // Root bypasses.
     if p == "/snips" || p.starts_with("/snips/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
+    if p == "/workspaces/{id}/network-profiles" || p.starts_with("/network-profiles/") || p == "/sessions/{id}/network" {
+        return Require(Connections, if get { View } else { Edit });
+    }
+
+    // Shared project context is provider-independent; Swarm execution retains
+    // its separate gate and endpoints.
+    if p == "/workspaces/{id}/projects" || p.starts_with("/projects/") {
         return Require(Agents, if get { View } else { Edit });
     }
 

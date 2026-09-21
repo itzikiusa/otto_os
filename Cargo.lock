@@ -3867,6 +3867,7 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-sandbox",
+ "otto-ssh",
  "otto-state",
  "otto-transcript",
  "serde",

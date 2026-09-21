@@ -1690,6 +1690,17 @@ export interface ApiTokenInfo {
   created_at: string;
   last_seen_at: string;
   expires_at: string;
+  session_id?: string | null;
+  /** Legacy label candidate, not durable session ownership. */
+  legacy_session_id?: string | null;
+  session_exists?: boolean | null;
+}
+
+export interface ProviderAccount {
+  id: string;
+  provider: 'claude' | 'codex';
+  label: string;
+  created_at: string;
 }
 
 /** Response for POST /api/v1/auth/tokens: raw secret (shown once) + metadata. */
@@ -3890,6 +3901,13 @@ export interface GlobalSoulResp {
 }
 
 export interface WorkspaceContextConfig {
+  repo_rules_md?: string; // machine-managed review rules
+  goal_md: string;
+  memory_md: string;
+  decisions_md: string;
+  references: string[];
+  artifacts: string[];
+  context_version: number;
   skills: string[] | null; // null = all library skills
   soul: string | null; // null = global default
   extra_context_md: string;
@@ -3899,11 +3917,18 @@ export interface WorkspaceContextConfig {
 }
 
 export interface UpdateWorkspaceContextReq {
-  skills: string[] | null;
-  soul: string | null;
-  extra_context_md: string;
-  include_memory: boolean;
+  skills?: string[] | null;
+  soul?: string | null;
+  extra_context_md?: string;
+  include_memory?: boolean;
   include_repo_map?: boolean;
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
+  /** Required for shared knowledge edits; stale revisions return 409. */
+  context_version?: number;
 }
 
 export interface MaterializeProviderResult {
@@ -3978,6 +4003,11 @@ export interface ContextPreviewResp {
  * preview a not-yet-saved choice (the same inputs a session spawn would use).
  */
 export interface ContextPreviewReq {
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
   /** Provider to preview; omit for both `claude` and `codex`. */
   provider?: string;
   /**
@@ -8561,3 +8591,69 @@ export interface WorkflowCheckpointPage {
   next_cursor: string | null;
 }
 export interface WorkflowDetail<T> {rev: number; detail_version: string; body: T}
+
+
+/** Common project identity/context, including existing Swarm projects. */
+export interface Project {
+  id: Id;
+  workspace_id: Id;
+  swarm_id: Id | null;
+  name: string;
+  description: string;
+  repo_path: string | null;
+  goal_md: string;
+  instructions_md: string;
+  references: string[];
+  memory_md: string;
+  decisions_md: string;
+  artifacts: string[];
+  status: 'active' | 'archived';
+  context_version: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+export type ProjectInput = Pick<Project, 'name' | 'description' | 'repo_path' | 'goal_md' | 'instructions_md' | 'references' | 'memory_md' | 'decisions_md' | 'artifacts' | 'status'>;
+
+/** Versioned user-editable personal-agent document. Memory has a resolved path;
+ * context is stored separately in SQLite. Send version unchanged on PUT. */
+export interface PersonalAgentDocument {
+  content: string;
+  version: string;
+  exists: boolean;
+  path: string | null;
+}
+
+/** Explicit, session-scoped SSH TCP forwards. No transparent VPN/proxy routing. */
+export interface NetworkEndpoint {
+  name: string;
+  remote_host: string;
+  remote_port: number;
+  host_env?: string | null;
+  port_env?: string | null;
+}
+export interface NetworkProfileInput {
+  name: string;
+  ssh_connection_id: Id;
+  endpoints: NetworkEndpoint[];
+  archived?: boolean;
+}
+export interface NetworkProfile extends NetworkProfileInput {
+  id: Id;
+  workspace_id: Id;
+  archived: boolean;
+  version: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+export interface SessionNetwork {
+  profile_id: Id | null;
+  profile_name: string | null;
+  profile_version: number | null;
+  selected_profile_id: Id | null;
+  restart_required: boolean;
+  status: 'connected' | 'error' | 'stopped' | 'disabled';
+  error: string | null;
+  endpoints: (NetworkEndpoint & {host: string; port: number})[];
+}

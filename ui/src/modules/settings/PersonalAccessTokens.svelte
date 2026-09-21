@@ -13,6 +13,32 @@
   let tokens: ApiTokenInfo[] = $state([]);
   let loading = $state(true);
   let revoking: Set<string> = $state(new Set());
+  let filter = $state<'all' | 'personal' | 'session' | 'orphaned'>('all');
+  const sessionToken = (t: ApiTokenInfo) => !!(t.session_id || t.legacy_session_id);
+  const orphaned = $derived(tokens.filter((t) => sessionToken(t) && t.session_exists === false));
+  const visible = $derived(tokens.filter((t) => filter === 'all'
+    || (filter === 'personal' && !sessionToken(t))
+    || (filter === 'session' && sessionToken(t))
+    || (filter === 'orphaned' && sessionToken(t) && t.session_exists === false)));
+
+  async function revokeOrphaned(): Promise<void> {
+    const candidates = [...orphaned];
+    if (!candidates.length) return;
+    if (!await confirmer.ask(
+      `Revoke ${candidates.length} tokens referring to sessions that no longer exist? Legacy tokens are identified by their labels; review the Deleted session filter first if you named a personal token this way.`,
+      { title: 'Revoke deleted-session tokens', confirmLabel: 'Revoke tokens', danger: true },
+    )) return;
+    let failed = 0;
+    revoking = new Set([...revoking, ...candidates.map((t) => t.id)]);
+    // Bounded requests; do not flood the local API for historical token lists.
+    for (const t of candidates) {
+      try { await api.del(`/auth/tokens/${t.id}`); tokens = tokens.filter((x) => x.id !== t.id); }
+      catch { failed += 1; }
+    }
+    revoking = new Set([...revoking].filter((id) => !candidates.some((t) => t.id === id)));
+    if (failed) toasts.error('Some tokens could not be revoked', `${failed} failed; they remain listed.`);
+    else toasts.success('Tokens revoked', `${candidates.length} deleted-session tokens removed.`);
+  }
 
   // ---- create form ----
   let newLabel = $state('');
@@ -143,11 +169,23 @@
 
   <!-- ── Existing tokens ── -->
   <div class="section-title">Your tokens</div>
+  <div class="token-controls">
+    <select class="input" aria-label="Filter tokens" bind:value={filter}>
+      <option value="all">All ({tokens.length})</option>
+      <option value="personal">Personal tokens</option>
+      <option value="session">Session tokens</option>
+      <option value="orphaned">Deleted session ({orphaned.length})</option>
+    </select>
+    {#if orphaned.length}
+      <button class="btn small danger" disabled={revoking.size > 0} onclick={revokeOrphaned}>Revoke deleted-session tokens…</button>
+    {/if}
+  </div>
+  <p class="usage-note dim">Otto revokes managed session tokens when their session is deleted or replaced on restart. Older label-only tokens can be reviewed and revoked here.</p>
 
   {#if loading}
     <Skeleton rows={3} height={44} />
-  {:else if tokens.length === 0}
-    <div class="empty dim">No personal access tokens yet.</div>
+  {:else if visible.length === 0}
+    <div class="empty dim">No tokens in this view.</div>
   {:else}
     <div class="card token-table">
       <div class="token-head">
@@ -156,9 +194,12 @@
         <span class="col-exp">Expires</span>
         <span class="col-action"></span>
       </div>
-      {#each tokens as t (t.id)}
+      {#each visible as t (t.id)}
         <div class="token-row" class:expired={isExpired(t)}>
           <span class="col-label">
+            {#if sessionToken(t)}
+              <span class="session-badge">{t.session_id ? 'Managed session' : 'Legacy session label'}{t.session_exists === false ? ' · deleted' : ''}</span>
+            {/if}
             {#if t.label}
               <span class="tok-label">{t.label}</span>
               <span class="tok-prefix dim">{t.token_prefix}…</span>
@@ -196,6 +237,8 @@
 </div>
 
 <style>
+  .token-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .session-badge { display: block; color: var(--text-dim); font-size: 11px; }
   .empty {
     padding: 24px 0;
     text-align: center;

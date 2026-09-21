@@ -167,6 +167,7 @@ mod tests {
             mcp_scope: None,
             mcp_internal: false,
             mcp_session_id: None,
+            managed_session_id: None,
         }
     }
 

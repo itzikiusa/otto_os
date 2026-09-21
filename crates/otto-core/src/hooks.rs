@@ -9,6 +9,14 @@
 
 use crate::domain::Workspace;
 
+/// Resolved by the session manager, never accepted as an arbitrary client path.
+#[derive(Debug, Clone, Default)]
+pub struct SessionSpawnContext {
+    pub namespace: String,
+    pub provider_home: Option<std::path::PathBuf>,
+    pub extra_context_md: String,
+}
+
 /// Extra launch configuration a provider needs so its CLI loads the out-of-tree
 /// context bundle: CLI args appended to the spawn (and resume) command, plus env
 /// vars added to the child's environment. Empty when nothing was materialized.
@@ -26,13 +34,22 @@ pub struct SpawnInjection {
 /// panic) and return an empty [`SpawnInjection`] on failure. A hook failure must
 /// never block a session from spawning.
 pub trait PreSpawnHook: Send + Sync {
+    fn before_spawn_session(&self, ws: &Workspace, cwd: &str, provider: &str, _context: &SessionSpawnContext) -> SpawnInjection {
+        self.before_spawn(ws, cwd, provider)
+    }
+
+    fn resume_session(&self, cwd: &str, provider: &str, _context: &SessionSpawnContext) -> SpawnInjection {
+        self.resume_injection(cwd, provider)
+    }
+
     /// Materialize the workspace's active context for `provider` into its
     /// out-of-tree bundle and return the launch injection needed to load it.
     fn before_spawn(&self, ws: &Workspace, cwd: &str, provider: &str) -> SpawnInjection;
 
     /// Recompute the launch injection for a RESUME, reading the already-
-    /// materialized bundle (no `Workspace` is available on the restart path, and
-    /// the bundle persists across daemon restarts). Returns empty if no bundle
+    /// materialized bundle for callers without workspace settings. The session
+    /// manager re-materializes current workspace settings on restart instead.
+    /// Returns empty if no bundle
     /// exists for `(provider, cwd)`.
     fn resume_injection(&self, cwd: &str, provider: &str) -> SpawnInjection;
 }

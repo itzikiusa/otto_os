@@ -51,13 +51,7 @@ pub fn render_repo_rules_block(rules: &[RepoRule]) -> String {
 pub async fn apply_repo_rules_to_context(ctx: &ServerCtx, workspace_id: &str) -> Result<()> {
     let rules = ctx.repo_rules_store.list_enabled(workspace_id).await?;
     let block = render_repo_rules_block(&rules);
-    let ws = ctx.workspaces.get(&workspace_id.to_string()).await?;
-    let mut cfg = otto_context::config::from_settings(&ws.settings);
-    cfg.repo_rules_md = block;
-    let merged = otto_context::config::write_into_settings(&ws.settings, &cfg);
-    ctx.workspaces
-        .update(&workspace_id.to_string(), None, None, Some(&merged), None)
-        .await?;
+    ctx.workspaces.update_repo_rules(&workspace_id.to_string(), &block).await?;
     Ok(())
 }
 

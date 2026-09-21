@@ -158,13 +158,20 @@ pub fn provision(
     provider: &str,
     ctx_root: &Path,
 ) -> (MaterializeProviderResult, SpawnInjection) {
+    provision_with_home(library, cfg, cwd, provider, ctx_root, None)
+}
+
+pub fn provision_with_home(
+    library: &Library, cfg: &WorkspaceContextConfig, cwd: &str, provider: &str,
+    ctx_root: &Path, provider_home: Option<&Path>,
+) -> (MaterializeProviderResult, SpawnInjection) {
     let plan = plan(library, cfg, cwd, provider, ctx_root);
     let bundle = plan.bundle.clone();
     let result = execute(plan);
     // Compute the injection AFTER writing — codex reads the materialized context
     // file back to pass it inline.
     let injection = match (&bundle, result.skipped) {
-        (Some(dir), false) => injection_for(provider, dir),
+        (Some(dir), false) => injection_for_home(provider, dir, provider_home),
         _ => SpawnInjection::default(),
     };
     (result, injection)
@@ -174,9 +181,13 @@ pub fn provision(
 /// bundle under `ctx_root` (the restart path has no `Workspace` and the bundle
 /// persists across daemon restarts). Empty when no bundle exists.
 pub fn resume_injection(ctx_root: &Path, cwd: &str, provider: &str) -> SpawnInjection {
+    resume_injection_with_home(ctx_root, cwd, provider, None)
+}
+
+pub fn resume_injection_with_home(ctx_root: &Path, cwd: &str, provider: &str, provider_home: Option<&Path>) -> SpawnInjection {
     let dir = bundle_dir(ctx_root, provider, cwd);
     if dir.is_dir() {
-        injection_for(provider, &dir)
+        injection_for_home(provider, &dir, provider_home)
     } else {
         SpawnInjection::default()
     }
@@ -230,6 +241,10 @@ pub fn append_context_block(
 /// - **grok** — `--rules=<bundle>/CONTEXT.md` appends Otto's context to this
 ///   launch only. Grok currently has no per-launch native skill-root flag.
 fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
+    injection_for_home(provider, dir, None)
+}
+
+fn injection_for_home(provider: &str, dir: &Path, provider_home: Option<&Path>) -> SpawnInjection {
     let d = dir.to_string_lossy().into_owned();
     let ctx = dir.join(context_file_name(provider));
     match provider {
@@ -252,7 +267,12 @@ fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
             env: Vec::new(),
         },
         "codex" => {
-            sync_codex_shadow_home(dir);
+            // Named accounts keep their native home stable so login, token
+            // refresh and resume all address the same Keychain identity. Their
+            // selected workspace skills remain available through the existing
+            // absolute-path skill index in developer_instructions; never link
+            // default-account auth/config/history into this bundle.
+            if provider_home.is_none() { sync_codex_shadow_home(dir); }
             let mut args = vec![format!("--add-dir={d}")];
             if let Ok(text) = fs::read_to_string(&ctx) {
                 let text = text.trim();
@@ -265,7 +285,7 @@ fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
                 args,
                 env: vec![(
                     "CODEX_HOME".to_string(),
-                    dir.join(CODEX_SHADOW_HOME).to_string_lossy().into_owned(),
+                    provider_home.map(Path::to_path_buf).unwrap_or_else(|| dir.join(CODEX_SHADOW_HOME)).to_string_lossy().into_owned(),
                 )],
             }
         }
@@ -460,6 +480,24 @@ fn build_block(
     let extra = cfg.extra_context_md.trim();
     if !extra.is_empty() {
         sections.push(format!("## Context\n\n{extra}"));
+    }
+
+    // Workspace-owned knowledge is provider-independent. These are curated
+    // strings: references never authorize filesystem reads or URL fetches.
+    for (label, text) in [
+        ("Workspace goal", &cfg.goal_md),
+        ("Workspace memory", &cfg.memory_md),
+        ("Workspace decisions", &cfg.decisions_md),
+    ] {
+        if !text.trim().is_empty() {
+            sections.push(format!("## {label}\n\n{}", text.trim()));
+        }
+    }
+    for (label, items) in [("Workspace references", &cfg.references), ("Workspace artifacts", &cfg.artifacts)] {
+        if !items.is_empty() {
+            let list = items.iter().map(|item| format!("- {item}")).collect::<Vec<_>>().join("\n");
+            sections.push(format!("## {label}\n\n{list}"));
+        }
     }
 
     // Repo rules generalized from code-review findings (machine-managed, separate
@@ -1008,6 +1046,74 @@ fn write_file(path: &Path, content: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn workspace_instructions_survive_the_budget_when_shared_memory_is_large() {
+        let (_lib_dir, cwd, root, library) = setup();
+        let cfg = WorkspaceContextConfig {
+            extra_context_md: "Critical shared instruction: never publish without approval.".into(),
+            memory_md: "Remember a fact.\n".repeat(MAX_CONTEXT_LINES * 2),
+            include_memory: false,
+            ..Default::default()
+        };
+        let previewed = preview(&library, &cfg, &cwd.path().to_string_lossy(), "claude", root.path());
+        assert!(previewed.generated_instructions.contains("Critical shared instruction"));
+        assert!(previewed.generated_instructions.contains("Otto trimmed"));
+    }
+
+    #[test]
+    fn workspace_knowledge_preview_and_materialization_match_for_every_provider() {
+        let (_lib_dir, cwd, root, library) = setup();
+        let home = TempDir::new().unwrap();
+        let cwd_path = cwd.path().to_string_lossy();
+        let secret_reference = cwd.path().join("reference.md");
+        fs::write(&secret_reference, "REFERENCE CONTENT MUST NOT BE READ").unwrap();
+        let mut cfg = WorkspaceContextConfig {
+            extra_context_md: "Shared instructions".into(),
+            goal_md: "Shared goal".into(), memory_md: "Shared memory".into(),
+            decisions_md: "Shared decision".into(),
+            references: vec![secret_reference.to_string_lossy().into_owned()],
+            artifacts: vec!["vault://shared/artifact".into()],
+            include_memory: false,
+            ..Default::default()
+        };
+        for provider in ["claude", "codex", "agy", "grok"] {
+            let previewed = preview(&library, &cfg, &cwd_path, provider, root.path());
+            let (_, injection) = provision_with_home(&library, &cfg, &cwd_path, provider, root.path(), Some(home.path()));
+            let path = bundle_dir(root.path(), provider, &cwd_path).join(context_file_name(provider));
+            let text = fs::read_to_string(&path).unwrap();
+            assert_eq!(previewed.generated_instructions, text, "{provider}");
+            for expected in ["Shared instructions", "Shared goal", "Shared memory", "Shared decision", "vault://shared/artifact"] {
+                assert!(text.contains(expected), "{provider} missing {expected}");
+            }
+            assert!(!text.contains("REFERENCE CONTENT MUST NOT BE READ"));
+            cfg.memory_md = "Updated workspace memory".into();
+            let (_, refreshed) = provision_with_home(&library, &cfg, &cwd_path, provider, root.path(), Some(home.path()));
+            assert!(fs::read_to_string(&path).unwrap().contains("Updated workspace memory"));
+            assert_eq!(injection.env, refreshed.env, "refresh must preserve provider home");
+            cfg.memory_md = "Shared memory".into();
+        }
+    }
+
+    #[test]
+    fn named_codex_profile_keeps_native_home_without_default_auth_links() {
+        let (_lib_dir, cwd, root, library) = setup();
+        let profile_a = TempDir::new().unwrap();
+        let profile_b = TempDir::new().unwrap();
+        let cfg = WorkspaceContextConfig { extra_context_md: "Project context".into(), ..Default::default() };
+        for (name, home) in [("a", profile_a.path()), ("b", profile_b.path())] {
+            let namespace = root.path().join(name);
+            let (_, injection) = provision_with_home(&library, &cfg, &cwd.path().to_string_lossy(), "codex", &namespace, Some(home));
+            assert_eq!(injection.env, [("CODEX_HOME".into(), home.to_string_lossy().into_owned())]);
+            let shadow = bundle_dir(&namespace, "codex", &cwd.path().to_string_lossy()).join(CODEX_SHADOW_HOME);
+            assert!(!shadow.join("auth.json").exists());
+            assert!(!shadow.join("sessions").exists());
+            assert!(!shadow.join("config.toml").exists());
+            assert!(injection.args.iter().any(|arg| arg.contains("Project context")));
+            let resumed = resume_injection_with_home(&namespace, &cwd.path().to_string_lossy(), "codex", Some(home));
+            assert_eq!(injection.env, resumed.env);
+        }
+    }
 
     /// (library dir, cwd dir, ctx-root dir, Library). The ctx-root stands in for
     /// `~/.otto/context` so tests never touch the real home.

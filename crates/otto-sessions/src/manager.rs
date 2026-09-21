@@ -321,9 +321,14 @@ async fn persist_transcript_path(
     provider: &str,
     cwd: &str,
     psid: &str,
+    provider_home: Option<&std::path::Path>,
 ) {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    match crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)) {
+    let resolved = match provider_home {
+        Some(root) => crate::lifecycle::transcript_path_in_roots(&root.join("projects"), &root.join("sessions"), provider, cwd, Some(psid)),
+        None => crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)),
+    };
+    match resolved {
         Ok(path) => {
             if let Err(e) = repo.set_transcript_path(id, &path.to_string_lossy()).await {
                 tracing::debug!(session = %id, "transcript path persist failed: {e}");
@@ -1338,6 +1343,7 @@ pub struct SessionManager {
     /// every 60 s forever, so only a CHANGE of guard is worth an `info!` line.
     suspend_hold: Arc<DashMap<Id, &'static str>>,
     repo: SessionsRepo,
+    networks: Arc<crate::network::SessionNetworks>,
     events: broadcast::Sender<Event>,
     providers: ProviderRegistry,
     /// Optional context-provisioning hook, invoked before an agent spawn.
@@ -1375,6 +1381,7 @@ pub struct SessionManager {
     /// read-only MCP tool server (Task B2b) and injects the `otto` entry into
     /// `.mcp.json`. Absent ⇒ the feature is entirely off.
     auth: Option<AuthRepo>,
+    provider_accounts: Option<(otto_state::provider_accounts::ProviderAccountsRepo, std::path::PathBuf)>,
     /// Absolute path to the `ottod` binary that backs the `otto` MCP tool server
     /// (`<path> mcp-tools`). Defaults to the running executable's own path so the
     /// tools subcommand is always the same build as the daemon.
@@ -1426,6 +1433,7 @@ impl SessionManager {
         events: broadcast::Sender<Event>,
         providers: ProviderRegistry,
     ) -> Self {
+        let networks = crate::network::SessionNetworks::new(repo.pool());
         Self {
             live: Arc::new(DashMap::new()),
             attached: Arc::new(DashMap::new()),
@@ -1437,6 +1445,7 @@ impl SessionManager {
             suspend_cpu: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
             repo,
+            networks,
             events,
             providers,
             pre_spawn_hook: None,
@@ -1451,6 +1460,7 @@ impl SessionManager {
             evict: Arc::new(DashMap::new()),
             settings: None,
             auth: None,
+            provider_accounts: None,
             // Default to this daemon's own binary so `mcp-tools` is the same build.
             mcp_tools_bin: std::env::current_exe()
                 .ok()
@@ -1495,6 +1505,36 @@ impl SessionManager {
     pub fn with_auth_repo(mut self, auth: AuthRepo) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    pub fn with_provider_accounts(mut self, repo: otto_state::provider_accounts::ProviderAccountsRepo, root: std::path::PathBuf) -> Self {
+        self.provider_accounts = Some((repo, root));
+        self
+    }
+
+    /// Canonical profile root for transcript/activity lookup. The account ID is
+    /// validated at creation, immutable thereafter, and checked again on resume.
+    pub fn provider_home(&self, session: &Session) -> Option<std::path::PathBuf> {
+        let id = session.meta.get("account_id")?.as_str()?;
+        crate::accounts::account_home(&self.provider_accounts.as_ref()?.1, &id.to_owned()).ok()
+    }
+
+    fn codex_root_for(&self, session: &Session) -> std::path::PathBuf {
+        self.provider_home(session).map(|home| home.join("sessions")).unwrap_or_else(codex_sessions_root)
+    }
+
+    async fn resolve_account(&self, owner: &Id, provider: &str, meta: &serde_json::Value)
+        -> Result<Option<(otto_core::provider_accounts::ProviderAccount, std::path::PathBuf)>> {
+        let Some(value) = meta.get("account_id").filter(|v| !v.is_null()) else { return Ok(None) };
+        let id = value.as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Invalid("account_id must be a nonempty profile ID or null".into()))?;
+        let (repo, root) = self.provider_accounts.as_ref()
+            .ok_or_else(|| Error::Invalid("provider account support is unavailable".into()))?;
+        let account = repo.get(owner, &id.to_owned()).await?;
+        if account.provider != provider { return Err(Error::Invalid("selected account belongs to a different provider".into())); }
+        let home = crate::accounts::account_home(root, &account.id)?;
+        crate::accounts::prepare_home(&home)?;
+        Ok(Some((account, home)))
     }
 
     /// Override the `ottod` binary path that backs the `otto` MCP tool server
@@ -1920,11 +1960,12 @@ impl SessionManager {
         let Some(auth) = &self.auth else {
             return OttoToolsInjection::default(); // feature wired off (no token minter)
         };
-        // A restart replaces the previous in-process token before minting a new
-        // one. (After a daemon restart the old raw secret is gone with the PTY;
-        // the fixed TTL remains the final backstop.)
-        self.revoke_mcp_token(&session.created_by, &session.id)
-            .await;
+        // Durable session ownership survives daemon restarts. Do not mint a
+        // replacement if revocation failed, or credentials would accumulate.
+        if let Err(e) = self.revoke_mcp_token(&session.created_by, &session.id).await {
+            tracing::warn!(session = %session.id, "otto MCP token rotation failed: {e}");
+            return OttoToolsInjection::default();
+        }
         // Mint a per-session token for the owner. Labeled so it is identifiable
         // in the token list and revoked on session removal.
         let label = format!("otto-mcp:{}", session.id);
@@ -1942,7 +1983,7 @@ impl SessionManager {
             )
             .await
         } else {
-            auth.issue_api_token(&session.created_by, Some(&label))
+            auth.issue_session_api_token(&session.created_by, &session.id)
                 .await
                 .map(|(token, info)| (token, info.id))
         };
@@ -2122,8 +2163,11 @@ impl SessionManager {
     /// delete the Codex creds file if one was written. Called from the
     /// session-removal path so the `otto` tool server's credential dies with the
     /// session. Best-effort.
-    async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) {
+    async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) -> Result<()> {
         let _ = std::fs::remove_file(codex_creds_path(session_id));
+        if let Some(auth) = &self.auth {
+            auth.revoke_session_tokens(owner, session_id).await?;
+        }
         if let Some((_, token_id)) = self.mcp_tokens.remove(session_id) {
             if let Some(auth) = &self.auth {
                 if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
@@ -2134,6 +2178,7 @@ impl SessionManager {
                 }
             }
         }
+        Ok(())
     }
 
     /// All `(provider_name, update_command)` pairs for providers that have an
@@ -2146,6 +2191,10 @@ impl SessionManager {
     /// provider is not registered. Delegates to the registry.
     pub fn provider_program(&self, name: &str) -> Option<String> {
         self.providers.program_for(name)
+    }
+
+    pub fn network_status(&self, id: &str) -> otto_core::network_profiles::SessionNetworkStatus {
+        self.networks.status(id)
     }
 
     /// Create a session row, spawn its PTY and start the status task.
@@ -2269,6 +2318,12 @@ impl SessionManager {
             obj.insert("title_source".into(), source.into());
         }
 
+        let account = self.resolve_account(user_id, &provider, &meta).await?;
+        if let Some((account, _)) = &account {
+            crate::accounts::validate_account(&spec, account)?;
+            meta["account_label"] = account.label.clone().into();
+        }
+        let project_context = self.repo.project_context(&ws.id, &meta).await?;
         let session = self
             .repo
             .create(NewSession {
@@ -2284,11 +2339,21 @@ impl SessionManager {
             })
             .await?;
 
+        let network = match self.networks.prepare(&session).await {
+            Ok(network) => network,
+            Err(error) => {
+                let _ = self.repo.delete(&session.id).await;
+                return Err(error);
+            }
+        };
+
         // The cwd must exist (a missing dir makes the child fall back to
         // $HOME) and agent CLIs should already trust the workspace folder.
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
-            crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            // The legacy trust helper writes default CLI homes. Named profiles
+            // let their native CLI/prompt guard persist trust in their own home.
+            if account.is_none() { crate::trust::ensure_trusted(&session.provider, &session.cwd); }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
             // launcher entry itself lands via the reconcile below. Opt-in,
@@ -2308,34 +2373,37 @@ impl SessionManager {
             // skills + soul + context into this CLI's native form. Best-effort —
             // the hook logs and swallows its own errors, never blocking spawn.
             //
-            // Skipped for PR-review sessions: they all share one repo cwd, so
-            // concurrent spawns would serialize on this *synchronous* materialize
-            // (leaving one agent stuck "pending"); a focused diff review needs no
-            // workspace skills/soul; and provisioning also pollutes the repo with
-            // .otto-managed.json / CLAUDE.md.
-            let is_review = session.meta.get("source").and_then(|v| v.as_str()) == Some("review");
-            if !is_review {
-                if let Some(hook) = &self.pre_spawn_hook {
-                    // Materialize the workspace context into its out-of-tree
-                    // bundle and append the launch flags/env that load it
-                    // (--add-dir / --append-system-prompt-file / codex
-                    // developer_instructions). Nothing is written into the cwd.
-                    // Materialize is synchronous disk churn (skill dir copies)
-                    // — run it on the blocking pool so it can't stall an async
-                    // worker (part of the intermittent create-session 2-3s
-                    // latency; see also the PtyHandle spawn below).
-                    let hook = Arc::clone(hook);
-                    let ws_owned = ws.clone();
-                    let cwd = session.cwd.clone();
-                    let prov = session.provider.clone();
-                    let injection = tokio::task::spawn_blocking(move || {
-                        hook.before_spawn(&ws_owned, &cwd, &prov)
-                    })
-                    .await
-                    .unwrap_or_default();
-                    spec.args.extend(injection.args);
-                    spec.env.extend(injection.env);
-                }
+            // Reviews receive the same workspace knowledge. Keep ordinary
+            // provider bundle paths stable (Codex credentials depend on its
+            // home identity); explicit accounts/projects retain scoped bundles.
+            if let Some(hook) = &self.pre_spawn_hook {
+                // Materialize the workspace context into its out-of-tree
+                // bundle and append the launch flags/env that load it
+                // (--add-dir / --append-system-prompt-file / codex
+                // developer_instructions). Nothing is written into the cwd.
+                // Materialize is synchronous disk churn (skill dir copies)
+                // — run it on the blocking pool so it can't stall an async
+                // worker (part of the intermittent create-session 2-3s
+                // latency; see also the PtyHandle spawn below).
+                let hook = Arc::clone(hook);
+                let ws_owned = ws.clone();
+                let cwd = session.cwd.clone();
+                let prov = session.provider.clone();
+                let context = (account.is_some() || project_context.is_some()).then(|| otto_core::hooks::SessionSpawnContext {
+                    namespace: session.id.clone(),
+                    provider_home: account.as_ref().map(|(_, home)| home.clone()),
+                    extra_context_md: project_context.clone().unwrap_or_default(),
+                });
+                let injection = tokio::task::spawn_blocking(move || {
+                    match context {
+                        Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
+                        None => hook.before_spawn(&ws_owned, &cwd, &prov),
+                    }
+                })
+                .await
+                .unwrap_or_default();
+                spec.args.extend(injection.args);
+                spec.env.extend(injection.env);
             }
             // Wire this session's injected hooks back to the daemon: the
             // provisioner wrote a hooks config that reads these env vars and
@@ -2360,6 +2428,17 @@ impl SessionManager {
 
         // OS-level confinement (opt-in via the `process_sandbox` setting), applied
         // as the very last step before spawn so it wraps the fully-injected spec.
+        if let Some((account, home)) = &account {
+            if let Err(error) = crate::accounts::apply_account(&mut spec, account, home) {
+                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                let _ = self.repo.delete(&session.id).await;
+                return Err(error);
+            }
+        }
+        if let Some(network) = &network {
+            spec.env.retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env.extend(network.env.clone());
+        }
         self.apply_sandbox(&mut spec, &session).await;
 
         // fork/exec of the agent CLI is a synchronous syscall path that can take
@@ -2374,11 +2453,13 @@ impl SessionManager {
         {
             Ok(h) => Arc::new(h),
             Err(e) => {
+                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
                 let _ = self.repo.delete(&session.id).await;
                 return Err(e);
             }
         };
 
+        self.networks.activate(session.id.clone(), network, handle.on_exit());
         self.live.insert(session.id.clone(), Arc::clone(&handle));
         self.start_status_task(
             session.id.clone(),
@@ -2443,6 +2524,8 @@ impl SessionManager {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| session.cwd.clone());
         let provider = session.provider.clone();
+        let provider_home = self.provider_home(session);
+        let codex_root = self.codex_root_for(session);
         probes.insert(id.clone(), CaptureProbe::default());
         *in_flight.entry(cwd.clone()).or_insert(0) += 1;
         tokio::spawn(async move {
@@ -2484,7 +2567,7 @@ impl SessionManager {
                     claimed_rows.iter().map(String::as_str).collect();
                 let pick = match provider.as_str() {
                     "codex" => {
-                        pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, probe)
+                        pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe)
                     }
                     "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
                         .map(RolloutPick::Claim)
@@ -2497,7 +2580,7 @@ impl SessionManager {
                         // set already contains this id.
                         match repo.set_provider_session(&id, &psid).await {
                             Ok(()) => {
-                                persist_transcript_path(&repo, &id, &provider, &cwd, &psid).await;
+                                persist_transcript_path(&repo, &id, &provider, &cwd, &psid, provider_home.as_deref()).await;
                                 captured = Some(psid)
                             }
                             Err(e) => tracing::warn!(
@@ -2815,6 +2898,7 @@ impl SessionManager {
                             &session.provider,
                             &session.cwd,
                             &psid,
+                            self.provider_home(&session).as_deref(),
                         )
                         .await;
                         session.provider_session_id = Some(psid);
@@ -2838,7 +2922,7 @@ impl SessionManager {
             if session.provider == "codex" {
                 if let Some(psid) = &session.provider_session_id {
                     if rollout_actively_written(
-                        &codex_sessions_root(),
+                        &self.codex_root_for(&session),
                         psid,
                         Duration::from_millis(750),
                     )
@@ -2991,7 +3075,7 @@ impl SessionManager {
                 tracing::warn!(session = %id, "nested-agent capture: persist failed: {e}");
                 continue;
             }
-            persist_transcript_path(&self.repo, &id, provider, &cwd, &psid).await;
+            persist_transcript_path(&self.repo, &id, provider, &cwd, &psid, self.provider_home(&session).as_deref()).await;
             let _ = self
                 .repo
                 .merge_meta(
@@ -3054,7 +3138,7 @@ impl SessionManager {
                     .get(&session.id)
                     .map(|p| normalize_pty_input(&p.raw));
                 match pick_codex_rollout(
-                    &codex_sessions_root(),
+                    &self.codex_root_for(session),
                     &cwd,
                     floor,
                     &claimed,
@@ -3158,6 +3242,9 @@ impl SessionManager {
     /// Object-valued keys are replaced in one atomic UPDATE, preserving other
     /// keys and never exposing an absent object between removal and replacement.
     pub async fn update_meta(&self, id: &Id, patch: serde_json::Value) -> Result<Session> {
+        if patch.get("account_id").is_some() || patch.get("account_label").is_some() {
+            return Err(Error::Invalid("a session keeps its original account; create a new session to choose another".into()));
+        }
         let _ = self.repo.get(id).await?;
         self.repo.replace_meta_keys(id, &patch).await?;
         let updated = self.repo.get(id).await?;
@@ -3174,6 +3261,7 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.networks.clear(id);
         if let Some(handle) = self.live_handle(id) {
             let _ = handle.kill();
         }
@@ -3204,6 +3292,7 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.networks.clear(id);
         // Mark as suspending so the status task's exit branch chooses
         // Reconnectable over Exited. Cleared by that branch (or below).
         self.suspending.insert(id.clone(), ());
@@ -3269,8 +3358,7 @@ impl SessionManager {
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                     .collect();
-                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                    .join(".claude")
+                self.provider_home(&session).unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
                     .join("projects")
                     .join(enc)
                     .join(format!("{psid}.jsonl"))
@@ -3283,7 +3371,7 @@ impl SessionManager {
                     .checked_sub(Duration::from_secs(2))
                     .unwrap_or(std::time::UNIX_EPOCH);
                 let suffix = format!("-{psid}.jsonl");
-                recent_codex_rollouts(&codex_sessions_root(), floor)
+                recent_codex_rollouts(&self.codex_root_for(&session), floor)
                     .into_iter()
                     .find(|p| {
                         p.file_name()
@@ -3699,6 +3787,9 @@ impl SessionManager {
         };
         let mut pruned = 0;
         for s in candidates {
+            // Never use the default CLI's history to declare a named account's
+            // conversation missing. Account sessions are retained explicitly.
+            if s.meta.get("account_id").and_then(|v| v.as_str()).is_some() { continue; }
             // Foreground (Agents-tab) sessions are durable — never auto-delete
             // them, whatever the transcript says (see the method doc).
             if s.is_foreground_agent() {
@@ -3741,6 +3832,7 @@ impl SessionManager {
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
         let count = ids.len();
         for id in ids {
+            self.networks.clear(&id);
             if let Some((_, handle)) = self.live.remove(&id) {
                 let _ = handle.kill();
             }
@@ -3769,6 +3861,7 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.networks.clear(id);
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
@@ -3860,6 +3953,7 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.networks.clear(id);
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
@@ -3871,7 +3965,9 @@ impl SessionManager {
         self.capture_probes.remove(id);
         // Revoke the per-session token minted for the `otto` MCP tool server, so
         // its read-only credential dies with the session (best-effort).
-        self.revoke_mcp_token(&session.created_by, id).await;
+        if let Err(e) = self.revoke_mcp_token(&session.created_by, id).await {
+            tracing::warn!(session = %id, "revoke removed session credentials: {e}");
+        }
         // Drop the per-session disconnect sender; any attached viewers were
         // already evicted by the terminate path before removal.
         self.evict.remove(id);
@@ -3902,15 +3998,16 @@ impl SessionManager {
     async fn restart_locked(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let session = self.repo.get(id).await?;
+        let account = self.resolve_account(&session.created_by, &session.provider, &session.meta).await?;
+        let project_context = self.repo.project_context(&session.workspace_id, &session.meta).await?;
+        let workspace = if session.kind == SessionKind::Agent {
+            Some(self.repo.workspace(&session.workspace_id).await?)
+        } else { None };
         if session.archived {
             return Err(Error::Conflict(
                 "session is archived — unarchive it first".into(),
             ));
         }
-        if let Some((_, handle)) = self.live.remove(id) {
-            let _ = handle.kill();
-        }
-
         let mut spec = match spec_override {
             Some(s) => s,
             None => {
@@ -3934,21 +4031,38 @@ impl SessionManager {
                         .as_deref(),
                     &session.meta,
                 ));
-                // Re-apply the out-of-tree context injection so a resumed session
-                // keeps its bundle (no Workspace here — the bundle persists and is
-                // read back). Mirrors the create() path's `before_spawn`.
-                if let Some(hook) = &self.pre_spawn_hook {
-                    let injection = hook.resume_injection(&session.cwd, &session.provider);
-                    spec.args.extend(injection.args);
-                    spec.env.extend(injection.env);
-                }
                 spec
             }
         };
 
+        // Always re-materialize from current workspace settings on restart,
+        // including spec overrides and review sessions. Reusing the persisted
+        // bundle would silently retain pre-edit shared knowledge.
+        if let (Some(hook), Some(workspace)) = (&self.pre_spawn_hook, workspace) {
+            let hook = Arc::clone(hook);
+            let cwd = session.cwd.clone();
+            let provider = session.provider.clone();
+            let context = (account.is_some() || project_context.is_some()).then(|| otto_core::hooks::SessionSpawnContext {
+                namespace: session.id.clone(),
+                provider_home: account.as_ref().map(|(_, home)| home.clone()),
+                extra_context_md: project_context.clone().unwrap_or_default(),
+            });
+            let injection = tokio::task::spawn_blocking(move || match context {
+                Some(context) => hook.before_spawn_session(&workspace, &cwd, &provider, &context),
+                None => hook.before_spawn(&workspace, &cwd, &provider),
+            }).await.unwrap_or_default();
+            spec.args.extend(injection.args);
+            spec.env.extend(injection.env);
+        }
+
+        if let Some((account, _)) = &account { crate::accounts::validate_account(&spec, account)?; }
+        // Keep an existing PTY/tunnel alive if replacement forwarding fails.
+        let network = self.networks.prepare(&session).await?;
+        self.networks.clear(id);
+        if let Some((_, handle)) = self.live.remove(id) { let _ = handle.kill(); }
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
-            crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            if account.is_none() { crate::trust::ensure_trusted(&session.provider, &session.cwd); }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
@@ -3976,17 +4090,33 @@ impl SessionManager {
             .map(|v| v as u16);
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
         // OS-level confinement on resume too (mirrors create()).
+        if let Some((account, home)) = &account {
+            if let Err(error) = crate::accounts::apply_account(&mut spec, account, home) {
+                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                return Err(error);
+            }
+        }
+        if let Some(network) = &network {
+            spec.env.retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env.extend(network.env.clone());
+        }
         self.apply_sandbox(&mut spec, &session).await;
         // Blocking-pool fork/exec, mirroring create(): idle-resume runs on the
         // terminal-attach path, so a blocked async worker here is user-visible.
         let spawn_spec = spec.clone();
-        let handle = Arc::new(
-            tokio::task::spawn_blocking(move || {
+        let spawned = tokio::task::spawn_blocking(move || {
                 PtyHandle::spawn_sized(&spawn_spec, grid_cols, grid_rows)
             })
             .await
-            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))?,
-        );
+            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))));
+        let handle = match spawned {
+            Ok(handle) => Arc::new(handle),
+            Err(e) => {
+                let _ = self.revoke_mcp_token(&session.created_by, &session.id).await;
+                return Err(e);
+            }
+        };
+        self.networks.activate(id.clone(), network, handle.on_exit());
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -4486,10 +4616,11 @@ mod tests {
             .await
             .unwrap();
 
+        let auth = AuthRepo::new(pool.clone());
         let repo = SessionsRepo::new(pool);
         let (events, _rx) = broadcast::channel(16);
         let providers = ProviderRegistry::new(None);
-        let mgr = Arc::new(SessionManager::new(repo.clone(), events, providers));
+        let mgr = Arc::new(SessionManager::new(repo.clone(), events, providers).with_auth_repo(auth));
         let ws = Workspace {
             id: ws_id,
             name: "w".into(),
@@ -4499,6 +4630,71 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         (mgr, repo, ws, user)
+    }
+
+    #[tokio::test]
+    async fn workspace_context_refreshes_on_create_and_restart_including_reviews() {
+        #[derive(Default)]
+        struct RecordingHook(std::sync::Mutex<Vec<serde_json::Value>>);
+        impl PreSpawnHook for RecordingHook {
+            fn before_spawn(&self, ws: &Workspace, _cwd: &str, _provider: &str) -> otto_core::hooks::SpawnInjection {
+                self.0.lock().unwrap().push(ws.settings.clone());
+                otto_core::hooks::SpawnInjection::default()
+            }
+            fn resume_injection(&self, _cwd: &str, _provider: &str) -> otto_core::hooks::SpawnInjection {
+                panic!("restart must refresh workspace context, not reuse a stale bundle")
+            }
+        }
+        let (mut manager,repo,mut workspace,user)=test_manager().await;
+        let dir=tempfile::tempdir().unwrap();
+        workspace.root_path=dir.path().to_string_lossy().into_owned();
+        let workspaces=otto_state::WorkspacesRepo::new(repo.pool());
+        workspaces.update(&workspace.id,None,Some(&workspace.root_path),None,None).await.unwrap();
+        let first=serde_json::from_value(serde_json::json!({"context_version":0,"memory_md":"before"})).unwrap();
+        workspace=workspaces.update_context(&workspace.id,&first).await.unwrap();
+        let hook=Arc::new(RecordingHook::default());
+        Arc::get_mut(&mut manager).unwrap().pre_spawn_hook=Some(hook.clone());
+        let spec=|| CommandSpec { program:"/bin/sh".into(),args:vec!["-c".into(),"exec /bin/sleep 60".into()],cwd:Some(workspace.root_path.clone()),env:vec![] };
+        let mut sessions=Vec::new();
+        for meta in [serde_json::json!({}),serde_json::json!({"source":"review"})] {
+            let request=CreateSessionReq { kind:SessionKind::Agent,provider:Some("shell".into()),title:Some("Context fixture".into()),cwd:Some(workspace.root_path.clone()),connection_id:None,model:None,meta:Some(meta) };
+            sessions.push(manager.create(&workspace,&user,request,Some(spec())).await.unwrap());
+        }
+        let next=serde_json::from_value(serde_json::json!({"context_version":1,"memory_md":"after"})).unwrap();
+        workspaces.update_context(&workspace.id,&next).await.unwrap();
+        for session in &sessions {
+            manager.restart(&session.id,Some(spec())).await.unwrap();
+            manager.remove(&session.id).await.unwrap();
+        }
+        let calls=hook.0.lock().unwrap();
+        assert_eq!(calls.len(),4);
+        assert_eq!(calls[0]["context"]["memory_md"],"before");
+        assert_eq!(calls[1]["context"]["memory_md"],"before");
+        assert_eq!(calls[2]["context"]["memory_md"],"after");
+        assert_eq!(calls[3]["context"]["memory_md"],"after");
+    }
+
+    #[tokio::test]
+    async fn network_prepare_failure_removes_new_row_and_preserves_existing_pty() {
+        let (manager,repo,workspace,user)=test_manager().await;
+        let pool=repo.pool();
+        sqlx::query("UPDATE users SET is_root=1 WHERE id=?").bind(&user).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO connections(id,workspace_id,name,kind,params_json,created_by,created_at) VALUES('network-fixture',?,'Invalid host fixture','ssh','{}',?,'2026-01-01T00:00:00Z')").bind(&workspace.id).bind(&user).execute(&pool).await.unwrap();
+        let profile=otto_state::network_profiles::NetworkProfilesRepo::new(pool).create(&workspace.id,&user,
+            serde_json::from_value(serde_json::json!({"name":"Broken network","ssh_connection_id":"network-fixture","endpoints":[{"name":"db","remote_host":"internal","remote_port":5432}]})).unwrap()).await.unwrap();
+        let meta=serde_json::json!({"network_profile_id":profile.id});
+        let request=CreateSessionReq { kind:SessionKind::Agent,provider:Some("shell".into()),title:Some("Network fixture".into()),cwd:Some("/tmp".into()),connection_id:None,model:None,meta:Some(meta.clone()) };
+        let error=manager.create(&workspace,&user,request,None).await.unwrap_err();
+        assert!(error.to_string().contains("valid host"));
+        assert!(repo.list_by_workspace(&workspace.id).await.unwrap().is_empty());
+        assert_eq!(manager.live_count(),0);
+        let session=repo.create(NewSession { workspace_id:workspace.id.clone(),kind:SessionKind::Agent,provider:"shell".into(),title:"Existing fixture".into(),cwd:"/tmp".into(),provider_session_id:None,connection_id:None,created_by:user,meta }).await.unwrap();
+        let handle=Arc::new(PtyHandle::spawn(&CommandSpec { program:"/bin/sh".into(),args:vec!["-c".into(),"sleep 10".into()],cwd:Some("/tmp".into()),env:vec![] }).unwrap());
+        manager.live.insert(session.id.clone(),handle.clone());
+        assert!(manager.restart(&session.id,None).await.is_err());
+        assert!(Arc::ptr_eq(&manager.live_handle(&session.id).unwrap(),&handle));
+        assert!(handle.on_exit().borrow().is_none());
+        manager.kill_session(&session.id).await.unwrap();
     }
 
     #[tokio::test]
@@ -4528,6 +4724,107 @@ mod tests {
             drop(guard);
             mutation.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn removing_session_revokes_persisted_tokens_without_in_memory_mapping() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, None).await;
+        let auth = mgr.auth.as_ref().unwrap();
+        let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+        assert!(mgr.mcp_tokens.is_empty()); // As after a daemon restart.
+        assert!(auth.authenticate(&token).await.is_ok());
+        mgr.remove(&id).await.unwrap();
+        assert!(auth.authenticate(&token).await.is_err());
+        assert!(auth.list_api_tokens(&user).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archiving_session_preserves_managed_credentials_until_removed() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, None).await;
+        let auth = mgr.auth.as_ref().unwrap();
+        let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+        mgr.archive(&id).await.unwrap();
+        assert!(auth.authenticate(&token).await.is_ok());
+        mgr.remove(&id).await.unwrap();
+        assert!(auth.authenticate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn named_account_fake_cli_keeps_home_after_manager_restart_and_rejects_foreign_profiles() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("fixture.db")).await.unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for owner in ["owner", "other"] {
+            sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', 'Fixture', 0, ?)")
+                .bind(owner).bind(owner).bind(&now).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('ws', 'Fixture', ?, ?)")
+            .bind(dir.path().to_str().unwrap()).bind(&now).execute(&pool).await.unwrap();
+        let ws = Workspace { id: "ws".into(), name: "Fixture".into(), root_path: dir.path().to_str().unwrap().into(),
+            settings: serde_json::json!({"otto_mcp_enabled":false}), archived:false, created_at:chrono::Utc::now() };
+        let profiles = otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone());
+        let a = profiles.create(&"owner".into(), "claude", "A").await.unwrap();
+        let b = profiles.create(&"owner".into(), "claude", "B").await.unwrap();
+        let foreign = profiles.create(&"other".into(), "claude", "Foreign").await.unwrap();
+        let wrong_provider = profiles.create(&"owner".into(), "codex", "Codex").await.unwrap();
+        let program = dir.path().join("fake-cli");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$CLAUDE_CONFIG_DIR/observed\"\nprintf 'fixture ready\\n'\nexec /bin/sleep 60\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = serde_json::json!({"claude":{"cmd":program,"args":[],"resume_args":["--resume","{session_id}"]}});
+        let make_manager = || {
+            let (events, _) = broadcast::channel(16);
+            SessionManager::new(SessionsRepo::new(pool.clone()), events, ProviderRegistry::new(Some(&config)))
+                .with_auth_repo(AuthRepo::new(pool.clone()))
+                .with_provider_accounts(profiles.clone(), dir.path().join("accounts"))
+        };
+        let request = |id: &str| CreateSessionReq { kind:SessionKind::Agent, provider:Some("claude".into()), title:Some("Fixture".into()),
+            cwd:Some(ws.root_path.clone()), connection_id:None, model:None, meta:Some(serde_json::json!({"account_id":id})) };
+        let manager = make_manager();
+        for id in [&foreign.id, &wrong_provider.id, &"missing".to_string()] {
+            assert!(manager.create(&ws, &"owner".into(), request(id), None).await.is_err());
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "invalid accounts must not create a session");
+        let sa = manager.create(&ws, &"owner".into(), request(&a.id), None).await.unwrap();
+        let sb = manager.create(&ws, &"owner".into(), request(&b.id), None).await.unwrap();
+        async fn wait_lines(path: &std::path::Path, count: usize) -> String {
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    if text.lines().count() >= count { return text; }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("fake CLI did not produce expected profile observation");
+        }
+        let ahome = dir.path().join("accounts").join(&a.id);
+        let bhome = dir.path().join("accounts").join(&b.id);
+        assert_eq!(wait_lines(&ahome.join("observed"), 1).await.trim(), ahome.to_str().unwrap());
+        assert_eq!(wait_lines(&bhome.join("observed"), 1).await.trim(), bhome.to_str().unwrap());
+        manager.kill_session(&sa.id).await.unwrap();
+        manager.kill_session(&sb.id).await.unwrap();
+        let restarted = make_manager();
+        restarted.restart(&sa.id, None).await.unwrap();
+        assert!(wait_lines(&ahome.join("observed"), 2).await.lines().all(|line| line == ahome.to_str().unwrap()));
+        assert_eq!(std::fs::read_to_string(bhome.join("observed")).unwrap().lines().count(), 1);
+        restarted.remove(&sa.id).await.unwrap();
+        restarted.remove(&sb.id).await.unwrap();
+
+        // Failure after token minting must release the durable credential and row.
+        let mut token_ws = ws.clone(); token_ws.settings = serde_json::json!({"otto_mcp_enabled":true});
+        let conflicting_spec = CommandSpec { program:program.to_string_lossy().into_owned(), args:vec![], cwd:Some(ws.root_path.clone()),
+            env:vec![("CLAUDE_CODE_USE_BEDROCK".into(), "1".into())] };
+        assert!(restarted.create(&token_ws, &"owner".into(), request(&a.id), Some(conflicting_spec)).await.is_err());
+        let rejected_tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL").fetch_one(&pool).await.unwrap();
+        let rejected_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
+        assert_eq!((rejected_tokens, rejected_sessions), (0, 0), "policy mismatch must leave no session or credential");
+        let bad_spec = CommandSpec { program:program.to_string_lossy().into_owned(), args:vec!["\0".into()], cwd:Some(ws.root_path.clone()), env:vec![] };
+        assert!(restarted.create(&token_ws, &"owner".into(), request(&a.id), Some(bad_spec)).await.is_err());
+        let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE session_scope IS NOT NULL").fetch_one(&pool).await.unwrap();
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions").fetch_one(&pool).await.unwrap();
+        assert_eq!((tokens, sessions), (0, 0));
     }
 
     /// RAII: set an env var for one test and restore the previous value on drop

@@ -153,7 +153,11 @@ pub(crate) fn resolve_transcript_sync(
         .get("nested_cwd")
         .and_then(|v| v.as_str())
         .unwrap_or(&session.cwd);
-    let (claude_root, codex_root) = transcript_roots(data_dir);
+    let (claude_root, codex_root) = if let Some(id) = session.meta.get("account_id").and_then(|v| v.as_str()) {
+        let home = otto_sessions::accounts::account_home(&data_dir.join("provider-accounts"), &id.to_owned())
+            .map_err(|_| UnavailableReason::TranscriptMissing)?;
+        (home.join("projects"), home.join("sessions"))
+    } else { transcript_roots(data_dir) };
     let path = otto_sessions::transcript_path_in_roots(
         &claude_root,
         &codex_root,
@@ -1309,6 +1313,34 @@ pub async fn history_rescan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_accounts_resolve_same_provider_session_id_only_in_their_own_home() {
+        let dir = tempfile::tempdir().unwrap();
+        for provider in ["claude", "codex"] {
+            let mut s = Session {
+                id: "s".into(), workspace_id: "ws".into(), kind: SessionKind::Agent,
+                provider: provider.into(), title: "fixture".into(), status: SessionStatus::Exited,
+                cwd: "/fixture".into(), provider_session_id: Some("same-session".into()), connection_id: None,
+                created_by: "u".into(), created_at: chrono::Utc::now(), last_active_at: chrono::Utc::now(),
+                archived: false, meta: serde_json::json!({"account_id":"account-a"}),
+            };
+            let relative = if provider == "claude" { "projects/-fixture/same-session.jsonl" }
+                else { "sessions/2026/09/20/rollout-2026-09-20T10-00-00-same-session.jsonl" };
+            for account in ["account-a", "account-b"] {
+                let path = dir.path().join("provider-accounts").join(account).join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, account).unwrap();
+            }
+            for account in ["account-a", "account-b"] {
+                s.meta["account_id"] = account.into();
+                let (resolved, _) = resolve_transcript_sync(dir.path(), None, &s).unwrap();
+                assert_eq!(std::fs::read_to_string(&resolved.path).unwrap(), account);
+            }
+            s.meta["account_id"] = "missing-profile".into();
+            assert!(resolve_transcript_sync(dir.path(), None, &s).is_err());
+        }
+    }
 
     #[test]
     fn transcript_roots_honour_env_override() {

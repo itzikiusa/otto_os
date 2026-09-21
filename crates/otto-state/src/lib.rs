@@ -44,7 +44,9 @@ pub mod product_discovery;
 pub mod product_mockup;
 pub mod product_refinement;
 pub mod proof;
+pub mod projects;
 pub mod provider_models;
+pub mod provider_accounts;
 pub mod repo_rules;
 pub mod resource_access;
 pub mod review_findings;
@@ -190,3 +192,5 @@ pub mod api_runs;
 pub mod history_page;
 
 pub mod workflow_progress;
+
+pub mod network_profiles;

@@ -100,7 +100,25 @@ impl SessionsRepo {
         Self { pool }
     }
 
+    pub fn pool(&self) -> SqlitePool { self.pool.clone() }
+
+    pub async fn network_profile(&self, workspace: &Id, meta: &serde_json::Value) -> Result<Option<otto_core::network_profiles::NetworkProfile>> {
+        crate::network_profiles::NetworkProfilesRepo::new(self.pool.clone()).selected(workspace, meta).await
+    }
+
+    pub async fn workspace(&self, workspace_id: &Id) -> Result<otto_core::domain::Workspace> {
+        crate::WorkspacesRepo::new(self.pool.clone()).get(workspace_id).await
+    }
+
+    /// Resolve curated project context with workspace validation, regardless of
+    /// session provider. The launch layer decides how its adapter consumes it.
+    pub async fn project_context(&self, workspace_id: &Id, meta: &serde_json::Value) -> Result<Option<String>> {
+        crate::projects::ProjectsRepo::new(self.pool.clone()).context(workspace_id, meta).await
+    }
+
     pub async fn create(&self, s: NewSession) -> Result<Session> {
+        self.project_context(&s.workspace_id, &s.meta).await?;
+        self.network_profile(&s.workspace_id, &s.meta).await?;
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -352,6 +370,17 @@ impl SessionsRepo {
     /// Replace object-valued top-level keys without exposing a missing-key
     /// intermediate state. Both merge patches belong to one atomic UPDATE.
     pub async fn replace_meta_keys(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
+        if patch.get("account_id").is_some() || patch.get("account_label").is_some() {
+            return Err(Error::Invalid("session account is immutable; create a new session to choose another account".into()));
+        }
+        if patch.get("project_id").is_some() {
+            let session = self.get(id).await?;
+            self.project_context(&session.workspace_id, patch).await?;
+        }
+        if patch.get("network_profile_id").is_some() {
+            let session = self.get(id).await?;
+            self.network_profile(&session.workspace_id, patch).await?;
+        }
         let Some(object) = patch.as_object() else {
             return Ok(());
         };

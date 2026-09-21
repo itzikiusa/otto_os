@@ -307,8 +307,9 @@ Notes:
   accepts a path the repo itself lists (never an arbitrary directory) and never the main worktree.
 - `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
   `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
-- `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at}`.
-  `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
+- `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at, session_id?, legacy_session_id?, session_exists?}`. `session_id` is durable ownership for credentials minted by the session manager. `legacy_session_id` only recognizes a historical `otto-mcp:<ULID>` label and is a cleanup candidate, not ownership proof. `session_exists` is null for personal tokens and otherwise indicates whether that session still exists for the same owner. Listing never revokes credentials; legacy cleanup uses the existing owner-scoped DELETE per selected token.
+- Managed session credentials are replaced on session spawn and revoked on deletion or failed spawn, using persisted session ownership across daemon restarts. They cannot authenticate after their originating session is deleted. Archiving keeps the existing lifecycle behavior; it does not revoke the token. Label-only legacy tokens are never automatically revoked merely because their name matches.
+- `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.
 - `DELETE` only revokes the caller's own API tokens (scoped by `user_id` + `kind='api'`).
 - `last_seen_at` is updated on use, throttled to at most once per hour.
@@ -1534,9 +1535,50 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /library/default-soul | root | — | the default soul name |
 | PUT /library/default-soul | root | `{name}` | set the default soul |
 | GET /workspaces/{id}/context | ws viewer | — | the workspace's active context selection |
-| PUT /workspaces/{id}/context | ws admin | UpdateWsContextReq | selection |
+| PUT /workspaces/{id}/context | ws admin | `UpdateWorkspaceContextReq` | `WorkspaceContextConfig` |
 | POST /workspaces/{id}/context/materialize | ws editor | — | materialize the active set into the CLIs |
 | POST /workspaces/{id}/context/preview | ws viewer | `ContextPreviewReq` | `ContextPreviewResp` — dry-run of what a spawn would materialize |
+
+The workspace itself owns shared instructions and curated knowledge; there is
+no separate project selection for ordinary sessions. Stored under
+`Workspace.settings.context`, `WorkspaceContextConfig` includes `skills`
+(`string[] | null`), `soul` (`string | null`), `extra_context_md` (shared
+instructions), `goal_md`, `memory_md`, `decisions_md` (all strings), `references`
+and `artifacts` (`string[]`), `context_version` (integer, initially 0),
+`include_memory` (boolean, initially true), `include_repo_map` (boolean, initially
+false), `repo_map_max_lines` (integer or null), and machine-owned `repo_rules_md`.
+New strings/lists default to empty without migrating existing data.
+
+`UpdateWorkspaceContextReq` is a field patch despite the existing PUT method:
+all editable fields above are optional, except that `repo_rules_md` and
+`repo_map_max_lines` are not client-editable. Omitted fields survive; `""`/`[]`
+explicitly clear strings/lists; `skills: null` and `soul: null` reset those
+selections. `context_version` is the **expected current revision**; a stale
+revision returns `409`, preserving the saved context. It is required (`400`
+when absent) if any of `goal_md`, `memory_md`, `decisions_md`, `references`, or
+`artifacts` is supplied. Legacy clients editing only legacy fields may omit the
+revision; their patches preserve new fields. Every successful context edit
+increments the revision. Machine-rule refreshes preserve user fields and do
+not increment that revision. Generic workspace settings PATCH requests preserve
+the current `context` block even if their settings snapshot includes an older
+copy; edit context through this dedicated endpoint.
+
+Example: `PUT /workspaces/{id}/context` with
+`{"context_version":0,"extra_context_md":"Use UTC","goal_md":"Ship safely","references":["vault://runbooks/release"]}`
+returns the full context with `context_version: 1`. Markdown fields are limited
+to 32,000 UTF-8 bytes each, references/artifacts to 100 entries of 2,000 bytes
+each, and the combined instructions/knowledge text to 64 KiB (`400` on excess).
+References and artifacts are text only: no target file is read and no URL is
+fetched during context assembly.
+
+Agent creation and restart load this workspace context for every supported
+provider, including review sessions. Running CLIs pick up edits on their next
+restart. Default provider bundle/home identities remain stable; selected account
+profiles and legacy scoped project memberships retain their existing session
+namespaces. Existing Swarm/common project records and session memberships remain
+intact, with their context appended only to explicitly associated sessions;
+no project data is automatically copied into workspace-wide context. Preview,
+materialization, and launch use the same renderer and existing context budget.
 
 `POST /workspaces/{id}/context/preview` is a **dry-run**: it returns exactly what
 a session spawn would materialize for one or more providers — the skill files,
@@ -1560,6 +1602,11 @@ interface ContextPreviewReq {
   skills?: string[] | null;     // omit ⇒ stored; null ⇒ all library skills
   soul?: string | null;         // omit ⇒ stored; null ⇒ global default
   extra_context_md?: string;    // omit ⇒ stored
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
   include_memory?: boolean;     // omit ⇒ stored
   include_repo_map?: boolean;   // omit ⇒ stored; opt-in tree-sitter repo map
   cwd?: string;                 // omit ⇒ workspace root
@@ -4190,3 +4237,83 @@ Transcript session/history GETs reuse bounded immutable folds (32 retained entri
 `GET /api/v1/workflow-runs/{id}/nodes/{node_id}` and `GET /api/v1/workflow-runs/{id}/checkpoints/{node_id}` return `{rev,detail_version,body}` with exact NodeRunState or WorkflowCheckpoint recovery body. URL-encode node IDs (including `#`). Body/version come from one SQL snapshot; clients reject stale selected-body responses. All endpoints recheck run workspace Viewer permission; missing run/node returns404. Full legacy run GET and mutation responses retain their existing bodies.
 
 `GET /api/v1/workflows/{id}/runs?summary=true` returns up to 50 lightweight `{id,workflow_id,status,started_at,rev}` rows, newest first, for the run menu. Default `summary=false` preserves the existing full-row response. It has the same workspace Viewer requirement as the legacy list. The UI uses summaries for opening/polling and fetches exact node/checkpoint bodies only for expanded or selected details.
+## Common projects (all providers)
+
+Projects belong to a workspace and share the existing Swarm project identity.
+`swarm_id` is nullable: ordinary projects require no Swarm. These endpoints use
+Agents View/Edit plus workspace Viewer/Editor. They do not modify Swarm execution
+fields or launch a session.
+
+| Method/path | Permission | Body | Response |
+|---|---|---|---|
+| `GET /workspaces/{id}/projects` | ws viewer, Agents View | — | `Project[]`, most recently updated first, including archived and existing Swarm projects |
+| `POST /workspaces/{id}/projects` | ws editor, Agents Edit | `ProjectInput` | `Project` |
+| `GET /projects/{id}` | ws viewer, Agents View | — | `Project` |
+| `PUT /projects/{id}` | ws editor, Agents Edit | complete `ProjectInput` plus `context_version` | `Project`, incremented version; stale version returns 409 |
+| `GET /projects/{id}/sessions?limit=200` | ws viewer, Agents View | — | `Session[]`, newest activity first; visible limit clamped 1–500; owner/admin filtering occurs in SQL and the server pages past protected-resource-denied candidates |
+
+`ProjectInput`: `name` (required, 1–200 bytes); `description`, `goal_md`,
+`instructions_md`, `memory_md`, `decisions_md` (strings, default empty, max 32 KB
+per field, 64 KB combined context); `repo_path` (optional string/null reference, max 2 KB); `references`, `artifacts`
+(string arrays, default empty, max 100 items of 2 KB); `status` (`active` default or
+`archived`). PUT replaces all editable common fields; clients send the complete
+form. `Project` adds `id`, `workspace_id`, nullable `swarm_id`, `context_version`,
+`created_by`, `created_at`, and `updated_at`. Malformed fields return 400,
+workspace denial returns 403, absent project returns 404.
+
+Session create metadata accepts `project_id` (string or null). Existing owner/admin
+protected `PATCH /sessions/{id}` with `{"meta":{"project_id":"…"}}` attaches or
+moves a session; null detaches it. Creation and reassignment validate the project's
+workspace (403 mismatch, 404 missing, 400 malformed ID). SessionMetaUpdated is the
+existing notification. Membership does not grant access to another user's session.
+All providers and session kinds may be grouped. Agent launch/resume loads curated
+project context through the provider adapter; shell/connection membership is
+organizational. Attaching/moving a live session does not restart it; context changes
+apply at the next launch/resume. References are supplied as text, never implicitly
+read from disk/network or used to expand filesystem permissions.
+
+
+### Subscription provider profiles
+
+All routes below require authentication and are scoped to the effective user's own profiles. Profile identifiers never grant access to another owner's records (404). Create and login reject impersonation. No provider credentials or raw provider status output are returned.
+
+- `GET /auth/provider-accounts` → `ProviderAccount[]`.
+- `POST /auth/provider-accounts` `{provider: "claude" | "codex", label: string}` → `ProviderAccount`. Label is trimmed, 1–80 characters, unique per owner/provider (409); unsupported providers/invalid labels return 400.
+- `POST /auth/provider-accounts/{id}/login` `{workspace_id: Id}` → `Session`. Requires workspace Editor; launches the provider's native subscription sign-in in a connection terminal. A missing CLI or invalid profile fails without fallback.
+- `GET /auth/provider-accounts/{id}/status` → `{signed_in: boolean}`. Runs the native status command in its isolated home, capped at 10 seconds; launch/time-out failures return an upstream error.
+
+`ProviderAccount = {id: Id, provider: string, label: string, created_at: RFC3339}`. Session creation accepts optional `meta.account_id`; the owner/provider must match the requested session. Otto persists the validated `account_label`. Omitting/null account ID uses existing default CLI behavior. Account ID/label are immutable on metadata patches. Resume/restart retains the selected home; invalid/missing profiles fail rather than changing identity. CLI sign-in secrets live in the provider's native storage, not in the profile table.
+
+
+## Session network profiles
+
+Workspace-scoped profiles expose explicit localhost TCP forwards through an existing SSH connection. No VPN/proxy environment is installed. JSON fields are snake_case. Profile reads require workspace Viewer and Connections View; writes require workspace Editor and Connections Edit. Profile use/read additionally checks the effective user's bastion `shell` access (legacy Connections Edit, or enforced discovery+shell permission). Unauthorized profiles are omitted from lists. Secrets are not stored in these records.
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /api/v1/workspaces/{id}/network-profiles | — | NetworkProfile[] (includes archived) |
+| POST /api/v1/workspaces/{id}/network-profiles | NetworkProfileInput | NetworkProfile |
+| GET /api/v1/network-profiles/{id} | — | NetworkProfile |
+| PUT /api/v1/network-profiles/{id} | NetworkProfileInput plus `version` | NetworkProfile; version increments |
+| GET /api/v1/sessions/{id}/network | — | SessionNetworkStatus plus `selected_profile_id`, `restart_required` |
+
+```json
+{
+  "name": "Office database",
+  "ssh_connection_id": "ssh-connection-id",
+  "endpoints": [
+    { "name": "database", "remote_host": "db.office.internal", "remote_port": 5432,
+      "host_env": "PGHOST", "port_env": "PGPORT" }
+  ],
+  "archived": false
+}
+```
+
+`NetworkProfile` flattens that input and adds `id`, `workspace_id`, `version`, `created_by`, `created_at`, `updated_at`. Name is 1–200 bytes. A profile has 1–8 endpoints; endpoint names are 1–32 ASCII identifier characters beginning with a letter and unique ignoring case. Remote host is DNS/IPv4 or bracketed IPv6 and port is nonzero u16. Optional host/port environment keys must be uppercase identifiers ending `_HOST`/`_PORT`, or `PGHOST`/`PGPORT`; reserved `OTTO_`, `LD_`, `DYLD_` prefixes and duplicate mappings are invalid. Version conflicts return409; invalid inputs return400; workspace/feature/resource failures use normal403/404 rules.
+
+Session creation or metadata patch can set `network_profile_id` to an active same-workspace profile ID, or null to remove selection. Malformed IDs, cross-workspace selection and archived profiles are rejected. Launch/restart rechecks current permissions and opens every required forward before spawning. Failure blocks launch; already opened handles are dropped. Replacement preparation failure preserves the old live session. Selected-profile edits apply next restart.
+
+`SessionNetworkStatus` fields: nullable `profile_id`, `profile_name`, `profile_version` (active snapshot), `status` (`connected|error|stopped|disabled`), nullable `error`, and `endpoints[]`. Each live endpoint has `name`, local `host`/`port`, `remote_host`/`remote_port`, nullable `host_env`/`port_env`. The endpoint also returns nullable `selected_profile_id` and boolean `restart_required` when the active ID/version differs. Stopped selected profiles may have a display name but no active ID/endpoints. The endpoint checks session owner/workspace-admin, workspace Viewer, Connections feature access and effective permission for both selected and active bastions; knowing a session ID does not bypass those checks.
+
+Generated child variables are `OTTO_TUNNEL_<UPPERCASE_NAME>_HOST`, `_PORT`, and `OTTO_NETWORK_ENDPOINTS` (JSON array of the endpoint objects). Explicit mapped keys point to the same localhost endpoint and replace only those child environment keys. `connected` means the SSH forwards are listening, not that DB authentication/reachability succeeded. Mid-session tunnel death sets Error and retains its diagnostic; restart is required to obtain new ports. PTYexit, kill, suspend, archive, remove, restart and graceful shutdown release handles. No new WebSocket event; UI polls status. Abrupt daemon process death has no guaranteed orphan-SSH cleanup.
+

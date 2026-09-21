@@ -563,7 +563,7 @@
               { separator: true as const },
             ] : []),
             { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
-            { label: 'Workspace settings', icon: 'gear', action: () => router.go('settings/appearance') },
+            { label: 'Workspace context', icon: 'note', action: async () => { await ws.select(w.id); router.go('settings/context-soul'); } },
           ])}
           title={w.root_path}
         >

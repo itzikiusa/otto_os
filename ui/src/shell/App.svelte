@@ -77,6 +77,8 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  // Old bookmarks lead to the workspace's existing context editor.
+  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
