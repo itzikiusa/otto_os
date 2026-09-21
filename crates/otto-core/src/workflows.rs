@@ -272,6 +272,10 @@ pub struct NodeRunState {
     /// run view can open it while running. Empty for non-agent nodes.
     #[serde(default)]
     pub sessions: Vec<String>,
+    /// Reviews spawned by this node, published before waiting and retained for
+    /// asynchronous reviews and later summarizer retries.
+    #[serde(default)]
+    pub review_ids: Vec<String>,
     /// Live sub-agent / phase snapshot while the node runs; `None` once it
     /// finished (and on rows persisted before the field existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]

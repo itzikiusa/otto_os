@@ -8,6 +8,7 @@ pub mod classify;
 pub mod config;
 pub mod digest;
 pub mod engine;
+mod evidence;
 pub mod http;
 pub mod live;
 pub mod pathsafe;

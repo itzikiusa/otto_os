@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
   import Icon from '../../lib/components/Icon.svelte';
@@ -579,7 +580,7 @@
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
     <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></div>
+    <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}

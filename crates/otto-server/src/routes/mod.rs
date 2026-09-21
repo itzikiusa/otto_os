@@ -36,8 +36,11 @@ pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
 pub mod personal_agents;
+pub mod provider_accounts;
 pub mod product_memory;
 pub mod proof;
+pub mod projects;
+pub mod network_profiles;
 pub mod proof_pack;
 pub mod repo_rules;
 pub mod runs;
@@ -150,6 +153,9 @@ pub fn public_routes() -> Router<ServerCtx> {
 /// of this router, together with any api_extras, by `build_router`).
 pub fn protected_routes() -> Router<ServerCtx> {
     Router::new()
+        .merge(provider_accounts::routes())
+        .merge(projects::routes())
+        .merge(network_profiles::routes())
         .merge(resource_access::api_router::<ServerCtx>())
         .merge(database_changes::api_router())
         .route("/auth/logout", post(auth_routes::logout))

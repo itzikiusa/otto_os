@@ -31,6 +31,17 @@ pub async fn provision_worktree(
     ctx: &ServerCtx,
     loop_: &GoalLoop,
 ) -> Result<(String, String, String)> {
+    if loop_.config.mode == "research" {
+        let path = worktree_dir(ctx, &loop_.id);
+        tokio::fs::create_dir_all(&path)
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        return Ok((
+            String::new(),
+            path.to_string_lossy().into_owned(),
+            String::new(),
+        ));
+    }
     let git = otto_git::LocalGit::new(&loop_.repo_path);
     let path = worktree_dir(ctx, &loop_.id);
     let path_str = path.to_string_lossy().to_string();
@@ -85,13 +96,87 @@ pub async fn provision_worktree(
     Ok((branch, path_str, base))
 }
 
-/// Best-effort: remove the loop's worktree (keeps the branch so the diff
-/// survives). Called on finalize, delete, and boot cleanup.
-pub async fn remove_worktree(ctx: &ServerCtx, loop_: &GoalLoop) {
-    let git = otto_git::LocalGit::new(&loop_.repo_path);
-    let path = loop_
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| worktree_dir(ctx, &loop_.id).to_string_lossy().to_string());
-    let _ = git.worktree_remove(&path).await;
+/// Capture the actual working contents, including untracked files. No staging,
+/// temporary commits or mutation of the user's index is needed for evidence.
+pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
+    async fn git(cwd: &str, args: &[&str]) -> Result<std::process::Output> {
+        tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|e| Error::Internal(format!("capture goal work: {e}")))
+    }
+    let base = base.filter(|b| !b.is_empty()).unwrap_or("HEAD");
+    if base.starts_with('-') {
+        return Err(Error::Invalid("invalid goal base".into()));
+    }
+    let tracked = git(cwd, &["diff", "--no-ext-diff", "--no-color", base, "--"]).await?;
+    let mut text = if tracked.status.success() {
+        String::from_utf8_lossy(&tracked.stdout).into_owned()
+    } else {
+        // Unborn repositories in research/fixtures have no HEAD.
+        let staged = git(
+            cwd,
+            &["diff", "--no-ext-diff", "--no-color", "--cached", "--"],
+        )
+        .await?;
+        let unstaged = git(cwd, &["diff", "--no-ext-diff", "--no-color", "--"]).await?;
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&staged.stdout),
+            String::from_utf8_lossy(&unstaged.stdout)
+        )
+    };
+    let untracked = git(cwd, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    for path in untracked
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+    {
+        let path = String::from_utf8_lossy(path);
+        // -- prevents option-like filenames being interpreted as git flags.
+        let patch = git(
+            cwd,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &path,
+            ],
+        )
+        .await?;
+        text.push_str(&String::from_utf8_lossy(&patch.stdout));
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    #[tokio::test]
+    async fn captures_staged_and_untracked_without_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(dir.path().join("tracked.txt"), "staged\n").unwrap();
+        assert!(git(&["add", "tracked.txt"]).status.success());
+        std::fs::write(dir.path().join("untracked.txt"), "new evidence\n").unwrap();
+        let diff = super::capture_work(dir.path().to_str().unwrap(), None)
+            .await
+            .unwrap();
+        assert!(diff.contains("staged"));
+        assert!(diff.contains("new evidence"));
+        assert!(dir.path().join("untracked.txt").exists());
+    }
 }

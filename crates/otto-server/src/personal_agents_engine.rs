@@ -175,21 +175,28 @@ pub fn validate_agent_cwd(raw: &str) -> Result<Option<std::path::PathBuf>> {
     Ok(Some(candidate))
 }
 
+/// Resolve without provisioning: read-only document endpoints never seed files.
+pub fn agent_directory(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<std::path::PathBuf> {
+    let dir = validate_agent_cwd(&agent.cwd)?.unwrap_or_else(|| default_agent_dir(ctx, &agent.id));
+    match std::fs::canonicalize(&dir) {
+        Ok(canonical) => Ok(canonical),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dir),
+        Err(e) => Err(Error::Internal(format!("agent directory: {e}"))),
+    }
+}
+
+pub fn with_user_context(prompt: &str, context: &str) -> String {
+    if context.trim().is_empty() { return prompt.into(); }
+    format!("{prompt}\n\n## User-maintained context (snapshot for this session)\n\n{context}\n\nUse these background notes and selected references for this task. \
+This context is maintained by the user; do not prune or rewrite it when updating memory/notes.md.")
+}
+
 /// Resolve + provision the agent's working directory: create it (and
 /// `memory/notes.md`, seeded once), then materialize `soul_md` into the cwd's
 /// CLAUDE.md/AGENTS.md (the swarm `provision` mechanism). Returns the cwd.
 pub async fn ensure_agent_workspace(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<String> {
-    let dir = match validate_agent_cwd(&agent.cwd)? {
-        Some(chosen) => chosen,
-        None => default_agent_dir(ctx, &agent.id),
-    };
-    tokio::fs::create_dir_all(dir.join("memory"))
-        .await
-        .map_err(|e| Error::Internal(format!("create agent dir: {e}")))?;
-    let notes = dir.join("memory").join("notes.md");
-    if !notes.exists() {
-        let _ = tokio::fs::write(&notes, seed_notes(&agent.name)).await;
-    }
+    let dir = agent_directory(ctx, agent)?;
+    crate::personal_agent_documents::seed_memory(&dir, &seed_notes(&agent.name)).await?;
     let cwd = dir.to_string_lossy().to_string();
 
     // Persona → CLAUDE.md/AGENTS.md, same mechanism as swarm agents
@@ -373,7 +380,8 @@ async fn execute_agent(
     directive: &str,
 ) -> Result<ExecOutcome> {
     let cwd = ensure_agent_workspace(ctx, agent).await?;
-    let prompt = wrap_prompt(&agent.name, directive);
+    let (user_context, _) = repo(ctx).context(&agent.id).await?;
+    let prompt = with_user_context(&wrap_prompt(&agent.name, directive), &user_context);
     let model = (!agent.model.trim().is_empty()).then_some(agent.model.as_str());
 
     let _permit = run_semaphore()
@@ -579,6 +587,17 @@ async fn prune(ctx: &ServerCtx, agent_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_context_is_snapshotted_in_the_shared_prompt_for_every_provider() {
+        let original = wrap_prompt("Helper", "scheduled or manual directive");
+        assert_eq!(with_user_context(&original, ""), original);
+        let prompt = with_user_context(&original, "Pinned background\n[Reference](/workspace/context.md)");
+        assert!(prompt.contains("scheduled or manual directive"));
+        assert!(prompt.contains("Pinned background"));
+        assert!(prompt.contains("/workspace/context.md"));
+        assert!(prompt.contains("do not prune or rewrite"));
+    }
 
     #[test]
     fn wrap_prompt_embeds_sentinel_memory_and_directive() {

@@ -1023,3 +1023,31 @@ async fn recovery_records_survive_engine_restart_and_guard_hidden_symlinks() {
     assert!(eng.delete_note(WS, id, "recover.md").await.is_err());
     assert!(td.path().join("recover.md").exists());
 }
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn okf_v02_metadata_is_optional_and_generated_at_replaces_timestamp() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    std::fs::write(td.path().join("services/current.md"), "---\ntype: Attested Computation\ntitle: Current\ndescription: A computation definition.\ngenerated: {by: process:test, at: '2026-09-20T00:00:00Z'}\nverified: {by: 'human:reviewer', at: '2026-09-20T01:00:00Z'}\nsources: [{resource: /services/auth-api.md}]\nstatus: stable\nstale_after: '2030-01-01T00:00:00Z'\n---\n# Definition\n").unwrap();
+    std::fs::write(td.path().join("services/malformed.md"), "---\ntype: Custom Future Type\ntitle: Optional\ndescription: Still consumable.\ngenerated: {at: yesterday}\nverified: true\nsources: [42]\nstatus: unexpected\nstale_after: 3 days\n---\nContent\n").unwrap();
+    eng.scan(id).await.unwrap();
+    let report = eng.okf_validate(WS, id).await.unwrap();
+    assert!(report.conformant, "{:?}", report.errors);
+    assert!(!report.warnings.iter().any(|f| f.path == "services/current.md"));
+    assert!(!report.warnings.iter().any(|f| f.path == "services/auth-api.md" && f.rule == "W3"));
+    assert!(report.warnings.iter().any(|f| f.path == "services/malformed.md" && f.rule == "W6"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn okf_index_generation_preserves_declared_version() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    for version in ["0.1", "0.2", "0.3"] {
+        std::fs::write(td.path().join("index.md"), format!("---\nokf_version: \"{version}\"\n---\n# Bundle\n")).unwrap();
+        eng.scan(id).await.unwrap();
+        eng.okf_indexes(WS, id).await.unwrap();
+        let raw = std::fs::read_to_string(td.path().join("index.md")).unwrap();
+        assert!(raw.contains(&format!("okf_version: \"{version}\"")), "{raw}");
+    }
+}

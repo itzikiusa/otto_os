@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Swarm settings: three tabs —
   //   • Standing goals — the swarm's quality bar, applied to every task (PUT set)
   //   • Team skills    — library skills every agent inherits (config.skills)
@@ -224,7 +225,7 @@
           </div>
           <div class="field">
             <label for="t-repo">Repo path <span class="dim">(optional)</span></label>
-            <input id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" />
+            <PathField bind:value={triggerForm.repo_path}><input id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
           </div>
         </div>
         <div class="toggles">

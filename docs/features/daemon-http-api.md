@@ -347,7 +347,9 @@ resolve their owning workspace from the row and role-check against it.
 | `GET /admin/sessions` · `POST /admin/sessions/{id}/terminate` | Users:Admin or root | Daemon-wide session overview · force-terminate (audited) |
 | `POST /admin/impersonate/{user_id}` · `/stop` | Users:Admin or root | Mint an act-as token · end it (audited) |
 | `GET /audit-log` · `GET /security-posture` | root | Append-only security ledger · listener/loopback/token posture |
-| `GET /fs/browse`·`/fs/read` · `GET /logs/daemon` | member / root | Path-picker FS reads · recent daemon log lines |
+| `GET /fs/browse`·`/fs/read` · `GET /logs/daemon` | member / root | OS-permitted daemon-host directory listings/file reads · recent daemon log lines |
+
+The filesystem endpoints use the permissions of the macOS account running `ottod`, for every authenticated caller. Hidden folders, credential filenames, external volumes, and paths outside the home directory have no additional Otto path restriction. The daemon does not elevate its OS privileges; authentication and share/MCP endpoint scopes still apply. A remote browser operates on the daemon's filesystem, not the browser computer. `/fs/read` serves regular files only, with a 400 KiB text cap and binary detection; devices, FIFOs and sockets are rejected. Listings and reads run off async workers with separate four-request limits and 10-second deadlines. OS permission failures report 403 and the attempted path; missing paths report 404. Session artifact access continues to use its separate resource policy.
 
 ---
 

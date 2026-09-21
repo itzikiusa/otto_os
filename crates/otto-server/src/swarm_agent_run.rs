@@ -190,6 +190,7 @@ pub async fn run_swarm_agent(
             "source": "swarm",
             "swarm_id": swarm_id,
             "swarm_run_id": run_id,
+            "project_id": project_id,
             "kind": kind,
         });
         // A chosen model reaches the CLI only via meta["model"] (→ --model);

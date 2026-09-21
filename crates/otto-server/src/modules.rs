@@ -2234,16 +2234,6 @@ pub(crate) fn mode_source(cfg: &ReviewConfig) -> (otto_core::domain::ReviewMode,
     }
 }
 
-/// Derive the model `Option<&str>` for `run_agent` from an agent's model field.
-fn model_opt(model: &str) -> Option<&str> {
-    let m = model.trim();
-    if m.is_empty() {
-        None
-    } else {
-        Some(m)
-    }
-}
-
 /// Per-agent grace period before an agent is marked stuck/failed. 30 min for
 /// large diffs, scaled down for small ones so short PRs fail fast. An explicit
 /// `override_secs` (from `ReviewConfig.timeout_secs`) wins over the heuristic.
@@ -2506,6 +2496,9 @@ async fn run_review(
     // config decides, then `FanOut`.
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) {
+    let attempt_cancel = ctx.review_cancels.lock().ok().map(|mut map| {
+        map.entry(review_id.clone()).or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false))).clone()
+    });
     let result = run_review_core(
         &ctx,
         &review_id,
@@ -2521,6 +2514,8 @@ async fn run_review(
         mode_override,
     )
     .await;
+    if attempt_cancel.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+        || review_is_cancelled(&ctx, &review_id).await { return; }
     match result {
         Ok(()) => {
             tracing::info!(review = %review_id, "review complete");
@@ -2981,7 +2976,7 @@ fn label_findings_with_lens(
 
 /// A draft review comment as emitted by the summarizer.
 #[derive(Deserialize)]
-struct DraftComment {
+pub(crate) struct DraftComment {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -3026,6 +3021,16 @@ fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment>
     })
 }
 
+/// Flags stop work immediately; the durable status covers daemon/retry paths
+/// that do not have a registered flag.
+async fn review_is_cancelled(ctx: &ServerCtx, review_id: &Id) -> bool {
+    let flagged = ctx.review_cancels.lock().ok()
+        .and_then(|m| m.get(review_id.as_str()).cloned())
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
+    flagged || ctx.reviews_store.get_review(review_id).await
+        .is_ok_and(|r| r.status == ReviewStatus::Cancelled)
+}
+
 /// Run the summarizer over the reviewers' findings and persist the result:
 /// the summarizer live-state row (last element), the draft comments, and the
 /// promoted workflow findings (+ resolve_absent + proof pack).
@@ -3055,11 +3060,29 @@ async fn summarize_and_persist(
 ) -> Result<()> {
     // Reclaim the live states (updated by the reviewer tasks) and mark the
     // summarizer (always the LAST row) running.
+    if review_is_cancelled(ctx, review_id).await { return Ok(()); }
+    // Hold THIS attempt's flag. A retry may replace the registry entry while
+    // a cancelled attempt is still unwinding; it must stay cancelled.
+    let cancel_flag = ctx.review_cancels.lock().ok().map(|mut map| {
+        map.entry(review_id.clone()).or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false))).clone()
+    });
+    let is_cancelled = || async {
+        cancel_flag.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+            || review_is_cancelled(ctx, review_id).await
+    };
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
-    let summarizer_idx = agent_states.len().saturating_sub(1);
+    let summarizer_idx = agent_states.len().checked_sub(1)
+        .ok_or_else(|| Error::Invalid("review has no summarizer row".into()))?;
     agent_states[summarizer_idx].status = "running".to_string();
+    agent_states[summarizer_idx].session_id = None;
+    agent_states[summarizer_idx].fallback = false;
+    agent_states[summarizer_idx].note = "Starting summarizer".into();
+    agent_states[summarizer_idx].provider = if summarizer_cfg.provider.trim().is_empty() {
+        "claude".into()
+    } else { summarizer_cfg.provider.trim().into() };
+    agent_states[summarizer_idx].model = summarizer_cfg.model.trim().into();
     ctx.reviews_store
-        .set_agents(review_id, &agent_states)
+        .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
 
     // A finding with an empty body carries nothing reviewable — feeding husks
@@ -3106,43 +3129,51 @@ async fn summarize_and_persist(
         summarizer_timeout.as_secs()
     );
     let mut summary_fallback = false;
-    // Run the summarizer on its CONFIGURED provider (the ReviewPanel exposes a
-    // summarizer-provider picker). claude/unset ⇒ the fast orchestrator PTY
-    // (unchanged); any other provider ⇒ a managed `run_session_turn` so a chosen
-    // codex/agy/custom summarizer actually runs instead of being ignored.
-    let sp = summarizer_cfg.provider.trim();
-    let run_text: std::result::Result<String, String> = if sp.is_empty() || sp == "claude" {
-        ctx.orchestrator
-            .run_agent(
-                &summarizer_prompt,
-                repo_path,
-                model_opt(&summarizer_cfg.model),
-                summarizer_timeout,
-            )
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        let mut meta = serde_json::json!({ "source": "review_summarizer", "review_id": review_id });
-        if !summarizer_cfg.model.trim().is_empty() {
-            meta["model"] = serde_json::json!(summarizer_cfg.model.trim());
-        }
-        crate::agent_session::run_session_turn(
-            ctx,
-            workspace,
-            user,
-            None,
-            "Review summarizer",
-            repo_path,
-            sp,
-            meta,
-            &summarizer_prompt,
-            summarizer_timeout,
-            |_id| {},
-        )
-        .await
-        .map(|(t, _sid)| t)
-        .map_err(|e| format!("{e:?}"))
-    };
+    // Every provider uses a managed session. A fresh attempt owns its output
+    // directory, so retries cannot observe an earlier attempt's completion.
+    let run_text = async {
+        let mut attempt = crate::review_summarizer::Attempt::new(
+            &summarizer_cfg.provider, &summarizer_cfg.model,
+        )?;
+        attempt.meta["review_id"] = serde_json::json!(review_id);
+        let prompt = attempt.prompt(&summarizer_prompt);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let turn = crate::agent_session::run_session_turn_with(
+            ctx, workspace, user, None, "Review summarizer", repo_path,
+            &attempt.provider, attempt.meta.clone(), &prompt, summarizer_timeout,
+            crate::agent_session::TurnOpts {
+                done_file: Some(attempt.result_path()),
+                done_file_validator: Some(crate::review_summarizer::valid_result),
+                ..Default::default()
+            },
+            |id| { let _ = ready_tx.send(id.clone()); },
+        );
+        let cancelled = async {
+            loop {
+                if is_cancelled().await { break; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        crate::review_summarizer::drive(
+            async { turn.await.map(|(text, _)| text).map_err(|e| e.0.to_string()) },
+            ready_rx, summarizer_timeout, cancelled,
+            |sid| async {
+                agent_states[summarizer_idx].session_id = Some(sid.clone());
+                ctx.reviews_store.set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
+                    .await.map_err(|e| e.to_string())?;
+                let _ = ctx.events.send(Event::ReviewChanged {
+                    workspace_id: workspace.id.clone(), session_id: Some(sid),
+                    review_id: review_id.clone(), status: "running".into(),
+                });
+                Ok(())
+            },
+            |sid| async move {
+                crate::review_session::stop_review_sessions(&ctx.manager, &[sid]).await;
+            },
+        ).await
+    }.await;
+    // A cancellation is terminal, not a provider failure eligible for fallback.
+    if is_cancelled().await { return Ok(()); }
     let summary_text = match run_text {
         Ok(t) => t,
         Err(e) => {
@@ -3204,6 +3235,7 @@ async fn summarize_and_persist(
     };
     let mut seen_fingerprints: Vec<String> = Vec::new();
     for c in parsed {
+        if is_cancelled().await { return Ok(()); }
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
         let comment = ctx
             .reviews_store
@@ -3279,6 +3311,7 @@ async fn summarize_and_persist(
 
     // Findings present in a prior run but absent now flip open→resolved (the
     // "verification" leg: a re-run that no longer surfaces a finding resolves it).
+    if is_cancelled().await { return Ok(()); }
     let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
     if let Err(e) = ctx
         .findings_store
@@ -3794,6 +3827,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             "/repos/{id}/local-review",
             post(start_local_review).get(get_local_review),
         )
+        .route("/reviews/{review_id}", get(get_review_by_id))
         .route("/reviews/{review_id}/handoff", post(handoff_review))
         .route("/reviews/{review_id}/cancel", post(cancel_review))
         .route(
@@ -5468,6 +5502,12 @@ async fn retry_summarizer(
         )));
     }
 
+    // Each retry has its own cancellation flag; a cancelled earlier attempt
+    // must not poison the new session, and Cancel must cover this task too.
+    let attempt_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(mut map) = ctx.review_cancels.lock() {
+        map.insert(review_id.clone(), attempt_cancel.clone());
+    }
     // Flip the run back to running so the UI tracks the re-summarize live.
     ctx.reviews_store
         .set_status(&review_id, ReviewStatus::Running, None)
@@ -5520,6 +5560,8 @@ async fn retry_summarizer(
             "",
         )
         .await;
+        if attempt_cancel.load(std::sync::atomic::Ordering::SeqCst)
+            || review_is_cancelled(&ctx_bg, &review_id_bg).await { return; }
         let status = match result {
             Ok(()) => {
                 tracing::info!(review = %review_id_bg, "summarizer retry complete");
@@ -5814,14 +5856,24 @@ async fn cancel_review(
         ))));
     }
 
+    cancel_running_review(&ctx, &review, &repo.workspace_id).await;
+    Ok(Json(ctx.reviews_store.get_review(&review_id).await.map_err(ApiError)?))
+}
+
+/// Shared cancellation for the review endpoint and workflows that own reviews.
+/// Signal the review itself before killing PTYs: a killed summarizer is otherwise
+/// indistinguishable from a provider failure eligible for deterministic fallback.
+pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, workspace_id: &Id) {
+    if review.status != ReviewStatus::Running { return; }
+    let review_id = review.id.clone();
     // 1. Signal the cancel flags so each agent's recovery loop short-circuits and
     //    run_review_core skips the summarizer / finding persistence. The review-
     //    level flag gates the post-join summarizer skip; the recovery loops watch
     //    their per-agent flags (per-agent Stop), so trip those too.
-    if let Ok(map) = ctx.review_cancels.lock() {
-        if let Some(flag) = map.get(review_id.as_str()) {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+    if let Ok(mut map) = ctx.review_cancels.lock() {
+        map.entry(review_id.clone())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     for i in 0..review.agents.len() {
         signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, i);
@@ -5860,18 +5912,21 @@ async fn cancel_review(
 
     // 5. Broadcast the terminal status to subscribers.
     let _ = ctx.events.send(Event::ReviewChanged {
-        workspace_id: repo.workspace_id.clone(),
+        workspace_id: workspace_id.clone(),
         session_id: None,
         review_id: review_id.to_string(),
         status: ReviewStatus::Cancelled.as_str().to_string(),
     });
 
-    Ok(Json(
-        ctx.reviews_store
-            .get_review(&review_id)
-            .await
-            .map_err(crate::error::ApiError)?,
-    ))
+ }
+
+async fn get_review_by_id(
+    Path(review_id): Path<Id>, State(ctx): State<ServerCtx>, CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<Review>> {
+    let review = ctx.reviews_store.get_review(&review_id).await.map_err(crate::error::ApiError)?;
+    let repo = ctx.git_store.get_repo(&review.repo_id).await.map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(review))
 }
 
 async fn get_review(
@@ -5897,6 +5952,28 @@ async fn get_review(
         .ok_or_else(|| crate::error::ApiError(Error::NotFound("no review for this PR".into())))?;
 
     Ok(Json(review))
+}
+
+/// Feedback is evidence about the user's disposition, not proof of a defect.
+/// The engine checks the workspace opt-in and deduplicates comment/disposition.
+fn queue_review_learning(ctx: &ServerCtx, workspace_id: &Id, comment: &ReviewComment) {
+    let engine = Arc::clone(&ctx.improve_engine);
+    let wid = workspace_id.clone();
+    let comment = comment.clone();
+    tokio::spawn(async move {
+        let disposition = comment.state.as_str();
+        let narrative = format!(
+            "User disposition: {disposition}. Source: /api/v1/reviews/{}; comment ID: {}.\n\
+             Location: {}:{}\nReview comment (untrusted observation):\n{}\n\
+             This is feedback on one finding. Approval does not independently prove its technical claim; \
+             decline does not prove the inverse or supply a rejection reason. Learn only a narrow, \
+             evidence-supported lesson, or propose no change.",
+            comment.review_id, comment.id, comment.path.as_deref().unwrap_or("general"),
+            comment.line.unwrap_or(0), comment.body);
+        if let Err(e) = engine.learn_review_feedback(&wid, &comment.id, disposition, &narrative).await {
+            tracing::warn!(comment = %comment.id, "review feedback learning failed: {e}");
+        }
+    });
 }
 
 async fn approve_comment(
@@ -5954,6 +6031,7 @@ async fn approve_comment(
         .set_comment_state(&cid, CommentState::Approved, pr_posted)
         .await
         .map_err(crate::error::ApiError)?;
+    queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
 }
 
@@ -5984,6 +6062,7 @@ async fn decline_comment(
         .set_comment_state(&cid, CommentState::Declined, false)
         .await
         .map_err(crate::error::ApiError)?;
+    queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
 }
 

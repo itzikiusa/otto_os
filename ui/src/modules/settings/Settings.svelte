@@ -51,7 +51,7 @@
     { id: 'mcp-servers', label: 'MCP Servers' },
     { id: 'insights', label: 'Insights' },
     { id: 'snipping', label: 'Snipping' },
-    { id: 'context-soul', label: 'Context & Soul' },
+    { id: 'context-soul', label: 'Workspace context' },
     { id: 'language-servers', label: 'Language Servers' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'tokens', label: 'API Tokens' },

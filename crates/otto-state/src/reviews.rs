@@ -94,10 +94,13 @@ impl ReviewsRepo {
         status: ReviewStatus,
         error: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE pr_reviews SET status = ?, error = ? WHERE id = ?")
+        // A late background completion must not undo cancellation. Only an
+        // explicit new attempt (`running`) may reopen a cancelled review.
+        sqlx::query("UPDATE pr_reviews SET status = ?, error = ? WHERE id = ? AND (status != 'cancelled' OR ? = 'running')")
             .bind(status.as_str())
             .bind(error)
             .bind(id)
+            .bind(status.as_str())
             .execute(&self.pool)
             .await
             .map_err(dberr("set review status"))?;
@@ -477,6 +480,22 @@ mod tests {
 
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn summarizer_completion_cannot_overwrite_cancelled_review() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        repo.set_status(&review.id, ReviewStatus::Cancelled, None).await.unwrap();
+        repo.set_status(&review.id, ReviewStatus::Done, None).await.unwrap();
+        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Cancelled);
+        repo.set_status(&review.id, ReviewStatus::Error, Some("late failure")).await.unwrap();
+        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Cancelled);
+        // Explicit retries may start a fresh run, and subsequently complete it.
+        repo.set_status(&review.id, ReviewStatus::Running, None).await.unwrap();
+        repo.set_status(&review.id, ReviewStatus::Done, None).await.unwrap();
+        assert_eq!(repo.get_review(&review.id).await.unwrap().status, ReviewStatus::Done);
     }
 
     /// Durable-retry storage: prompt + diff rows round-trip, upsert in place,

@@ -1,6 +1,6 @@
 # Concept patterns
 
-Choose the narrowest concept that a reader can name and link. Start with `# Overview`; add the applicable contract below; finish factual concepts with `# Citations`.
+Choose the narrowest concept that a reader can name and link. Start with `# Overview`; add the applicable contract below; record provenance in `sources` with keyed footnotes for v0.2; preserve legacy `# Citations` during focused v0.1 maintenance.
 
 ## Pattern routing
 

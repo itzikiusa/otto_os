@@ -60,7 +60,7 @@
   let crumbsElement: HTMLElement | undefined = $state();
   let requestSeq = 0;
   let requestController: AbortController | null = null;
-  let lastAttempt: { path: string; index?: number } = { path: '' };
+  let lastAttempt = $state<{ path: string; index?: number }>({ path: '' });
   const backIndex = $derived(historyTarget(history, -1));
   const forwardIndex = $derived(historyTarget(history, 1));
 
@@ -193,6 +193,7 @@
     </button>
   </div>
   {#if view}
+    {#if error || loading}<div class="dim last-opened">Last opened folder</div>{/if}
     <nav bind:this={crumbsElement} class="crumb mono" dir="ltr" aria-label="Folder path" data-path={view.path}>
       {#each folderCrumbs(view.path) as part, i (part.path)}
         {#if i > 1}<span aria-hidden="true">/</span>{/if}
@@ -238,7 +239,11 @@
     {#if loading}
       <div class="dim pad">Loading…</div>
     {:else if error}
-      <div class="err pad" role="alert">{error}</div>
+      <div class="err pad" role="alert">
+        <div>Could not open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>
+        <div>{error}</div>
+      </div>
+      {#if view}<button class="btn retry" onclick={() => view && load(view.path)}>Return to last opened folder</button>{/if}
       <button class="btn retry" bind:this={retryElement} onclick={() => load(lastAttempt.path, lastAttempt.index)}>Retry</button>
     {:else if view}
       {#if view.parent !== null}
@@ -460,7 +465,9 @@
     padding: 14px;
     font-size: 12px;
   }
+  .last-opened { font-size: 11px; margin-bottom: 3px; }
   .err {
+    overflow-wrap: anywhere;
     color: var(--danger, #e5534b);
   }
 </style>

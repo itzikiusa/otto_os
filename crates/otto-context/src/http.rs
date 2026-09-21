@@ -521,26 +521,7 @@ async fn update_ws_context<C: ContextCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Admin)
         .await?;
-    let ws = s.workspaces().get(&ws_id).await?;
-    // PRESERVE the machine-managed `repo_rules_md` block — it is rendered from the
-    // `repo_rules` table by the server, not edited via this user-facing PUT, and
-    // must survive a user context edit (the wholesale overwrite would otherwise
-    // wipe it — a lost-update clobber).
-    let stored = config::from_settings(&ws.settings);
-    let cfg = WorkspaceContextConfig {
-        skills: req.skills,
-        soul: req.soul,
-        extra_context_md: req.extra_context_md,
-        include_memory: req.include_memory,
-        repo_rules_md: stored.repo_rules_md,
-        include_repo_map: req.include_repo_map.unwrap_or(stored.include_repo_map),
-        repo_map_max_lines: stored.repo_map_max_lines,
-    };
-    let merged = config::write_into_settings(&ws.settings, &cfg);
-    let updated = s
-        .workspaces()
-        .update(&ws_id, None, None, Some(&merged), None)
-        .await?;
+    let updated = s.workspaces().update_context(&ws_id, &req).await?;
     Ok(Json(config::from_settings(&updated.settings)))
 }
 
@@ -600,6 +581,12 @@ async fn preview_ws<C: ContextCtx>(
         skills: req.skills.unwrap_or(stored.skills),
         soul: req.soul.unwrap_or(stored.soul),
         extra_context_md: req.extra_context_md.unwrap_or(stored.extra_context_md),
+        goal_md: req.goal_md.unwrap_or(stored.goal_md),
+        memory_md: req.memory_md.unwrap_or(stored.memory_md),
+        decisions_md: req.decisions_md.unwrap_or(stored.decisions_md),
+        references: req.references.unwrap_or(stored.references),
+        artifacts: req.artifacts.unwrap_or(stored.artifacts),
+        context_version: stored.context_version,
         include_memory: req.include_memory.unwrap_or(stored.include_memory),
         repo_rules_md: stored.repo_rules_md,
         include_repo_map: req.include_repo_map.unwrap_or(stored.include_repo_map),

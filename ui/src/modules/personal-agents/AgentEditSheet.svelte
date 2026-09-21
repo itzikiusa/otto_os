@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Create/edit sheet for one personal agent: name, avatar, persona (soul),
   // provider + ModelPicker, browser toggle, delivery — mirrors the
   // scheduled-tasks destination form. Schedules are edited on the agent page.
@@ -191,7 +192,7 @@
 
     <label class="fld">
       <span>Working dir (optional — empty = a private per-agent folder)</span>
-      <input bind:value={fCwd} placeholder="defaults to the agent's own workspace" />
+      <PathField bind:value={fCwd}><input bind:value={fCwd} placeholder="defaults to the agent's own workspace" /></PathField>
     </label>
 
     <div class="row">

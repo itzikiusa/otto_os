@@ -529,6 +529,7 @@ mod tests {
                 duration_ms: None,
                 attempts: None,
                 sessions: vec![],
+                review_ids: Vec::new(),
                 activity: None,
             }),
             nodes_done: 2,

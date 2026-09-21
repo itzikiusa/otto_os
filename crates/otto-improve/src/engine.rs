@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::classify::{decide, Disposition};
 use crate::config::{effective_config, next_run, write_config};
-use crate::digest::{build_digest, SessionDigest};
+use crate::digest::SessionDigest;
 use crate::pathsafe::resolve_target;
 use crate::producer::ProposalProducer;
 use crate::prompt::{build_prompt, load_skill_instructions};
@@ -146,7 +146,22 @@ impl ImprovementEngine {
         };
 
         // Build digests; skip cheaply if nothing to review.
-        let digests: Vec<SessionDigest> = sessions.iter().filter_map(build_digest).collect();
+        let mut digests = Vec::new();
+        for session in &sessions {
+            if let Some(digest) = crate::evidence::collect(
+                session,
+                &self.sessions,
+                &self.improvements,
+                self.library_root.parent().unwrap_or(Path::new(".")),
+                &serde_json::Value::Null,
+                cfg.lookback_hours,
+            )
+            .await?
+            .digest
+            {
+                digests.push(digest);
+            }
+        }
         if digests.is_empty() {
             advance_schedule(&mut cfg);
             self.persist_config(ws_id, &ws.settings, &cfg).await?;
@@ -165,11 +180,9 @@ impl ImprovementEngine {
             return Ok(());
         }
 
-        // Detect candidate skills (used in-window ∩ allow-list) and read files.
+        // Read used skills for proposal discovery; the write allow-list stays separate.
         let used: Vec<String> = digests.iter().flat_map(|d| d.skills_used.clone()).collect();
-        let current_skills = self
-            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
-            .await;
+        let current_skills = self.read_candidate_skills(&ws.root_path, &used).await;
         let current_memory = self.read_memory(&ws.root_path).await;
 
         let skill_instructions = load_skill_instructions(&ws.root_path);
@@ -292,34 +305,67 @@ impl ImprovementEngine {
         session_id: &Id,
     ) -> Result<()> {
         let session = self.sessions.get(session_id).await?;
+        if session.workspace_id != *ws_id {
+            return Err(Error::Forbidden(
+                "session belongs to another workspace".into(),
+            ));
+        }
+        let source = format!("session:{session_id}");
+        let Some(claim) = self.improvements.claim_evidence(&source).await? else {
+            return self
+                .skip_evolve(run_id, ws_id, "analysis already in progress")
+                .await;
+        };
+        let result = async {
+            let ws = self.workspaces.get(ws_id).await?;
+            let cfg = effective_config(&ws.settings);
+            let batch = crate::evidence::collect(
+                &session,
+                &self.sessions,
+                &self.improvements,
+                self.library_root.parent().unwrap_or(Path::new(".")),
+                &claim.checkpoint,
+                cfg.lookback_hours,
+            )
+            .await?;
+            match batch.digest {
+                Some(digest) => self.execute_evolve_digest(run_id, ws_id, digest).await?,
+                None => self.skip_evolve(run_id, ws_id, "no new evidence").await?,
+            }
+            let run = self.improvements.get_run(run_id).await?;
+            Ok::<_, Error>((run.status != ImprovementRunStatus::Failed).then_some(batch.checkpoint))
+        }
+        .await;
+        let checkpoint = result.as_ref().ok().and_then(|v| v.as_ref());
+        self.improvements
+            .finish_evidence(&source, &claim.token, checkpoint)
+            .await?;
+        result.map(|_| ())
+    }
+
+    async fn skip_evolve(&self, run_id: &Id, ws_id: &Id, why: &str) -> Result<()> {
+        self.improvements
+            .finish_run(run_id, ImprovementRunStatus::Skipped, why, 0, 0, 0, None)
+            .await?;
+        self.emit_finished(ws_id, run_id, "skipped", 0, 0);
+        Ok(())
+    }
+
+    async fn execute_evolve_digest(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
+        digest: SessionDigest,
+    ) -> Result<()> {
         let ws = self.workspaces.get(ws_id).await?;
         let cfg = effective_config(&ws.settings);
-
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws.id.clone(),
             run_id: run_id.clone(),
         });
 
-        let Some(digest) = build_digest(&session) else {
-            self.improvements
-                .finish_run(
-                    run_id,
-                    ImprovementRunStatus::Skipped,
-                    "no transcript yet",
-                    0,
-                    0,
-                    0,
-                    None,
-                )
-                .await?;
-            self.emit_finished(&ws.id, run_id, "skipped", 0, 0);
-            return Ok(());
-        };
-
         let used = digest.skills_used.clone();
-        let current_skills = self
-            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
-            .await;
+        let current_skills = self.read_candidate_skills(&ws.root_path, &used).await;
         let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         let mut prompt = build_prompt(
@@ -331,7 +377,7 @@ impl ImprovementEngine {
             &cfg.skill_allowlist,
         );
         prompt.push_str(
-            "\n\nNOTE: This is a LIVE single-interaction review (manually triggered). Focus \
+            "\n\nNOTE: This is a LIVE review of NEW recent evidence since the last successful analysis. Focus \
              narrowly on improving the skill(s) THIS one session used. Be conservative — only \
              propose a change you have clear evidence for from this interaction.\n",
         );
@@ -340,10 +386,12 @@ impl ImprovementEngine {
             .next()
             .unwrap_or_else(|| "claude".to_string());
 
-        match self
-            .producer
-            .produce(&prompt, &ws.root_path, &provider)
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            self.producer.produce(&prompt, &ws.root_path, &provider),
+        )
+        .await
+        .unwrap_or_else(|_| Err(Error::Internal("learning analysis timed out".into())))
         {
             Ok(proposal) => {
                 let (applied, pending) = self
@@ -462,108 +510,85 @@ impl ImprovementEngine {
     /// cron schedule. Returns the run id.
     pub async fn evolve_session(&self, session_id: &Id) -> Result<Id> {
         let session = self.sessions.get(session_id).await?;
-        let ws = self.workspaces.get(&session.workspace_id).await?;
-        let cfg = effective_config(&ws.settings);
-
         let run = self
             .improvements
-            .create_run(&ws.id, ImprovementTrigger::Live)
+            .create_run(&session.workspace_id, ImprovementTrigger::Live)
             .await?;
-        let run_id = run.id.clone();
-        let _ = self.events.send(Event::ImprovementRunStarted {
-            workspace_id: ws.id.clone(),
-            run_id: run_id.clone(),
-        });
+        self.execute_evolve_session(&run.id, &session.workspace_id, session_id)
+            .await?;
+        Ok(run.id)
+    }
 
-        let Some(digest) = build_digest(&session) else {
-            self.improvements
-                .finish_run(
-                    &run_id,
-                    ImprovementRunStatus::Skipped,
-                    "no transcript yet",
-                    0,
-                    0,
-                    0,
-                    None,
-                )
-                .await?;
-            self.emit_finished(&ws.id, &run_id, "skipped", 0, 0);
-            return Ok(run_id);
+    /// Automatic review feedback is an observation, never authorization to edit.
+    /// The workspace opt-in and existing policy gate remain authoritative.
+    pub async fn learn_review_feedback(
+        &self,
+        ws_id: &Id,
+        comment_id: &Id,
+        disposition: &str,
+        narrative: &str,
+    ) -> Result<Option<Id>> {
+        let ws = self.workspaces.get(ws_id).await?;
+        let cfg = effective_config(&ws.settings);
+        if !cfg.enabled {
+            return Ok(None);
+        }
+        let source = format!("review:{comment_id}:{disposition}");
+        let Some(claim) = self.improvements.claim_evidence(&source).await? else {
+            return Ok(None);
         };
-
-        let used = digest.skills_used.clone();
-        let current_skills = self
-            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
-            .await;
-        let current_memory = self.read_memory(&ws.root_path).await;
-        let skill_instructions = load_skill_instructions(&ws.root_path);
-        let mut prompt = build_prompt(
-            &skill_instructions,
-            &ws.name,
-            std::slice::from_ref(&digest),
-            &current_skills,
-            &current_memory,
-            &cfg.skill_allowlist,
-        );
-        prompt.push_str(
-            "\n\nNOTE: This is a LIVE single-interaction review. Focus narrowly on improving \
-             the skill(s) THIS one session used, based on how it went. Be conservative — only \
-             propose a change you have clear evidence for from this interaction.\n",
-        );
-        // Live evolve fires after every interaction, so it runs on a single
-        // provider (the first configured, default claude) rather than fanning
-        // out to all of them on every turn.
-        let provider = effective_providers(&cfg.providers)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| "claude".to_string());
-
-        match self
-            .producer
-            .produce(&prompt, &ws.root_path, &provider)
+        if claim.checkpoint == serde_json::json!("done") {
+            self.improvements
+                .finish_evidence(&source, &claim.token, None)
+                .await?;
+            return Ok(None);
+        }
+        let mut narrative: String = narrative.chars().take(12_000).collect();
+        let root = ws.root_path.clone();
+        let library_root = self.library_root.clone();
+        let catalog = tokio::task::spawn_blocking(move || skill_catalog(&root, &library_root))
             .await
-        {
-            Ok(proposal) => {
-                let (applied, pending) = self
-                    .process_edits(
-                        &ws.id,
-                        &ws.root_path,
-                        &run_id,
-                        &proposal,
-                        &cfg.skill_allowlist,
-                        cfg.autonomy,
-                    )
-                    .await;
-                self.improvements
-                    .finish_run(
-                        &run_id,
-                        ImprovementRunStatus::Done,
-                        &proposal.run_summary,
-                        1,
-                        applied,
-                        pending,
-                        None,
-                    )
-                    .await?;
-                self.emit_finished(&ws.id, &run_id, "done", applied, pending);
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                self.improvements
-                    .finish_run(
-                        &run_id,
-                        ImprovementRunStatus::Failed,
-                        "",
-                        1,
-                        0,
-                        0,
-                        Some(&msg),
-                    )
-                    .await?;
-                self.emit_finished(&ws.id, &run_id, "failed", 0, 0);
+            .unwrap_or_default();
+        let mut targets = Vec::new();
+        crate::digest::collect_skill_mentions(&narrative, &mut targets);
+        for (name, _) in &catalog {
+            if narrative.contains(name) {
+                crate::digest::add_skill(&mut targets, name);
             }
         }
-        Ok(run_id)
+        if !catalog.is_empty() {
+            narrative.push_str(
+                "\n\nAvailable skills (read-only discovery; not an auto-apply allow-list):\n",
+            );
+            for (name, description) in catalog {
+                narrative.push_str(&format!("- {name}: {description}\n"));
+            }
+        }
+        let result = self
+            .run_for_narrative(
+                ws_id,
+                &format!("Review feedback: {disposition}"),
+                &narrative,
+                &targets,
+                ImprovementTrigger::Live,
+            )
+            .await;
+        let completed = match &result {
+            Ok(id) => self
+                .improvements
+                .get_run(id)
+                .await
+                .is_ok_and(|r| r.status == ImprovementRunStatus::Done),
+            Err(_) => false,
+        };
+        self.improvements
+            .finish_evidence(
+                &source,
+                &claim.token,
+                completed.then_some(&serde_json::json!("done")),
+            )
+            .await?;
+        result.map(Some)
     }
 
     /// Resolve, classify, and apply-or-queue a single proposed edit. Returns
@@ -748,7 +773,7 @@ impl ImprovementEngine {
     /// auto-apply allow-list — otherwise a narrative could self-authorize edits
     /// to any skill it names. The allow-list passed to `process_edits` is the
     /// workspace's configured `cfg.skill_allowlist` ONLY; `target_skills` merely
-    /// narrows which allow-listed skills are surfaced as prompt candidates.
+    /// narrows read-only discovery; it never expands write permission.
     pub async fn run_for_narrative(
         &self,
         ws_id: &Id,
@@ -777,30 +802,21 @@ impl ImprovementEngine {
             text: narrative.into(),
         };
 
-        // Candidates = skills the caller targeted AND the workspace allow-listed.
-        // Reading skill files into the prompt is scoped to the configured
-        // allow-list so a narrative can't surface (or learn to rewrite) skills
-        // the workspace never authorized.
-        let candidates: Vec<String> = target_skills
-            .iter()
-            .filter(|s| cfg.skill_allowlist.iter().any(|a| a == *s))
-            .cloned()
-            .collect();
+        // Discovery and authorization are separate: an explicitly relevant
+        // unallowlisted skill can be inspected and proposed, but never acquires
+        // auto-apply permission from this caller-supplied target list.
         let current_skills = self
-            .read_candidate_skills(&ws.root_path, &candidates, &cfg.skill_allowlist)
+            .read_candidate_skills(&ws.root_path, target_skills)
             .await;
         let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
-        // The prompt's "allow-list" section reflects what may actually auto-apply
-        // (the configured allow-list ∩ targeted candidates), not the raw
-        // caller-supplied target set.
         let prompt = build_prompt(
             &skill_instructions,
             &ws.name,
             std::slice::from_ref(&digest),
             &current_skills,
             &current_memory,
-            &candidates,
+            &cfg.skill_allowlist,
         );
 
         // Run the same multi-provider loop as execute_run.
@@ -848,8 +864,8 @@ impl ImprovementEngine {
             edits,
         };
 
-        // Auto-apply allow-list = the workspace's CONFIGURED allow-list only,
-        // intersected with the targeted candidates. Never the raw caller-supplied
+        // Auto-apply allow-list = the workspace's CONFIGURED allow-list only.
+        // Never the raw caller-supplied
         // `target_skills`: a narrative is externally triggered, so it must not be
         // able to authorize edits to a skill the workspace hasn't allow-listed.
         // Edits to non-allow-listed skills still get queued by `process_edits`.
@@ -859,7 +875,7 @@ impl ImprovementEngine {
                 &ws.root_path,
                 &id,
                 &proposal,
-                &candidates,
+                &cfg.skill_allowlist,
                 cfg.autonomy,
             )
             .await;
@@ -890,21 +906,14 @@ impl ImprovementEngine {
         Ok(id)
     }
 
-    /// Read allow-listed skills that were actually used in-window. Runs on the
-    /// blocking thread pool so it does not hold up the async executor. (Allow-list
-    /// scoping keeps the prompt focused and bounds blast radius.)
-    async fn read_candidate_skills(
-        &self,
-        root: &str,
-        used: &[String],
-        allowlist: &[String],
-    ) -> Vec<(String, String)> {
+    /// Read bounded, actually used/referenced skills independently of the
+    /// auto-apply allow-list. Proposal discovery never grants write permission.
+    async fn read_candidate_skills(&self, root: &str, used: &[String]) -> Vec<(String, String)> {
         let root = root.to_string();
-        let used: Vec<String> = used.to_vec();
-        let allowlist: Vec<String> = allowlist.to_vec();
+        let used = used.to_vec();
         let library_root = self.library_root.clone();
         tokio::task::spawn_blocking(move || {
-            blocking_read_candidate_skills(&root, &used, &allowlist, &library_root)
+            blocking_read_candidate_skills(&root, &used, &library_root)
         })
         .await
         .unwrap_or_default()
@@ -928,26 +937,78 @@ impl ImprovementEngine {
 fn blocking_read_candidate_skills(
     root: &str,
     used: &[String],
-    allowlist: &[String],
-    library_root: &std::path::Path,
+    library_root: &Path,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for name in allowlist {
-        if !used.iter().any(|u| u == name) {
-            continue; // not exercised this window — nothing new to learn
+    for name in used {
+        if out.len() >= 16 {
+            break;
         }
-        if let Ok(path) = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let content = if content.len() > 8000 {
-                    cap_bytes(&content, 8000).to_string()
-                } else {
-                    content
-                };
-                out.push((name.clone(), content));
-            }
+        if out.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        if let Some(content) = read_skill(root, library_root, name, 8000) {
+            out.push((name.clone(), content));
         }
     }
     out
+}
+
+/// Existing skill files only, canonicalized inside the library/workspace roots;
+/// no path from a session or external review may escape into unrelated files.
+fn read_skill(root: &str, library_root: &Path, name: &str, cap: u64) -> Option<String> {
+    use std::io::Read;
+    let path = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)).ok()?;
+    let library_skills = library_root.join("skills");
+    let workspace_skills = Path::new(root).join(".claude/skills");
+    let allowed = if path.starts_with(&library_skills) {
+        &library_skills
+    } else {
+        &workspace_skills
+    };
+    let path = canonicalize_within(&path, allowed).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(cap).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A small catalog lets feedback without an explicit /skill invocation still
+/// identify a relevant candidate. Bodies are loaded only for referenced names.
+fn skill_catalog(root: &str, library_root: &Path) -> Vec<(String, String)> {
+    let mut names = std::collections::BTreeSet::new();
+    for base in [
+        library_root.join("skills"),
+        Path::new(root).join(".claude/skills"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten().take(500) {
+                if let Some(name) = entry.file_name().to_str() {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let content = read_skill(root, library_root, &name, 4096)?;
+            let description = content
+                .lines()
+                .find_map(|line| line.strip_prefix("description:"))
+                .unwrap_or("")
+                .trim()
+                .trim_matches(['\"', '\''])
+                .chars()
+                .take(160)
+                .collect();
+            Some((name, description))
+        })
+        .take(100)
+        .collect()
 }
 
 /// Truncate `s` to at most `max` bytes, backing up to a UTF-8 char boundary so
@@ -1201,7 +1262,10 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join(format!("{psid}.jsonl")),
-            r#"{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            concat!(
+                r#"{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+                "\n"
+            ),
         )
         .unwrap();
 
@@ -1317,6 +1381,232 @@ mod tests {
         (engine, ws.id, uid, dir)
     }
 
+    #[derive(Clone)]
+    struct LearningProducer {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        fail_next: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ProposalProducer for LearningProducer {
+        fn produce<'a>(
+            &'a self,
+            prompt: &'a str,
+            _cwd: &'a str,
+            _provider: &'a str,
+        ) -> otto_core::auth::BoxFuture<'a, Result<ImprovementProposal>> {
+            Box::pin(async move {
+                self.prompts.lock().unwrap().push(prompt.to_owned());
+                if self
+                    .fail_next
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(Error::Internal("fixture analysis failed".into()));
+                }
+                Ok(ImprovementProposal {
+                    run_summary: "observed recent evidence".into(),
+                    edits: vec![],
+                })
+            })
+        }
+    }
+
+    async fn learning_session(
+        engine: &ImprovementEngine,
+        ws: &Id,
+        uid: &Id,
+        provider: &str,
+        cwd: &Path,
+    ) -> otto_core::domain::Session {
+        engine
+            .sessions
+            .create(otto_state::NewSession {
+                workspace_id: ws.clone(),
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: provider.into(),
+                title: "learning fixture".into(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: uid.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn learning_latest_codex_delta_retries_failures_and_skips_duplicates() {
+        let (mut engine, ws, uid, dir) = harness().await;
+        let producer = LearningProducer {
+            prompts: Arc::default(),
+            fail_next: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        engine.producer = Arc::new(producer.clone());
+        let session = learning_session(&engine, &ws, &uid, "codex", dir.path()).await;
+        let path = dir.path().join("rollout-test.jsonl");
+        let line = |text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":text}})
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                line(&"old context ".repeat(1000)),
+                line("Newest correction: preserve every verified finding")
+            ),
+        )
+        .unwrap();
+        engine
+            .sessions
+            .set_transcript_path(&session.id, path.to_str().unwrap())
+            .await
+            .unwrap();
+        let failed = engine.evolve_session(&session.id).await.unwrap();
+        assert_eq!(
+            engine.improvements.get_run(&failed).await.unwrap().status,
+            ImprovementRunStatus::Failed
+        );
+        assert!(producer.prompts.lock().unwrap()[0].contains("Newest correction"));
+        let retry = engine.evolve_session(&session.id).await.unwrap();
+        assert_eq!(
+            engine.improvements.get_run(&retry).await.unwrap().status,
+            ImprovementRunStatus::Done
+        );
+        let duplicate = engine.evolve_session(&session.id).await.unwrap();
+        assert_eq!(
+            engine
+                .improvements
+                .get_run(&duplicate)
+                .await
+                .unwrap()
+                .status,
+            ImprovementRunStatus::Skipped
+        );
+        assert_eq!(producer.prompts.lock().unwrap().len(), 2);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line("Later correction: cite the exact source").as_bytes())
+            .unwrap();
+        engine.evolve_session(&session.id).await.unwrap();
+        let prompts = producer.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts[2].contains("Later correction"));
+        assert!(!prompts[2].contains("Newest correction"));
+    }
+
+    #[tokio::test]
+    async fn learning_keeps_a_new_trail_prompt_when_transcript_flush_lags() {
+        let (mut engine, ws, uid, dir) = harness().await;
+        let producer = LearningProducer {
+            prompts: Arc::default(),
+            fail_next: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        engine.producer = Arc::new(producer.clone());
+        let session = learning_session(&engine, &ws, &uid, "claude", dir.path()).await;
+        let path = dir.path().join("claude.jsonl");
+        std::fs::write(&path,format!("{}\n",serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Previous assistant answer has flushed"}]}}))).unwrap();
+        engine
+            .sessions
+            .set_transcript_path(&session.id, path.to_str().unwrap())
+            .await
+            .unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        otto_state::ActivityRepo::new(pool)
+            .append_trail(otto_state::NewTrail {
+                session_id: session.id.clone(),
+                workspace_id: ws.clone(),
+                source: otto_core::domain::TrailSource::User,
+                kind: otto_core::domain::TrailKind::Prompt,
+                level: otto_core::domain::TrailLevel::Info,
+                summary: "Latest user correction has not flushed yet".into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        engine.evolve_session(&session.id).await.unwrap();
+        assert!(producer.prompts.lock().unwrap()[0]
+            .contains("Latest user correction has not flushed yet"));
+        engine.evolve_session(&session.id).await.unwrap();
+        assert_eq!(producer.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn learning_uses_provider_neutral_trail_and_review_opt_in_dedup() {
+        let (mut engine, ws, uid, dir) = harness().await;
+        let producer = LearningProducer {
+            prompts: Arc::default(),
+            fail_next: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        engine.producer = Arc::new(producer.clone());
+        let session = learning_session(&engine, &ws, &uid, "agy", dir.path()).await;
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        otto_state::ActivityRepo::new(pool)
+            .append_trail(otto_state::NewTrail {
+                session_id: session.id.clone(),
+                workspace_id: ws.clone(),
+                source: otto_core::domain::TrailSource::User,
+                kind: otto_core::domain::TrailKind::Note,
+                level: otto_core::domain::TrailLevel::Info,
+                summary: "Correction from Gemini session: keep user work intact".into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        engine.evolve_session(&session.id).await.unwrap();
+        engine.evolve_session(&session.id).await.unwrap();
+        assert_eq!(producer.prompts.lock().unwrap().len(), 1);
+        assert!(producer.prompts.lock().unwrap()[0].contains("Correction from Gemini"));
+        assert!(engine
+            .learn_review_feedback(
+                &ws,
+                &"comment-1".into(),
+                "declined",
+                "User declined finding; reason unknown"
+            )
+            .await
+            .unwrap()
+            .is_none());
+        engine
+            .workspaces
+            .update(
+                &ws,
+                None,
+                None,
+                Some(
+                    &serde_json::json!({"self_improvement":{"enabled":true,"autonomy":"propose"}}),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(engine
+            .learn_review_feedback(
+                &ws,
+                &"comment-1".into(),
+                "declined",
+                "User declined finding; reason unknown"
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert!(engine
+            .learn_review_feedback(
+                &ws,
+                &"comment-1".into(),
+                "declined",
+                "User declined finding; reason unknown"
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(producer.prompts.lock().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn memory_low_edit_applies_and_rolls_back() {
         let (engine, ws_id, uid, dir) = harness().await;
@@ -1335,7 +1625,10 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join(format!("{psid}.jsonl")),
-            r#"{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            concat!(
+                r#"{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+                "\n"
+            ),
         )
         .unwrap();
         engine
@@ -1443,6 +1736,131 @@ mod tests {
             library_root: dir.path().join("library"),
         };
         (engine, ws.id, dir)
+    }
+
+    struct CapturingEditProducer {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        proposal: ImprovementProposal,
+    }
+    impl ProposalProducer for CapturingEditProducer {
+        fn produce<'a>(
+            &'a self,
+            prompt: &'a str,
+            _cwd: &'a str,
+            _provider: &'a str,
+        ) -> otto_core::auth::BoxFuture<'a, Result<ImprovementProposal>> {
+            Box::pin(async move {
+                self.prompts.lock().unwrap().push(prompt.into());
+                Ok(self.proposal.clone())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn learning_reads_used_unallowlisted_skill_but_only_queues_its_edit() {
+        let (mut engine, ws, uid, dir) = harness().await;
+        let skill = dir.path().join("library/skills/ui-design/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill,"---\nname: ui-design\ndescription: Improve responsive forms\n---\nUNIQUE ORIGINAL UI RULE\n").unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(vec![]));
+        let mut edit = write_edit("NEW UI BODY", ImprovementEditKind::Modify);
+        edit.target_type = ImprovementTarget::Skill;
+        edit.target_ref = "ui-design".into();
+        engine.producer = Arc::new(CapturingEditProducer {
+            prompts: prompts.clone(),
+            proposal: ImprovementProposal {
+                run_summary: "learned".into(),
+                edits: vec![edit],
+            },
+        });
+        let session = learning_session(&engine, &ws, &uid, "codex", dir.path()).await;
+        let path = dir.path().join("rollout-ui.jsonl");
+        std::fs::write(&path,format!("{}\n",serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"/ui-design correction: preserve keyboard focus"}}))).unwrap();
+        engine
+            .sessions
+            .set_transcript_path(&session.id, path.to_str().unwrap())
+            .await
+            .unwrap();
+        let run = engine.evolve_session(&session.id).await.unwrap();
+        assert!(prompts.lock().unwrap()[0].contains("UNIQUE ORIGINAL UI RULE"));
+        let edits = engine.improvements.list_edits_by_run(&run).await.unwrap();
+        assert_eq!(edits[0].status, ImprovementEditStatus::Pending);
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("UNIQUE ORIGINAL UI RULE"));
+        // Later corrections still know which skill this session exercised,
+        // even when the new delta does not repeat its name.
+        use std::io::Write;
+        let later = format!(
+            "{}\n",
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"Also preserve keyboard focus after closing the picker"}})
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(later.as_bytes())
+            .unwrap();
+        engine.evolve_session(&session.id).await.unwrap();
+        assert!(prompts.lock().unwrap()[1].contains("UNIQUE ORIGINAL UI RULE"));
+    }
+
+    #[tokio::test]
+    async fn learning_review_discovers_unallowlisted_catalog_and_target_body() {
+        let (mut engine, ws, _uid, dir) = harness().await;
+        let skill = dir.path().join("library/skills/ui-design/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill,"---\nname: ui-design\ndescription: Improve responsive forms\n---\nEXISTING UI GUIDANCE\n").unwrap();
+        engine
+            .workspaces
+            .update(
+                &ws,
+                None,
+                None,
+                Some(&serde_json::json!({"self_improvement":{"enabled":true}})),
+                None,
+            )
+            .await
+            .unwrap();
+        let producer = LearningProducer {
+            prompts: Arc::default(),
+            fail_next: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        engine.producer = Arc::new(producer.clone());
+        engine
+            .learn_review_feedback(
+                &ws,
+                &"catalog-comment".into(),
+                "approved",
+                "ui-design missed keyboard focus restoration",
+            )
+            .await
+            .unwrap();
+        let prompts = producer.prompts.lock().unwrap();
+        assert!(prompts[0].contains("ui-design: Improve responsive forms"));
+        assert!(prompts[0].contains("EXISTING UI GUIDANCE"));
+        assert!(prompts[0].contains("their edits require human approval"));
+    }
+
+    #[test]
+    fn learning_discovery_rejects_symlink_escape_and_bounds_skill_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        let skill = library.join("skills/safe/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "x".repeat(20_000)).unwrap();
+        let escape = library.join("skills/escape");
+        std::fs::create_dir_all(&escape).unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "private").unwrap();
+        std::os::unix::fs::symlink(&outside, escape.join("SKILL.md")).unwrap();
+        let read = blocking_read_candidate_skills(
+            dir.path().to_str().unwrap(),
+            &["safe".into(), "escape".into(), "../outside".into()],
+            &library,
+        );
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].1.len(), 8000);
     }
 
     #[tokio::test]

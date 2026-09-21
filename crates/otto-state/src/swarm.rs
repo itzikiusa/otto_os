@@ -972,7 +972,7 @@ impl SwarmRepo {
     }
 
     pub async fn get_project(&self, id: &Id) -> Result<SwarmProject> {
-        let row = sqlx::query("SELECT * FROM swarm_projects WHERE id = ?")
+        let row = sqlx::query("SELECT * FROM swarm_projects WHERE id = ? AND swarm_id IS NOT NULL")
             .bind(id)
             .fetch_one(&self.pool)
             .await
@@ -1045,7 +1045,8 @@ impl SwarmRepo {
         sqlx::query(
             "UPDATE swarm_projects SET name = ?, description = ?, repo_path = ?, goal_md = ?,
                 story_id = ?, skills_json = ?, integration_branch = ?, origin_channel = ?,
-                origin_chat = ?, origin_thread = ?, status = ?, order_idx = ?, updated_at = ?
+                origin_chat = ?, origin_thread = ?, status = ?, order_idx = ?, updated_at = ?,
+                context_version = context_version + 1
              WHERE id = ?",
         )
         .bind(&name)

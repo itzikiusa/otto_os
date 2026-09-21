@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { authedText } from '../../lib/api/client';
@@ -484,7 +485,7 @@
           </label>
           <label class="fld">
             <span>Working dir (optional)</span>
-            <input bind:value={fCwd} placeholder="repo path — not a sandbox" />
+            <PathField bind:value={fCwd}><input bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
           </label>
         </div>
 
@@ -504,7 +505,7 @@
       {:else if fProvider === 'shell'}
         <label class="fld">
           <span>Working dir (optional)</span>
-          <input bind:value={fCwd} placeholder="dir to run the command in" />
+          <PathField bind:value={fCwd}><input bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
         </label>
       {/if}
 

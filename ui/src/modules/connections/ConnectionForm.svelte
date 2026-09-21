@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
   //   [SSH section: jump host + identity file] / first command.
@@ -658,16 +659,16 @@
         </div>
         <div class="field">
           <label for="cf-tls-ca">CA certificate path <span class="dim">(optional)</span></label>
-          <input id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" />
+          <PathField bind:value={tlsCaCert} files><input id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" /></PathField>
         </div>
         <div class="field-row">
           <div class="field grow">
             <label for="cf-tls-cert">Client cert <span class="dim">(optional)</span></label>
-            <input id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" />
+            <PathField bind:value={tlsClientCert} files><input id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" /></PathField>
           </div>
           <div class="field grow">
             <label for="cf-tls-key">Client key <span class="dim">(optional)</span></label>
-            <input id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" />
+            <PathField bind:value={tlsClientKey} files><input id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" /></PathField>
           </div>
         </div>
         <div class="field">

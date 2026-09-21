@@ -12,7 +12,7 @@
 //! - [`PolicyDecision::Exempt`] — the request is **not** feature-gated. This is an
 //!   explicit allow-list: public routes, per-session-`?token=` ingest routes, and
 //!   the cross-cutting *self-owned* routes (Auth/PAT self-management, `/auth/me`,
-//!   Notifications, the FS-browse sandbox) plus the pure workspace-axis routes
+//!   Notifications, host filesystem access) plus the pure workspace-axis routes
 //!   (workspace CRUD / members / MCP-server config) whose authorization is the
 //!   `require_ws_role` gate the central guard can't replace. Static catalogs
 //!   (`/swarm/presets`, `/workflows/node-types`) are exempt too.
@@ -130,6 +130,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         p,
         "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities"
     ) || p.starts_with("/auth/tokens/")
+        || p == "/auth/provider-accounts" || p.starts_with("/auth/provider-accounts/")
         || p.starts_with("/auth/shares")
     {
         return Exempt;
@@ -168,7 +169,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/extend" {
         return Exempt;
     }
-    // FS-browse sandbox (cross-cutting; sandboxed in the handler).
+    // Host filesystem access: authenticated; OS permissions enforced by I/O.
+    // Share/MCP endpoint scopes are still checked before this exemption.
     if matches!(p, "/fs/browse" | "/fs/read") {
         return Exempt;
     }
@@ -434,6 +436,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // list/fetch images = View; capture/upload/annotate/copy/delete = Edit.
     // Root bypasses.
     if p == "/snips" || p.starts_with("/snips/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
+    if p == "/workspaces/{id}/network-profiles" || p.starts_with("/network-profiles/") || p == "/sessions/{id}/network" {
+        return Require(Connections, if get { View } else { Edit });
+    }
+
+    // Shared project context is provider-independent; Swarm execution retains
+    // its separate gate and endpoints.
+    if p == "/workspaces/{id}/projects" || p.starts_with("/projects/") {
         return Require(Agents, if get { View } else { Edit });
     }
 
@@ -999,6 +1011,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
     if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
     if p == "/personal-agents/{id}/schedules" {

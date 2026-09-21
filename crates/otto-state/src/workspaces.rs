@@ -184,7 +184,10 @@ impl WorkspacesRepo {
                 .map_err(dberr("update workspace"))?;
         }
         if let Some(v) = settings {
-            sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = ?")
+            // Context has its own versioned API. A stale settings snapshot from
+            // another feature must never erase shared knowledge or repo rules.
+            sqlx::query("UPDATE workspaces SET settings_json = CASE WHEN json_type(settings_json, '$.context') IS NULL THEN json_remove(?, '$.context') ELSE json_set(?, '$.context', json_extract(settings_json, '$.context')) END WHERE id = ?")
+                .bind(v.to_string())
                 .bind(v.to_string())
                 .bind(id)
                 .execute(&self.pool)
@@ -200,6 +203,95 @@ impl WorkspacesRepo {
                 .map_err(dberr("update workspace"))?;
         }
         self.get(id).await
+    }
+
+    /// Patch user-owned context with optimistic concurrency. Compare the raw
+    /// settings snapshot as well as the context revision so a concurrent machine
+    /// rule or unrelated settings write is re-read rather than overwritten.
+    pub async fn update_context(
+        &self,
+        id: &Id,
+        req: &otto_core::api::UpdateWorkspaceContextReq,
+    ) -> Result<Workspace> {
+        let mut patch = serde_json::to_value(req)
+            .map_err(|e| Error::Invalid(format!("workspace context: {e}")))?;
+        let fields = patch.as_object_mut().expect("context request is an object");
+        fields.remove("context_version");
+        let has_knowledge = [
+            "goal_md",
+            "memory_md",
+            "decisions_md",
+            "references",
+            "artifacts",
+        ]
+        .iter()
+        .any(|key| fields.contains_key(*key));
+        if has_knowledge && req.context_version.is_none() {
+            return Err(Error::Invalid(
+                "context_version is required when editing workspace knowledge".into(),
+            ));
+        }
+        for _ in 0..8 {
+            let old: String =
+                sqlx::query_scalar("SELECT settings_json FROM workspaces WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(dberr("workspace"))?;
+            let mut settings: serde_json::Value = json(&old)?;
+            let mut context = settings
+                .get("context")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let version = context
+                .get("context_version")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if req
+                .context_version
+                .is_some_and(|expected| expected != version)
+            {
+                return Err(Error::Conflict(
+                    "workspace context changed; reload before saving".into(),
+                ));
+            }
+            context.extend(fields.clone());
+            context.insert("context_version".into(), (version + 1).into());
+            let context = serde_json::Value::Object(context);
+            validate_workspace_context(&context)?;
+            if !settings.is_object() {
+                settings = serde_json::json!({});
+            }
+            settings["context"] = context;
+            let changed = sqlx::query(
+                "UPDATE workspaces SET settings_json = ? WHERE id = ? AND settings_json = ?",
+            )
+            .bind(settings.to_string())
+            .bind(id)
+            .bind(&old)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update workspace context"))?
+            .rows_affected();
+            if changed == 1 {
+                return self.get(id).await;
+            }
+        }
+        Err(Error::Conflict(
+            "workspace settings changed repeatedly; retry saving".into(),
+        ))
+    }
+
+    /// A rule refresh owns exactly one machine-managed field, without changing
+    /// the user context revision or replacing any user-edited settings.
+    pub async fn update_repo_rules(&self, id: &Id, rules: &str) -> Result<()> {
+        let changed = sqlx::query("UPDATE workspaces SET settings_json = json_set(settings_json, '$.context.repo_rules_md', ?) WHERE id = ?")
+            .bind(rules).bind(id).execute(&self.pool).await.map_err(dberr("update workspace repo rules"))?.rows_affected();
+        if changed == 0 {
+            return Err(Error::NotFound("workspace".into()));
+        }
+        Ok(())
     }
 
     pub async fn set_member(&self, ws: &Id, user: &Id, role: WorkspaceRole) -> Result<()> {
@@ -270,6 +362,41 @@ impl WorkspacesRepo {
         .map_err(dberr("role"))?;
         Ok(row.and_then(|r| WorkspaceRole::parse(&r.get::<String, _>("role"))))
     }
+}
+
+fn validate_workspace_context(context: &serde_json::Value) -> Result<()> {
+    let mut total = 0;
+    for key in ["extra_context_md", "goal_md", "memory_md", "decisions_md"] {
+        let text = context.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        if text.len() > 32_000 {
+            return Err(Error::Invalid(format!(
+                "{key} exceeds 32 KB; use references for longer documents"
+            )));
+        }
+        total += text.len();
+    }
+    for key in ["references", "artifacts"] {
+        if let Some(items) = context.get(key).and_then(|v| v.as_array()) {
+            if items.len() > 100
+                || items
+                    .iter()
+                    .any(|v| v.as_str().is_none_or(|s| s.len() > 2000))
+            {
+                return Err(Error::Invalid(format!("{key} exceeds 100 entries of 2 KB")));
+            }
+            total += items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::len)
+                .sum::<usize>();
+        }
+    }
+    if total > 64 * 1024 {
+        return Err(Error::Invalid(
+            "workspace knowledge must fit within 64 KB; use references for longer documents".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

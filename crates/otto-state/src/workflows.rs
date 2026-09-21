@@ -1191,6 +1191,7 @@ mod tests {
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            review_ids: Vec::new(),
             activity: None,
         };
         repo.update_run(&r3.id, RunStatus::Error, &[node], Some("boom"), true)

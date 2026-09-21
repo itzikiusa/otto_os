@@ -113,6 +113,14 @@ pub struct ApiTokenInfo {
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Durable originating session, set only by Otto's session token minter.
+    #[serde(default)]
+    pub session_id: Option<Id>,
+    /// Legacy label matches a session ID; candidate only, never ownership proof.
+    #[serde(default)]
+    pub legacy_session_id: Option<Id>,
+    #[serde(default)]
+    pub session_exists: Option<bool>,
 }
 
 /// Response for `POST /api/v1/auth/tokens`: the raw secret is returned exactly
@@ -1286,6 +1294,12 @@ pub struct RefBranch {
     pub is_current: bool,
     pub upstream: Option<String>,
     pub remote: bool,
+    /// Commits relative to this local branch's upstream (zero without a live
+    /// upstream, and for remote refs). Computed without checking out the branch.
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
     /// True when this branch's tip is already contained in the repo's cleanup
     /// base branch (`git merge-base --is-ancestor`, surfaced as a bulk
     /// `git branch --merged <base>`). A hint that the branch is safe to delete;
@@ -2040,10 +2054,17 @@ pub struct RepoReviewConfigResp {
 // ---------------------------------------------------------------------------
 
 /// `POST /api/v1/workspaces/{id}/goal-loops/define` — run the AI goal-definer to
-/// turn a rough seed into a structured, loop-executable draft. Persists nothing.
+/// turn a rough seed into a structured draft. Creates a managed definer session,
+/// but does not create a loop until the user launches it.
 /// Supplying `feedback` (with the prior draft echoed in `context`) refines it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DefineGoalReq {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
     /// The rough goal text the user typed.
     pub seed: String,
     /// The repo the loop will work in (gives the definer codebase context).
@@ -2054,6 +2075,17 @@ pub struct DefineGoalReq {
     /// When refining: what to change about the prior draft.
     #[serde(default)]
     pub feedback: Option<String>,
+}
+
+/// Explicit human evidence; verifier identity is taken from authentication.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerifyGoalCriterionReq {
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnswerGoalQuestionReq {
+    pub answer: String,
 }
 
 /// The definer's structured suggestion. The user edits this before launching.
@@ -2468,6 +2500,20 @@ pub struct WorkspaceContextConfig {
     pub soul: Option<String>,
     #[serde(default)]
     pub extra_context_md: String,
+    /// Curated knowledge shared by every agent in this workspace. References
+    /// remain text; materialization never reads their filesystem/URL targets.
+    #[serde(default)]
+    pub goal_md: String,
+    #[serde(default)]
+    pub memory_md: String,
+    #[serde(default)]
+    pub decisions_md: String,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub context_version: i64,
     #[serde(default = "default_include_memory")]
     pub include_memory: bool,
     /// Machine-managed block of repo rules (from code review). Rendered from the
@@ -2499,6 +2545,12 @@ impl Default for WorkspaceContextConfig {
             skills: None,
             soul: None,
             extra_context_md: String::new(),
+            goal_md: String::new(),
+            memory_md: String::new(),
+            decisions_md: String::new(),
+            references: Vec::new(),
+            artifacts: Vec::new(),
+            context_version: 0,
             include_memory: true,
             repo_rules_md: String::new(),
             include_repo_map: false,
@@ -2508,19 +2560,32 @@ impl Default for WorkspaceContextConfig {
 }
 
 /// `PUT /workspaces/{id}/context`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateWorkspaceContextReq {
-    #[serde(default)]
-    pub skills: Option<Vec<String>>,
-    #[serde(default)]
-    pub soul: Option<String>,
-    #[serde(default)]
-    pub extra_context_md: String,
-    #[serde(default = "default_include_memory")]
-    pub include_memory: bool,
-    /// Inject the tree-sitter repo map (opt-in; absent ⇒ keep stored value).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "de_double_option", skip_serializing_if = "Option::is_none")]
+    pub soul: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_context_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_repo_map: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<String>>,
+    /// Expected revision. Required when editing curated knowledge; legacy
+    /// clients may omit it while editing only legacy fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_version: Option<i64>,
 }
 
 /// One provider's result from a materialize action.
@@ -2628,6 +2693,16 @@ pub struct ContextPreviewReq {
     /// Override the extra-context markdown (`None` ⇒ use stored config).
     #[serde(default)]
     pub extra_context_md: Option<String>,
+    #[serde(default)]
+    pub goal_md: Option<String>,
+    #[serde(default)]
+    pub memory_md: Option<String>,
+    #[serde(default)]
+    pub decisions_md: Option<String>,
+    #[serde(default)]
+    pub references: Option<Vec<String>>,
+    #[serde(default)]
+    pub artifacts: Option<Vec<String>>,
     /// Override the include-memory toggle (`None` ⇒ use stored config).
     #[serde(default)]
     pub include_memory: Option<bool>,

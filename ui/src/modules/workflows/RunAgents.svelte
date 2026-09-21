@@ -10,7 +10,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import type { WorkflowRun } from '../../lib/api/types';
+  import type { WorkflowRun, Review, Session } from '../../lib/api/types';
+  import { api } from '../../lib/api/client';
+  import { reviewIds, reviewSessions, reviewAgentStatus } from './reviewAgents';
 
   interface Props {
     run: WorkflowRun;
@@ -25,23 +27,59 @@
   // agent step reports its sub-agents (from the parent transcript) before its
   // own session id lands, so an activity-only step is still a group — the
   // sub-agent rows must not wait for the session.
+  let reviews = $state<Record<string, Review>>({});
+  let sessionDetails = $state<Record<string, Session>>({});
+  const relatedIds = $derived([...new Set((run.nodes ?? []).flatMap(reviewIds))]);
+  // Reviews outlive await:false steps and may be retried after the workflow is
+  // complete. Keep their durable association active while this panel is open.
+  // Each effect owns its requests, so a late response cannot enter another run.
+  $effect(() => {
+    const runId = run.id;
+    const ids = relatedIds;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      const results = await Promise.all(ids.map(async (id) => {
+        try { return await api.get<Review>(`/reviews/${id}`); } catch { return null; }
+      }));
+      if (!alive || run.id !== runId) return;
+      for (const review of results) if (review) reviews[review.id] = review;
+      timer = setTimeout(refresh, 2000);
+    }
+    if (ids.length) void refresh();
+    return () => { alive = false; clearTimeout(timer); };
+  });
   const groups = $derived(
     (run.nodes ?? [])
-      .filter((n) => (n.sessions?.length ?? 0) > 0 || (n.activity?.subagents?.length ?? 0) > 0)
       .map((n) => ({
         id: n.node_id,
         status: n.status,
-        sessions: n.sessions ?? [],
+        sessions: reviewSessions(n, reviews),
+        reviews: reviewIds(n).flatMap((id) => reviews[id] ? [reviews[id]] : []),
         activity: n.activity ?? null,
-      })),
+      }))
+      .filter((g) => g.sessions.length > 0 || g.reviews.length > 0 || (g.activity?.subagents.length ?? 0) > 0),
   );
+  // Suspended sessions may be absent from the workspace's live list. Load
+  // metadata once for titles/provider and an elapsed clock that survives reload.
+  $effect(() => {
+    const ids = groups.flatMap((g) => g.sessions);
+    let alive = true;
+    void Promise.all(ids.filter((id) => !sessOf(id)).map(async (id) => {
+      try {
+        const session = await api.get<Session>(`/sessions/${id}`);
+        if (alive) sessionDetails[id] = session;
+      } catch { /* An old deleted session still retains its review label. */ }
+    }));
+    return () => { alive = false; };
+  });
   const runActive = $derived(run.status === 'running' || run.status === 'pending');
 
   // Live "running 3m40s" on sub-agent rows: the same 1s client-side ticker
   // RunSteps uses, alive only while a step actually runs (no network).
   let now = $state(Date.now());
   $effect(() => {
-    if (!(run.nodes ?? []).some((n) => n.status === 'running')) return;
+    if (!(run.nodes ?? []).some((n) => n.status === 'running') && !Object.values(reviews).some((r) => r.status === 'running')) return;
     const iv = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(iv);
   });
@@ -95,12 +133,27 @@
   });
 
   function sessOf(sid: string) {
-    return ws.sessions.find((s) => s.id === sid) ?? null;
+    return ws.sessions.find((s) => s.id === sid) ?? sessionDetails[sid] ?? null;
+  }
+  function reviewAgent(sid: string) {
+    for (const id of relatedIds) {
+      const review = reviews[id];
+      const agent = review?.agents.find((a) => a.session_id === sid);
+      if (agent) return { review, agent, summarizer: review.agents.at(-1) === agent };
+    }
+    return null;
   }
   function sTitle(sid: string): string {
+    const row = reviewAgent(sid);
+    if (row) return row.summarizer ? 'Summarizer' : row.agent.name;
     return sessOf(sid)?.title || 'Session';
   }
+  function sProvider(sid: string): string {
+    return reviewAgent(sid)?.agent.provider || sessOf(sid)?.provider || '';
+  }
   function sStatus(sid: string): string {
+    const row = reviewAgent(sid);
+    if (row) return reviewAgentStatus(row.review, row.agent);
     return ws.statusMap[sid] ?? sessOf(sid)?.status ?? 'idle';
   }
   function shortId(id: string): string {
@@ -131,10 +184,14 @@
               <Icon name={expanded[sid] ? 'chevronDown' : 'chevronRight'} size={12} />
               <span class="s-dot {sStatus(sid)}"></span>
               <span class="s-title">{sTitle(sid)}</span>
-              <span class="s-status">{sStatus(sid)}</span>
+              <span class="s-provider">{sProvider(sid)}</span>
+              <span class="s-status">{sStatus(sid)}{#if ['running', 'waiting'].includes(sStatus(sid))}{' ' + fmtSince(sessOf(sid)?.created_at)}{/if}</span>
               <span class="grow"></span>
               <code class="s-id" title={sid}>{shortId(sid)}</code>
             </button>
+            {#if reviewAgent(sid)?.agent.fallback}
+              <div class="fallback" data-testid="summarizer-fallback">Deterministic fallback — {reviewAgent(sid)?.agent.note}</div>
+            {/if}
             {#if expanded[sid]}
               <div class="term">
                 {#key sid}
@@ -143,6 +200,12 @@
               </div>
             {/if}
           </div>
+        {/each}
+        {#each g.reviews as review (review.id)}
+          {@const summarizer = review.agents.at(-1)}
+          {#if summarizer && !summarizer.session_id}
+            <div class="sub" data-testid="summarizer-without-session">Summarizer · {summarizer.provider || 'claude'} — {reviewAgentStatus(review, summarizer)}{summarizer.fallback ? ' · Deterministic fallback' : ''}</div>
+          {/if}
         {/each}
         <!-- Sub-agents / background tasks the step launched. Display only —
              they have no PTY of their own, so there is nothing to attach. -->
@@ -242,6 +305,14 @@
     white-space: nowrap;
     max-width: 50%;
   }
+  .s-provider {
+    font-size: 10.5px;
+  }
+  .fallback {
+    padding: 4px 8px 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
   .s-status {
     text-transform: capitalize;
     font-size: 10.5px;
@@ -287,7 +358,9 @@
     background: var(--status-working, #28c840);
   }
   .dot.error,
-  .s-dot.exited {
+  .s-dot.exited,
+  .s-dot.error,
+  .s-dot.fallback {
     background: var(--status-exited);
   }
   .dot.pending,

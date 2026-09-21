@@ -97,11 +97,14 @@ modal (`NewSession.svelte`) offers:
 - **Working directory** — *"Defaults to the workspace root"* if blank. Any
   folder on the daemon host works; it does **not** have to be inside a
   workspace, so a one-off job somewhere else needs no new workspace. **Browse…**
-  opens the shared daemon-side folder picker (`GET /fs/browse`, sandboxed to
-  `$HOME` + the data dir — see [daemon-http-api](./daemon-http-api.md)), and the
+  opens the shared daemon-side folder picker (`GET /fs/browse`, using the OS
+  permissions of the daemon account — see [daemon-http-api](./daemon-http-api.md)), and the
   picker provides **Back**, **Forward**, **Up**, and clickable path segments
   for jumping to any ancestor. Search still filters the current listing, with
-  **Show hidden** available. **Favorites** stores folders you pin, and **Recents**
+  **Show hidden** available. Hidden folders such as `.ssh` follow those same OS
+  permissions. If opening a folder fails, the error identifies the attempted path;
+  the breadcrumb is labeled **Last opened folder**, with a button to return there.
+  **Favorites** stores folders you pin, and **Recents**
   lists the last 20 distinct folders opened. These shortcuts persist locally
   for the current daemon/user; every jump still checks access permissions. The same navigation appears in every shared
   folder/file picker across Otto. The working-directory field offers your recently used directories (this workspace's root first, then
@@ -357,6 +360,36 @@ on `claude`/`codex` repaints.
   pins and focuses it; scrolling a live tile off-screen (over budget) tears down
   its WS so the session can re-suspend. Without this, opening a tiled view of M
   suspended sessions would wake all M agents (~200 MB each) at once.
+
+### Clickable URLs and file references
+
+In a local agent terminal, click an HTTP(S) URL to open the system browser, or a
+file reference such as `ui/src/App.svelte:42:3`, `../Cargo.toml#L8`, or
+`/tmp/report.md` to open the Files viewer. Hover shows the resolved target.
+Relative paths and source basenames such as `SKILL.md` resolve from the session's
+saved working folder. A CLI may print only a basename for a nested file; Otto
+cannot infer its hidden directory. Use the full path if the resolved file is
+missing; the viewer error includes the attempted path. Changing directories
+inside a shell command does not change that saved session folder.
+
+Soft-wrapped paths remain clickable across rows. Explicit filesystem paths can
+include spaces, such as `/Users/me/Library/Application Support/report.md`.
+Provider-rendered paths may also span hard terminal rows: Otto recognizes bounded
+continuations of a single styled or delimited path, retaining the complete target
+when either fragment is clicked. Separate file references are not concatenated.
+Quoted paths, Markdown destinations and OSC 8 hyperlinks make ambiguous filename
+boundaries explicit. Native OSC 8 destinations take
+precedence over their visible labels. Only HTTP(S) and local file destinations
+are dispatched; text is never executed as a shell command, and agent task names
+such as `/root/git_fetch` do not become application routes. Remote connection
+terminals and guest-share terminals provide URL links only.
+
+Opening an explicit file navigates the primary Files section to that file's
+parent folder without changing the active workspace or the session's cwd. The
+file remains visible even if its parent cannot be listed, or no workspace is
+selected. File reads and folder listings follow the daemon's macOS permissions;
+a failed read displays its path and error. New clicks replace older pending
+reads, so a slow response cannot replace the latest file.
 
 ### Copy & paste
 

@@ -218,7 +218,7 @@ def _require(
         findings.append(_finding(rule, path, message))
 
 
-def _audit_api(path: str, sections: Dict[str, str], findings: List[Dict[str, str]]) -> None:
+def _audit_api(path: str, sections: Dict[str, str], findings: List[Dict[str, str]], has_sources: bool = False) -> None:
     authentication = _section(sections, "Authentication", "Authorization")
     parameters = _section(sections, "Parameters", "Path and Query Parameters")
     request = _section(sections, "Request", "Request Body")
@@ -248,10 +248,10 @@ def _audit_api(path: str, sections: Dict[str, str], findings: List[Dict[str, str
     _require(findings, _has_depth(validation), "Q_API_VALIDATION", path, "API endpoint needs validation rules")
     _require(findings, _has_depth(side_effects), "Q_API_SIDE_EFFECTS", path, "API endpoint needs side effects or an explicit none")
     _require(findings, _has_depth(flow), "Q_API_FLOW", path, "API endpoint needs a link or description of its runtime flow")
-    _require(findings, bool(citations) and bool(LINK_RE.search(citations)), "Q_CITATIONS", path, "Concept needs source citations")
+    _require(findings, has_sources or (bool(citations) and bool(LINK_RE.search(citations))), "Q_CITATIONS", path, "Concept needs source citations")
 
 
-def _audit_data(path: str, sections: Dict[str, str], findings: List[Dict[str, str]]) -> None:
+def _audit_data(path: str, sections: Dict[str, str], findings: List[Dict[str, str]], has_sources: bool = False) -> None:
     overview = _section(sections, "Overview")
     fields = _section(sections, "Schema", "Fields")
     access = _section(sections, "Access Paths", "Reads and Writes", "Access Patterns")
@@ -335,7 +335,7 @@ def _audit_data(path: str, sections: Dict[str, str], findings: List[Dict[str, st
         path,
         "Data asset needs a realistic query or payload example",
     )
-    _require(findings, bool(citations) and bool(LINK_RE.search(citations)), "Q_CITATIONS", path, "Concept needs source citations")
+    _require(findings, has_sources or (bool(citations) and bool(LINK_RE.search(citations))), "Q_CITATIONS", path, "Concept needs source citations")
 
 
 def audit_bundle(root: Path) -> List[Dict[str, str]]:
@@ -359,9 +359,11 @@ def audit_bundle(root: Path) -> List[Dict[str, str]]:
         if read_error or not present or parse_error or not frontmatter.get("type"):
             continue
         concept_type = str(frontmatter["type"]).strip().lower()
+        sources = validate_okf.optional_metadata(text).get("sources", [])
+        has_sources = isinstance(sources, list) and any(isinstance(source, dict) and validate_okf._nonempty(source.get("resource")) for source in sources)
         sections = _sections(body)
         if concept_type in {"api endpoint", "endpoint", "http endpoint", "rpc endpoint"}:
-            _audit_api(relative, sections, findings)
+            _audit_api(relative, sections, findings, has_sources)
         if concept_type in {
             "bigquery table",
             "collection",
@@ -371,7 +373,7 @@ def audit_bundle(root: Path) -> List[Dict[str, str]]:
             "redis key",
             "table",
         }:
-            _audit_data(relative, sections, findings)
+            _audit_data(relative, sections, findings, has_sources)
 
     findings.sort(key=lambda item: (item["path"], item["rule"], item["message"]))
     return findings

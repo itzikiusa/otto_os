@@ -3,8 +3,11 @@
   // title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import AccountPicker from '../../lib/components/AccountPicker.svelte';
+  import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import ContextPreview from './ContextPreview.svelte';
+  import { router } from '../../lib/router.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -68,6 +71,10 @@
   // Model pinned for THIS session only ('' = provider default). Reset on
   // provider switch — model ids are provider-specific.
   let model = $state('');
+  let accountIds = $state<Record<string, string>>({});
+  let networkProfileId = $state('');
+  const networkWorkspace = $derived(scratchMode ? SCRATCH_WORKSPACE_ID : ws.current!.id);
+  $effect(() => { void networkWorkspace; networkProfileId = ''; });
   let title = $state('');
   let cwd = $state('');
   let browser = $state(false);
@@ -178,7 +185,7 @@
       return;
     }
     const t = e.target as HTMLElement | null;
-    if (t && (t.closest('input, textarea, [contenteditable="true"]') || gridEl?.contains(t))) return;
+    if (t && (t.closest('input, textarea, select, [contenteditable="true"]') || gridEl?.contains(t))) return;
     onProviderKeydown(e);
   }
 
@@ -282,6 +289,8 @@
       const failures: string[] = [];
       for (const [i, p] of spawns.entries()) {
         const meta: Record<string, unknown> = {};
+        if (accountIds[p]) meta.account_id = accountIds[p];
+        if (networkProfileId) meta.network_profile_id = networkProfileId;
         if (browser && (p === 'claude' || p === 'codex')) meta.browser = true;
         if (dirs.length > 0) meta.extra_dirs = dirs;
         try {
@@ -432,9 +441,19 @@
 
   <!-- Hidden entirely when the provider's spec has no model-flag template, and
        for a mixed batch (model ids are provider-specific). -->
+    {#each chosen.filter((p) => p === 'claude' || p === 'codex') as accountProvider (accountProvider)}
+      <AccountPicker provider={accountProvider} value={accountIds[accountProvider] || ''}
+        workspaceId={scratchMode ? SCRATCH_WORKSPACE_ID : ws.current!.id}
+        onchange={(id) => (accountIds[accountProvider] = id)} />
+    {/each}
   {#if supportsModel}
     <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
   {/if}
+
+  {#if auth.can('connections', 'view')}
+    <NetworkProfilePicker workspaceId={networkWorkspace} value={networkProfileId} onchange={(id) => networkProfileId = id} editable={auth.can('connections', 'edit') && (scratchMode || ws.myRole !== 'viewer')} disabled={busy} />
+  {/if}
+
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>

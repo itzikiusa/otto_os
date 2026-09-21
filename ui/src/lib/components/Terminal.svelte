@@ -18,7 +18,8 @@
   import { viewport } from '../stores/viewport.svelte';
   import { ws } from '../stores/workspace.svelte';
   import { openFile } from '../stores/openfile.svelte';
-  import { openExternal, isExternalUrl } from '../external';
+  import { openExternal } from '../external';
+  import { terminalLinksForRow, resolveTerminalFile, oscTerminalLink, type TerminalLink } from './terminalLinks';
   import { keyContext } from '../keys';
   import { copyText } from '../clipboard';
   import { snipApi } from '../snip';
@@ -777,162 +778,39 @@
     }
   }
 
-  // ── Clickable links (URLs, `file:line(:col)`, plain absolute paths) ────────
-  // Implemented with xterm's built-in registerLinkProvider (no web-links addon
-  // dependency). For each buffer line we scan the text and surface ranges for:
-  //   • http(s) URLs            → open in the system browser (openExternal)
-  //   • path:line(:col) refs    → open the file in the Files panel at the line
-  //   • absolute paths (/… ~/…) → open the file in the Files panel viewer
-  //     (agents often print bare output paths, e.g. "Findings were written
-  //     to: /var/folders/…/review.json" — the viewer reads any absolute path,
-  //     including ones outside the session's file-tree root)
-  // Detection is conservative to avoid turning ordinary prose into dead links.
-
-  interface LinkHit {
-    /** 0-based [start, end) character offsets within the line string. */
-    start: number;
-    end: number;
-    kind: 'url' | 'file';
-    text: string;
-    /** file refs only */
-    path?: string;
-    line?: number;
-    col?: number;
+  // Native OSC8 has xterm priority; text links supplement it without ever
+  // interpreting output as a shell command or application route.
+  function localFileContext(): { cwd: string; allowed: boolean } {
+    const session = ws.sessions.find(s => s.id === sessionId);
+    return { cwd: session?.cwd ?? '', allowed: !shareToken && session?.kind === 'agent' };
   }
 
-  // URLs: stop at whitespace and characters that are almost never *inside* a URL
-  // but commonly trail one in prose. Trailing punctuation is trimmed afterwards.
-  const URL_RE = /\bhttps?:\/\/[^\s<>"'`(){}\[\]]+/gi;
-  // file:line(:col) — require a file extension (1–8 alnum chars) right before the
-  // `:line` so we don't match clock times (12:34). The path may be absolute (an
-  // optional leading `/`) or relative; it allows dirs, `.`, `~`, `@`, `+`, `-`,
-  // `_`. The negative lookbehind deliberately does NOT include `/`, so a leading
-  // `/abs/path` isn't blocked. `host:port` false positives (example.com:8080) are
-  // filtered in scanLine via SOURCE_FILE_EXTS for refs that contain no `/`.
-  const FILE_RE = /(?<![\w.@~+-])(\/?(?:[\w.@~+-]+\/)*[\w.@~+-]+\.([A-Za-z0-9]{1,8})):(\d+)(?::(\d+))?\b/g;
-  // Plain absolute path with NO trailing `:line` — rooted at `/` or `~/`, at
-  // least one directory segment, and a 1–8 char extension so bare prose words
-  // never match. Ranges already claimed by a URL or `path:line` hit win.
-  const ABS_PATH_RE = /(?<![\w.@~+-])(?:~\/|\/)(?:[\w.@+-]+\/)+[\w.@+-]+\.([A-Za-z0-9]{1,8})\b/g;
-
-  // Source/text file extensions we'll treat as a file link even when the ref has
-  // no `/` (so `file.go:7` links but `example.com:8080` / `redis.io:6379` don't).
-  // Refs that DO contain a `/` always link (an explicit path).
-  const SOURCE_FILE_EXTS = new Set([
-    'rs', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'go', 'py', 'rb', 'java', 'kt',
-    'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'swift', 'scala', 'sh', 'bash',
-    'zsh', 'sql', 'html', 'css', 'scss', 'svelte', 'vue', 'json', 'toml', 'yaml',
-    'yml', 'md', 'txt', 'xml', 'proto', 'lock', 'cfg', 'ini', 'env',
-  ]);
-
-  /** Trim trailing punctuation that's likely sentence/markup, not part of the URL. */
-  function trimUrl(raw: string): string {
-    let s = raw;
-    // Drop a trailing unbalanced closing paren/bracket and common terminators.
-    while (s.length > 1 && /[.,;:!?'"]$/.test(s)) s = s.slice(0, -1);
-    if (s.endsWith(')') && !s.includes('(')) s = s.slice(0, -1);
-    if (s.endsWith(']') && !s.includes('[')) s = s.slice(0, -1);
-    return s;
-  }
-
-  /** Scan one rendered buffer-line string for URL + file:line hits. */
-  function scanLine(text: string): LinkHit[] {
-    const hits: LinkHit[] = [];
-
-    URL_RE.lastIndex = 0;
-    for (let m = URL_RE.exec(text); m; m = URL_RE.exec(text)) {
-      const trimmed = trimUrl(m[0]);
-      if (trimmed.length < 'http://a'.length) continue;
-      hits.push({ start: m.index, end: m.index + trimmed.length, kind: 'url', text: trimmed });
+  function activateLink(event: MouseEvent, link: TerminalLink): void {
+    event.preventDefault();
+    if (link.kind === 'url') {
+      void openExternal(link.text);
+    } else if (link.path) {
+      const context = localFileContext();
+      const path = context.allowed ? resolveTerminalFile(link.path, context.cwd) : null;
+      if (path) openFile.open(path, link.line, link.col);
     }
-
-    // `file:line` links only make sense for agent sessions: they open paths in
-    // the local Files panel. SSH/DB connection sessions show a REMOTE filesystem
-    // the local Files panel can't resolve, so we surface URLs only there.
-    const isAgent = ws.sessions.find((s) => s.id === sessionId)?.kind === 'agent';
-    if (!isAgent) return hits;
-
-    FILE_RE.lastIndex = 0;
-    for (let m = FILE_RE.exec(text); m; m = FILE_RE.exec(text)) {
-      const start = m.index;
-      const end = m.index + m[0].length;
-      // Skip file refs that sit inside a URL we already matched (e.g. a port).
-      if (hits.some((h) => h.kind === 'url' && start < h.end && end > h.start)) continue;
-      const path = m[1];
-      const ext = m[2].toLowerCase();
-      const line = Number(m[3]);
-      const col = m[4] ? Number(m[4]) : undefined;
-      if (!Number.isFinite(line) || line < 1) continue;
-      // A ref with no `/` separator could be `host:port` (example.com:8080) — only
-      // treat it as a file link if its extension is a known source/text type. Any
-      // ref containing a `/` is an explicit path and always links.
-      if (!path.includes('/') && !SOURCE_FILE_EXTS.has(ext)) continue;
-      hits.push({ start, end, kind: 'file', text: m[0], path, line, col });
-    }
-
-    // Plain absolute paths (no :line). A `path:line` hit's path prefix overlaps
-    // its claimed range, so the overlap check also dedupes those.
-    ABS_PATH_RE.lastIndex = 0;
-    for (let m = ABS_PATH_RE.exec(text); m; m = ABS_PATH_RE.exec(text)) {
-      const start = m.index;
-      const end = m.index + m[0].length;
-      if (hits.some((h) => start < h.end && end > h.start)) continue;
-      hits.push({ start, end, kind: 'file', text: m[0], path: m[0] });
-    }
-    return hits;
   }
 
-  /** Resolve a (possibly relative) file path against the session cwd. */
-  function resolvePath(p: string): string {
-    if (p.startsWith('/') || p.startsWith('~')) return p;
-    const cwd = ws.sessions.find((s) => s.id === sessionId)?.cwd;
-    if (!cwd) return p;
-    return `${cwd.replace(/\/$/, '')}/${p}`;
-  }
-
-  /** Build the xterm link provider that surfaces every URL + file:line hit on a line. */
   function makeLinkProvider(): LinkProvider {
     return {
-      provideLinks(bufferLineNumber, callback) {
-        const buf = term?.buffer.active;
-        const line = buf?.getLine(bufferLineNumber - 1);
-        if (!line) {
-          callback(undefined);
-          return;
-        }
-        const text = line.translateToString(true);
-        const cols = term?.cols ?? text.length;
-        const hits = scanLine(text);
-        if (hits.length === 0) {
-          callback(undefined);
-          return;
-        }
-        const links = hits.map((h) => {
-          // xterm buffer coords are 1-based; clamp the end to the row width.
-          // IBufferRange.end.x is 1-based *inclusive* while h.end is exclusive,
-          // so the two cancel out — no `+ 1` on the end (that would over-extend
-          // the clickable range by one cell).
-          const startX = h.start + 1;
-          const endX = Math.min(h.end, cols);
-          return {
-            text: h.text,
-            range: {
-              start: { x: startX, y: bufferLineNumber },
-              end: { x: endX, y: bufferLineNumber },
-            },
-            decorations: { pointerCursor: true, underline: true },
-            activate: (event: MouseEvent) => {
-              event.preventDefault();
-              if (h.kind === 'url') {
-                // Defence-in-depth: only ever hand http(s) to the OS browser.
-                if (isExternalUrl(h.text)) void openExternal(h.text);
-              } else if (h.path) {
-                openFile.open(resolvePath(h.path), h.line, h.col);
-              }
-            },
-          };
-        });
-        callback(links);
+      provideLinks(row, callback) {
+        const buffer = term?.buffer.active;
+        if (!buffer) { callback(undefined); return; }
+        const context = localFileContext();
+        const hits = terminalLinksForRow(buffer, row, context.allowed);
+        callback(hits.map(hit => ({
+          text: hit.text,
+          range: hit.range,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event: MouseEvent) => activateLink(event, hit),
+          hover: () => { if (term?.element) term.element.title = hit.path ? (resolveTerminalFile(hit.path, context.cwd) ?? hit.path) : hit.text; },
+          leave: () => { term?.element?.removeAttribute('title'); },
+        })));
       },
     };
   }
@@ -960,6 +838,14 @@
       cursorWidth: 2,
       cursorBlink: true,
       allowProposedApi: true,
+      linkHandler: {
+        allowNonHttpProtocols: true,
+        activate(event, target) {
+          const context = localFileContext();
+          const link = oscTerminalLink(target, context.cwd, context.allowed);
+          if (link) activateLink(event, link);
+        },
+      },
       // Keep fallback-font glyphs (e.g. Hebrew from Cousine) inside their grid
       // cell when their advance width differs from the primary font's cell.
       rescaleOverlappingGlyphs: true,

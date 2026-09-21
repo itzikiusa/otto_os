@@ -3,9 +3,13 @@
   import { toasts } from '../../lib/toast.svelte';
   import SessionView from '../agents/SessionView.svelte';
   import IterationRow from './IterationRow.svelte';
+  import { humanVerification } from './verification';
   import type { GoalLoop } from '../../lib/api/types';
 
   let { id, onback }: { id: string; onback: () => void } = $props();
+
+  let answers = $state<Record<string, string>>({});
+  let evidence = $state<Record<string, string>>({});
 
   let openSessionId = $state<string | null>(null);
 
@@ -62,7 +66,7 @@
         <button class="btn" onclick={() => act(() => loops.pause(id), 'Pause')}>Pause</button>
         <button class="btn danger" onclick={() => act(() => loops.stop(id), 'Stop')}>Stop</button>
       {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
-        <button class="btn primary" onclick={() => act(() => loops.resume(id), 'Resume')}>Resume</button>
+        <button class="btn primary" disabled={loop.ledger?.questions.some(q => !q.answer)} onclick={() => act(() => loops.resume(id), 'Resume')}>Resume</button>
         <button class="btn danger" onclick={() => act(() => loops.stop(id), 'Stop')}>Stop</button>
         <button class="btn ghost" onclick={del}>Delete</button>
       {:else}
@@ -98,12 +102,37 @@
       <p class="errline">{loop.error}</p>
     {/if}
 
+    {#if loop.worktree_path}<p class="muted">Retained work: <code>{loop.worktree_path}</code></p>{/if}
+    {#if loop.ledger?.next_action}<p class="summary"><strong>Next action:</strong> {loop.ledger.next_action}</p>{/if}
+    {#if loop.ledger?.review_summary}
+      <details><summary>Completion review · {loop.ledger.review_passed ? 'passed' : 'needs attention'}</summary><pre>{loop.ledger.review_summary}</pre></details>
+    {/if}
+    {#each loop.ledger?.questions ?? [] as q (q.id)}
+      <section class="goal">
+        <h3>Decision needed</h3><p>{q.question}</p>
+        {#if q.answer}<p>{q.answer} <span class="dim">— {q.answered_by}</span></p>
+        {:else}
+          <textarea aria-label="Answer question" bind:value={answers[q.id]}></textarea>
+          <button class="btn" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked'} onclick={() => act(() => loops.answerQuestion(id, q.id, answers[q.id]), 'Answer')}>Record answer</button>
+        {/if}
+      </section>
+    {/each}
     <section class="goal">
       <h3>Goal</h3>
       <p class="muted">{loop.definition.summary || loop.definition.title}</p>
       <ul class="crit-list">
         {#each loop.definition.acceptance_criteria as c (c.id)}
-          <li><strong>{c.id}</strong> {c.text} <span class="mono dim">— {c.verify}</span></li>
+          <li><strong>{c.id}</strong> {c.text} <span class="mono dim">— {c.verify}</span>
+            {#if c.verify_kind === 'human'}
+              {@const approval = humanVerification(c, loop.ledger)}
+              {#if approval}<p>Verified by {approval.verified_by}: {approval.evidence}</p>
+              {:else}
+                <p class="dim">Human verification required</p>
+                <textarea aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
+                <button class="btn small" disabled={!evidence[c.id]?.trim() || !['paused', 'blocked', 'exhausted'].includes(loop.status)} onclick={() => act(() => loops.verifyCriterion(id, c.id, evidence[c.id]), 'Verification')}>Record verification</button>
+              {/if}
+            {/if}
+          </li>
         {/each}
       </ul>
     </section>
@@ -130,6 +159,7 @@
             iter={it}
             loopId={id}
             loopStatus={loop.status}
+            executorCount={loop.config.executors.length}
             open={i === 0}
             onopensession={(sid) => (openSessionId = sid)}
           />
@@ -140,6 +170,8 @@
 </div>
 
 <style>
+  textarea { width: 100%; min-height: 60px; box-sizing: border-box; background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .detail {
     padding: 16px 22px;
     overflow-y: auto;

@@ -1351,7 +1351,7 @@ pub struct AcceptanceCriterion {
     pub text: String,
     /// How to check this criterion (a test command, a file to inspect, behavior).
     pub verify: String,
-    /// "command" | "manual".
+    /// "command" | "agent" | "human". Legacy "manual" means agent-assessed.
     #[serde(default = "default_verify_kind")]
     pub verify_kind: String,
     /// Shell command run in the worktree when `verify_kind == "command"`.
@@ -1382,8 +1382,8 @@ pub struct GoalLoopDefinition {
 }
 
 /// Hard limits, enforced at phase boundaries. `max_runtime_secs` counts ACTIVE
-/// time (pausing does not refund it). `max_cost_usd` is advisory (cost lands
-/// late). `per_phase_timeout_secs` wraps every agent turn.
+/// time (pausing does not refund it). `max_cost_usd` is reserved: accounting
+/// is not wired and non-null limits are rejected. `per_phase_timeout_secs` wraps every agent turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalLoopLimits {
     pub max_iterations: u32,
@@ -1425,8 +1425,8 @@ pub struct GoalLoopAgentCfg {
     pub prompt_extra: String,
 }
 
-/// A non-executor role (planner / evaluator / digester / definer) — a single
-/// headless agent turn with its own prompt + model.
+/// A non-executor role (planner / evaluator / digester / definer) — a managed
+/// agent turn with its own provider, prompt and model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GoalLoopRoleCfg {
     pub provider: String,
@@ -1439,6 +1439,17 @@ pub struct GoalLoopRoleCfg {
 /// just a goal + budget.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalLoopConfig {
+    /// Local commits require explicit opt-in. Push and publishing are never implicit.
+    #[serde(default)]
+    pub allow_commits: bool,
+    #[serde(default = "default_goal_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub source_links: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub require_review: bool,
     pub executors: Vec<GoalLoopAgentCfg>,
     pub planner: GoalLoopRoleCfg,
     pub evaluator: GoalLoopRoleCfg,
@@ -1446,9 +1457,16 @@ pub struct GoalLoopConfig {
     pub definer: GoalLoopRoleCfg,
 }
 
+fn default_goal_mode() -> String { "build".into() }
+
 impl Default for GoalLoopConfig {
     fn default() -> Self {
         Self {
+            allow_commits: false,
+            mode: default_goal_mode(),
+            source_links: Vec::new(),
+            skills: Vec::new(),
+            require_review: false,
             executors: vec![GoalLoopAgentCfg {
                 name: "Executor".to_string(),
                 provider: "claude".to_string(),
@@ -1532,6 +1550,58 @@ pub struct GoalLoopEvaluation {
     pub rationale: String,
 }
 
+/// Human records are written only by authenticated checkpoint endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalHumanVerification {
+    pub criterion_id: String,
+    pub criterion_revision: String,
+    pub verified_by: Id,
+    pub evidence: String,
+    pub verified_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalQuestion {
+    pub id: Id,
+    pub question: String,
+    pub answer: Option<String>,
+    pub answered_by: Option<Id>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+/// Structured durable handoff alongside the narrative digest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GoalLoopLedger {
+    #[serde(default)]
+    pub verifications: Vec<GoalHumanVerification>,
+    #[serde(default)]
+    pub questions: Vec<GoalQuestion>,
+    #[serde(default)]
+    pub next_action: String,
+    #[serde(default)]
+    pub last_failure_signature: String,
+    #[serde(default)]
+    pub repeated_failures: u32,
+    #[serde(default)]
+    pub review_summary: String,
+    #[serde(default)]
+    pub review_passed: bool,
+}
+
+impl AcceptanceCriterion {
+    /// Exact serialized contract, independent of evaluator prose.
+    pub fn revision(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+impl GoalLoopLedger {
+    pub fn verification(&self, criterion: &AcceptanceCriterion) -> Option<&GoalHumanVerification> {
+        self.verifications.iter().find(|v| v.criterion_id == criterion.id
+            && v.criterion_revision == criterion.revision() && !v.evidence.trim().is_empty())
+    }
+}
+
 /// A goal loop run: the goal + config + live progress pointer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalLoop {
@@ -1553,6 +1623,8 @@ pub struct GoalLoop {
     /// Running narrative memory (secondary; the worktree is primary context).
     #[serde(default)]
     pub context_digest: String,
+    #[serde(default)]
+    pub ledger: GoalLoopLedger,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -2627,6 +2699,15 @@ impl Feature {
 #[cfg(test)]
 mod tests {
     use super::{Capability, Feature, ReviewStatus};
+
+    #[test]
+    fn goal_loop_defaults_forbid_commits_and_keep_review_explicit() {
+        let value = serde_json::to_value(super::GoalLoopConfig::default()).unwrap();
+        assert_eq!(value["allow_commits"], false);
+        assert_eq!(value["mode"], "build");
+        assert_eq!(value["require_review"], false);
+    }
+
 
     #[test]
     fn capability_orders_and_roundtrips() {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
@@ -1831,13 +1832,13 @@
                 oninput={(e) => onParam('msg', e.currentTarget.value)}
               ></textarea>
               <label for="mt-wd">Working directory (where agents run)</label>
-              <input
+              <PathField value={paramStr('working_directory')} onpick={(path) => onParam('working_directory', path)}><input
                 id="mt-wd"
                 type="text"
                 placeholder="~/path/to/repo (default: workspace root)"
                 value={paramStr('working_directory')}
                 oninput={(e) => onParam('working_directory', e.currentTarget.value)}
-              />
+              /></PathField>
               <label for="mt-repo">Repo ID (for review / PR steps)</label>
               <input
                 id="mt-repo"

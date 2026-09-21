@@ -77,6 +77,8 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  // Old bookmarks lead to the workspace's existing context editor.
+  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
@@ -298,6 +300,24 @@
       unlistenClose?.();
       window.removeEventListener('contextmenu', suppressNativeMenu);
       window.removeEventListener('click', onLinkClick, { capture: true });
+    };
+  });
+
+  // Open Git tabs remain fresh while working in other modules. Only the
+  // visible, focused window schedules network work; focus resumes due repos.
+  $effect(() => {
+    let stopped = false;
+    void untrack(() => git.initializeOpenTabs()).then(() => {
+      if (!stopped) git.startAutoFetch();
+    });
+    const wake = (): void => git.requestAutoFetch();
+    window.addEventListener('focus', wake);
+    document.addEventListener('visibilitychange', wake);
+    return () => {
+      stopped = true;
+      window.removeEventListener('focus', wake);
+      document.removeEventListener('visibilitychange', wake);
+      git.stopAutoFetch();
     };
   });
 

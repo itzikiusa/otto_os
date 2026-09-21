@@ -9,7 +9,17 @@ title: Orders
 description: Stores one row per accepted order.
 resource: "postgresql://commerce/orders"
 tags: [orders, transactional]
-timestamp: 2026-07-12T09:00:00Z
+generated: {by: otto/example-v1, at: 2026-07-12T09:00:00Z}
+sources:
+  - id: source-1
+    resource: "../../migrations/0042_orders.sql#L1"
+    title: "Orders migration"
+  - id: source-2
+    resource: "../../src/orders/repository.rs#L20"
+    title: "Order repository"
+  - id: source-3
+    resource: "../../src/orders/archive.rs#L31"
+    title: "Archive worker"
 ---
 
 # Overview
@@ -73,9 +83,9 @@ flowchart LR
   OUTBOX --> PUB[Event publisher]
 ```
 
-# Citations
+Source locations for this illustrative example.[^source-1][^source-2][^source-3]
 
-[1] [Orders migration](../../migrations/0042_orders.sql#L1)
-[2] [Order repository](../../src/orders/repository.rs#L20)
-[3] [Archive worker](../../src/orders/archive.rs#L31)
+[^source-1]: Orders migration
+[^source-2]: Order repository
+[^source-3]: Archive worker
 ````

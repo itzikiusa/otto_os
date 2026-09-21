@@ -18,6 +18,7 @@ pub mod id;
 pub mod paths;
 pub mod proof;
 pub mod provider;
+pub mod provider_accounts;
 pub mod redact;
 pub mod run;
 pub mod secrets;
@@ -26,3 +27,5 @@ pub mod workref;
 
 pub use error::{Error, Result};
 pub use id::{new_id, Id};
+
+pub mod network_profiles;

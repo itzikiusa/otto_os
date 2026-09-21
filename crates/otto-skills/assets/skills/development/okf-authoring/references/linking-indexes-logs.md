@@ -59,4 +59,4 @@ Deprecate durable history rather than deleting it: add a visible concept note an
 
 For Obsidian, convert `[[Note]]` to standard Markdown, aliases to link text, heading suffixes to anchors, inline tags to `tags`, embeds to links, callouts to blockquotes, and MOC notes to `index.md`.
 
-For Notion, map Name to `title`, Tags to `tags`, URL to `resource`, and Last edited to `timestamp`; strip export UUID suffixes from filenames and links. In both conversions, add a factual `type`, preserve content, update links, and run conformance plus quality audits.
+For Notion, map Name to `title`, Tags to `tags`, URL to `resource`, and Last edited to `generated.at` with an evidence-backed author in `generated.by` (or retain legacy `timestamp` for v0.1); strip export UUID suffixes from filenames and links. In both conversions, add a factual `type`, preserve content, update links, and run conformance plus quality audits.

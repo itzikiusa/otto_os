@@ -73,6 +73,15 @@ class LoopsStore {
     await this.lifecycle(id, 'stop');
   }
 
+  async verifyCriterion(id: string, criterion: string, evidence: string): Promise<void> {
+    await api.post(`/goal-loops/${id}/criteria/${encodeURIComponent(criterion)}/verify`, { evidence });
+    await this.loadDetail(id);
+  }
+  async answerQuestion(id: string, question: string, answer: string): Promise<void> {
+    await api.post(`/goal-loops/${id}/questions/${question}/answer`, { answer });
+    await this.loadDetail(id);
+  }
+
   async retryExecutor(id: string, iterIdx: number, agentIndex: number): Promise<void> {
     await api.post(`/goal-loops/${id}/iterations/${iterIdx}/agents/${agentIndex}/retry`);
     await this.loadDetail(id);

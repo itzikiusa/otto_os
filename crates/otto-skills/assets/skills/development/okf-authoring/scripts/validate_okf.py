@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic, read-only OKF v0.1 conformance validator."""
+"""Deterministic, read-only OKF v0.2/v0.1 conformance validator."""
 
 import argparse
+from datetime import datetime
 import json
 import posixpath
 import re
@@ -103,6 +104,146 @@ def parse_frontmatter(text: str) -> Tuple[bool, bool, Dict[str, Optional[str]], 
         last_key = key
 
     return True, parse_error, values, "".join(lines[closing + 1 :])
+
+
+def _flow_parts(raw: str) -> List[str]:
+    """Split the documented YAML flow forms without splitting quoted URLs."""
+    parts, start, depth, quote, escaped = [], 0, 0, None, False
+    for index, char in enumerate(raw):
+        if quote:
+            if char == quote and not escaped:
+                quote = None
+            escaped = char == "\\" and not escaped
+        elif char in "\"'":
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(raw[start:index].strip())
+            start = index + 1
+    parts.append(raw[start:].strip())
+    return [part for part in parts if part]
+
+
+def _metadata_value(raw: str):
+    raw = raw.strip()
+    quote, escaped = None, False
+    for index, char in enumerate(raw):
+        if quote:
+            if char == quote and not escaped:
+                quote = None
+            escaped = char == "\\" and not escaped
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (index == 0 or raw[index - 1].isspace()):
+            raw = raw[:index].rstrip()
+            break
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", raw):
+        return float(raw) if "." in raw else int(raw)
+    if raw.startswith("{") and raw.endswith("}"):
+        result = {}
+        for item in _flow_parts(raw[1:-1]):
+            key, separator, value = item.partition(":")
+            if separator:
+                result[key.strip().strip("\"'")] = _metadata_value(value)
+        return result
+    if raw.startswith("[") and raw.endswith("]"):
+        return [_metadata_value(item) for item in _flow_parts(raw[1:-1])]
+    return _scalar(raw)
+
+
+def optional_metadata(text: str) -> dict:
+    """Read common block/flow mappings and lists, without executing YAML tags.
+
+    This advisory reader is deliberately not a complete YAML implementation.
+    Anchors, tags and multiline flow syntax need Otto's full runtime parser.
+    Unknown keys are untouched; malformed optional shapes remain warnings.
+    """
+    lines = text.lstrip("\ufeff").splitlines()
+    if not lines or lines[0] != "---":
+        return {}
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return {}
+    entries = [(len(line) - len(line.lstrip()), line.strip()) for line in lines[1:end]
+               if line.strip() and not line.lstrip().startswith("#")]
+
+    def block(index, indent):
+        sequence = entries[index][1].startswith("- ")
+        result = [] if sequence else {}
+        while index < len(entries) and entries[index][0] == indent:
+            content = entries[index][1]
+            if sequence:
+                if not content.startswith("- "):
+                    break
+                content = content[2:].strip()
+                if content.startswith(("{", "[")):
+                    value = _metadata_value(content)
+                elif KEY_RE.match(content):
+                    key, rest = KEY_RE.match(content).groups()
+                    value = {key: _metadata_value(rest)}
+                else:
+                    value = _metadata_value(content)
+                index += 1
+                if index < len(entries) and entries[index][0] > indent:
+                    child, index = block(index, entries[index][0])
+                    if isinstance(value, dict) and isinstance(child, dict):
+                        value.update(child)
+                result.append(value)
+            else:
+                match = KEY_RE.match(content)
+                index += 1
+                if not match:
+                    continue
+                key, rest = match.groups()
+                value = _metadata_value(rest)
+                if index < len(entries) and entries[index][0] > indent:
+                    child, index = block(index, entries[index][0])
+                    if not rest.strip() or rest.lstrip().startswith("#"):
+                        value = child
+                result[key] = value
+        return result, index
+
+    return block(0, entries[0][0])[0] if entries else {}
+
+
+def _nonempty(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _datetime(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return "T" in value and parsed.utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def optional_metadata_warnings(metadata: dict) -> List[str]:
+    warnings = []
+    def event(value):
+        return isinstance(value, dict) and _nonempty(value.get("by")) and _datetime(value.get("at"))
+    if "generated" in metadata and not event(metadata["generated"]):
+        warnings.append("`generated` should carry nonempty `by` and an offset-bearing ISO datetime `at`")
+    if "verified" in metadata:
+        value = metadata["verified"]
+        events = [value] if isinstance(value, dict) else value
+        if not isinstance(events, list) or not all(event(item) for item in events):
+            warnings.append("`verified` should be a {by, at} mapping or list of verification mappings")
+    if "sources" in metadata:
+        value = metadata["sources"]
+        if not isinstance(value, list) or not all(isinstance(item, dict) and _nonempty(item.get("resource")) for item in value):
+            warnings.append("`sources` should be a list of mappings with a nonempty `resource` (path, URI or scope descriptor)")
+    if "status" in metadata and metadata["status"] not in ("draft", "stable", "deprecated"):
+        warnings.append("recommended lifecycle `status` values are draft, stable or deprecated")
+    if "stale_after" in metadata and not _datetime(metadata["stale_after"]):
+        warnings.append("`stale_after` should be an absolute ISO datetime with a UTC offset")
+    return warnings
 
 
 def _markdown_files(root: Path) -> List[Path]:
@@ -255,14 +396,19 @@ def validate_bundle(root: Path) -> Dict[str, object]:
                     "missing recommended `title` and/or `description`",
                 )
             )
-        if "timestamp" not in frontmatter:
+        metadata = optional_metadata(text)
+        changed_at = metadata.get("generated", {}).get("at") if isinstance(metadata.get("generated"), dict) else None
+        if "generated" not in metadata:
+            changed_at = frontmatter.get("timestamp")
+        if not _nonempty(changed_at):
             warnings.append(
                 _finding(
                     "W3",
                     relative,
-                    "missing `timestamp` (ISO 8601 last-meaningful-change)",
+                    "missing `generated.at` (or legacy `timestamp`) for the last content change",
                 )
             )
+        warnings.extend(_finding("W6", relative, message) for message in optional_metadata_warnings(metadata))
         bodies.append((relative, body))
 
     for source, body in bodies:

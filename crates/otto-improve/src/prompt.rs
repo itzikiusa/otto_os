@@ -106,7 +106,7 @@ pub fn build_prompt(
     s.push_str("\n\n========================================\n");
     s.push_str(&format!("# Workspace: {workspace_name}\n\n"));
 
-    s.push_str("## Skills you MAY propose edits to (allow-list)\n");
+    s.push_str("## Skills eligible for auto-apply (configured allow-list)\n");
     if skill_allowlist.is_empty() {
         s.push_str("(none — every skill edit will be queued for human approval)\n\n");
     } else {
@@ -116,6 +116,7 @@ pub fn build_prompt(
         s.push('\n');
     }
 
+    s.push_str("Relevant skills outside this allow-list may receive evidence-backed proposals; their edits require human approval. Reading a candidate never grants permission to apply its changes.\n\n");
     s.push_str("## Current skill files\n");
     if current_skills.is_empty() {
         s.push_str("(none in scope)\n\n");

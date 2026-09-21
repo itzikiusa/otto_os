@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
   // the vault (a summarizer consolidates drafts when >1 writer), plus the
   // vault's RUN HISTORY (docs runs + per-note refine turns, server-persisted
@@ -454,7 +455,7 @@
             {/each}
           </select>
           {#if tpl?.needsRepo}
-            <input class="tpl-repo" bind:value={tplRepo} placeholder="~/path/to/repo" />
+            <PathField bind:value={tplRepo}><input class="tpl-repo" bind:value={tplRepo} placeholder="~/path/to/repo" /></PathField>
           {/if}
           <button
             class="tpl-use"

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Proof section: a two-pane viewer of proof packs. Left = status filter chips
   // + the pack list; right = the open pack's detail (badges, artifacts grouped
   // by kind, and assemble / add-artifact / waive / delete actions).
@@ -198,6 +199,7 @@
     if (!detail) return;
     const cwd = await confirmer.promptText('Working directory to assemble proof from:', {
       title: 'Assemble proof',
+      browseFolder: true,
       confirmLabel: 'Assemble',
       placeholder: '/path/to/repo',
     });
@@ -884,7 +886,7 @@
       </div>
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
-        <input id="pr-cwd" class="input" bind:value={prCwd} placeholder="/path/to/repo" />
+        <PathField bind:value={prCwd}><input id="pr-cwd" class="input" bind:value={prCwd} placeholder="/path/to/repo" /></PathField>
       </div>
     </div>
     {#snippet footer()}

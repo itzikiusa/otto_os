@@ -137,6 +137,9 @@ fn app(pool: SqlitePool, user: User) -> Router {
         .route("/workspaces/{id}/sessions", get(ok))
         // Swarm feature
         .route("/workspaces/{id}/swarm/swarms", get(ok))
+        // Personal documents: read-only grants cannot save memory/context.
+        .route("/personal-agents/{id}/memory", get(ok).put(ok))
+        .route("/personal-agents/{id}/context", get(ok).put(ok))
         // Users / Settings (Admin)
         .route("/users", post(ok))
         .route("/settings", put(ok))
@@ -341,4 +344,15 @@ async fn unknown_protected_route_403() {
         StatusCode::FORBIDDEN,
         "a protected route with no policy entry must fail closed (403)"
     );
+}
+
+#[tokio::test]
+async fn personal_document_viewer_cannot_save() {
+    let viewer = app_for(&[(Feature::ScheduledTasks, Capability::View)], false).await;
+    let editor = app_for(&[(Feature::ScheduledTasks, Capability::Edit)], false).await;
+    for path in ["/api/v1/personal-agents/a/memory", "/api/v1/personal-agents/a/context"] {
+        assert_eq!(status(&viewer, Method::GET, path).await, StatusCode::OK);
+        assert_eq!(status(&viewer, Method::PUT, path).await, StatusCode::FORBIDDEN);
+        assert_eq!(status(&editor, Method::PUT, path).await, StatusCode::OK);
+    }
 }

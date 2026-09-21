@@ -12,7 +12,7 @@ embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 tempfile.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["process"] }
 otto-core.workspace = true
 otto-state.workspace = true
 otto-rbac.workspace = true

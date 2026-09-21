@@ -764,7 +764,7 @@ export interface AcceptanceCriterion {
   id: string;
   text: string;
   verify: string;
-  verify_kind: 'command' | 'manual';
+  verify_kind: 'command' | 'agent' | 'human' | 'manual';
   verify_cmd?: string | null;
 }
 
@@ -800,6 +800,11 @@ export interface GoalLoopRoleCfg {
 }
 
 export interface GoalLoopConfig {
+  allow_commits?: boolean;
+  mode?: 'build' | 'research';
+  source_links?: string[];
+  skills?: string[];
+  require_review?: boolean;
   executors: GoalLoopAgentCfg[];
   planner: GoalLoopRoleCfg;
   evaluator: GoalLoopRoleCfg;
@@ -831,6 +836,30 @@ export interface GoalLoopEvaluation {
   rationale: string;
 }
 
+export interface GoalHumanVerification {
+  criterion_id: string;
+  criterion_revision: string;
+  verified_by: string;
+  evidence: string;
+  verified_at: string;
+}
+export interface GoalQuestion {
+  id: string;
+  question: string;
+  answer: string | null;
+  answered_by: string | null;
+  answered_at: string | null;
+}
+export interface GoalLoopLedger {
+  verifications: GoalHumanVerification[];
+  questions: GoalQuestion[];
+  next_action: string;
+  last_failure_signature: string;
+  repeated_failures: number;
+  review_summary: string;
+  review_passed: boolean;
+}
+
 export interface GoalLoop {
   id: Id;
   workspace_id: Id;
@@ -845,6 +874,7 @@ export interface GoalLoop {
   current_iteration: number;
   progress_pct: number;
   context_digest: string;
+  ledger?: GoalLoopLedger;
   branch?: string | null;
   worktree_path?: string | null;
   base_commit?: string | null;
@@ -883,6 +913,9 @@ export interface GoalLoopDetail {
 }
 
 export interface DefineGoalReq {
+  provider?: string;
+  model?: string;
+  mode?: 'build' | 'research';
   seed: string;
   repo_path: string;
   context?: string | null;
@@ -1690,6 +1723,17 @@ export interface ApiTokenInfo {
   created_at: string;
   last_seen_at: string;
   expires_at: string;
+  session_id?: string | null;
+  /** Legacy label candidate, not durable session ownership. */
+  legacy_session_id?: string | null;
+  session_exists?: boolean | null;
+}
+
+export interface ProviderAccount {
+  id: string;
+  provider: 'claude' | 'codex';
+  label: string;
+  created_at: string;
 }
 
 /** Response for POST /api/v1/auth/tokens: raw secret (shown once) + metadata. */
@@ -2247,6 +2291,7 @@ export interface FsEntry {
   is_git_repo: boolean;
 }
 
+/** Canonical daemon-host listing; access follows the daemon OS account permissions. */
 export interface FsBrowse {
   path: string;
   parent: string | null;
@@ -2396,6 +2441,10 @@ export interface RefBranch {
   is_current: boolean;
   upstream: string | null;
   remote: boolean;
+  /** Commits relative to this local branch's upstream; zero without a live
+   *  upstream and for remote refs. Optional for older daemon responses. */
+  ahead?: number;
+  behind?: number;
   /** True when this branch's tip is already contained in the repo's cleanup base
    *  branch — a hint that it's safe to delete. The base branch itself is never
    *  flagged. Absent on responses that predate the field → treat as false. */
@@ -3124,7 +3173,7 @@ export interface ReviewAgentState {
   /** This agent's own findings (before summarization). */
   findings?: ReviewFinding[];
   /** True on the summarizer row when its output came from the deterministic
-   *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
+   *  Rust-side dedupe/rank fallback (configured summarizer unavailable). */
   fallback?: boolean;
   /** The configured reviewer (lens) this row expanded from; rows sharing a
    *  lens are the same lens on different providers. Absent on the summarizer
@@ -3157,7 +3206,7 @@ export interface Review {
   blocker_count?: number | null;
   summary_md?: string | null;
   /** true when the final comments came from the deterministic summarizer
-   *  fallback (claude unavailable) — derived from the agents' fallback flags. */
+   *  fallback (configured summarizer unavailable) — derived from the agents' fallback flags. */
   summary_fallback?: boolean;
 }
 
@@ -3554,6 +3603,7 @@ export interface UpsertIntegrationReq {
 // Filesystem (GET /fs/read)
 // ---------------------------------------------------------------------------
 
+/** Bounded regular-file read using daemon OS account permissions; endpoint token scopes still apply. */
 export interface FsRead {
   path: string;
   content: string;
@@ -3890,6 +3940,13 @@ export interface GlobalSoulResp {
 }
 
 export interface WorkspaceContextConfig {
+  repo_rules_md?: string; // machine-managed review rules
+  goal_md: string;
+  memory_md: string;
+  decisions_md: string;
+  references: string[];
+  artifacts: string[];
+  context_version: number;
   skills: string[] | null; // null = all library skills
   soul: string | null; // null = global default
   extra_context_md: string;
@@ -3899,11 +3956,18 @@ export interface WorkspaceContextConfig {
 }
 
 export interface UpdateWorkspaceContextReq {
-  skills: string[] | null;
-  soul: string | null;
-  extra_context_md: string;
-  include_memory: boolean;
+  skills?: string[] | null;
+  soul?: string | null;
+  extra_context_md?: string;
+  include_memory?: boolean;
   include_repo_map?: boolean;
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
+  /** Required for shared knowledge edits; stale revisions return 409. */
+  context_version?: number;
 }
 
 export interface MaterializeProviderResult {
@@ -3978,6 +4042,11 @@ export interface ContextPreviewResp {
  * preview a not-yet-saved choice (the same inputs a session spawn would use).
  */
 export interface ContextPreviewReq {
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
   /** Provider to preview; omit for both `claude` and `codex`. */
   provider?: string;
   /**
@@ -4808,6 +4877,8 @@ export interface NodeRunState {
   attempts?: number | null;
   /** Session ids this node drove (e.g. agent_prompt / review_run). */
   sessions?: string[];
+  /** Reviews started by this step; retained for async completion and retries. */
+  review_ids?: string[];
   /** Present only while the node runs (agent steps): phase + sub-agents. */
   activity?: NodeActivity | null;
 }
@@ -8561,3 +8632,69 @@ export interface WorkflowCheckpointPage {
   next_cursor: string | null;
 }
 export interface WorkflowDetail<T> {rev: number; detail_version: string; body: T}
+
+
+/** Common project identity/context, including existing Swarm projects. */
+export interface Project {
+  id: Id;
+  workspace_id: Id;
+  swarm_id: Id | null;
+  name: string;
+  description: string;
+  repo_path: string | null;
+  goal_md: string;
+  instructions_md: string;
+  references: string[];
+  memory_md: string;
+  decisions_md: string;
+  artifacts: string[];
+  status: 'active' | 'archived';
+  context_version: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+export type ProjectInput = Pick<Project, 'name' | 'description' | 'repo_path' | 'goal_md' | 'instructions_md' | 'references' | 'memory_md' | 'decisions_md' | 'artifacts' | 'status'>;
+
+/** Versioned user-editable personal-agent document. Memory has a resolved path;
+ * context is stored separately in SQLite. Send version unchanged on PUT. */
+export interface PersonalAgentDocument {
+  content: string;
+  version: string;
+  exists: boolean;
+  path: string | null;
+}
+
+/** Explicit, session-scoped SSH TCP forwards. No transparent VPN/proxy routing. */
+export interface NetworkEndpoint {
+  name: string;
+  remote_host: string;
+  remote_port: number;
+  host_env?: string | null;
+  port_env?: string | null;
+}
+export interface NetworkProfileInput {
+  name: string;
+  ssh_connection_id: Id;
+  endpoints: NetworkEndpoint[];
+  archived?: boolean;
+}
+export interface NetworkProfile extends NetworkProfileInput {
+  id: Id;
+  workspace_id: Id;
+  archived: boolean;
+  version: number;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+}
+export interface SessionNetwork {
+  profile_id: Id | null;
+  profile_name: string | null;
+  profile_version: number | null;
+  selected_profile_id: Id | null;
+  restart_required: boolean;
+  status: 'connected' | 'error' | 'stopped' | 'disabled';
+  error: string | null;
+  endpoints: (NetworkEndpoint & {host: string; port: number})[];
+}

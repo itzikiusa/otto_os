@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use otto_core::domain::Workspace;
-use otto_core::hooks::{PreSpawnHook, SpawnInjection};
+use otto_core::hooks::{PreSpawnHook, SpawnInjection, SessionSpawnContext};
 
 use crate::config;
 use crate::library::Library;
@@ -35,6 +35,26 @@ impl Provisioner {
 }
 
 impl PreSpawnHook for Provisioner {
+    fn before_spawn_session(&self, ws: &Workspace, cwd: &str, provider: &str, context: &SessionSpawnContext) -> SpawnInjection {
+        let Some(namespace) = otto_core::paths::safe_component(&context.namespace) else {
+            return SpawnInjection::default();
+        };
+        let mut cfg = config::from_settings(&ws.settings);
+        if !context.extra_context_md.is_empty() {
+            cfg.extra_context_md.push_str("\n\n");
+            cfg.extra_context_md.push_str(&context.extra_context_md);
+        }
+        materialize::provision_with_home(&self.library, &cfg, cwd, provider,
+            &self.ctx_root.join("sessions").join(namespace), context.provider_home.as_deref()).1
+    }
+
+    fn resume_session(&self, cwd: &str, provider: &str, context: &SessionSpawnContext) -> SpawnInjection {
+        let Some(namespace) = otto_core::paths::safe_component(&context.namespace) else {
+            return SpawnInjection::default();
+        };
+        materialize::resume_injection_with_home(&self.ctx_root.join("sessions").join(namespace), cwd, provider, context.provider_home.as_deref())
+    }
+
     /// Best-effort: builds the workspace context config, materializes it for
     /// `provider` into its bundle, and returns the launch injection.
     /// `materialize::provision` logs its own errors and never panics, so a

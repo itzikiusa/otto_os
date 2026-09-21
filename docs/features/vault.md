@@ -31,7 +31,7 @@ contract is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | Navigate knowledge | Backlinks with context snippets, outgoing links, outline, properties, quick switcher (⌘O) |
 | Find things | FTS5 search with `tag:` / `path:` / `type:` operators; vault notes also appear in **global ⌘F** |
 | See the shape of it | A Canvas2D graph view with a Web-Worker Barnes-Hut layout, built for 100k notes / millions of edges |
-| Standardize docs | **OKF v0.1**: deterministic validator (E1–E3 / W1–W5), reserved `index.md`/`log.md`, concept templates, index generation |
+| Standardize docs | **OKF v0.1/v0.2**: deterministic validator (E1–E3 / W1–W6), reserved `index.md`/`log.md`, concept templates, index generation |
 | Let agents use it | `otto_vault_*` MCP session tools (read + Editor-gated Markdown and guarded text-artifact writes) and outward `otto.vault_*` control-plane tools |
 | Verify generated docs | Optional 1–4 independent reviewers, each with its own provider/model/method/focus, iterating visibly with the final author (default 3 rounds) |
 | Stay safe | Deletion is a move to `<vault>/.trash/`; rename rewrites links across the vault; writes are optimistic-concurrency checked |
@@ -166,8 +166,8 @@ rename). Attachments appear in the tree; reserved OKF files (`index.md`,
 `log.md`) are styled dimmer. **⌘N** (or the + toolbar button) opens the
 new-note dialog — in an OKF vault it offers a **concept template** picker
 (Service / Reference / Decision / Runbook / Playbook / Metric / Dataset) that
-pre-fills `type/title/description/tags/timestamp` frontmatter plus
-`# Overview` / `# Citations` sections.
+pre-fills `type/title/description/tags/status/generated/sources` frontmatter (draft, unverified) plus
+`# Overview`; record evidence in `sources`.
 
 ### 4.2 Editor ⇄ reading view
 
@@ -275,7 +275,7 @@ Reserved OKF files are excluded from switcher results.
 
 ### 4.6 The OKF card — Open Knowledge Format
 
-OKF v0.1 is the vault's documentation standard: markdown + YAML frontmatter
+OKF v0.2 (with v0.1 compatibility) is the vault's documentation standard: markdown + YAML frontmatter
 concepts, `index.md`/`log.md` reserved files, markdown links between concepts.
 For OKF vaults the right panel's **OKF** section (and the status-bar badge)
 exposes:
@@ -290,14 +290,14 @@ exposes:
   | E3 | error | reserved-file structure (only the bundle-root `index.md` may carry frontmatter, and only `okf_version`; `log.md` never) |
   | W1 | warning | missing `title` or `description` |
   | W2 | warning | broken internal link |
-  | W3 | warning | no `timestamp` |
+  | W3 | warning | no `generated.at` or legacy `timestamp` |
   | W4 | warning | directory without an `index.md` |
   | W5 | warning | `log.md` `##` headings not ISO `YYYY-MM-DD` |
 
   Warnings never fail a bundle — permissive consumption is intentional, and a
   malformed note is indexed with a parse-error flag rather than aborting a scan.
 - **Generate indexes** — regenerates per-directory `index.md` files from the
-  notes' frontmatter descriptions (root index carries `okf_version`).
+  notes' frontmatter descriptions (root index preserves its existing `okf_version`; new indexes use `0.2`).
 
 `index.md`/`log.md` are flagged `reserved` everywhere: excluded from the
 switcher and (by default) the graph, never validated as concepts, searchable
@@ -602,7 +602,7 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 - **No semantic search** — that's the point. Recall = FTS + links + tags +
   types. (The memory layer likewise accepts but coerces `semantic`/`hybrid`.)
 - Structured Properties edits cover title, type, description, resource, tags,
-  aliases and timestamp; other fields remain editable in source mode.
+  aliases, timestamp, status and stale_after; nested provenance and other fields remain editable in source mode.
 
 **Non-goals** (deliberate — plugin territory, not core parity): canvas boards
 (Otto has its own [Canvas](./canvas.md) module), daily notes, sync/publish,
@@ -674,3 +674,16 @@ Saving an existing note updates its own metadata, tags, outgoing links, search e
 External edits are checked on the existing five-second freshness schedule. Unchanged scans retain lookup caches; incomplete directory reads never authorize pruning unseen files. File-tree refreshes fetch visible branches, and collapsed branches refresh when reopened.
 
 Notes larger than 4 MiB keep their original bytes and exact streamed hash but skip content parsing/indexing. The Properties panel explains this limitation; the note remains findable by filename and can still be a path-link target. Body tags, aliases, headings and outgoing links are unavailable until the file is small enough to index. Explicit raw-note reads remain complete. Preparation runs outside async workers with two active jobs and bounded admission; a busy response asks the caller to retry rather than queueing unlimited body copies.
+
+
+## OKF 0.2 provenance and freshness
+
+Otto follows the [current upstream specification](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md), retrieved on 2026-09-20. The older `knowledge-catalog/okf` location is superseded. Existing v0.1 bundles remain readable; regeneration of indexes preserves the bundle's declared version.
+
+For OKF notes, the right panel displays sources, recorded generation and verification events, lifecycle status and an explicit stale deadline. Verification may be a single mapping or a list. The UI calls these **declared** reviews: a `human:` value in an editable Markdown file is not authenticated human approval. It also marks content changed since the latest recorded verification. Missing optional metadata does not reject a note.
+
+`generated.at` is preferred for the last content change; legacy `timestamp` is used when `generated` is absent. `stale_after` is an absolute instant, evaluated inclusively with a visible refresh every 30 seconds. This expresses the author's freshness policy; a recent Vault scan only proves the index was refreshed, not that the documented facts are still true. Malformed optional families produce W6 warnings rather than conformance errors.
+
+Use source records for durable evidence and keep verification separate from generation. Prioritize source links, review dates, deprecation and stale deadlines for important API/data/runtime documentation before adding more generated prose. `Attested Computation` is accepted as a concept type, but Otto does not execute an executor/attester referenced by a note or claim that its result is attested. That requires a separate governed execution and receipt-verification workflow.
+
+The Properties editor can change `status` and `stale_after`; nested source/generation/verification fields remain editable in Markdown source and are preserved by ordinary property edits. No automatic migration rewrites an existing bundle. Source records are displayed as evidence text; they do not yet add frontmatter-only graph edges.

@@ -4,6 +4,8 @@
   // context, and whether to inline the workspace MEMORY.md. A "Materialize now"
   // button per provider (claude / codex / agy) writes the resolved context into
   // the workspace's native CLI files on demand.
+  import { onDestroy } from 'svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { contextApi } from '../../lib/api/context';
   import type {
     ContextPreviewReq,
@@ -28,6 +30,14 @@
   let souls: LibrarySoul[] = $state([]);
   let loading = $state(false);
   let saving = $state(false);
+  let error = $state('');
+  let references = $state('');
+  let artifacts = $state('');
+  let generation = 0;
+  const editing = $derived(auth.me?.is_root || ws.current?.my_role === 'admin');
+  const canMaterialize = $derived(auth.me?.is_root || ['admin', 'editor'].includes(ws.current?.my_role ?? ''));
+  const lines = (text: string) => text.split('\n').map((line) => line.trim()).filter(Boolean);
+  onDestroy(() => { generation++; });
   let materializing: string | null = $state(null);
 
   // "All active" vs explicit selection. When true, cfg.skills is null (every
@@ -57,6 +67,11 @@
       skills: allSkills ? null : [...selectedSkills],
       soul: c.soul,
       extra_context_md: c.extra_context_md,
+      goal_md: c.goal_md,
+      memory_md: c.memory_md,
+      decisions_md: c.decisions_md,
+      references: lines(references),
+      artifacts: lines(artifacts),
       include_memory: c.include_memory,
       include_repo_map: c.include_repo_map ?? false,
     };
@@ -73,23 +88,32 @@
   // ---------------------------------------------------------------------------
 
   $effect(() => {
-    if (wsId) void load(wsId);
+    const id = wsId;
+    if (id) void load(id);
+    else { generation++; cfg = null; loading = false; error = ''; }
   });
 
+  function accept(value: WorkspaceContextConfig) {
+    cfg = { ...value, goal_md: value.goal_md ?? '', memory_md: value.memory_md ?? '', decisions_md: value.decisions_md ?? '', references: value.references ?? [], artifacts: value.artifacts ?? [], context_version: value.context_version ?? 0 };
+    references = cfg.references.join('\n');
+    artifacts = cfg.artifacts.join('\n');
+    allSkills = cfg.skills === null;
+    selectedSkills = new Set(cfg.skills ?? []);
+  }
+
   async function load(id: string): Promise<void> {
-    loading = true;
+    const request = ++generation;
+    loading = true; saving = false; cfg = null; error = '';
     try {
-      [cfg, skills, souls] = await Promise.all([
-        contextApi.getWorkspaceContext(id),
-        contextApi.listSkills(),
-        contextApi.listSouls(),
+      const [next, nextSkills, nextSouls] = await Promise.all([
+        contextApi.getWorkspaceContext(id), contextApi.listSkills(), contextApi.listSouls(),
       ]);
-      allSkills = cfg.skills === null;
-      selectedSkills = new Set(cfg.skills ?? []);
+      if (request !== generation || wsId !== id) return;
+      accept(next); skills = nextSkills; souls = nextSouls;
     } catch (e) {
-      toasts.error('Could not load context & soul', e instanceof Error ? e.message : String(e));
+      if (request === generation && wsId === id) error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (request === generation && wsId === id) loading = false;
     }
   }
 
@@ -118,24 +142,25 @@
   // ---------------------------------------------------------------------------
 
   async function save(): Promise<void> {
-    if (!wsId || !cfg) return;
-    saving = true;
+    const id = wsId; const current = cfg; const request = generation;
+    if (!id || !current || !editing || saving || loading) return;
+    saving = true; error = '';
     try {
       const body: UpdateWorkspaceContextReq = {
-        skills: allSkills ? null : [...selectedSkills],
-        soul: cfg.soul,
-        extra_context_md: cfg.extra_context_md,
-        include_memory: cfg.include_memory,
-        include_repo_map: cfg.include_repo_map ?? false,
+        skills: allSkills ? null : [...selectedSkills], soul: current.soul,
+        extra_context_md: current.extra_context_md,
+        goal_md: current.goal_md, memory_md: current.memory_md, decisions_md: current.decisions_md,
+        references: lines(references), artifacts: lines(artifacts), context_version: current.context_version,
+        include_memory: current.include_memory, include_repo_map: current.include_repo_map ?? false,
       };
-      cfg = await contextApi.updateWorkspaceContext(wsId, body);
-      allSkills = cfg.skills === null;
-      selectedSkills = new Set(cfg.skills ?? []);
-      toasts.success('Context & soul saved', allSkills ? 'All skills active' : `${selectedSkills.size} skills active`);
+      const saved = await contextApi.updateWorkspaceContext(id, body);
+      if (request !== generation || wsId !== id) return;
+      accept(saved);
+      toasts.success('Workspace context saved', 'Used when agent sessions start or restart.');
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      if (request === generation && wsId === id) error = e instanceof Error ? e.message : String(e);
     } finally {
-      saving = false;
+      if (request === generation && wsId === id) saving = false;
     }
   }
 
@@ -144,7 +169,7 @@
   // ---------------------------------------------------------------------------
 
   async function materialize(provider: string): Promise<void> {
-    if (!wsId) return;
+    if (!wsId || !canMaterialize) return;
     materializing = provider;
     try {
       const resp = await contextApi.materialize(wsId, provider);
@@ -171,11 +196,11 @@
   <!-- Header -->
   <div class="page-header">
     <div>
-      <h1>Context &amp; Soul</h1>
+      <h1>Workspace context</h1>
       <div class="sub">
-        Choose which library skills, soul (persona), and extra context Otto injects into the
-        agents it spawns in this workspace. Saved config is materialized at the next session
-        spawn, or immediately via “Materialize now”.
+        {ws.current?.name ?? 'Your workspace'} is the shared project for its sessions.
+        Goals, instructions, memory and references apply across agent providers when sessions start or restart.
+        Running conversations keep their current context.
       </div>
     </div>
   </div>
@@ -185,13 +210,17 @@
     <EmptyState
       icon="gear"
       title="Select a workspace first"
-      body="Context & soul are per-workspace. Choose a workspace from the sidebar to configure it."
+      body="Choose a workspace from the sidebar to edit its shared project context."
     />
   {:else if loading && !cfg}
     <Skeleton rows={2} height={88} />
+  {:else if !cfg && error}
+    <p role="alert">{error}</p><button class="btn" onclick={() => wsId && load(wsId)}>Retry</button>
   {:else if cfg}
+    <p class="dim">{ws.current?.root_path} · Context version {cfg.context_version}</p>
+    {#if !editing}<p class="dim">Workspace administrators can edit shared context.</p>{/if}
     <!-- Config form -->
-    <div class="card form">
+    <fieldset class="card form" disabled={!editing || saving || loading}>
       <!-- Active skills -->
       <div class="field">
         <span class="lbl">Active skills</span>
@@ -249,9 +278,13 @@
         </span>
       </div>
 
+      <div class="field">
+        <label for="cs-goal">Goal</label>
+        <textarea id="cs-goal" class="input mono" rows={3} bind:value={cfg.goal_md} maxlength="32000" placeholder="What this workspace is working toward"></textarea>
+      </div>
       <!-- Extra context -->
       <div class="field">
-        <label for="cs-extra">Extra context</label>
+        <label for="cs-extra">Shared instructions</label>
         <textarea
           id="cs-extra"
           class="input mono"
@@ -263,6 +296,23 @@
         <span class="hint">Markdown, appended to the Otto-managed region of CLAUDE.md / AGENTS.md.</span>
       </div>
 
+      <div class="field">
+        <label for="cs-shared-memory">Workspace memory</label>
+        <textarea id="cs-shared-memory" class="input mono" rows={4} bind:value={cfg.memory_md} maxlength="32000" placeholder="Curated facts that every session should know"></textarea>
+      </div>
+      <div class="field">
+        <label for="cs-decisions">Decisions</label>
+        <textarea id="cs-decisions" class="input mono" rows={3} bind:value={cfg.decisions_md} maxlength="32000" placeholder="Agreed decisions and their reasons"></textarea>
+      </div>
+      <div class="field">
+        <label for="cs-references">References</label>
+        <textarea id="cs-references" class="input mono" rows={3} bind:value={references} placeholder="Document, Vault or repository references — one per line"></textarea>
+        <span class="hint">References are shared as text. Listing a path does not read its contents.</span>
+      </div>
+      <div class="field">
+        <label for="cs-artifacts">Artifacts</label>
+        <textarea id="cs-artifacts" class="input mono" rows={3} bind:value={artifacts} placeholder="Links or paths to outputs — one per line"></textarea>
+      </div>
       <!-- Include memory -->
       <div class="field field-row">
         <label for="cs-memory">Inline workspace MEMORY.md</label>
@@ -285,10 +335,15 @@
 
       <div class="actions">
         <button class="btn primary" disabled={saving} onclick={save}>
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? 'Saving…' : 'Save workspace context'}
         </button>
       </div>
-    </div>
+    </fieldset>
+    {#if error}
+      <p role="alert">{error}</p>
+      <p class="dim">Your draft is still here. Reloading replaces it with the saved version.</p>
+      <button class="btn" disabled={saving} onclick={() => wsId && load(wsId)}>Reload saved context</button>
+    {/if}
 
     <!-- Materialize -->
     <h2 class="section-title">Materialize now</h2>
@@ -298,7 +353,7 @@
     </div>
     <div class="actions materialize-actions">
       {#each providers as p (p)}
-        <button class="btn" disabled={materializing !== null} onclick={() => materialize(p)}>
+        <button class="btn" disabled={!canMaterialize || materializing !== null} onclick={() => materialize(p)}>
           {materializing === p ? 'Materializing…' : `Materialize ${p}`}
         </button>
       {/each}
@@ -340,6 +395,8 @@
 
 <style>
   .form {
+    margin: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 16px;

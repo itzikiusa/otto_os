@@ -10,12 +10,11 @@
 //!   * **Gated** on the workspace's `self_improvement.enabled` toggle — returns
 //!     `None` (silent) when off. The daemon additionally only wires this hook at
 //!     all when `OTTO_SELF_IMPROVE` is on.
-//!   * **Deduped** per session by transcript turn count, so a single turn never
+//!   * **Deduped** per session by successful evidence checkpoints, so a single turn never
 //!     evolves twice and a trivial (empty) transcript is skipped.
 //!   * **Quiet when nothing changed** — returns `None` unless the run applied or
 //!     queued at least one edit, so the thread isn't pinged for no-ops.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,10 +23,8 @@ use otto_core::domain::ImprovementEdit;
 use otto_core::domain::ImprovementEditStatus;
 use otto_core::Id;
 use otto_improve::config::effective_config;
-use otto_improve::digest::build_digest;
 use otto_improve::ImprovementEngine;
 use otto_state::{ImprovementsRepo, SessionsRepo, WorkspacesRepo};
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// Runs single-interaction self-improvement and summarises the result.
@@ -36,9 +33,6 @@ pub struct InteractionImproverImpl {
     workspaces: WorkspacesRepo,
     sessions: SessionsRepo,
     improvements: ImprovementsRepo,
-    /// Per-session transcript turn count last evolved — skip when it hasn't grown
-    /// (the same grown-check the in-loop `LiveEvolver` uses).
-    seen: Mutex<HashMap<Id, usize>>,
 }
 
 impl InteractionImproverImpl {
@@ -53,7 +47,6 @@ impl InteractionImproverImpl {
             workspaces,
             sessions,
             improvements,
-            seen: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -69,20 +62,7 @@ impl InteractionImprover for InteractionImproverImpl {
             return None;
         }
 
-        // Grown-check / dedup: skip an empty transcript and any turn we've already
-        // evolved. Record BEFORE the (slow) run so a duplicate Final can't double-run.
-        let turns = build_digest(&session).map(|d| d.turns).unwrap_or(0);
-        if turns == 0 {
-            return None;
-        }
-        {
-            let mut seen = self.seen.lock().await;
-            if seen.get(session_id).copied().unwrap_or(0) >= turns {
-                return None;
-            }
-            seen.insert(session_id.clone(), turns);
-        }
-
+        // Durable dedup and failure retry are shared with live learning in the engine.
         info!(session = %session_id, "channel self-improvement: evolving interaction");
         let run_id = match self.engine.evolve_session(session_id).await {
             Ok(id) => id,

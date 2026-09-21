@@ -307,8 +307,9 @@ Notes:
   accepts a path the repo itself lists (never an arbitrary directory) and never the main worktree.
 - `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
   `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
-- `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at}`.
-  `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
+- `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at, session_id?, legacy_session_id?, session_exists?}`. `session_id` is durable ownership for credentials minted by the session manager. `legacy_session_id` only recognizes a historical `otto-mcp:<ULID>` label and is a cleanup candidate, not ownership proof. `session_exists` is null for personal tokens and otherwise indicates whether that session still exists for the same owner. Listing never revokes credentials; legacy cleanup uses the existing owner-scoped DELETE per selected token.
+- Managed session credentials are replaced on session spawn and revoked on deletion or failed spawn, using persisted session ownership across daemon restarts. They cannot authenticate after their originating session is deleted. Archiving keeps the existing lifecycle behavior; it does not revoke the token. Label-only legacy tokens are never automatically revoked merely because their name matches.
+- `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.
 - `DELETE` only revokes the caller's own API tokens (scoped by `user_id` + `kind='api'`).
 - `last_seen_at` is updated on use, throttled to at most once per hour.
@@ -972,7 +973,7 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | GET /git/repos | Git:View | — | `Repo[]` (each carries `forge`: `github`\|`bitbucket`\|`gitlab`\|`unrecognized`\|null — computed live from `remote_url`; `unrecognized` = remote exists but isn't a supported forge, null = no remote) across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | PATCH /repos/{id} | ws editor (+ account owner, S4) | `UpdateRepoReq {git_account_id?}` | `Repo` — (re)bind the repo's hosting account; the field is authoritative (an id binds, `null` unbinds). Re-reads `origin` from disk first and persists any change to `remote_url`/`provider`, so a repo whose remote was added after registration becomes bindable. 400 when the account's provider differs from the remote's, or when the repo has no supported remote to bind against. Registration is the only other place an account is resolved, so this is how a repo registered BEFORE its account existed reaches a provider at all. Provider routes (PRs, collaborators, …) also self-heal: a repo with no recorded provider re-reads `origin` from disk before failing (the remote snapshot is taken once at registration, and a failed `git` spawn there is indistinguishable from "no remote"), and an unbound repo whose caller owns exactly ONE account for that provider is bound on first use — the same rule registration applies, and always the caller's own credential. With zero or several candidate accounts nothing is guessed; the call 400s asking for an explicit link. |
-| GET /repos/{id}/refs | ws viewer | — | `RefsResp` — branch/tag refs. Each `RefBranch` carries `merged_into_base` (tip already contained in the cleanup base branch → safe to delete; the base branch itself is never flagged); `base_branch` echoes the base merged-status was computed against (per-repo override, else detected default; `null` = no resolvable base). Merged sets come from two bulk `git branch --merged <base>` calls (local + remote), not a per-branch spawn. `RefBranch.sha` / `RefTag.sha` give the commit each ref points at, so a client can locate a ref whose commit isn't in the loaded page of history; annotated tags are dereferenced (`%(*objectname)`) so `RefTag.sha` is always a COMMIT. Tags are returned in full (newest-first), not truncated. |
+| GET /repos/{id}/refs | ws viewer | — | `RefsResp` — branch/tag refs. Each `RefBranch` includes `ahead`/`behind` (unsigned commit counts against that local branch's configured upstream; zero for remote refs or missing/gone upstreams). Counts come from bulk `for-each-ref %(upstream:track,nobracket)`, without checkout or per-branch processes. Each `RefBranch` carries `merged_into_base` (tip already contained in the cleanup base branch → safe to delete; the base branch itself is never flagged); `base_branch` echoes the base merged-status was computed against (per-repo override, else detected default; `null` = no resolvable base). Merged sets come from two bulk `git branch --merged <base>` calls (local + remote), not a per-branch spawn. `RefBranch.sha` / `RefTag.sha` give the commit each ref points at, so a client can locate a ref whose commit isn't in the loaded page of history; annotated tags are dereferenced (`%(*objectname)`) so `RefTag.sha` is always a COMMIT. Tags are returned in full (newest-first), not truncated. |
 | GET /repos/{id}/cleanup-base | ws viewer | — | `CleanupBaseResp {base_branch, resolved}` — the per-repo cleanup base override (`base_branch`; `null` = follow the detected default) and what it currently resolves to (`resolved`). Drives the "safe to delete (merged)" indicators. |
 | PUT /repos/{id}/cleanup-base | ws editor | `SetCleanupBaseReq {base_branch?}` | `CleanupBaseResp` — set/clear (empty/null clears) the per-repo cleanup base override. Indicator-only: never deletes or moves any branch. |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
@@ -1021,11 +1022,18 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
 | POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
+| GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
 | POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
+
+The trailing summarizer row uses a managed session on every configured provider
+(empty provider defaults to Claude). Its `session_id` is persisted and broadcast
+before awaiting the result, and retained after cleanup. Each retry creates a new
+session and isolated result file. `fallback` and `note` describe deterministic
+fallback; cancellation does not produce fallback or overwrite `cancelled`.
 
 **Review agent rows** (`Review.agents[]`, `ReviewAgentState`): `status` is
 `pending · running · waiting · done · error · skipped`; `lens` (optional, absent
@@ -1534,9 +1542,50 @@ are root; per-workspace context selection is workspace-scoped.
 | GET /library/default-soul | root | — | the default soul name |
 | PUT /library/default-soul | root | `{name}` | set the default soul |
 | GET /workspaces/{id}/context | ws viewer | — | the workspace's active context selection |
-| PUT /workspaces/{id}/context | ws admin | UpdateWsContextReq | selection |
+| PUT /workspaces/{id}/context | ws admin | `UpdateWorkspaceContextReq` | `WorkspaceContextConfig` |
 | POST /workspaces/{id}/context/materialize | ws editor | — | materialize the active set into the CLIs |
 | POST /workspaces/{id}/context/preview | ws viewer | `ContextPreviewReq` | `ContextPreviewResp` — dry-run of what a spawn would materialize |
+
+The workspace itself owns shared instructions and curated knowledge; there is
+no separate project selection for ordinary sessions. Stored under
+`Workspace.settings.context`, `WorkspaceContextConfig` includes `skills`
+(`string[] | null`), `soul` (`string | null`), `extra_context_md` (shared
+instructions), `goal_md`, `memory_md`, `decisions_md` (all strings), `references`
+and `artifacts` (`string[]`), `context_version` (integer, initially 0),
+`include_memory` (boolean, initially true), `include_repo_map` (boolean, initially
+false), `repo_map_max_lines` (integer or null), and machine-owned `repo_rules_md`.
+New strings/lists default to empty without migrating existing data.
+
+`UpdateWorkspaceContextReq` is a field patch despite the existing PUT method:
+all editable fields above are optional, except that `repo_rules_md` and
+`repo_map_max_lines` are not client-editable. Omitted fields survive; `""`/`[]`
+explicitly clear strings/lists; `skills: null` and `soul: null` reset those
+selections. `context_version` is the **expected current revision**; a stale
+revision returns `409`, preserving the saved context. It is required (`400`
+when absent) if any of `goal_md`, `memory_md`, `decisions_md`, `references`, or
+`artifacts` is supplied. Legacy clients editing only legacy fields may omit the
+revision; their patches preserve new fields. Every successful context edit
+increments the revision. Machine-rule refreshes preserve user fields and do
+not increment that revision. Generic workspace settings PATCH requests preserve
+the current `context` block even if their settings snapshot includes an older
+copy; edit context through this dedicated endpoint.
+
+Example: `PUT /workspaces/{id}/context` with
+`{"context_version":0,"extra_context_md":"Use UTC","goal_md":"Ship safely","references":["vault://runbooks/release"]}`
+returns the full context with `context_version: 1`. Markdown fields are limited
+to 32,000 UTF-8 bytes each, references/artifacts to 100 entries of 2,000 bytes
+each, and the combined instructions/knowledge text to 64 KiB (`400` on excess).
+References and artifacts are text only: no target file is read and no URL is
+fetched during context assembly.
+
+Agent creation and restart load this workspace context for every supported
+provider, including review sessions. Running CLIs pick up edits on their next
+restart. Default provider bundle/home identities remain stable; selected account
+profiles and legacy scoped project memberships retain their existing session
+namespaces. Existing Swarm/common project records and session memberships remain
+intact, with their context appended only to explicitly associated sessions;
+no project data is automatically copied into workspace-wide context. Preview,
+materialization, and launch use the same renderer and existing context budget.
 
 `POST /workspaces/{id}/context/preview` is a **dry-run**: it returns exactly what
 a session spawn would materialize for one or more providers — the skill files,
@@ -1560,6 +1609,11 @@ interface ContextPreviewReq {
   skills?: string[] | null;     // omit ⇒ stored; null ⇒ all library skills
   soul?: string | null;         // omit ⇒ stored; null ⇒ global default
   extra_context_md?: string;    // omit ⇒ stored
+  goal_md?: string;
+  memory_md?: string;
+  decisions_md?: string;
+  references?: string[];
+  artifacts?: string[];
   include_memory?: boolean;     // omit ⇒ stored
   include_repo_map?: boolean;   // omit ⇒ stored; opt-in tree-sitter repo map
   cwd?: string;                 // omit ⇒ workspace root
@@ -1882,7 +1936,7 @@ left behind by a failed earlier attempt is replaced, so downstream steps never
 read a failed attempt's summary. `GET /workflow-runs/{id}` carries the derived
 `context_dir` (absolute path; present when the directory exists — absent on
 list endpoints); the run view renders a browsable file tree over it via the
-existing sandboxed `/fs/browse` + `/fs/read`, including a dedicated Final
+existing authenticated `/fs/browse` + `/fs/read`, including a dedicated Final
 output panel that reads `final-output.md` on a successful run. Context files
 are unredacted local artifacts in the same trust domain as `nodes_json`; any
 future remote serving (share links) must redact on delivery.
@@ -2202,9 +2256,12 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /fs/browse?path= | member | — | complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
-| GET /fs/read?path= | member | — | file contents |
+| GET /fs/read?path= | member | — | regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
 | GET /logs/daemon | root | — | recent daemon log lines |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
+
+Filesystem paths are on the **daemon host**, including when the caller uses a remote browser. Both filesystem endpoints follow the permissions of the OS account running the daemon; there is no additional allowed-root, hidden-directory, secret-filename, root-user, or managed-agent path restriction. Authentication and existing share/MCP endpoint scopes still apply. Directory listings include hidden names (including `.git`) and accessible directory/file symlinks; broken links and special files are omitted. Paths are canonicalized on open, so symlinks resolve to their target; a leading `~` refers to the daemon account's home. The daemon does not elevate privileges. OS permission failures return 403 with the attempted path, missing paths return 404, and incompatible path types return 400. Reads reject nonregular files, including devices, sockets and FIFOs, before consuming content; the opened file handle is checked again. Read/list workers remain bounded after cancellation or timeout. Session artifact endpoints retain their separate resource and path policies.
+
 
 ## PR-review config
 
@@ -2423,8 +2480,8 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
 | GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
 | GET /workspaces/{ws}/vault/vaults/{id}/graph | ws viewer | `?mode=full\|local&path=&depth=&tags=&orphans=&reserved=&ghosts=&edge_budget=` | `VaultGraphPayload` — compact parallel arrays (`paths,titles,types,type_labels,services,service_labels,tag_off,tag_ids,tag_labels,flags,edges`) with a flat `[src,dst,…]` edge index list; `flags` bits: 1=ghost, 2=tag, 4=reserved; `types`/`services` are label-table indices per node (types are case-folded, so `Flow`/`flow` share one bucket; `untyped`/`unresolved`/`tag` are synthetic buckets), tags are CSR-encoded (`tag_ids[tag_off[i]..tag_off[i+1]]`, `tag_off` has `n+1` entries) and load regardless of `tags`, which only controls whether tag NODES are drawn. The client filters, rolls up and colors on these attributes without refetching. Full mode enforces a degree-prioritized edge budget (default 2M) with `truncated` |
-| POST /workspaces/{ws}/vault/vaults/{id}/okf/validate | ws viewer | — | `OkfReport{conformant, errors[], warnings[], checked_notes}` — deterministic OKF v0.1 conformance: E1 no/unparseable frontmatter, E2 missing `type`, E3 reserved-file structure; W1 title/description, W2 broken link, W3 timestamp, W4 dir missing index.md, W5 log dates |
-| POST /workspaces/{ws}/vault/vaults/{id}/okf/indexes | ws editor | — | `{written}` — regenerate per-directory `index.md` files (frontmatter descriptions; root index carries `okf_version`) |
+| POST /workspaces/{ws}/vault/vaults/{id}/okf/validate | ws viewer | — | `OkfReport{conformant, errors[], warnings[], checked_notes}` — deterministic OKF v0.1/v0.2 conformance: E1 no/unparseable frontmatter, E2 missing `type`, E3 reserved-file structure; W1 title/description, W2 broken link, W3 missing generated.at (legacy timestamp fallback), W4 dir missing index.md, W5 log dates, W6 malformed optional provenance/trust/lifecycle metadata |
+| POST /workspaces/{ws}/vault/vaults/{id}/okf/indexes | ws editor | — | `{written}` — regenerate per-directory `index.md` files (frontmatter descriptions; root index preserves declared `okf_version`; new roots use 0.2) |
 | GET /workspaces/{ws}/vault/vaults/{id}/trash | ws viewer | — | `VaultTrashEntry[]` — original/stored paths, deletion time, kind, opaque ID; includes legacy trash files |
 | POST /workspaces/{ws}/vault/vaults/{id}/trash/{entry}/restore | ws editor | `{destination?}` | `{path}` — restore original or new vault-relative destination; existing targets → 409, missing entries → 404; files/folders preserved |
 | GET /workspaces/{ws}/vault/vaults/{id}/history | ws viewer | `?path=&before=` | `VaultRevision[]` — newest first, up to 200; optional exact path; `before` is the last ID from the previous page |
@@ -2800,7 +2857,7 @@ flag) — all on the EXISTING query/consume routes.
 ## Goal Loops
 
 Bounded, goal-directed multi-agent iteration. A loop runs Plan → Execute → Evaluate →
-Digest cycles on an isolated git branch (`goal-loop/<id>`) until the goal's
+Digest cycles on an isolated git branch (`goal-loop/<id>`) or research directory until the goal's
 acceptance criteria are met or a hard limit (iterations / active time) is hit. Live
 updates arrive over `/ws/events` (`goal_loop_updated`). Item routes resolve the
 workspace from the loop row; every handler enforces ws Viewer/Editor.
@@ -2810,7 +2867,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; persists nothing; `feedback` refines) |
+| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
 | 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id} | ws viewer | — | GoalLoopDetail (`{loop, iterations}`) |
@@ -2820,7 +2877,53 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
 | 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
 | 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
-| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops + removes worktree; **keeps the branch**) |
+| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops and deletes history; **retains working files and branch**) |
+
+### Goal execution and verification contract
+
+`GoalLoopConfig` adds optional `allow_commits` (default false), `mode` (`build` default or
+`research`), `source_links: string[]`, `skills: string[]`, and `require_review` (default false).
+Local commits are instructed only when explicitly enabled; push/publish are separately
+permissioned. Selected skills and source links enter the role context. Missing skills must
+be reported by agents; there is no preflight availability guarantee for custom skills.
+Research requires no repository and writes `findings.md` inside the retained research directory.
+Planner/evaluator/digester sessions append to each iteration's `agents` after executor slots;
+existing executor indices remain stable. Every role honors its configured provider/model.
+The definer accepts optional `provider`, `model`, and `mode` in `DefineGoalReq`.
+
+Criterion `verify_kind` accepts `command`, `agent`, `human`, and legacy `manual` (agent-assessed).
+The model cannot satisfy `human`; approval requires an authenticated explicit action from a
+person. Both human-decision endpoints reject managed session credentials (including author
+API tokens and internal MCP tokens) with 403:
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/goal-loops/{id}/criteria/{criterion}/verify | ws editor | `{ "evidence": "Observed the expected result" }` | GoalLoop; only paused/blocked/exhausted human criteria |
+| POST /api/v1/goal-loops/{id}/questions/{question}/answer | ws editor | `{ "answer": "Use the existing endpoint" }` | GoalLoop; only an unanswered question on a blocked loop |
+
+Invalid/empty input returns 400; unknown criterion/question returns 404; workspace permission
+failures use the usual authorization error. `GoalLoop.ledger` holds `verifications[]`
+(`criterion_id`, exact serialized `criterion_revision`, server-derived `verified_by`, `evidence`,
+`verified_at`), `questions[]` (`id`, `question`, nullable `answer`, `answered_by`, `answered_at`),
+`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`.
+Legacy rows default to an empty ledger. Answers do not auto-resume; unanswered questions block Resume.
+Lifecycle and human-decision mutations serialize per loop. Approval/Resume while execution is
+still stopping returns 409. Explicit executor retry owns Running state, cancels with Pause/Stop,
+clears old output/evaluation/approvals, and returns to Blocked for fresh evaluation. Only the
+current iteration can be retried. Build/Research mode cannot change after creation.
+Further executor work invalidates human approvals; changed criterion contracts cannot reuse them.
+Final human verification rechecks the current iteration without rerunning executors or consuming
+another iteration, subject to the active-time and phase limits.
+
+Two identical unmet-criterion/evidence outcomes block the loop with a persisted question.
+Optional completion review must return approval with no unresolved findings before success.
+Required machine proof (`OTTO_PROOF_REQUIRE_GOAL_LOOP`) is never waived on the final iteration.
+Proof captures actual tracked, staged and untracked content, even when no commits exist.
+
+Stop, failure, success, restart and history deletion retain working files. Boot recovery pauses
+active loops and preserves blocked questions, allowing explicit Resume; sessions are reaped.
+Per-loop cost accounting is not wired: non-null `max_cost_usd` is rejected at create/patch;
+legacy loops carrying one block before execution. Workspace usage-budget gates remain in force.
 
 ## Canvas Studio
 
@@ -3150,6 +3253,42 @@ writes) + the workspace-role axis on the agent's workspace.
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+
+### Personal Agent Memory and Context
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/personal-agents/{id}/memory | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/memory | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+| GET /api/v1/personal-agents/{id}/context | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/context | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+
+`PersonalAgentDocument = {content: string, version: string, exists: boolean, path: string | null}`.
+`version` is opaque; submit the version returned by GET with a save. Memory uses
+`<resolved agent directory>/memory/notes.md`; Context is stored separately in SQLite
+and has `path: null`. Neither endpoint accepts a filesystem path. GET of a missing
+document returns empty content, `exists: false`, and an opaque version without
+creating the agent workspace. Saving empty text creates an empty document.
+
+Content is UTF-8 Markdown, bounded to 1 MiB. Memory rejects symlinked memory
+directories/files and nonregular files. Saves check the current version and replace
+the file atomically through a sibling temporary file; Context saves use an atomic
+SQL compare-and-swap. Stale versions return 409 Conflict and leave the current
+content unchanged. Oversized/invalid content returns 400; symlinked memory paths return 403;
+missing agents return 404; feature/workspace access failures return 403. The memory version binds its resolved path and contents, so changing an agent
+working directory also invalidates an open editor. External
+agent writes are detected by the memory content hash when saving; the agent CLI
+does not participate in the UI save lock.
+
+Custom working directories intentionally share `memory/notes.md` between agents
+using that directory. Saving Memory before the first run is supported; initial
+workspace provisioning never overwrites existing notes. Context is user-maintained
+and is appended as a snapshot to new manual/scheduled run prompts for every
+provider. Newly created chat sessions receive the snapshot before their ID is
+returned; an existing pinned chat retains its current context. Context edits do not
+rewrite persona files or ongoing sessions. Files and Vault notes are inserted as
+path references in Context Markdown; this does not ingest attachments or binaries.
+These document operations return their state directly and emit no new WS event.
 
 ### Agent rooms (inter-agent messaging — always user-visible)
 
@@ -4190,3 +4329,120 @@ Transcript session/history GETs reuse bounded immutable folds (32 retained entri
 `GET /api/v1/workflow-runs/{id}/nodes/{node_id}` and `GET /api/v1/workflow-runs/{id}/checkpoints/{node_id}` return `{rev,detail_version,body}` with exact NodeRunState or WorkflowCheckpoint recovery body. URL-encode node IDs (including `#`). Body/version come from one SQL snapshot; clients reject stale selected-body responses. All endpoints recheck run workspace Viewer permission; missing run/node returns404. Full legacy run GET and mutation responses retain their existing bodies.
 
 `GET /api/v1/workflows/{id}/runs?summary=true` returns up to 50 lightweight `{id,workflow_id,status,started_at,rev}` rows, newest first, for the run menu. Default `summary=false` preserves the existing full-row response. It has the same workspace Viewer requirement as the legacy list. The UI uses summaries for opening/polling and fetches exact node/checkpoint bodies only for expanded or selected details.
+
+**Workflow review association.** `NodeRunState.review_ids: string[]` (default `[]`)
+is recorded as soon as a `review_run` starts each review, before waiting. It is
+included in full runs, lightweight progress responses, and node recovery bodies.
+`NodeRunState.sessions` retains already captured session IDs. Clients can read
+`GET /reviews/{review_id}` to discover current sessions after `await:false`
+steps finish and when the summarizer is retried after workflow completion.
+
+
+## Common projects (all providers)
+
+Projects belong to a workspace and share the existing Swarm project identity.
+`swarm_id` is nullable: ordinary projects require no Swarm. These endpoints use
+Agents View/Edit plus workspace Viewer/Editor. They do not modify Swarm execution
+fields or launch a session.
+
+| Method/path | Permission | Body | Response |
+|---|---|---|---|
+| `GET /workspaces/{id}/projects` | ws viewer, Agents View | — | `Project[]`, most recently updated first, including archived and existing Swarm projects |
+| `POST /workspaces/{id}/projects` | ws editor, Agents Edit | `ProjectInput` | `Project` |
+| `GET /projects/{id}` | ws viewer, Agents View | — | `Project` |
+| `PUT /projects/{id}` | ws editor, Agents Edit | complete `ProjectInput` plus `context_version` | `Project`, incremented version; stale version returns 409 |
+| `GET /projects/{id}/sessions?limit=200` | ws viewer, Agents View | — | `Session[]`, newest activity first; visible limit clamped 1–500; owner/admin filtering occurs in SQL and the server pages past protected-resource-denied candidates |
+
+`ProjectInput`: `name` (required, 1–200 bytes); `description`, `goal_md`,
+`instructions_md`, `memory_md`, `decisions_md` (strings, default empty, max 32 KB
+per field, 64 KB combined context); `repo_path` (optional string/null reference, max 2 KB); `references`, `artifacts`
+(string arrays, default empty, max 100 items of 2 KB); `status` (`active` default or
+`archived`). PUT replaces all editable common fields; clients send the complete
+form. `Project` adds `id`, `workspace_id`, nullable `swarm_id`, `context_version`,
+`created_by`, `created_at`, and `updated_at`. Malformed fields return 400,
+workspace denial returns 403, absent project returns 404.
+
+Session create metadata accepts `project_id` (string or null). Existing owner/admin
+protected `PATCH /sessions/{id}` with `{"meta":{"project_id":"…"}}` attaches or
+moves a session; null detaches it. Creation and reassignment validate the project's
+workspace (403 mismatch, 404 missing, 400 malformed ID). SessionMetaUpdated is the
+existing notification. Membership does not grant access to another user's session.
+All providers and session kinds may be grouped. Agent launch/resume loads curated
+project context through the provider adapter; shell/connection membership is
+organizational. Attaching/moving a live session does not restart it; context changes
+apply at the next launch/resume. References are supplied as text, never implicitly
+read from disk/network or used to expand filesystem permissions.
+
+
+### Subscription provider profiles
+
+All routes below require authentication and are scoped to the effective user's own profiles. Profile identifiers never grant access to another owner's records (404). Create and login reject impersonation. No provider credentials or raw provider status output are returned.
+
+- `GET /auth/provider-accounts` → `ProviderAccount[]`.
+- `POST /auth/provider-accounts` `{provider: "claude" | "codex", label: string}` → `ProviderAccount`. Label is trimmed, 1–80 characters, unique per owner/provider (409); unsupported providers/invalid labels return 400.
+- `POST /auth/provider-accounts/{id}/login` `{workspace_id: Id}` → `Session`. Requires workspace Editor; launches the provider's native subscription sign-in in a connection terminal. A missing CLI or invalid profile fails without fallback.
+- `GET /auth/provider-accounts/{id}/status` → `{signed_in: boolean}`. Runs the native status command in its isolated home, capped at 10 seconds; launch/time-out failures return an upstream error.
+
+`ProviderAccount = {id: Id, provider: string, label: string, created_at: RFC3339}`. Session creation accepts optional `meta.account_id`; the owner/provider must match the requested session. Otto persists the validated `account_label`. Omitting/null account ID uses existing default CLI behavior. Account ID/label are immutable on metadata patches. Resume/restart retains the selected home; invalid/missing profiles fail rather than changing identity. CLI sign-in secrets live in the provider's native storage, not in the profile table.
+
+
+### Self-improvement recent-evidence behavior
+
+`POST /sessions/{id}/evolve` retains its `{ run_id }` response and existing
+permission/liveness checks. Live, channel and manual per-session analysis share
+persisted source checkpoints; a run may finish `skipped` with `no new evidence`
+or `analysis already in progress`. Success advances the source boundary;
+analysis failure releases the claim without consuming evidence. Interrupted
+claims expire after 30 minutes. This changes no request/response or WS fields.
+
+Claude/Codex use normalized, complete-line transcript deltas (at most 2 MiB read,
+4,000 characters of evidence; user text retains its own budget). Recorded
+prompt/note/skill trail summaries provide provider-neutral fallback. Native agy
+SQLite/protobuf history is not parsed. Account-pinned transcript paths remain
+pinned; E2E/explicit roots are respected.
+
+`POST /pr-review-comments/{cid}/approve` and `/decline` additionally schedule
+best-effort feedback analysis only when workspace `self_improvement.enabled`
+is true. The saved comment ID, review source and disposition are untrusted
+observations, not authorization or technical proof. Successful comment/disposition
+analyses are deduplicated. Existing allow-list, proposal/auto-apply policy and
+version-log behavior apply unchanged; feedback failure does not undo the saved
+review decision. No new DTO fields are introduced.
+
+## Session network profiles
+
+Workspace-scoped profiles expose explicit localhost TCP forwards through an existing SSH connection. No VPN/proxy environment is installed. JSON fields are snake_case. Profile reads require workspace Viewer and Connections View; writes require workspace Editor and Connections Edit. Profile use/read additionally checks the effective user's bastion `shell` access (legacy Connections Edit, or enforced discovery+shell permission). Unauthorized profiles are omitted from lists. Secrets are not stored in these records.
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /api/v1/workspaces/{id}/network-profiles | — | NetworkProfile[] (includes archived) |
+| POST /api/v1/workspaces/{id}/network-profiles | NetworkProfileInput | NetworkProfile |
+| GET /api/v1/network-profiles/{id} | — | NetworkProfile |
+| PUT /api/v1/network-profiles/{id} | NetworkProfileInput plus `version` | NetworkProfile; version increments |
+| GET /api/v1/sessions/{id}/network | — | SessionNetworkStatus plus `selected_profile_id`, `restart_required` |
+
+```json
+{
+  "name": "Office database",
+  "ssh_connection_id": "ssh-connection-id",
+  "endpoints": [
+    { "name": "database", "remote_host": "db.office.internal", "remote_port": 5432,
+      "host_env": "PGHOST", "port_env": "PGPORT" }
+  ],
+  "archived": false
+}
+```
+
+`NetworkProfile` flattens that input and adds `id`, `workspace_id`, `version`, `created_by`, `created_at`, `updated_at`. Name is 1–200 bytes. A profile has 1–8 endpoints; endpoint names are 1–32 ASCII identifier characters beginning with a letter and unique ignoring case. Remote host is DNS/IPv4 or bracketed IPv6 and port is nonzero u16. Optional host/port environment keys must be uppercase identifiers ending `_HOST`/`_PORT`, or `PGHOST`/`PGPORT`; reserved `OTTO_`, `LD_`, `DYLD_` prefixes and duplicate mappings are invalid. Version conflicts return409; invalid inputs return400; workspace/feature/resource failures use normal403/404 rules.
+
+Session creation or metadata patch can set `network_profile_id` to an active same-workspace profile ID, or null to remove selection. Malformed IDs, cross-workspace selection and archived profiles are rejected. Launch/restart rechecks current permissions and opens every required forward before spawning. Failure blocks launch; already opened handles are dropped. Replacement preparation failure preserves the old live session. Selected-profile edits apply next restart.
+
+`SessionNetworkStatus` fields: nullable `profile_id`, `profile_name`, `profile_version` (active snapshot), `status` (`connected|error|stopped|disabled`), nullable `error`, and `endpoints[]`. Each live endpoint has `name`, local `host`/`port`, `remote_host`/`remote_port`, nullable `host_env`/`port_env`. The endpoint also returns nullable `selected_profile_id` and boolean `restart_required` when the active ID/version differs. Stopped selected profiles may have a display name but no active ID/endpoints. The endpoint checks session owner/workspace-admin, workspace Viewer, Connections feature access and effective permission for both selected and active bastions; knowing a session ID does not bypass those checks.
+
+Generated child variables are `OTTO_TUNNEL_<UPPERCASE_NAME>_HOST`, `_PORT`, and `OTTO_NETWORK_ENDPOINTS` (JSON array of the endpoint objects). Explicit mapped keys point to the same localhost endpoint and replace only those child environment keys. `connected` means the SSH forwards are listening, not that DB authentication/reachability succeeded. Mid-session tunnel death sets Error and retains its diagnostic; restart is required to obtain new ports. PTYexit, kill, suspend, archive, remove, restart and graceful shutdown release handles. No new WebSocket event; UI polls status. Abrupt daemon process death has no guaranteed orphan-SSH cleanup.
+
+Self-improvement candidate discovery may read used or explicitly referenced skills
+outside `skill_allowlist` (up to 16 × 8 KiB bodies and a 100-entry review catalog).
+This does not expand auto-apply authorization: edits to unallowlisted skills
+remain `pending`. Up to 64 safe skill names persist with each source checkpoint
+so subsequent corrections can refer to an earlier skill invocation.
