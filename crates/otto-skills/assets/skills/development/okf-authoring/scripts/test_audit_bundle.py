@@ -2,6 +2,8 @@ import hashlib
 import io
 import json
 import unittest
+import tempfile
+import shutil
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -19,6 +21,17 @@ def tree_digest(root: Path) -> str:
 
 
 class AuditBundleTests(unittest.TestCase):
+    def test_v02_frontmatter_sources_satisfy_provenance_without_legacy_citations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "bundle"
+            shutil.copytree(FIXTURES / "clean-bundle", root)
+            concept = root / "endpoints/create-widget.md"
+            text = concept.read_text()
+            text = text.split("# Citations")[0]
+            text = text.replace("---\n", "---\nsources:\n  - id: source\n    resource: https://example.test/source\n", 1)
+            concept.write_text(text)
+            self.assertEqual(audit_bundle.audit_bundle(root), [])
+
     def test_missing_endpoint_sections_are_reported(self):
         findings = audit_bundle.audit_bundle(FIXTURES / "missing-endpoint-sections")
 

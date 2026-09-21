@@ -1,6 +1,8 @@
 <script lang="ts">
   // New-note dialog: name + folder + (OKF vaults) a concept-template picker.
   import { vault } from './vault.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { okfConceptTemplate } from './okfTemplate';
 
   let {
     open = $bindable(false),
@@ -19,13 +21,12 @@
     }
   });
 
-  const OKF_TYPES = ['Service', 'Reference', 'Decision', 'Runbook', 'Playbook', 'Metric', 'Dataset'];
+  const OKF_TYPES = ['Service', 'Reference', 'Decision', 'Runbook', 'Playbook', 'Metric', 'Dataset', 'Attested Computation'];
   let okfType = $state('Reference');
 
   function body(title: string): string {
     if (template === 'concept') {
-      const ts = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
-      return `---\ntype: ${okfType}\ntitle: ${title}\ndescription: \ntags: []\ntimestamp: ${ts}\n---\n\n# Overview\n\n\n\n# Citations\n\n`;
+      return okfConceptTemplate(okfType, title, auth.me ? `human:${auth.me.id}` : 'process:otto-note-editor');
     }
     return `# ${title}\n\n`;
   }

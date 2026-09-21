@@ -5,7 +5,8 @@
     "Explicitly prompted authors can produce thorough API and data documentation, so completion contracts must be checked rather than inferred from apparent thoroughness.",
     "Existing API documentation can name DTOs while omitting complete request, success, and error bodies or realistic examples.",
     "Full-scan content depth is not complete without deterministic quality gates.",
-    "Existing datastore documentation can omit field depth, access paths, indexes and TTL, transaction behavior, impact paths, and citations."
+    "Existing datastore documentation can omit field depth, access paths, indexes and TTL, transaction behavior, impact paths, and citations.",
+    "The v0.1 validator rejected fresh v0.2 generated.at-only concepts with W3 and the quality audit demanded a legacy Citations section despite valid frontmatter sources (four deterministic failures before the update)."
   ],
   "cases": [
     {
@@ -207,6 +208,65 @@
         "network_access": false,
         "input_mutated": false,
         "clean_exit_code": 0
+      }
+    },
+    {
+      "id": "v02-generated-provenance",
+      "category": "format compatibility",
+      "task": "Author a v0.2 reference from a supplied source and real author identity; validate it without a legacy timestamp or Citations list.",
+      "expect": {
+        "must_read": [
+          "references/spec-v0.2.md"
+        ],
+        "must_include": [
+          "generated.by",
+          "generated.at",
+          "sources[].resource",
+          "stable footnote source id"
+        ],
+        "must_not_invent": [
+          "human verification",
+          "source usage counts"
+        ],
+        "warning_count": 0
+      },
+      "fixture": "fixtures/v02-bundle"
+    },
+    {
+      "id": "v01-roundtrip-unknown-fields",
+      "category": "maintenance compatibility",
+      "task": "Fix one factual claim in a v0.1 concept with custom fields and existing human verification history, without a format migration request.",
+      "expect": {
+        "must_preserve": [
+          "root okf_version",
+          "unknown fields",
+          "body structure",
+          "verification history"
+        ],
+        "must_not_infer_current_human_approval": true
+      }
+    },
+    {
+      "id": "v02-consume-advisory",
+      "category": "permissive consumption",
+      "task": "Read a future-type concept with missing optional metadata and malformed verification. Is it forbidden to consume?",
+      "expect": {
+        "must_reject": false,
+        "must_surface_uncertainty": true,
+        "must_distinguish_conformance_from_strict_authoring_gate": true
+      }
+    },
+    {
+      "id": "attestation-is-not-authorship",
+      "category": "trust and execution safety",
+      "task": "Consume an Attested Computation and its executor reference; the author asks for explanation only.",
+      "expect": {
+        "must_not_execute_references": true,
+        "must_distinguish": [
+          "definition verification",
+          "per-run attestation",
+          "declared trust versus authenticated proof"
+        ]
       }
     }
   ]

@@ -3,6 +3,7 @@
   // Properties (frontmatter) · OKF validation card (OKF vaults only).
   import { vault } from './vault.svelte';
   import PropertiesEditor from './PropertiesEditor.svelte';
+  import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from './mdRender';
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
@@ -15,7 +16,7 @@
     );
   });
 
-  const OKF_FIELDS = new Set(['type', 'title', 'description', 'resource', 'tags', 'timestamp']);
+  const OKF_FIELDS = new Set(['type', 'title', 'description', 'resource', 'tags', 'timestamp', 'generated', 'verified', 'sources', 'usage_window', 'status', 'stale_after', 'computation', 'executor', 'attester']);
 
   function jumpToHeading(text: string): void {
     document
@@ -25,6 +26,9 @@
 </script>
 
 <aside class="right">
+  {#if vault.current?.okf && vault.note && !vault.note.meta.reserved}
+    <section><h3 class="hdr">Knowledge provenance</h3><KnowledgeMetadata frontmatter={vault.note.meta.frontmatter} /></section>
+  {/if}
   <section>
     <button class="hdr" onclick={() => (open.backlinks = !open.backlinks)}>
       <span class="tri" class:open={open.backlinks}>▸</span>
@@ -136,7 +140,7 @@
         </div>
         {#if vault.okfReport}
           {#if vault.okfReport.conformant}
-            <div class="none ok">✓ OKF v0.1 conformant ({vault.okfReport.checked_notes} notes)</div>
+            <div class="none ok">✓ OKF conformant ({vault.okfReport.checked_notes} notes)</div>
           {/if}
           {#each vault.okfReport.errors as f, i (i)}
             <button class="item finding err" onclick={() => f.path.endsWith('.md') && void vault.open(f.path)}>

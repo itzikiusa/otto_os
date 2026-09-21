@@ -1,11 +1,11 @@
-//! OKF (Open Knowledge Format) v0.1 conformance — the deterministic checker
+//! OKF (Open Knowledge Format) v0.1/v0.2 conformance — the deterministic checker
 //! ("never eyeball conformance") plus per-directory `index.md` generation.
 //!
 //! Rules follow the public validator taxonomy over SPEC.md §9:
 //!   E1 no/unparseable frontmatter · E2 missing/empty `type` · E3 reserved-file
 //!   structure (index.md frontmatter — only the bundle-root index may carry
 //!   one, and only `okf_version`; log.md frontmatter) · W1 missing title or
-//!   description · W2 broken internal link · W3 no timestamp · W4 directory
+//!   description · W2 broken internal link · W3 no content-change timestamp · W4 directory
 //!   without index.md · W5 log `##` headings not ISO `YYYY-MM-DD`.
 //! Warnings never fail a bundle (permissive consumption is intentional).
 
@@ -25,6 +25,44 @@ fn is_iso_date(s: &str) -> bool {
         && b.iter()
             .enumerate()
             .all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+}
+
+/// Optional families remain advisory: malformed metadata never makes otherwise
+/// valid knowledge unreadable. Trust declarations are not authenticated proofs.
+fn optional_metadata_warnings(fm: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let nonempty = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty());
+    let datetime = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str())
+        .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok());
+    if let Some(generated) = fm.get("generated") {
+        if !nonempty(generated.get("by")) || !datetime(generated.get("at")) {
+            warnings.push("`generated` should carry nonempty `by` and an offset-bearing ISO datetime `at`".into());
+        }
+    }
+    if let Some(verified) = fm.get("verified") {
+        let events: Vec<&serde_json::Value> = match verified {
+            serde_json::Value::Array(events) => events.iter().collect(),
+            serde_json::Value::Object(_) => vec![verified],
+            _ => vec![],
+        };
+        if (!verified.is_array() && !verified.is_object()) || events.iter().any(|event| !nonempty(event.get("by")) || !datetime(event.get("at"))) {
+            warnings.push("`verified` should be a {by, at} mapping or list of verification mappings".into());
+        }
+    }
+    if let Some(sources) = fm.get("sources") {
+        if sources.as_array().is_none_or(|entries| entries.iter().any(|entry| !nonempty(entry.get("resource")))) {
+            warnings.push("`sources` should be a list of mappings with a nonempty `resource` (path, URI or scope descriptor)".into());
+        }
+    }
+    if let Some(status) = fm.get("status") {
+        if !matches!(status.as_str(), Some("draft" | "stable" | "deprecated")) {
+            warnings.push("recommended lifecycle `status` values are draft, stable or deprecated".into());
+        }
+    }
+    if fm.get("stale_after").is_some() && !datetime(fm.get("stale_after")) {
+        warnings.push("`stale_after` should be an absolute ISO datetime with a UTC offset".into());
+    }
+    warnings
 }
 
 impl VaultEngine {
@@ -141,13 +179,19 @@ impl VaultEngine {
                     message: "missing recommended `title` and/or `description`".into(),
                 });
             }
-            // W3 — timestamp.
-            if fm.get("timestamp").is_none() {
+            // v0.2 generated.at takes precedence; timestamp is a v0.1 fallback.
+            let changed_at = if fm.get("generated").is_some() {
+                fm.get("generated").and_then(|v| v.get("at"))
+            } else { fm.get("timestamp") };
+            if changed_at.and_then(serde_json::Value::as_str).is_none_or(|s| s.trim().is_empty()) {
                 warnings.push(OkfFinding {
                     rule: "W3".into(),
                     path: r.path.clone(),
-                    message: "missing `timestamp` (ISO 8601 last-meaningful-change)".into(),
+                    message: "missing `generated.at` (or legacy `timestamp`) for the last content change".into(),
                 });
+            }
+            for message in optional_metadata_warnings(&fm) {
+                warnings.push(OkfFinding { rule: "W6".into(), path: r.path.clone(), message });
             }
         }
 
@@ -186,6 +230,13 @@ impl VaultEngine {
     pub async fn okf_indexes(self: &Arc<Self>, ws: &str, id: i64) -> Result<usize> {
         let v = self.get_scoped(ws, id).await?;
         let notes = self.store().all_notes(id).await?;
+        // Existing bundles keep their declared version, including future ones.
+        // Regenerating an index is not consent to migrate or downgrade a bundle.
+        let root = tokio::fs::read_to_string(std::path::Path::new(&v.root_path).join("index.md")).await.ok();
+        let version = root.as_deref().map(crate::parse::parse_note)
+            .and_then(|n| n.frontmatter.get("okf_version").cloned())
+            .filter(|v| v.is_string() || v.is_number())
+            .unwrap_or_else(|| serde_json::json!("0.2"));
         let mut dirs: BTreeSet<String> = BTreeSet::new();
         for (p, _, _, reserved) in &notes {
             if *reserved {
@@ -236,7 +287,7 @@ impl VaultEngine {
             let mut md = String::new();
             let is_root = dir.is_empty();
             if is_root {
-                md.push_str("---\nokf_version: \"0.1\"\n---\n\n");
+                md.push_str(&format!("---\nokf_version: {version}\n---\n\n"));
             }
             let dir_title = if is_root {
                 v.name.clone()

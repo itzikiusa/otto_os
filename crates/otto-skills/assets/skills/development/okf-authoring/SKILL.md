@@ -2,7 +2,7 @@
 name: okf-authoring
 description: Use when creating, maintaining, consuming, converting, or validating Open Knowledge Format bundles, especially Otto Vault documentation for repositories, services, APIs, data assets, decisions, runbooks, metrics, and references.
 metadata:
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # OKF authoring
@@ -23,7 +23,7 @@ Do not use this skill for ordinary Markdown writing, generic code review, or sou
 
 Read only the resources needed for the task:
 
-- Read [references/spec-v0.1.md](references/spec-v0.1.md) before validating, converting, or resolving frontmatter/reserved-file questions.
+- Read [references/spec-v0.2.md](references/spec-v0.2.md) before validating, converting, or resolving frontmatter/reserved-file questions.
 - Read [references/concept-patterns.md](references/concept-patterns.md) before writing a service, endpoint, flow, datastore, runbook, ADR, metric, or reference.
 - Read [references/linking-indexes-logs.md](references/linking-indexes-logs.md) when adding, moving, renaming, deprecating, or converting concepts.
 - Read [references/quality-gates.md](references/quality-gates.md) before declaring produce or maintain work complete.
@@ -34,8 +34,9 @@ Read only the resources needed for the task:
 1. Inspect the source and the existing bundle before writing. Record unknowns; never invent URLs, fields, joins, enum values, behavior, or citations.
 2. Choose a plural domain directory such as `services/`, `endpoints/`, `flows/`, `datasets/`, `runbooks/`, `decisions/`, `metrics/`, or `references/`.
 3. Write one concept per nameable topic. Use path-minus-`.md` as its ID, a non-empty `type`, a one-sentence `description`, and a canonical `resource` only for a real asset.
-4. Link related concepts at their first useful mention. Update the local `index.md` and append a newest-first dated `log.md` entry for produce/maintain work.
-5. Run the hard static gate, then the quality audit, without mutating input.
+4. For new v0.2 concepts, record source-backed `generated: {by, at}` and `sources`; use keyed source footnotes for claims. Preserve v0.1 metadata and unknown extensions on focused maintenance unless migration is requested. Record verification only for an actual check, never inferred from authorship or a syntax pass.
+5. Link related concepts at their first useful mention. Update the local `index.md` and append a newest-first dated `log.md` entry for produce/maintain work.
+6. Run the hard static gate, then the quality audit, without mutating input.
 
 ```bash
 python3 scripts/validate_okf.py ROOT --strict --format text
@@ -43,6 +44,8 @@ python3 scripts/audit_bundle.py ROOT --format text
 ```
 
 Use `--format json` for automation. Fix every conformance error. Resolve quality findings with cited facts or explicitly mark the fact unknown.
+
+Consumption remains permissive: unknown types/fields and missing optional trust metadata do not invalidate a concept. Root version declarations, existing bodies and verification history remain intact unless the task explicitly changes them. Read the v0.2 reference for trust, staleness and Attested Computation; declared human verification is not authenticated proof.
 
 ## Hard static enforcement
 

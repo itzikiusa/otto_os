@@ -9,7 +9,14 @@ title: Create widget
 description: Creates one widget for the authenticated tenant.
 resource: "POST /v1/widgets"
 tags: [widgets, write]
-timestamp: 2026-07-12T09:00:00Z
+generated: {by: otto/example-v1, at: 2026-07-12T09:00:00Z}
+sources:
+  - id: source-1
+    resource: "https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/api/widgets.rs#L42"
+    title: "Route and DTO"
+  - id: source-2
+    resource: "https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/widgets/service.rs#L88"
+    title: "Service transaction"
 ---
 
 # Overview
@@ -76,8 +83,8 @@ Inserts one `widgets` row and emits `widget.created` in the same documented tran
 
 The route calls the widget service, which checks uniqueness and writes through the widget repository; the cited implementation records the ordered path.
 
-# Citations
+Source locations for this illustrative example.[^source-1][^source-2]
 
-[1] [Route and DTO](https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/api/widgets.rs#L42)
-[2] [Service transaction](https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/widgets/service.rs#L88)
+[^source-1]: Route and DTO
+[^source-2]: Service transaction
 ````

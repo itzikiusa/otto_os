@@ -1,6 +1,6 @@
 # OKF v0.1 format and conformance
 
-Use this reference for exact bundle rules. Otto follows OKF v0.1 from `GoogleCloudPlatform/knowledge-catalog/okf/SPEC.md`; Otto's deterministic E1–E3/W1–W5 taxonomy is implemented by its Vault validator.
+Legacy compatibility reference for existing v0.1 bundles. Current authoring follows [spec-v0.2.md](spec-v0.2.md) and the canonical [Open Knowledge Format specification](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md). Preserve existing v0.1 fields during focused maintenance; do not force migration.
 
 ## Bundle and concept identity
 

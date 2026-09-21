@@ -5,7 +5,7 @@ Conformance proves parseability, not usefulness. Apply every applicable gate bef
 ## Evidence gate
 
 - Trace claims to source files, code symbols, schemas, queries, configuration, runtime evidence, or authoritative documents.
-- Put numbered Markdown links under `# Citations`; cite source locations as precisely as the medium permits.
+- For v0.2, record `sources` and keyed claim footnotes; retain numbered links under `# Citations` when maintaining a legacy v0.1 concept. Cite source locations as precisely as the medium permits.
 - Never invent a URL, field, type, enum, join, index, behavior, owner, or relationship.
 - Label unresolved facts `Unknown` or `N/A`, state what evidence was checked, and cite that evidence in the same section. A bare marker does not satisfy a depth gate.
 
@@ -28,7 +28,7 @@ Augment rather than rewrite:
 
 - Preserve every existing top-level heading in its original order and wording.
 - Copy `type`, `title`, and `resource` verbatim unless the underlying identity changed.
-- Preserve unknown frontmatter, union-merge tags, and refresh `timestamp` after a meaningful change.
+- Preserve unknown frontmatter, union-merge tags, and refresh `generated.at` after a meaningful change (or legacy `timestamp` for an unchanged v0.1 convention). Authorship does not confer verification.
 - Extend prose, add bullets or subsections, and append new top-level headings after existing headings.
 - Update links, local indexes, and `log.md` in the same pass.
 

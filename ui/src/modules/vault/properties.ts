@@ -1,6 +1,6 @@
 import { isMap, parseDocument } from 'yaml';
 
-export const PROPERTY_FIELDS = ['title', 'type', 'description', 'resource', 'tags', 'aliases', 'timestamp'] as const;
+export const PROPERTY_FIELDS = ['title', 'type', 'description', 'resource', 'tags', 'aliases', 'timestamp', 'status', 'stale_after'] as const;
 
 function frontmatter(raw: string) {
   const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)(?:\r?\n|$)/.exec(raw);

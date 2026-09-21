@@ -250,7 +250,7 @@ pub const NODE_ATTACHMENT: u8 = 8;
 pub struct OkfFinding {
     /// `E1` no/unparseable frontmatter · `E2` missing/empty `type` · `E3`
     /// reserved-file structure · `W1` missing title/description · `W2` broken
-    /// internal link · `W3` no timestamp · `W4` directory missing index.md ·
+    /// internal link · `W3` no content-change timestamp · `W4` directory missing index.md ·
     /// `W5` log dates not ISO.
     pub rule: String,
     pub path: String,

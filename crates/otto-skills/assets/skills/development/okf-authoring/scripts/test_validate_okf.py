@@ -30,6 +30,42 @@ class ValidateOkfTests(unittest.TestCase):
         (root / "log.md").write_text("## 2026-07-16\n", encoding="utf-8")
         return root
 
+    def test_v02_generated_block_and_flow_forms_replace_legacy_timestamp(self):
+        for generated in ["generated: {by: otto/test, at: 2026-09-20T00:00:00Z}",
+                          "generated:\n  by: human:fixture\n  at: 2026-09-20T00:00:00+03:00"]:
+            root = self.temporary_bundle()
+            (root / "index.md").write_text('---\nokf_version: "0.2"\n---\n# Bundle\n')
+            (root / "concept.md").write_text("---\ntype: Future Type\ntitle: Test\ndescription: A fixture.\n" + generated + "\nverified: {by: human:fixture, at: 2026-09-20T00:00:00Z}\nunknown_extension: [one, two]\n---\n")
+            before = tree_digest(root)
+            report = validate_okf.validate_bundle(root)
+            self.assertEqual(report["errors"], [])
+            self.assertEqual(report["warnings"], [])
+            self.assertEqual(tree_digest(root), before)
+
+    def test_flow_comments_and_numeric_actors_do_not_confuse_advisory_metadata(self):
+        root = self.temporary_bundle()
+        concept = root / "concept.md"
+        header = "---\ntype: Reference\ntitle: Test\ndescription: A fixture.\n"
+        concept.write_text(header + "generated: {by: human:fixture, at: 2026-09-20T00:00:00Z} # source-backed author\n---\n")
+        self.assertEqual(validate_okf.validate_bundle(root)["warnings"], [])
+        concept.write_text(header + "generated: {by: 42, at: 2026-09-20T00:00:00Z}\n---\n")
+        self.assertIn("W6", {item["rule"] for item in validate_okf.validate_bundle(root)["warnings"]})
+
+    def test_optional_v02_metadata_is_advisory_and_generated_has_precedence(self):
+        root = self.temporary_bundle()
+        (root / "concept.md").write_text("---\ntype: Future Type\ntitle: Test\ndescription: A fixture.\ntimestamp: 2026-09-20T00:00:00Z\ngenerated: {by: otto/test}\nverified: wrong\nsources: [{title: missing resource}]\nstatus: surprising\nstale_after: tomorrow\n---\n")
+        report = validate_okf.validate_bundle(root)
+        self.assertTrue(report["conformant"])
+        self.assertIn("W3", {item["rule"] for item in report["warnings"]})
+        self.assertEqual(sum(item["rule"] == "W6" for item in report["warnings"]), 5)
+
+    def test_optional_sources_and_verifiers_accept_lists_and_bare_mapping(self):
+        root = self.temporary_bundle()
+        (root / "concept.md").write_text("---\ntype: Metric\ntitle: Test\ndescription: A fixture.\ngenerated: {by: otto/test, at: 2026-09-20T00:00:00Z}\nsources:\n  - id: source\n    resource: all queries in project X\n    usage_count: 4\nverified:\n  - by: process:fixture\n    at: 2026-09-20T00:00:00Z\n  - {by: human:fixture, at: 2026-09-20T00:00:00Z}\n---\n")
+        report = validate_okf.validate_bundle(root)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["warnings"], [])
+
     def test_missing_frontmatter_and_type_are_conformance_errors(self):
         report = validate_okf.validate_bundle(FIXTURES / "invalid-concepts")
 
@@ -178,6 +214,14 @@ timestamp: 2026-07-16T00:00:00Z
             report,
             {"conformant": True, "errors": [], "warnings": [], "checked_notes": 6},
         )
+
+    def test_v02_fixture_has_no_findings_and_is_unchanged(self):
+        root = FIXTURES / "v02-bundle"
+        before = tree_digest(root)
+        report = validate_okf.validate_bundle(root)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["warnings"], [])
+        self.assertEqual(tree_digest(root), before)
 
     def test_validation_never_mutates_the_bundle(self):
         root = FIXTURES / "clean-bundle"
