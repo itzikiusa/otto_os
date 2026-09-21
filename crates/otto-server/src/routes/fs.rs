@@ -777,8 +777,12 @@ mod tests {
                 managed_session_id: None,
             };
             let app = Router::new()
-                .route("/api/v1/fs/read", get(super::read_file))
-                .route("/api/v1/fs/browse", get(super::browse))
+                .nest(
+                    "/api/v1",
+                    Router::new()
+                        .route("/fs/read", get(super::read_file))
+                        .route("/fs/browse", get(super::browse)),
+                )
                 .route_layer(middleware::from_fn_with_state(
                     ScopeState,
                     crate::feature_guard::feature_guard::<ScopeState>,
