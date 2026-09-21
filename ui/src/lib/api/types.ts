@@ -2291,6 +2291,7 @@ export interface FsEntry {
   is_git_repo: boolean;
 }
 
+/** Canonical daemon-host listing; access follows the daemon OS account permissions. */
 export interface FsBrowse {
   path: string;
   parent: string | null;
@@ -3598,6 +3599,7 @@ export interface UpsertIntegrationReq {
 // Filesystem (GET /fs/read)
 // ---------------------------------------------------------------------------
 
+/** Bounded regular-file read using daemon OS account permissions; endpoint token scopes still apply. */
 export interface FsRead {
   path: string;
   content: string;

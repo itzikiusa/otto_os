@@ -12,7 +12,7 @@
 //! - [`PolicyDecision::Exempt`] — the request is **not** feature-gated. This is an
 //!   explicit allow-list: public routes, per-session-`?token=` ingest routes, and
 //!   the cross-cutting *self-owned* routes (Auth/PAT self-management, `/auth/me`,
-//!   Notifications, the FS-browse sandbox) plus the pure workspace-axis routes
+//!   Notifications, host filesystem access) plus the pure workspace-axis routes
 //!   (workspace CRUD / members / MCP-server config) whose authorization is the
 //!   `require_ws_role` gate the central guard can't replace. Static catalogs
 //!   (`/swarm/presets`, `/workflows/node-types`) are exempt too.
@@ -169,7 +169,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/extend" {
         return Exempt;
     }
-    // FS-browse sandbox (cross-cutting; sandboxed in the handler).
+    // Host filesystem access: authenticated; OS permissions enforced by I/O.
+    // Share/MCP endpoint scopes are still checked before this exemption.
     if matches!(p, "/fs/browse" | "/fs/read") {
         return Exempt;
     }

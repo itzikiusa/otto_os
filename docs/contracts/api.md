@@ -1936,7 +1936,7 @@ left behind by a failed earlier attempt is replaced, so downstream steps never
 read a failed attempt's summary. `GET /workflow-runs/{id}` carries the derived
 `context_dir` (absolute path; present when the directory exists — absent on
 list endpoints); the run view renders a browsable file tree over it via the
-existing sandboxed `/fs/browse` + `/fs/read`, including a dedicated Final
+existing authenticated `/fs/browse` + `/fs/read`, including a dedicated Final
 output panel that reads `final-output.md` on a successful run. Context files
 are unredacted local artifacts in the same trust domain as `nodes_json`; any
 future remote serving (share links) must redact on delivery.
@@ -2256,9 +2256,12 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /fs/browse?path= | member | — | complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
-| GET /fs/read?path= | member | — | file contents |
+| GET /fs/read?path= | member | — | regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
 | GET /logs/daemon | root | — | recent daemon log lines |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
+
+Filesystem paths are on the **daemon host**, including when the caller uses a remote browser. Both filesystem endpoints follow the permissions of the OS account running the daemon; there is no additional allowed-root, hidden-directory, secret-filename, root-user, or managed-agent path restriction. Authentication and existing share/MCP endpoint scopes still apply. Directory listings include hidden names (including `.git`) and accessible directory/file symlinks; broken links and special files are omitted. Paths are canonicalized on open, so symlinks resolve to their target; a leading `~` refers to the daemon account's home. The daemon does not elevate privileges. OS permission failures return 403 with the attempted path, missing paths return 404, and incompatible path types return 400. Reads reject nonregular files, including devices, sockets and FIFOs, before consuming content; the opened file handle is checked again. Read/list workers remain bounded after cancellation or timeout. Session artifact endpoints retain their separate resource and path policies.
+
 
 ## PR-review config
 

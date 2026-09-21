@@ -1,6 +1,7 @@
 <script lang="ts">
   // FileTree: lazy browsable file tree + read-only syntax-highlighted viewer
   // for the right-panel Files tab.
+  import { onDestroy } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
   import { api } from '../../lib/api/client';
@@ -47,12 +48,17 @@
   let rootLoading = $state(false);
   let rootError = $state('');
   let loadedRoot = $state('');
+  let rootGeneration = 0;
+  let rootRequest: AbortController | undefined;
+  let fileGeneration = 0;
+  let fileRequest: AbortController | undefined;
 
   // ── viewer state ──────────────────────────────────────────────────────────
 
   let viewerFile: FsRead | null = $state(null);
   let viewerName = $state('');
   let viewerLoading = $state(false);
+  let viewerError = $state('');
   // Line/col to reveal when the viewer opens from a terminal `file:line` click.
   let viewerGotoLine: number | null = $state(null);
   let viewerGotoCol: number | null = $state(null);
@@ -68,9 +74,10 @@
     if (r && r !== loadedRoot) {
       // Reset tree state when root changes.
       rootNodes = [];
-      viewerFile = null;
-      viewerName = '';
-      loadRoot(r);
+      void loadRoot(r);
+    } else if (!r) {
+      rootGeneration++; rootRequest?.abort();
+      loadedRoot = ''; rootNodes = []; rootLoading = false; rootError = '';
     }
   });
 
@@ -89,16 +96,21 @@
   // ── helpers ───────────────────────────────────────────────────────────────
 
   async function loadRoot(r: string): Promise<void> {
+    const generation = ++rootGeneration;
+    rootRequest?.abort();
+    const controller = new AbortController();
+    rootRequest = controller;
+    loadedRoot = r;
     rootLoading = true;
     rootError = '';
     try {
-      const data = await api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(r)}&files=true`);
+      const data = await api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(r)}&files=true`, controller.signal);
+      if (generation !== rootGeneration) return;
       rootNodes = data.entries.map((e) => makeNode(e, 0));
-      loadedRoot = r;
     } catch (e) {
-      rootError = e instanceof Error ? e.message : String(e);
+      if (generation === rootGeneration) rootError = e instanceof Error ? e.message : String(e);
     } finally {
-      rootLoading = false;
+      if (generation === rootGeneration) rootLoading = false;
     }
   }
 
@@ -108,6 +120,7 @@
 
   async function toggleDir(node: TreeNode): Promise<void> {
     if (!node.entry.is_dir) return;
+    const generation = rootGeneration;
     if (!node.open) {
       // Open: lazy-load children if not yet done.
       node.open = true;
@@ -117,9 +130,11 @@
           const data = await api.get<FsBrowse>(
             `/fs/browse?path=${encodeURIComponent(node.entry.path)}&files=true`,
           );
+          if (generation !== rootGeneration) return;
           node.children = data.entries.map((e) => makeNode(e, node.depth + 1));
           node.loaded = true;
         } catch (e) {
+          if (generation !== rootGeneration) return;
           toasts.error('Cannot open folder', e instanceof Error ? e.message : String(e));
           node.open = false;
         } finally {
@@ -130,58 +145,64 @@
       node.open = false;
     }
     // Trigger reactivity by reassigning rootNodes.
-    rootNodes = [...rootNodes];
+    if (generation === rootGeneration) rootNodes = [...rootNodes];
   }
 
   async function openFile(entry: FsEntry): Promise<void> {
-    // A manual tree click clears any pending line jump.
-    viewerGotoLine = null;
-    viewerGotoCol = null;
-    viewerLoading = true;
-    viewerName = entry.name;
-    viewerFile = null;
-    previewMode = true; // previewable files default to rendered view
-    try {
-      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(entry.path)}`);
-      viewerFile = data;
-    } catch (e) {
-      toasts.error('Cannot read file', e instanceof Error ? e.message : String(e));
-      viewerLoading = false;
-      return;
-    } finally {
-      viewerLoading = false;
-    }
+    await readFile(entry.path, undefined, undefined, true, false);
   }
 
-  // Open a file by absolute path and reveal an optional line/col. Used by the
-  // terminal `file:line` link provider (routed through the open-file store).
+  function parentFolder(path: string): string {
+    return path.slice(0, path.lastIndexOf('/')) || '/';
+  }
+
   async function openPath(path: string, line?: number, col?: number): Promise<void> {
+    await readFile(path, line, col, false, true);
+  }
+
+  async function readFile(path: string, line: number | undefined, col: number | undefined, preview: boolean, revealParent: boolean): Promise<void> {
+    const generation = ++fileGeneration;
+    fileRequest?.abort();
+    const controller = new AbortController();
+    fileRequest = controller;
+    // Browsing location is independent from workspace/session identity. Listing
+    // the parent is useful but never a prerequisite to showing a readable file.
+    if (revealParent) overriddenRoot = parentFolder(path);
     viewerGotoLine = line ?? null;
     viewerGotoCol = col ?? null;
     viewerLoading = true;
-    viewerName = path.split('/').filter(Boolean).pop() ?? path;
+    viewerName = path.split('/').at(-1) ?? path;
     viewerFile = null;
-    // Force the source view (not the markdown/HTML preview) so the line jump
-    // lands in the CodeEditor where it's meaningful.
-    previewMode = false;
+    viewerError = '';
+    previewMode = preview;
     try {
-      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(path)}`);
+      const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(path)}`, controller.signal);
+      if (generation !== fileGeneration) return;
       viewerFile = data;
+      if (revealParent) overriddenRoot = parentFolder(data.path);
     } catch (e) {
-      toasts.error('Cannot open file', e instanceof Error ? e.message : String(e));
-      viewerLoading = false;
-      return;
+      if (generation !== fileGeneration) return;
+      viewerError = `Cannot open ${path}: ${e instanceof Error ? e.message : String(e)}. If the terminal shortened the filename, use its full path.`;
     } finally {
-      viewerLoading = false;
+      if (generation === fileGeneration) viewerLoading = false;
     }
   }
 
   function closeViewer(): void {
+    fileGeneration++;
+    fileRequest?.abort();
     viewerFile = null;
+    viewerError = '';
+    viewerLoading = false;
     viewerName = '';
     viewerGotoLine = null;
     viewerGotoCol = null;
   }
+
+  onDestroy(() => {
+    rootGeneration++; fileGeneration++;
+    rootRequest?.abort(); fileRequest?.abort();
+  });
 
   // ── Markdown / HTML preview ────────────────────────────────────────────────
   let previewMode = $state(true);
@@ -232,6 +253,7 @@
   }
 
   function onPickFolder(path: string): void {
+    closeViewer();
     overriddenRoot = path;
     showPicker = false;
   }
@@ -246,9 +268,6 @@
   />
 {/if}
 
-{#if !effectiveRoot}
-  <EmptyState icon="folder" title="No workspace" body="Open a workspace to browse its files." />
-{:else}
   <div class="ft-wrap">
     <!-- Section header: root path + Change folder + optional close -->
     <div class="ft-header">
@@ -276,7 +295,9 @@
       {/if}
     </div>
 
-    {#if rootLoading}
+    {#if !effectiveRoot}
+      <EmptyState icon="folder" title="Choose a folder" body="Choose a folder to browse, or open a file from a terminal link." />
+    {:else if rootLoading}
       <div class="loading dim">Loading…</div>
     {:else if rootError}
       <div class="error-msg">{rootError}</div>
@@ -319,8 +340,9 @@
         </div>
       </div>
 
-      <!-- Viewer pane -->
-      {#if viewerFile || viewerLoading}
+    {/if}
+      <!-- The viewer is independent from folder listing success. -->
+      {#if viewerFile || viewerLoading || viewerError}
         <div class="viewer-pane">
           <div class="viewer-header">
             <span class="viewer-name">
@@ -342,6 +364,8 @@
           </div>
           {#if viewerLoading}
             <div class="loading dim">Loading…</div>
+          {:else if viewerError}
+            <div class="error-msg" role="alert">{viewerError}</div>
           {:else if viewerFile}
             {#if canPreview && previewMode}
               <iframe class="preview-frame" title="Preview" sandbox="allow-same-origin" srcdoc={previewSrcdoc}></iframe>
@@ -360,9 +384,7 @@
           {/if}
         </div>
       {/if}
-    {/if}
   </div>
-{/if}
 
 <style>
   .ft-wrap {
