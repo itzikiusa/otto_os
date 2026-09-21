@@ -809,12 +809,13 @@
          settings — admin-gated server-side; off by default. -->
     <button
       class="btn small ghost {ws.apiAllowLocal ? 'local-on' : ''}"
+      aria-pressed={ws.apiAllowLocal}
       onclick={() => void ws.setApiAllowLocal(!ws.apiAllowLocal).catch(() => {})}
       title={ws.apiAllowLocal
-        ? 'Requests to localhost/private networks are ALLOWED for this workspace. Click to re-enable the guard.'
-        : 'Allow requests to localhost/private networks from this workspace (admin only; off by default)'}
+        ? 'API client requests may reach localhost/private networks in this workspace. Click to block private addresses.'
+        : 'Allow this API client to reach localhost/private networks (workspace admin only; blocked by default). This does not turn Otto’s server on or off.'}
     >
-      <Icon name="lock" size={11} />{ws.apiAllowLocal ? 'Local: on' : 'Local: off'}
+      <Icon name="lock" size={11} />{ws.apiAllowLocal ? 'Private addresses: allowed' : 'Private addresses: blocked'}
     </button>
     {#if apiClient.activeEnv}
       <span class="chip accent" title="Active environment">{apiClient.activeEnv.name}</span>
