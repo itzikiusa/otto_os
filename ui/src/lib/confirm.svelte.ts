@@ -22,6 +22,7 @@ class ConfirmStore {
   isPrompt = $state(false);
   inputValue = $state('');
   placeholder = $state('');
+  browseFolder = $state(false);
   // Choice mode: N labeled buttons + an optional "remember" checkbox.
   choices: ChoiceOption[] | null = $state(null);
   checkboxLabel = $state('');
@@ -51,7 +52,7 @@ class ConfirmStore {
    */
   promptText(
     message: string,
-    opts?: { title?: string; confirmLabel?: string; initial?: string; placeholder?: string },
+    opts?: { title?: string; confirmLabel?: string; initial?: string; placeholder?: string; browseFolder?: boolean },
   ): Promise<string | null> {
     this.isPrompt = true;
     this.choices = null;
@@ -61,6 +62,7 @@ class ConfirmStore {
     this.danger = false;
     this.inputValue = opts?.initial ?? '';
     this.placeholder = opts?.placeholder ?? '';
+    this.browseFolder = opts?.browseFolder ?? false;
     this.open = true;
     return new Promise<string | null>((resolve) => {
       this.resolver = resolve as (v: boolean | string | null) => void;

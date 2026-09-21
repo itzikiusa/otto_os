@@ -1012,6 +1012,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
+    if p == "/personal-agents/{id}/memory" || p == "/personal-agents/{id}/context" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
     if p == "/personal-agents/{id}/schedules" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }

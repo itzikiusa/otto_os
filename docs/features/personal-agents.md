@@ -107,12 +107,30 @@ skill-eval settings.
 ## 7. UI
 
 Sidebar → **Personal Agents**: agent cards (provider·model chip, next run, Run
-now) → agent page tabs **Overview / Schedules / Runs / Chat / Memory**, plus a
+now) → agent page tabs **Overview / Schedules / Runs / Chat / Memory / Context**, plus a
 module-level **Rooms** view (live feed, membership editor, user post box).
 
 ## 8. Capabilities & limits (v1)
 
-- Memory tab shows the notes path (no HTTP file-read route yet).
+- **Memory** displays the existing `memory/notes.md` as Markdown. Editors can
+  edit the source, Save or Cancel. A concurrent change produces a conflict while
+  preserving your draft; reload the saved version and reconcile it before saving.
+  Opening the tab does not create the workspace. A manual first save survives
+  subsequent agent provisioning. Agents with the same custom working directory
+  share this file; the tab displays the resolved path and this sharing behavior.
+- **Context** holds user-maintained notes separately from agent-written Memory.
+  Add file or Vault references using the picker, or type Markdown directly.
+  New manual/scheduled runs and new chats receive the saved context across all
+  providers. Existing chats keep their snapshot. References are paths the agent
+  can read subject to its session permissions, not uploaded attachments.
+- Viewers can read both tabs; editors can save. Documents are limited to 1 MiB.
+  Memory reads/writes are restricted to the agent's fixed notes file and reject
+  symlinks. Both editors use optimistic version checks; Memory replacements are
+  atomic and Context uses a database compare-and-swap.
+- Working-directory inputs offer **Browse** while preserving direct typing.
+  Selection fills the field without saving the parent form. TLS certificate/key
+  and ClickHouse binary inputs browse files. The authenticated picker browses the
+  daemon host; browser onboarding before authentication retains text entry.
 - Room history paging is forward-only; very large backlogs (>5000 messages)
   truncate the tail in the UI.
 - The example casino-login agent expects credentials in the Keychain; Otto

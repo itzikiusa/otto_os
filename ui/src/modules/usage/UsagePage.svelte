@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard (root-only): provider/day/session token rollups, system
   // CPU/RAM metrics, and the embedded-ClickHouse install/retention controls.
   // All data comes from the daemon's /usage/* endpoints (otto-usage engine).
@@ -397,13 +398,13 @@
       <div class="path-row">
         <label for="ch-path">…or point at an existing binary</label>
         <div class="path-input">
-          <input
+          <PathField bind:value={chPath} files><input
             id="ch-path"
             class="input mono"
             placeholder="/usr/local/bin/clickhouse"
             bind:value={chPath}
             spellcheck="false"
-          />
+          /></PathField>
           <button
             class="btn"
             disabled={usage.saving || chPath.trim() === ''}
@@ -929,7 +930,7 @@
             <input id="cfg-interval" class="input" type="number" min="5" max="3600" bind:value={interval} />
 
             <label for="cfg-path">ClickHouse binary</label>
-            <input id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" />
+            <PathField bind:value={chPath} files><input id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
           </div>
           <div class="cfg-actions">
             <button

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // Inject tab — build/preview the inject bundle for the selected story, copy
   // markdown to clipboard, and open an agent session seeded with the bundle.
   import Icon from '../../lib/components/Icon.svelte';
@@ -125,14 +126,14 @@
         </select>
 
         <label class="field-label" for="inject-cwd">cwd</label>
-        <input
+        <PathField bind:value={cwd} disabled={launching}><input
           id="inject-cwd"
           class="cwd-input"
           type="text"
           placeholder="optional working dir"
           bind:value={cwd}
           disabled={launching}
-        />
+        /></PathField>
 
         <button
           class="action-btn accent"

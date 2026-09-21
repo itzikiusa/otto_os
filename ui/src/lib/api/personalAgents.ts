@@ -7,6 +7,7 @@ import type {
   AgentRoomMessage,
   AgentRoomWithMembers,
   PersonalAgent,
+  PersonalAgentDocument,
   PersonalAgentRun,
   PersonalAgentSchedule,
 } from './types';
@@ -61,6 +62,11 @@ export const personalAgentsApi = {
   /** Return (creating if absent or dead) the agent's single chat session. */
   chatSession: (agentId: string) =>
     api.post<{ session_id: string; created: boolean }>(`/personal-agents/${agentId}/chat-session`, {}),
+
+  document: (agentId: string, kind: 'memory' | 'context') =>
+    api.get<PersonalAgentDocument>(`/personal-agents/${agentId}/${kind}`),
+  saveDocument: (agentId: string, kind: 'memory' | 'context', body: { content: string; version: string }) =>
+    api.put<PersonalAgentDocument>(`/personal-agents/${agentId}/${kind}`, body),
 
   // -- Rooms ---------------------------------------------------------------
   rooms: (ws: string) => api.get<AgentRoomWithMembers[]>(`/workspaces/${ws}/agent-rooms`),

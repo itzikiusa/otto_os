@@ -263,6 +263,7 @@
   async function changeWorkspaceDir(w: WorkspaceWithRole): Promise<void> {
     const root = await confirmer.promptText('Working directory (absolute path, ~ ok)', {
       title: `Change folder of “${w.name}”`,
+      browseFolder: true,
       confirmLabel: 'Change',
       initial: w.root_path,
       placeholder: '~/projects/my-repo',

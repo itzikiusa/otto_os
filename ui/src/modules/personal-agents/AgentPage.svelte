@@ -7,6 +7,8 @@
   import { router } from '../../lib/router.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
+  import AgentDocuments from './AgentDocuments.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import {
     browserTz,
     buildCadence,
@@ -23,7 +25,7 @@
   }
   let { agentId }: Props = $props();
 
-  type Tab = 'overview' | 'schedules' | 'runs' | 'chat' | 'memory';
+  type Tab = 'overview' | 'schedules' | 'runs' | 'chat' | 'memory' | 'context';
   let tab = $state<Tab>('overview');
   let editing = $state(false);
   let busy = $state(false);
@@ -177,9 +179,8 @@
     return ((agent?.delivery?.type as string) ?? 'none') as string;
   }
 
-  const memoryRoot = $derived(
-    agent?.cwd?.trim() ? agent.cwd : `<otto data dir>/personal/${agentId}/`,
-  );
+  const canEditDocuments = $derived(auth.can('scheduled_tasks', 'edit') &&
+    (auth.isRoot || ['editor', 'admin'].includes(ws.workspaces.find((w) => w.id === agent?.workspace_id)?.my_role ?? 'viewer')));
 </script>
 
 <div class="page">
@@ -202,7 +203,7 @@
   {#if error}<div class="err" role="alert">{error}</div>{/if}
 
   <div class="tabs" role="tablist" aria-label="Agent sections">
-    {#each [['overview', 'Overview'], ['schedules', 'Schedules'], ['runs', 'Runs'], ['chat', 'Chat'], ['memory', 'Memory']] as [id, label] (id)}
+    {#each [['overview', 'Overview'], ['schedules', 'Schedules'], ['runs', 'Runs'], ['chat', 'Chat'], ['memory', 'Memory'], ['context', 'Context']] as [id, label] (id)}
       <button
         class="tab"
         class:active={tab === id}
@@ -356,16 +357,10 @@
     {:else}
       <div class="muted">Opening the agent's chat session…</div>
     {/if}
-  {:else if tab === 'memory'}
-    <section class="card">
-      <h2>Memory</h2>
-      <p class="hint">
-        This agent keeps its notes in <code class="mono">memory/notes.md</code> under its workspace
-        folder; every run reads and updates them. There is no HTTP viewer for these files yet —
-        open the folder on this machine:
-      </p>
-      <pre class="soul mono">{memoryRoot}memory/notes.md</pre>
-    </section>
+  {:else if (tab === 'memory' || tab === 'context') && agent}
+    {#key `${agentId}:${tab}`}
+      <AgentDocuments {agentId} workspaceId={agent.workspace_id} kind={tab} editable={canEditDocuments} sharedWorkspace={!!agent.cwd.trim()} />
+    {/key}
   {/if}
 
   {#if editing && agent}

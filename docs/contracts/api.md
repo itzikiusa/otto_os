@@ -3251,6 +3251,42 @@ writes) + the workspace-role axis on the agent's workspace.
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
 
+### Personal Agent Memory and Context
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/personal-agents/{id}/memory | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/memory | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+| GET /api/v1/personal-agents/{id}/context | scheduled_tasks view + ws viewer | — | `PersonalAgentDocument` |
+| PUT /api/v1/personal-agents/{id}/context | scheduled_tasks edit + ws editor | `{content, version}` | `PersonalAgentDocument` |
+
+`PersonalAgentDocument = {content: string, version: string, exists: boolean, path: string | null}`.
+`version` is opaque; submit the version returned by GET with a save. Memory uses
+`<resolved agent directory>/memory/notes.md`; Context is stored separately in SQLite
+and has `path: null`. Neither endpoint accepts a filesystem path. GET of a missing
+document returns empty content, `exists: false`, and an opaque version without
+creating the agent workspace. Saving empty text creates an empty document.
+
+Content is UTF-8 Markdown, bounded to 1 MiB. Memory rejects symlinked memory
+directories/files and nonregular files. Saves check the current version and replace
+the file atomically through a sibling temporary file; Context saves use an atomic
+SQL compare-and-swap. Stale versions return 409 Conflict and leave the current
+content unchanged. Oversized/invalid content returns 400; symlinked memory paths return 403;
+missing agents return 404; feature/workspace access failures return 403. The memory version binds its resolved path and contents, so changing an agent
+working directory also invalidates an open editor. External
+agent writes are detected by the memory content hash when saving; the agent CLI
+does not participate in the UI save lock.
+
+Custom working directories intentionally share `memory/notes.md` between agents
+using that directory. Saving Memory before the first run is supported; initial
+workspace provisioning never overwrites existing notes. Context is user-maintained
+and is appended as a snapshot to new manual/scheduled run prompts for every
+provider. Newly created chat sessions receive the snapshot before their ID is
+returned; an existing pinned chat retains its current context. Context edits do not
+rewrite persona files or ongoing sessions. Files and Vault notes are inserted as
+path references in Context Markdown; this does not ingest attachments or binaries.
+These document operations return their state directly and emit no new WS event.
+
 ### Agent rooms (inter-agent messaging — always user-visible)
 
 Rooms are the ONLY agent-to-agent transport: every message is persisted,

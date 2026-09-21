@@ -3,6 +3,7 @@
   // `confirmer`. In prompt mode it shows a text input (native prompt() is a
   // no-op in the Tauri webview).
   import Modal from './Modal.svelte';
+  import PathField from './PathField.svelte';
   import { confirmer } from '../confirm.svelte';
 
   function onPrimary(): void {
@@ -15,6 +16,7 @@
   <Modal title={confirmer.title} onclose={() => confirmer.dismiss()} width={400}>
     {#if confirmer.message}<p class="cf-msg">{confirmer.message}</p>{/if}
     {#if confirmer.isPrompt}
+      {#snippet promptInput()}
       <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input cf-input"
@@ -32,6 +34,10 @@
           }
         }}
       />
+      {/snippet}
+      {#if confirmer.browseFolder}
+        <PathField bind:value={confirmer.inputValue}>{@render promptInput()}</PathField>
+      {:else}{@render promptInput()}{/if}
     {/if}
     {#if confirmer.choices && confirmer.checkboxLabel}
       <label class="cf-remember">

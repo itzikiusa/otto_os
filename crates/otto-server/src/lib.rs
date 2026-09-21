@@ -49,6 +49,7 @@ pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
 pub mod personal_agents_engine;
+mod personal_agent_documents;
 pub mod personal_agents_scheduler;
 pub mod plugins;
 pub mod policy;

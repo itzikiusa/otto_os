@@ -953,3 +953,6 @@ is also emitted when the managed summarizer's session ID is persisted; its
 for the existing agent `status`, `fallback`, and `note` fields, including retries
 after workflow completion. No new event type is introduced.
 
+Personal Agent Memory/Context document edits use the versioned HTTP responses
+documented in `api.md`; they do not introduce a WS event. New runs/chats snapshot
+saved Context, while existing sessions retain their initial context.

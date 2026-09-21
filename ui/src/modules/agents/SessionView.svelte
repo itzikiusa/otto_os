@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PathField from '../../lib/components/PathField.svelte';
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -854,14 +855,14 @@
         </ul>
       {/if}
       <div class="dir-add">
-        <input
+        <PathField bind:value={dirDraft}><input
           id="sv-extra-dir"
           class="input mono"
           bind:value={dirDraft}
           spellcheck="false"
           placeholder="/absolute/path/to/repo"
           onkeydown={onDirKeydown}
-        />
+        /></PathField>
         <button type="button" class="btn" disabled={dirDraft.trim() === ''} onclick={addDir}>Add</button>
       </div>
       <span class="hint">Passed as <code>--add-dir</code>. Takes effect on the next session restart.</span>
