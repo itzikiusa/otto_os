@@ -659,23 +659,21 @@ async fn run(cfg: Config) -> Result<(), String> {
     otto_server::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
 
     // Goal loops: each loop's controller dies with the process, so a row left
-    // running/paused/blocked is orphaned. Fail them, then remove their isolated
-    // worktrees (keeping the branch) and kill any executor sessions so nothing
-    // dangles. (Resume-after-restart is deferred; see docs/features/goal-loops.md.)
+    // running/paused/blocked is orphaned. Pause active loops, preserve blocked
+    // decisions and all working files, and reap only execution resources.
     match ctx
         .goal_loops_repo
-        .fail_running("Interrupted by a daemon restart — start it again to continue.")
+        .fail_running("Interrupted by a daemon restart — Resume to continue with preserved work.")
         .await
     {
         Ok(loops) => {
             if !loops.is_empty() {
                 tracing::info!(
-                    "goal-loop recovery: failed {} orphaned loop(s)",
+                    "goal-loop recovery: preserved {} interrupted loop(s)",
                     loops.len()
                 );
             }
             for l in &loops {
-                otto_server::goal_loop_workspace::remove_worktree(&ctx, l).await;
                 otto_server::goal_loop::cleanup_executor_sessions(&ctx, &l.workspace_id, &l.id)
                     .await;
             }

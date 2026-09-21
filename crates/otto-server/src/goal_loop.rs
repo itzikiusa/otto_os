@@ -6,7 +6,7 @@
 //! Reuse is plumbing-only: executors run as live, openable [`SessionManager`]
 //! sessions (review-style spawn/inject/watch via [`crate::agent_run`] +
 //! [`crate::review_session`]); the planner/evaluator/digester/definer are
-//! headless [`Orchestrator::run_agent`] turns, each timeout-wrapped. The
+//! managed provider-aware turns with absolute deadlines. The
 //! concurrency/safety model is OURS: v1 runs executors SEQUENTIALLY on one
 //! worktree (no git-index races), the evaluator ground-truths command criteria,
 //! and the controller is the sole writer of the loop's runtime fields.
@@ -38,6 +38,7 @@ use crate::state::ServerCtx;
 pub struct LoopHandle {
     pub cancel: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
+    pub interrupted: Arc<AtomicBool>,
 }
 
 impl LoopHandle {
@@ -45,6 +46,7 @@ impl LoopHandle {
         Self {
             cancel: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -56,31 +58,50 @@ impl Default for LoopHandle {
 }
 
 /// loop_id → live controller handle.
-pub type GoalLoopRegistry = Arc<Mutex<HashMap<String, LoopHandle>>>;
+pub type GoalLoopRegistry = Arc<LoopRegistry>;
 
-pub fn new_registry() -> GoalLoopRegistry {
-    Arc::new(Mutex::new(HashMap::new()))
+#[derive(Default)]
+pub struct LoopRegistry {
+    handles: Mutex<HashMap<String, LoopHandle>>,
+    operations: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+}
+impl LoopRegistry {
+    pub fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, HashMap<String, LoopHandle>>> {
+        self.handles.lock()
+    }
+    /// Serialize API decisions and mutations, including approval versus retry.
+    pub fn operation(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut operations = self.operations.lock().unwrap();
+        operations.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = operations.get(id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        operations.insert(id.into(), Arc::downgrade(&lock));
+        lock
+    }
+    pub fn require_idle(&self, id: &str) -> Result<()> {
+        if self.handles.lock().unwrap().contains_key(id) {
+            return Err(Error::Conflict(
+                "loop work is still active or stopping; retry when it settles".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
-/// Stuck window for a headless role turn (planner/evaluator/digester). Not a
-/// wall-clock cap; the turn is additionally bounded by `per_phase_timeout_secs`.
-const ROLE_NO_PROGRESS: Duration = Duration::from_secs(240);
+pub fn new_registry() -> GoalLoopRegistry {
+    Arc::new(LoopRegistry::default())
+}
+
 /// Idle thresholds for an executor session (mirror review's tuning).
 const EXECUTOR_WAITING_IDLE: Duration = Duration::from_secs(45);
 const EXECUTOR_STUCK_IDLE: Duration = Duration::from_secs(180);
 const EXECUTOR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
-/// Cooperative-cancel poll slice.
-const SLICE: Duration = Duration::from_millis(500);
 /// Absolute controller-lifetime backstop, regardless of config.
 const HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
-
-fn model_opt(model: &str) -> Option<&str> {
-    if model.trim().is_empty() {
-        None
-    } else {
-        Some(model)
-    }
-}
 
 // --- Lifecycle -------------------------------------------------------------
 
@@ -88,6 +109,7 @@ fn model_opt(model: &str) -> Option<&str> {
 /// the control handle (cancelling any prior controller), and spawn the
 /// controller task. Errors (e.g. bad repo) surface to the caller.
 pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
+    ctx.goal_loops.require_idle(loop_id)?;
     let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
     let (branch, wt, base) = crate::goal_loop_workspace::provision_worktree(ctx, &loop_).await?;
     ctx.goal_loops_repo
@@ -126,6 +148,11 @@ pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
 /// be refunded, then flag the controller to idle.
 pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
+    if let Some(h) = ctx.goal_loops.lock().unwrap().get(loop_id) {
+        h.paused.store(true, Ordering::Relaxed);
+        h.interrupted.store(true, Ordering::Relaxed);
+    }
+    cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
     if let Some(started) = loop_.run_started_at {
         let secs = (Utc::now() - started).num_seconds().max(0) as u64;
         ctx.goal_loops_repo.add_elapsed(loop_id, secs).await?;
@@ -157,8 +184,8 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     Ok(())
 }
 
-/// Stop a loop: cancel the controller (it finalizes), or finalize directly when
-/// no controller is live. Always kills executor sessions and removes the worktree.
+/// Stop a loop: cancel the controller or finalize directly. Execution resources
+/// are released while tracked and untracked working files remain intact.
 pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
     if loop_.status.is_terminal() {
@@ -172,6 +199,7 @@ pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
         match reg.get(&loop_id.to_string()) {
             Some(h) => {
                 h.cancel.store(true, Ordering::Relaxed);
+                h.interrupted.store(true, Ordering::Relaxed);
                 true
             }
             None => false,
@@ -217,19 +245,51 @@ pub async fn retry_executor(
         .get(agent_index)
         .cloned()
         .ok_or_else(|| Error::NotFound("executor".into()))?;
-    // Re-run using the persisted prompt for that executor.
+    ctx.goal_loops.require_idle(loop_id)?;
+    if iter_idx != loop_.current_iteration {
+        return Err(Error::Invalid(
+            "only the current iteration can be retried".into(),
+        ));
+    }
     let prompt = std::fs::read_to_string(prompt_path(loop_id, iter_idx, agent_index))
         .map_err(|_| Error::NotFound("executor prompt (nothing to retry)".into()))?;
     let wt = loop_
         .worktree_path
         .clone()
         .ok_or_else(|| Error::Invalid("loop has no worktree".into()))?;
-    let cancel = ctx
-        .goal_loops
+    let mut ledger = loop_.ledger.clone();
+    ledger.verifications.clear();
+    ledger.review_passed = false;
+    ctx.goal_loops_repo.set_ledger(loop_id, &ledger).await?;
+    // Old acceptance applies to old work. A retry must earn a fresh evaluation.
+    ctx.goal_loops_repo
+        .set_iter_evaluation(
+            &iter.id,
+            &fallback_eval("executor retried; fresh evaluation required"),
+        )
+        .await?;
+    let out_path = executor_out_path(loop_id, iter_idx, agent_index);
+    if let Err(error) = std::fs::remove_file(&out_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(Error::Internal(error.to_string()));
+        }
+    }
+    ctx.goal_loops_repo
+        .mark_running(loop_id, Utc::now())
+        .await?;
+    let handle = LoopHandle::new();
+    ctx.goal_loops
         .lock()
         .unwrap()
-        .get(&loop_id.to_string())
-        .map(|h| h.cancel.clone());
+        .insert(loop_id.clone(), handle.clone());
+    set_phase(
+        ctx,
+        &loop_.workspace_id,
+        &loop_,
+        GoalLoopPhase::Executing,
+        iter_idx,
+    )
+    .await;
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
         let _ = run_executor(
@@ -241,9 +301,42 @@ pub async fn retry_executor(
             &exec,
             &wt,
             &prompt,
-            cancel.as_ref(),
+            Some(&handle.interrupted),
         )
         .await;
+        let operation = ctx2.goal_loops.operation(&loop_.id);
+        let _guard = operation.lock().await;
+        if is_current(&ctx2, &loop_.id, &handle) {
+            if handle.cancel.load(Ordering::Relaxed) {
+                finalize(
+                    &ctx2,
+                    &loop_.id,
+                    GoalLoopStatus::Stopped,
+                    Some("stopped by user"),
+                    None,
+                )
+                .await;
+            } else if handle.paused.load(Ordering::Relaxed) {
+                cleanup_executor_sessions(&ctx2, &loop_.workspace_id, &loop_.id).await;
+            } else {
+                block(
+                    &ctx2,
+                    &loop_.id,
+                    "Executor retry finished. Resume for a fresh evaluation.",
+                )
+                .await;
+                emit(
+                    &ctx2,
+                    &loop_.workspace_id,
+                    &loop_.id,
+                    GoalLoopStatus::Blocked,
+                    GoalLoopPhase::Done,
+                    iter_idx,
+                    loop_.progress_pct,
+                );
+            }
+        }
+        deregister(&ctx2, &loop_.id, &handle);
     });
     Ok(())
 }
@@ -280,8 +373,11 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             return;
         }
         if handle.paused.load(Ordering::Relaxed) {
-            tokio::time::sleep(SLICE).await;
-            continue;
+            if let Ok(loop_) = ctx.goal_loops_repo.get(&loop_id).await {
+                cleanup_executor_sessions(&ctx, &loop_.workspace_id, &loop_id).await;
+            }
+            deregister(&ctx, &loop_id, &handle);
+            return;
         }
         if started.elapsed() >= HARD_CAP {
             finalize(
@@ -297,7 +393,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         }
 
         // Re-read fresh state (picks up raised limits / latest digest).
-        let loop_ = match ctx.goal_loops_repo.get(&loop_id).await {
+        let mut loop_ = match ctx.goal_loops_repo.get(&loop_id).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(loop = %loop_id, "goal-loop: load failed, stopping: {e}");
@@ -308,8 +404,24 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         let ws = loop_.workspace_id.clone();
         let limits = loop_.limits.clone();
 
+        // Human acceptance finishes the existing iteration without re-running
+        // executors or spending another iteration. Verification still has its
+        // phase/runtime deadline and command checks run again.
+        let verification_only = prior_eval.as_ref().is_some_and(|e| {
+            e.criteria
+                .iter()
+                .any(|c| c.evidence == "Awaiting human verification")
+                && loop_.definition.acceptance_criteria.iter().all(|c| {
+                    if c.verify_kind == "human" {
+                        loop_.ledger.verification(c).is_some()
+                    } else {
+                        e.criteria.iter().any(|v| v.id == c.id && v.met)
+                    }
+                })
+        });
+
         // ---- HARD-LIMIT GATE (before starting an iteration) ----
-        if loop_.iterations_started >= limits.max_iterations {
+        if !verification_only && loop_.iterations_started >= limits.max_iterations {
             finalize(
                 &ctx,
                 &loop_id,
@@ -333,47 +445,38 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             deregister(&ctx, &loop_id, &handle);
             return;
         }
-        if let Some(cap) = limits.max_cost_usd {
-            if loop_.cost_usd >= cap {
-                finalize(
-                    &ctx,
-                    &loop_id,
-                    GoalLoopStatus::Exhausted,
-                    Some("cost cap reached"),
-                    None,
-                )
-                .await;
-                deregister(&ctx, &loop_id, &handle);
-                return;
-            }
+        if limits.max_cost_usd.is_some() {
+            block(&ctx, &loop_id, "Per-loop cost accounting is unavailable. Remove the cost limit and use iteration/runtime limits to resume.").await;
+            deregister(&ctx, &loop_id, &handle);
+            return;
         }
 
-        // ---- new iteration ----
-        let idx = match ctx.goal_loops_repo.bump_iterations_started(&loop_id).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(loop = %loop_id, "goal-loop: bump failed: {e}");
-                finalize(
-                    &ctx,
-                    &loop_id,
-                    GoalLoopStatus::Failed,
-                    None,
-                    Some(&e.to_string()),
-                )
+        // ---- new iteration (or final human verification of the current one) ----
+        let context_in = loop_.context_digest.clone();
+        let created = if verification_only {
+            ctx.goal_loops_repo
+                .get_iteration(&loop_id, loop_.current_iteration)
+                .await
+        } else {
+            // Any further executor work invalidates approvals of the earlier state.
+            loop_.ledger.verifications.clear();
+            loop_.ledger.review_passed = false;
+            let _ = ctx
+                .goal_loops_repo
+                .set_ledger(&loop_id, &loop_.ledger)
                 .await;
-                deregister(&ctx, &loop_id, &handle);
-                return;
+            match ctx.goal_loops_repo.bump_iterations_started(&loop_id).await {
+                Ok(idx) => {
+                    ctx.goal_loops_repo
+                        .add_iteration(&loop_id, &ws, idx, &context_in, &loop_.config.executors)
+                        .await
+                }
+                Err(e) => Err(e),
             }
         };
-        let context_in = loop_.context_digest.clone();
-        let iter = match ctx
-            .goal_loops_repo
-            .add_iteration(&loop_id, &ws, idx, &context_in, &loop_.config.executors)
-            .await
-        {
+        let iter = match created {
             Ok(it) => it,
             Err(e) => {
-                tracing::warn!(loop = %loop_id, "goal-loop: add_iteration failed: {e}");
                 finalize(
                     &ctx,
                     &loop_id,
@@ -386,6 +489,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 return;
             }
         };
+        let idx = iter.idx;
         let wt = loop_
             .worktree_path
             .clone()
@@ -393,19 +497,26 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
 
         // ---- PLAN ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Planning, idx).await;
-        let plan = match run_role(
-            &ctx,
-            &loop_.config.planner,
-            planner_prompt(&loop_, &context_in, prior_eval.as_ref(), idx),
-            &wt,
-            limits.per_phase_timeout_secs,
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(loop = %loop_id, "goal-loop: planner failed: {e}");
-                String::from("(planner unavailable — executors should work directly toward the acceptance criteria)")
+        let plan = if verification_only {
+            iter.plan.clone()
+        } else {
+            match run_role(
+                &ctx,
+                &loop_,
+                &iter.id,
+                "Planner",
+                &loop_.config.planner,
+                planner_prompt(&loop_, &context_in, prior_eval.as_ref(), idx),
+                &wt,
+                limits.per_phase_timeout_secs,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(loop = %loop_id, "goal-loop: planner failed: {e}");
+                    String::from("(planner unavailable — executors should work directly toward the acceptance criteria)")
+                }
             }
         };
         let _ = ctx.goal_loops_repo.set_iter_plan(&iter.id, &plan).await;
@@ -419,8 +530,18 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             .goal_loops_repo
             .update_iteration_status(&iter.id, "executing", false)
             .await;
-        let mut exec_summaries: Vec<String> = Vec::new();
+        let mut exec_summaries: Vec<String> = if verification_only {
+            iter.agents
+                .iter()
+                .filter_map(|a| a.output_summary.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         for (i, exec) in loop_.config.executors.iter().enumerate() {
+            if verification_only {
+                break;
+            }
             if stop_requested(&handle) {
                 break;
             }
@@ -443,7 +564,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 exec,
                 &wt,
                 &prompt,
-                Some(&handle.cancel),
+                Some(&handle.interrupted),
             )
             .await;
             exec_summaries.push(format!("{}: {}", exec.name, summary));
@@ -458,14 +579,36 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             .goal_loops_repo
             .update_iteration_status(&iter.id, "evaluating", false)
             .await;
-        let (eval, verify_caps) = evaluate(
+        let (mut eval, verify_caps) = evaluate(
             &ctx,
             &loop_,
+            &iter.id,
             &wt,
             &exec_summaries,
             limits.per_phase_timeout_secs,
+            &handle,
         )
         .await;
+        if stop_requested(&handle) {
+            continue;
+        }
+        let mut ledger = loop_.ledger.clone();
+        let stagnant = crate::goal_loop_policy::record_progress(&mut ledger, &eval);
+        if stagnant && eval.verdict != "blocked" {
+            eval.verdict = "blocked".into();
+            eval.feedback = "Two iterations produced the same unmet criteria and evidence. Choose a new approach before resuming.".into();
+        }
+        if eval.verdict == "blocked" && !eval.feedback.starts_with("Work is ready for human") {
+            ledger.questions.push(otto_core::domain::GoalQuestion {
+                id: otto_core::new_id(),
+                question: eval.feedback.clone(),
+                answer: None,
+                answered_by: None,
+                answered_at: None,
+            });
+        }
+        ledger.next_action = eval.feedback.clone();
+        let _ = ctx.goal_loops_repo.set_ledger(&loop_id, &ledger).await;
         let _ = ctx
             .goal_loops_repo
             .set_iter_evaluation(&iter.id, &eval)
@@ -499,6 +642,9 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             .await;
         let digest = run_role(
             &ctx,
+            &loop_,
+            &iter.id,
+            "Digester",
             &loop_.config.digester,
             digester_prompt(&context_in, &plan, &exec_summaries, &eval),
             &wt,
@@ -518,6 +664,9 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             .goal_loops_repo
             .update_iteration_status(&iter.id, "done", true)
             .await;
+        if stop_requested(&handle) {
+            continue;
+        }
         prior_eval = Some(eval.clone());
 
         // ---- DECISION ----
@@ -530,14 +679,12 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 assemble_goal_loop_proof(&ctx, &loop_, &eval, &verify_caps, &wt).await;
 
             // Teeth (opt-in via OTTO_PROOF_REQUIRE_GOAL_LOOP): refuse to finalize
-            // "achieved" without a passing machine-checked test, unless this is the
-            // last allowed iteration (then accept the partial pack). Bounded by the
-            // iteration cap, so it can never spin forever.
-            let has_more_iters = loop_.iterations_started < limits.max_iterations;
-            if require_goal_loop_proof()
-                && proof_status != Some(otto_core::proof::ProofStatus::Passed)
-                && has_more_iters
-            {
+            // "achieved" without a passing machine-checked test, including the
+            // final iteration. Missing proof remains unmet when limits expire.
+            if crate::goal_loop_policy::missing_required_proof(
+                require_goal_loop_proof(),
+                proof_status,
+            ) {
                 if let Some(pe) = prior_eval.as_mut() {
                     pe.feedback = format!(
                         "{}\n\n[Otto proof] You reported the goal done but did not produce a passing, \
@@ -556,6 +703,9 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 continue;
             }
 
+            if stop_requested(&handle) {
+                continue;
+            }
             let proof_note = match proof_status {
                 Some(otto_core::proof::ProofStatus::Passed) => " Proof: passed.",
                 Some(otto_core::proof::ProofStatus::Partial) => {
@@ -563,6 +713,29 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 }
                 _ => "",
             };
+            if loop_.config.require_review {
+                let review = run_role(&ctx, &loop_, &iter.id, "Completion reviewer", &loop_.config.evaluator,
+                    format!("{}\nIndependently review the final work against the goal. Report concrete unresolved defects. Return JSON {{\"approved\":true|false,\"findings\":[string]}}. Approve only when no material issue remains.", goal_context(&loop_)),
+                    &wt, limits.per_phase_timeout_secs).await;
+                let result = review
+                    .as_ref()
+                    .ok()
+                    .and_then(|text| crate::goal_loop_parse::find_json_object(text))
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+                ledger.review_passed = result.as_ref().is_some_and(|v| {
+                    v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
+                });
+                ledger.review_summary = review.unwrap_or_else(|e| e.to_string());
+                let _ = ctx.goal_loops_repo.set_ledger(&loop_id, &ledger).await;
+                if stop_requested(&handle) {
+                    continue;
+                }
+                if !ledger.review_passed {
+                    block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await;
+                    deregister(&ctx, &loop_id, &handle);
+                    return;
+                }
+            }
             let summary = format!(
                 "Goal achieved in {idx} iteration(s). {}{}",
                 eval.rationale, proof_note
@@ -652,8 +825,8 @@ async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPh
     );
 }
 
-/// Bank the final active window, mark the loop terminal, remove the worktree
-/// (keeping the branch), and kill any lingering executor sessions.
+/// Bank the final active window, mark the loop terminal, preserve working files
+/// and release any lingering managed sessions.
 async fn finalize(
     ctx: &ServerCtx,
     loop_id: &Id,
@@ -673,15 +846,8 @@ async fn finalize(
         .goal_loops_repo
         .finalize(loop_id, status, summary, error)
         .await;
-    // Remove the worktree only for TRULY terminal states. Exhausted is
-    // resumable (raise limits + Resume), so keep its worktree — recreating it
-    // later would `-B`-reset the branch and destroy the loop's commits.
-    if matches!(
-        status,
-        GoalLoopStatus::Succeeded | GoalLoopStatus::Failed | GoalLoopStatus::Stopped
-    ) {
-        crate::goal_loop_workspace::remove_worktree(ctx, &loop_).await;
-    }
+    // Keep the worktree even on failure/stop/success: commits are optional and
+    // the retained branch cannot preserve dirty or untracked work.
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
     emit(
         ctx,
@@ -748,24 +914,20 @@ fn emit(
     });
 }
 
-// --- Roles (headless, timeout-wrapped) -------------------------------------
+// --- Roles (managed, timeout-wrapped) -------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_role(
     ctx: &ServerCtx,
+    loop_: &GoalLoop,
+    iter_id: &Id,
+    name: &str,
     role: &GoalLoopRoleCfg,
     prompt: String,
     cwd: &str,
     per_phase_secs: u64,
 ) -> Result<String> {
-    let fut = ctx
-        .orchestrator
-        .run_agent(&prompt, cwd, model_opt(&role.model), ROLE_NO_PROGRESS);
-    match tokio::time::timeout(Duration::from_secs(per_phase_secs), fut).await {
-        Ok(r) => r,
-        Err(_) => Err(Error::Internal(
-            "role turn exceeded per-phase timeout".into(),
-        )),
-    }
+    crate::goal_loop_roles::run(ctx, loop_, iter_id, name, role, prompt, cwd, per_phase_secs).await
 }
 
 /// The public goal context shared by every role/executor prompt.
@@ -797,6 +959,19 @@ fn goal_context(loop_: &GoalLoop) -> String {
             s.push_str(&format!("- {o}\n"));
         }
     }
+    if !loop_.config.source_links.is_empty() {
+        s.push_str(&format!(
+            "\n## Approved sources\n{}\n",
+            loop_.config.source_links.join("\n")
+        ));
+    }
+    if !loop_.config.skills.is_empty() {
+        s.push_str(&format!("\n## Selected skills\nUse the relevant skills; report missing skills as blockers.\n{}\n", loop_.config.skills.join("\n")));
+    }
+    s.push_str(&format!(
+        "\n## Persisted decisions and next action\n{}\n",
+        serde_json::to_string(&loop_.ledger).unwrap_or_default()
+    ));
     s
 }
 
@@ -844,10 +1019,18 @@ fn executor_prompt(
     out_path: &str,
 ) -> String {
     let mut s = format!(
-        "You are \"{}\", an executor on an autonomous goal loop working in THIS git repository (an isolated worktree — make changes freely).\n\n{}\n\n",
+        "You are \"{}\", an executor on an autonomous goal loop working in this isolated directory.\n\n{}\n\n",
         exec.name,
         goal_context(loop_)
     );
+    s.push_str(if loop_.config.allow_commits {
+        "## Execution policy\nLocal commits are allowed. Never push, publish, open a PR or send messages without a separately authorized user action.\n\n"
+    } else {
+        "## Execution policy\nDo not stage or commit changes. Leave tracked and untracked work in this directory for review. Never push, publish, open a PR or send messages.\n\n"
+    });
+    if loop_.config.mode == "research" {
+        s.push_str("This is a research goal. Produce a findings.md report with cited evidence; do not change repository code or create git history.\n");
+    }
     if !exec.prompt_extra.trim().is_empty() {
         s.push_str(&format!("## Your focus\n{}\n\n", exec.prompt_extra));
     }
@@ -856,7 +1039,7 @@ fn executor_prompt(
     }
     s.push_str(&format!("## This iteration's plan\n{plan}\n\n"));
     s.push_str(&format!(
-        "---\nDo the work toward the acceptance criteria, then COMMIT your changes (git add -A && git commit). \
+        "---\nDo the work toward the acceptance criteria, following the execution policy above. \
          Finally, write a JSON object describing what you did to this absolute file path, overwriting any existing content:\n\n{out_path}\n\n\
          Schema: {{\"summary\": string, \"changed_files\": [string], \"notes\": string, \"blockers\": [string]}}.\n\
          Write ONLY the JSON object to that file (no prose, no markdown fence). Writing the file is the LAST thing you do."
@@ -879,15 +1062,17 @@ fn digester_prompt(
     )
 }
 
-/// Run the evaluator headless in the worktree, then GROUND-TRUTH every
+/// Run the managed evaluator in the worktree, then GROUND-TRUTH every
 /// command-verify criterion by running its command (exit 0 = met), overriding the
 /// model. An "achieved" verdict with any unmet criterion is coerced to "continue".
 async fn evaluate(
     ctx: &ServerCtx,
     loop_: &GoalLoop,
+    iter_id: &Id,
     wt: &str,
     exec_summaries: &[String],
     per_phase_secs: u64,
+    handle: &LoopHandle,
 ) -> (GoalLoopEvaluation, Vec<VerifyCapture>) {
     let prompt = format!(
         "{}\n\n{}\n\n## Executor results this iteration\n{}\n\nReply with ONLY a JSON object: {{\"progress_pct\": 0-100, \"verdict\": \"achieved|continue|blocked\", \"criteria\": [{{\"id\": string, \"met\": bool, \"evidence\": string}}], \"feedback\": string, \"rationale\": string}}. Include one entry per acceptance criterion. Provide concrete evidence for every met=true.",
@@ -895,7 +1080,18 @@ async fn evaluate(
         goal_context(loop_),
         exec_summaries.join("\n"),
     );
-    let mut eval = match run_role(ctx, &loop_.config.evaluator, prompt, wt, per_phase_secs).await {
+    let mut eval = match run_role(
+        ctx,
+        loop_,
+        iter_id,
+        "Evaluator",
+        &loop_.config.evaluator,
+        prompt,
+        wt,
+        per_phase_secs,
+    )
+    .await
+    {
         Ok(text) => parse_evaluation(&text)
             .unwrap_or_else(|| fallback_eval("evaluator produced no parseable verdict")),
         Err(e) => fallback_eval(&format!("evaluator turn failed: {e}")),
@@ -905,9 +1101,14 @@ async fn evaluate(
     // proof pack can keep each as a `command` test-evidence artifact.
     let mut captures: Vec<VerifyCapture> = Vec::new();
     for crit in &loop_.definition.acceptance_criteria {
+        if stop_requested(handle) {
+            break;
+        }
         if crit.verify_kind == "command" {
             if let Some(cmd) = &crit.verify_cmd {
-                let run = crate::proof::run_command(wt, cmd, per_phase_secs).await;
+                let run =
+                    crate::goal_loop_commands::run(wt, cmd, per_phase_secs, &handle.interrupted)
+                        .await;
                 set_criterion(
                     &mut eval,
                     &crit.id,
@@ -933,6 +1134,8 @@ async fn evaluate(
             });
         }
     }
+
+    crate::goal_loop_policy::reconcile_human(&loop_.definition, &loop_.ledger, &mut eval);
 
     // Reconcile an over-optimistic verdict against ground truth.
     let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
@@ -1003,7 +1206,44 @@ async fn assemble_goal_loop_proof(
     }
 
     // Working-tree diff vs the loop's base commit.
-    let _ = crate::proof::assemble_diff(ctx, &pack, wt, loop_.base_commit.as_deref()).await;
+    if loop_.config.mode == "research" {
+        if let Ok(report) =
+            tokio::fs::read_to_string(std::path::Path::new(wt).join("findings.md")).await
+        {
+            let _ = crate::proof::upsert_content_artifact(
+                ctx,
+                &pack,
+                K::SelfReview,
+                "Research findings",
+                &report,
+                S::Info,
+                serde_json::json!({}),
+                "otto",
+            )
+            .await;
+        }
+    } else if let Ok(diff) =
+        crate::goal_loop_workspace::capture_work(wt, loop_.base_commit.as_deref()).await
+    {
+        let parsed = otto_git::parse::parse_diff(&diff);
+        let meta = serde_json::json!({
+            "files_changed": parsed.files.len(),
+            "additions": parsed.files.iter().filter_map(|f| f.added).sum::<u32>(),
+            "deletions": parsed.files.iter().filter_map(|f| f.deleted).sum::<u32>(),
+            "includes_uncommitted": true,
+        });
+        let _ = crate::proof::upsert_content_artifact(
+            ctx,
+            &pack,
+            K::Diff,
+            "Working tree diff",
+            &diff,
+            S::Info,
+            meta,
+            "otto",
+        )
+        .await;
+    }
 
     // Self-review from the evaluator's feedback + rationale + per-criterion evidence.
     let crit_lines: Vec<String> = eval
@@ -1109,10 +1349,6 @@ fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
     ))
 }
 
-fn never(_: &str) -> bool {
-    false
-}
-
 /// Run one executor with bounded recovery; persists its live state throughout.
 /// Returns a short result summary for the evaluator/digester.
 #[allow(clippy::too_many_arguments)]
@@ -1138,7 +1374,7 @@ async fn run_executor(
         cancel,
         |_attempt| {
             run_executor_attempt(
-                ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, &out_path, timeout,
+                ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, &out_path, timeout, cancel,
             )
         },
     )
@@ -1193,6 +1429,7 @@ async fn run_executor_attempt(
     prompt: &str,
     out_path: &std::path::Path,
     timeout: Duration,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> RunOutcome {
     // A blank executor provider resolves to the workspace/global default agent
     // (not a bare hardcoded "claude"), honoring Settings → Providers.
@@ -1267,69 +1504,94 @@ async fn run_executor_attempt(
     )
     .await;
 
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        let _ = ctx.manager.kill_session(&sid).await;
+        return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
     }
-
-    watch_for_result(
-        &ctx.manager,
-        &sid,
-        provider,
-        session.provider_session_id.as_deref(),
-        cwd,
-        out_path,
-        timeout,
-        EXECUTOR_WAITING_IDLE,
-        EXECUTOR_STUCK_IDLE,
-        never,
-        |st| {
-            let ctx = ctx.clone();
-            let exec = exec.clone();
-            let iter_id = iter_id.clone();
-            let sid = sid.clone();
-            let ws = loop_.workspace_id.clone();
-            let loop_id = loop_.id.clone();
-            let progress = loop_.progress_pct;
-            async move {
-                let (status, note, phase) = match st {
-                    WatchStatus::Waiting => (
-                        "waiting",
-                        "looks blocked on input — Open it to respond".to_string(),
-                        GoalLoopPhase::Waiting,
-                    ),
-                    WatchStatus::Resumed => ("running", String::new(), GoalLoopPhase::Executing),
-                };
-                persist_agent(
-                    &ctx,
-                    &iter_id,
-                    exec_index,
-                    &exec,
-                    status,
-                    &note,
-                    Some(sid),
-                    None,
-                )
-                .await;
-                let _ = ctx.goal_loops_repo.set_phase(&loop_id, phase).await;
-                emit(
-                    &ctx,
-                    &ws,
-                    &loop_id,
-                    GoalLoopStatus::Running,
-                    phase,
-                    idx,
-                    progress,
-                );
+    let work = async {
+        if wait_for_tui(&ctx.manager, &sid).await {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                let _ = ctx.manager.kill_session(&sid).await;
+                return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
             }
-        },
-    )
-    .await
+            let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+            tokio::time::sleep(PASTE_TO_ENTER).await;
+            let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
+            let _ = ctx.manager.input(&sid, b"\r").await;
+            if !dispatched(&ctx.manager, &sid, before).await {
+                let _ = ctx.manager.input(&sid, b"\r").await;
+            }
+        }
+
+        watch_for_result(
+            &ctx.manager,
+            &sid,
+            provider,
+            session.provider_session_id.as_deref(),
+            cwd,
+            out_path,
+            timeout,
+            EXECUTOR_WAITING_IDLE,
+            EXECUTOR_STUCK_IDLE,
+            |_| false,
+            |st| {
+                let ctx = ctx.clone();
+                let exec = exec.clone();
+                let iter_id = iter_id.clone();
+                let sid = sid.clone();
+                let ws = loop_.workspace_id.clone();
+                let loop_id = loop_.id.clone();
+                let progress = loop_.progress_pct;
+                async move {
+                    let (status, note, phase) = match st {
+                        WatchStatus::Waiting => (
+                            "waiting",
+                            "looks blocked on input — Open it to respond".to_string(),
+                            GoalLoopPhase::Waiting,
+                        ),
+                        WatchStatus::Resumed => {
+                            ("running", String::new(), GoalLoopPhase::Executing)
+                        }
+                    };
+                    persist_agent(
+                        &ctx,
+                        &iter_id,
+                        exec_index,
+                        &exec,
+                        status,
+                        &note,
+                        Some(sid),
+                        None,
+                    )
+                    .await;
+                    let _ = ctx.goal_loops_repo.set_phase(&loop_id, phase).await;
+                    emit(
+                        &ctx,
+                        &ws,
+                        &loop_id,
+                        GoalLoopStatus::Running,
+                        phase,
+                        idx,
+                        progress,
+                    );
+                }
+            },
+        )
+        .await
+    };
+    tokio::select! {
+        biased;
+        _ = async {
+            loop {
+                if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => {
+            let _ = ctx.manager.kill_session(&sid).await;
+            RunOutcome::failed(Some(sid.clone()), FailReason::Stopped)
+        }
+        outcome = work => outcome,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1370,4 +1632,54 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
         None => "unknown error",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod goal_loop_tests {
+    use super::*;
+    #[tokio::test]
+    async fn lifecycle_operations_serialize_retry_approval_and_resume() {
+        let registry = new_registry();
+        let retry_lock = registry.operation("g");
+        let retry = retry_lock.lock().await;
+        let approval_lock = registry.operation("g");
+        assert!(approval_lock.try_lock().is_err());
+        let other = registry.operation("other");
+        assert!(other.try_lock().is_ok());
+        drop(retry);
+        assert!(approval_lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn executor_prompt_requires_explicit_commit_permission() {
+        let mut goal: GoalLoop = serde_json::from_value(serde_json::json!({
+            "id":"g", "workspace_id":"w", "name":"Goal", "repo_path":"/tmp/isolated",
+            "definition":{"title":"Goal","acceptance_criteria":[]},
+            "config":otto_core::domain::GoalLoopConfig::default(),
+            "limits":otto_core::domain::GoalLoopLimits::default(),
+            "status":"draft", "phase":"done", "iterations_started":0, "current_iteration":0,
+            "progress_pct":0, "elapsed_secs":0, "cost_usd":0, "created_by":"u",
+            "created_at":Utc::now(), "updated_at":Utc::now()
+        }))
+        .unwrap();
+        let prompt = executor_prompt(
+            &goal,
+            &goal.config.executors[0],
+            "plan",
+            "",
+            "/tmp/result.json",
+        );
+        assert!(prompt.contains("Do not stage or commit"));
+        assert!(!prompt.contains("git add -A"));
+        goal.config.allow_commits = true;
+        let prompt = executor_prompt(
+            &goal,
+            &goal.config.executors[0],
+            "plan",
+            "",
+            "/tmp/result.json",
+        );
+        assert!(prompt.contains("Local commits are allowed"));
+        assert!(!prompt.contains("git add -A"));
+    }
 }

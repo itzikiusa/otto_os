@@ -764,7 +764,7 @@ export interface AcceptanceCriterion {
   id: string;
   text: string;
   verify: string;
-  verify_kind: 'command' | 'manual';
+  verify_kind: 'command' | 'agent' | 'human' | 'manual';
   verify_cmd?: string | null;
 }
 
@@ -800,6 +800,11 @@ export interface GoalLoopRoleCfg {
 }
 
 export interface GoalLoopConfig {
+  allow_commits?: boolean;
+  mode?: 'build' | 'research';
+  source_links?: string[];
+  skills?: string[];
+  require_review?: boolean;
   executors: GoalLoopAgentCfg[];
   planner: GoalLoopRoleCfg;
   evaluator: GoalLoopRoleCfg;
@@ -831,6 +836,30 @@ export interface GoalLoopEvaluation {
   rationale: string;
 }
 
+export interface GoalHumanVerification {
+  criterion_id: string;
+  criterion_revision: string;
+  verified_by: string;
+  evidence: string;
+  verified_at: string;
+}
+export interface GoalQuestion {
+  id: string;
+  question: string;
+  answer: string | null;
+  answered_by: string | null;
+  answered_at: string | null;
+}
+export interface GoalLoopLedger {
+  verifications: GoalHumanVerification[];
+  questions: GoalQuestion[];
+  next_action: string;
+  last_failure_signature: string;
+  repeated_failures: number;
+  review_summary: string;
+  review_passed: boolean;
+}
+
 export interface GoalLoop {
   id: Id;
   workspace_id: Id;
@@ -845,6 +874,7 @@ export interface GoalLoop {
   current_iteration: number;
   progress_pct: number;
   context_digest: string;
+  ledger?: GoalLoopLedger;
   branch?: string | null;
   worktree_path?: string | null;
   base_commit?: string | null;
@@ -883,6 +913,9 @@ export interface GoalLoopDetail {
 }
 
 export interface DefineGoalReq {
+  provider?: string;
+  model?: string;
+  mode?: 'build' | 'research';
   seed: string;
   repo_path: string;
   context?: string | null;

@@ -7,12 +7,14 @@
     iter,
     loopId,
     loopStatus,
+    executorCount,
     open = false,
     onopensession,
   }: {
     iter: GoalLoopIteration;
     loopId: string;
     loopStatus: string;
+    executorCount: number;
     open?: boolean;
     onopensession: (sessionId: string) => void;
   } = $props();
@@ -72,17 +74,18 @@
       {/if}
 
       <section>
-        <h4>Executors</h4>
+        <h4>Agents and roles</h4>
         {#each iter.agents as a, i (i)}
           <div class="agent">
             <span class={dotClass(a.status)}></span>
             <span class="aname">{a.name}</span>
+            <span class="anote">{a.provider}</span>
             <span class="anote">{a.note || a.output_summary || a.status}</span>
             <span class="spacer"></span>
             {#if a.session_id}
               <button class="btn ghost small" onclick={() => onopensession(a.session_id ?? '')}>Open</button>
             {/if}
-            {#if canRetry(a)}
+            {#if i < executorCount && canRetry(a)}
               <button class="btn small" onclick={() => retry(i)}>Retry</button>
             {/if}
           </div>

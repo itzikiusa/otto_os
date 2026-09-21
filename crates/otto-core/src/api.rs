@@ -2048,10 +2048,17 @@ pub struct RepoReviewConfigResp {
 // ---------------------------------------------------------------------------
 
 /// `POST /api/v1/workspaces/{id}/goal-loops/define` — run the AI goal-definer to
-/// turn a rough seed into a structured, loop-executable draft. Persists nothing.
+/// turn a rough seed into a structured draft. Creates a managed definer session,
+/// but does not create a loop until the user launches it.
 /// Supplying `feedback` (with the prior draft echoed in `context`) refines it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DefineGoalReq {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
     /// The rough goal text the user typed.
     pub seed: String,
     /// The repo the loop will work in (gives the definer codebase context).
@@ -2062,6 +2069,17 @@ pub struct DefineGoalReq {
     /// When refining: what to change about the prior draft.
     #[serde(default)]
     pub feedback: Option<String>,
+}
+
+/// Explicit human evidence; verifier identity is taken from authentication.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerifyGoalCriterionReq {
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnswerGoalQuestionReq {
+    pub answer: String,
 }
 
 /// The definer's structured suggestion. The user edits this before launching.

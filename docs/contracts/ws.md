@@ -385,6 +385,9 @@ a loop is active, covering any missed event).
 ```
 
 - `status` / `phase` — mirror the `goal_loops` row (snake_case enums).
+- Managed planner/evaluator/digester/reviewer sessions are persisted in iteration `agents` after executor slots. Detail polling retrieves role status/session IDs; the existing event shape is unchanged.
+- Human verification and answers are returned by their HTTP actions. Clients re-fetch detail; no new WS event is introduced.
+
 - `current_iteration` — the iteration index in flight or last completed.
 - `progress_pct` — the latest evaluator score (0–100).
 - Executor sessions are real agent sessions and also emit the normal

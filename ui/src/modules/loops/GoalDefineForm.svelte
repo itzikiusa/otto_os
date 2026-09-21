@@ -11,6 +11,11 @@
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
   let seed = $state('');
+  let mode = $state<'build' | 'research'>('build');
+  let allowCommits = $state(false);
+  let requireReview = $state(false);
+  let sourceLinks = $state('');
+  let selectedSkills = $state('');
   let repoPath = $state('');
   let picking = $state(false);
   let feedback = $state('');
@@ -34,11 +39,11 @@
 
   async function define(): Promise<void> {
     const wsId = ws.currentId;
-    if (!wsId || !seed.trim() || !repoPath.trim()) return;
+    if (!wsId || !seed.trim() || (mode === 'build' && !repoPath.trim())) return;
     defining = true;
     try {
       const d = await loops.define(wsId, {
-        seed,
+        seed, provider: execProvider, model: execModel, mode,
         repo_path: repoPath.trim(),
         context: draft ? JSON.stringify(draft.definition) : undefined,
         feedback: feedback.trim() || undefined,
@@ -48,8 +53,6 @@
       maxIterations = d.suggested_limits.max_iterations;
       maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
-      execProvider = d.suggested_config.executors[0]?.provider || defaultAgentProvider();
-      execModel = d.suggested_config.executors[0]?.model || '';
       feedback = '';
     } catch (e) {
       toasts.error('Define failed', e instanceof Error ? e.message : String(e));
@@ -69,7 +72,7 @@
       id: `c${n}`,
       text: '',
       verify: '',
-      verify_kind: 'manual',
+      verify_kind: 'agent',
       verify_cmd: null,
     });
   }
@@ -112,7 +115,9 @@
           max_cost_usd: null,
           max_attempts_per_executor: 3,
         },
-        config: { ...draft.suggested_config, executors },
+        config: { ...draft.suggested_config, executors, mode, allow_commits: mode === 'build' && allowCommits,
+          require_review: requireReview, source_links: sourceLinks.split('\n').map(s => s.trim()).filter(Boolean),
+          skills: selectedSkills.split(',').map(s => s.trim()).filter(Boolean) },
         autostart: true,
       });
       oncreated(loop.id);
@@ -123,7 +128,7 @@
     }
   }
 
-  function setKind(c: AcceptanceCriterion, kind: 'command' | 'manual'): void {
+  function setKind(c: AcceptanceCriterion, kind: AcceptanceCriterion['verify_kind']): void {
     c.verify_kind = kind;
     if (kind === 'command' && c.verify_cmd == null) c.verify_cmd = '';
   }
@@ -136,11 +141,18 @@
   </header>
 
   <section class="block">
+    <label class="lbl" for="gl-mode">Mode</label>
+    <select id="gl-mode" class="in" bind:value={mode}><option value="build">Build</option><option value="research">Research</option></select>
+    <label class="lbl" for="gl-define-provider">Definer provider</label>
+    <select id="gl-define-provider" class="in" bind:value={execProvider}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
+    <ModelPicker provider={execProvider} value={execModel} onchange={(m) => (execModel = m)} />
+    {#if mode === 'build'}
     <label class="lbl" for="gl-repo">Repository path</label>
     <div class="repo-row">
       <input id="gl-repo" class="in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
       <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
     </div>
+    {/if}
     <label class="lbl" for="gl-seed">Goal</label>
     <textarea
       id="gl-seed"
@@ -150,7 +162,7 @@
       placeholder="e.g. Make the export endpoint stream instead of buffering, and add a test."
     ></textarea>
     <div class="row">
-      <button class="btn primary" onclick={define} disabled={defining || !seed.trim() || !repoPath.trim()}>
+      <button class="btn primary" onclick={define} disabled={defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}>
         {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
       </button>
       {#if draft}
@@ -176,8 +188,10 @@
             <button class="btn ghost small" onclick={() => removeCriterion(i)} aria-label="Remove">✕</button>
           </div>
           <div class="crit-row">
-            <select class="in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as 'command' | 'manual')}>
-              <option value="manual">manual</option>
+            <select class="in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
+              <option value="agent">Agent assessment</option>
+              <option value="manual">Agent assessment (legacy)</option>
+              <option value="human">Human verification</option>
               <option value="command">command</option>
             </select>
             {#if c.verify_kind === 'command'}
@@ -218,11 +232,27 @@
         </div>
       </div>
       <p class="muted small">
-        Executors run sequentially on an isolated branch <code>goal-loop/&lt;id&gt;</code> — your working
-        tree is never touched.
+        Executors run sequentially in an isolated {mode === 'research' ? 'research directory' : 'git worktree'}. Working files remain available after the loop finishes.
       </p>
     </section>
 
+    <section class="block">
+      <label class="lbl"><input type="checkbox" bind:checked={allowCommits} disabled={mode === 'research'} /> Allow local commits</label>
+      <p class="muted small">Working files are retained when a loop stops or finishes. Push and publishing require separate authorization.</p>
+      <label class="lbl"><input type="checkbox" bind:checked={requireReview} /> Require independent completion review</label>
+      <label class="lbl" for="gl-sources">Source, spec and plan links (one per line)</label>
+      <textarea id="gl-sources" class="in area" bind:value={sourceLinks}></textarea>
+      <label class="lbl" for="gl-skills">Selected skills (comma separated)</label>
+      <input id="gl-skills" class="in" bind:value={selectedSkills} />
+      {#each ['planner', 'evaluator', 'digester'] as role}
+        {@const key = role as 'planner' | 'evaluator' | 'digester'}
+        <label class="lbl" for={`gl-${role}`}>{role} provider</label>
+        <select id={`gl-${role}`} class="in" bind:value={draft.suggested_config[key].provider} onchange={() => { if (draft) draft.suggested_config[key].model = ''; }}>
+          {#each providers as p (p)}<option value={p}>{p}</option>{/each}
+        </select>
+        <ModelPicker provider={draft.suggested_config[key].provider} value={draft.suggested_config[key].model} onchange={(m) => { if (draft) draft.suggested_config[key].model = m; }} />
+      {/each}
+    </section>
     <div class="row end">
       <button class="btn primary" onclick={launch} disabled={launching || !canLaunch()}>
         {launching ? 'Launching…' : 'Launch loop'}

@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use otto_core::domain::{
     GoalLoop, GoalLoopAgentCfg, GoalLoopConfig, GoalLoopDefinition, GoalLoopDetail,
-    GoalLoopEvaluation, GoalLoopIteration, GoalLoopLimits, GoalLoopPhase, GoalLoopStatus,
-    LoopAgentState,
+    GoalLoopEvaluation, GoalLoopIteration, GoalLoopLedger, GoalLoopLimits, GoalLoopPhase,
+    GoalLoopStatus, LoopAgentState,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::{Row, SqlitePool};
@@ -65,6 +65,8 @@ fn row_to_loop(r: &sqlx::sqlite::SqliteRow) -> Result<GoalLoop> {
         current_iteration: r.get::<i64, _>("current_iteration") as u32,
         progress_pct: r.get::<i64, _>("progress_pct") as u32,
         context_digest: r.get("context_digest"),
+        ledger: serde_json::from_str(&r.get::<String, _>("ledger_json"))
+            .map_err(|e| Error::Internal(format!("bad ledger_json: {e}")))?,
         branch: r.get("branch"),
         worktree_path: r.get("worktree_path"),
         base_commit: r.get("base_commit"),
@@ -562,6 +564,57 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
+    pub async fn set_ledger(&self, id: &Id, ledger: &GoalLoopLedger) -> Result<()> {
+        let json = serde_json::to_string(ledger).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query("UPDATE goal_loops SET ledger_json = ?, updated_at = ? WHERE id = ?")
+            .bind(json)
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set goal ledger"))?;
+        Ok(())
+    }
+
+    /// Serialize explicit human updates so two browser actions cannot overwrite
+    /// each other's answers or evidence after both read the same detail payload.
+    pub async fn edit_ledger<F>(&self, id: &Id, edit: F) -> Result<()>
+    where
+        F: FnOnce(&mut GoalLoopLedger) -> Result<()>,
+    {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("lock goal ledger"))?;
+        let raw: String = sqlx::query_scalar("SELECT ledger_json FROM goal_loops WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("read goal ledger"))?;
+        let mut ledger: GoalLoopLedger =
+            serde_json::from_str(&raw).map_err(|e| Error::Internal(e.to_string()))?;
+        edit(&mut ledger)?;
+        let json = serde_json::to_string(&ledger).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query("UPDATE goal_loops SET ledger_json = ?, updated_at = ? WHERE id = ?")
+            .bind(json)
+            .bind(fmt(Utc::now()))
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("edit goal ledger"))?;
+        tx.commit().await.map_err(dberr("commit goal ledger"))?;
+        Ok(())
+    }
+
+    /// Append a role after the executor slots without moving their stable indices.
+    pub async fn append_iter_agent(&self, iter_id: &Id, agent: &LoopAgentState) -> Result<usize> {
+        let json = serde_json::to_string(agent).map_err(|e| Error::Internal(e.to_string()))?;
+        let row = sqlx::query("UPDATE goal_loop_iterations SET agents_json = json_insert(agents_json, '$[#]', json(?)) WHERE id = ? RETURNING json_array_length(agents_json) AS n")
+            .bind(json).bind(iter_id).fetch_one(&self.pool).await.map_err(dberr("append goal role"))?;
+        Ok(row.get::<i64, _>("n") as usize - 1)
+    }
+
     pub async fn delete(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM goal_loop_iterations WHERE loop_id = ?")
             .bind(id)
@@ -577,9 +630,9 @@ impl GoalLoopsRepo {
     }
 
     /// Boot sweep: a loop's controller dies with the daemon, so any row left in
-    /// `running`/`paused`/`blocked` is orphaned. Flip them (and their
-    /// non-terminal iterations) to failed/error and RETURN the rows so the caller
-    /// can also remove worktrees + kill executor sessions.
+    /// `running`/`paused`/`blocked` is orphaned. Pause active work, retain blocked
+    /// questions, mark incomplete iterations interrupted, and return the rows
+    /// so the caller can release sessions without removing working files.
     pub async fn fail_running(&self, error: &str) -> Result<Vec<GoalLoop>> {
         let loops = self.list_running().await?;
         if loops.is_empty() {
@@ -587,8 +640,12 @@ impl GoalLoopsRepo {
         }
         let now = fmt(Utc::now());
         for l in &loops {
+            if let Some(started) = l.run_started_at {
+                self.add_elapsed(&l.id, (Utc::now() - started).num_seconds().max(0) as u64)
+                    .await?;
+            }
             sqlx::query(
-                "UPDATE goal_loops SET status = 'failed', error = ?, phase = 'done',
+                "UPDATE goal_loops SET status = CASE WHEN status = 'blocked' THEN 'blocked' ELSE 'paused' END, error = ?, phase = 'done',
                  run_started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?",
             )
             .bind(error)
@@ -686,6 +743,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ledger_and_role_slots_survive_reload_without_moving_executors() {
+        let repo = GoalLoopsRepo::new(mem_pool().await);
+        let l = repo.create(new_loop()).await.unwrap();
+        let mut ledger = l.ledger.clone();
+        ledger.questions.push(otto_core::domain::GoalQuestion {
+            id: "q".into(),
+            question: "Which option?".into(),
+            answer: Some("existing one".into()),
+            answered_by: Some("user".into()),
+            answered_at: Some(Utc::now()),
+        });
+        repo.set_ledger(&l.id, &ledger).await.unwrap();
+        let it = repo
+            .add_iteration(&l.id, &l.workspace_id, 1, "", &l.config.executors)
+            .await
+            .unwrap();
+        let mut role = it.agents[0].clone();
+        role.name = "Planner".into();
+        role.session_id = Some("role-sid".into());
+        let index = repo.append_iter_agent(&it.id, &role).await.unwrap();
+        assert_eq!(index, 1);
+        let detail = repo.get_detail(&l.id).await.unwrap();
+        assert_eq!(
+            detail.loop_.ledger.questions[0].answered_by.as_deref(),
+            Some("user")
+        );
+        assert_eq!(detail.iterations[0].agents[0].name, "Executor");
+        assert_eq!(
+            detail.iterations[0].agents[1].session_id.as_deref(),
+            Some("role-sid")
+        );
+        repo.update_runtime(&l.id, GoalLoopStatus::Blocked, GoalLoopPhase::Done, 1, 50)
+            .await
+            .unwrap();
+        repo.fail_running("restart").await.unwrap();
+        assert_eq!(
+            repo.get(&l.id).await.unwrap().status,
+            GoalLoopStatus::Blocked
+        );
+        assert_eq!(repo.get(&l.id).await.unwrap().ledger.questions.len(), 1);
+    }
+
+    #[tokio::test]
     async fn fail_running_returns_and_flips_rows() {
         let pool = mem_pool().await;
         let repo = GoalLoopsRepo::new(pool.clone());
@@ -703,7 +803,7 @@ mod tests {
         let failed = repo.fail_running("interrupted").await.unwrap();
         assert_eq!(failed.len(), 1);
         let after = repo.get(&l.id).await.unwrap();
-        assert_eq!(after.status, GoalLoopStatus::Failed);
+        assert_eq!(after.status, GoalLoopStatus::Paused);
         assert_eq!(after.error.as_deref(), Some("interrupted"));
     }
 }

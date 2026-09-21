@@ -2854,7 +2854,7 @@ flag) — all on the EXISTING query/consume routes.
 ## Goal Loops
 
 Bounded, goal-directed multi-agent iteration. A loop runs Plan → Execute → Evaluate →
-Digest cycles on an isolated git branch (`goal-loop/<id>`) until the goal's
+Digest cycles on an isolated git branch (`goal-loop/<id>`) or research directory until the goal's
 acceptance criteria are met or a hard limit (iterations / active time) is hit. Live
 updates arrive over `/ws/events` (`goal_loop_updated`). Item routes resolve the
 workspace from the loop row; every handler enforces ws Viewer/Editor.
@@ -2864,7 +2864,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
-| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; persists nothing; `feedback` refines) |
+| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
 | 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id} | ws viewer | — | GoalLoopDetail (`{loop, iterations}`) |
@@ -2874,7 +2874,53 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
 | 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
 | 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
-| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops + removes worktree; **keeps the branch**) |
+| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops and deletes history; **retains working files and branch**) |
+
+### Goal execution and verification contract
+
+`GoalLoopConfig` adds optional `allow_commits` (default false), `mode` (`build` default or
+`research`), `source_links: string[]`, `skills: string[]`, and `require_review` (default false).
+Local commits are instructed only when explicitly enabled; push/publish are separately
+permissioned. Selected skills and source links enter the role context. Missing skills must
+be reported by agents; there is no preflight availability guarantee for custom skills.
+Research requires no repository and writes `findings.md` inside the retained research directory.
+Planner/evaluator/digester sessions append to each iteration's `agents` after executor slots;
+existing executor indices remain stable. Every role honors its configured provider/model.
+The definer accepts optional `provider`, `model`, and `mode` in `DefineGoalReq`.
+
+Criterion `verify_kind` accepts `command`, `agent`, `human`, and legacy `manual` (agent-assessed).
+The model cannot satisfy `human`; approval requires an authenticated explicit action from a
+person. Both human-decision endpoints reject managed session credentials (including author
+API tokens and internal MCP tokens) with 403:
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/goal-loops/{id}/criteria/{criterion}/verify | ws editor | `{ "evidence": "Observed the expected result" }` | GoalLoop; only paused/blocked/exhausted human criteria |
+| POST /api/v1/goal-loops/{id}/questions/{question}/answer | ws editor | `{ "answer": "Use the existing endpoint" }` | GoalLoop; only an unanswered question on a blocked loop |
+
+Invalid/empty input returns 400; unknown criterion/question returns 404; workspace permission
+failures use the usual authorization error. `GoalLoop.ledger` holds `verifications[]`
+(`criterion_id`, exact serialized `criterion_revision`, server-derived `verified_by`, `evidence`,
+`verified_at`), `questions[]` (`id`, `question`, nullable `answer`, `answered_by`, `answered_at`),
+`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`.
+Legacy rows default to an empty ledger. Answers do not auto-resume; unanswered questions block Resume.
+Lifecycle and human-decision mutations serialize per loop. Approval/Resume while execution is
+still stopping returns 409. Explicit executor retry owns Running state, cancels with Pause/Stop,
+clears old output/evaluation/approvals, and returns to Blocked for fresh evaluation. Only the
+current iteration can be retried. Build/Research mode cannot change after creation.
+Further executor work invalidates human approvals; changed criterion contracts cannot reuse them.
+Final human verification rechecks the current iteration without rerunning executors or consuming
+another iteration, subject to the active-time and phase limits.
+
+Two identical unmet-criterion/evidence outcomes block the loop with a persisted question.
+Optional completion review must return approval with no unresolved findings before success.
+Required machine proof (`OTTO_PROOF_REQUIRE_GOAL_LOOP`) is never waived on the final iteration.
+Proof captures actual tracked, staged and untracked content, even when no commits exist.
+
+Stop, failure, success, restart and history deletion retain working files. Boot recovery pauses
+active loops and preserves blocked questions, allowing explicit Resume; sessions are reaped.
+Per-loop cost accounting is not wired: non-null `max_cost_usd` is rejected at create/patch;
+legacy loops carrying one block before execution. Workspace usage-budget gates remain in force.
 
 ## Canvas Studio
 
