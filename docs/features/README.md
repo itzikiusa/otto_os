@@ -55,6 +55,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | Guide | What it covers | Quick-start note |
 |-------|----------------|------------------|
 | [Connections — SSH & SFTP](./connections-ssh-sftp.md) | Defining connections (SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse) in the unified hub tree (Kafka clusters included), interactive PTY sessions, **SSH tunnels** (`-L` vs SOCKS5 `-D`, with the MongoDB `+srv` reason and the bastion `AllowTcpForwarding` gotcha), and the **SFTP file browser** over SSH. | Add a connection; secrets go to the Keychain. |
+| [Session network profiles](./session-network-profiles.md) | Managed per-session bastion TCP forwards, explicit endpoint/environment mappings, live tunnel status and lifecycle cleanup for agent-run programs. | Choose an SSH connection and named endpoints in New session. |
 | [Database Explorer](./database-explorer.md) | A TablePlus-class browser for MySQL / PostgreSQL / Redis / MongoDB / ClickHouse: lazy schema tree, per-engine autocomplete, query tabs with true multi-statement batches, an auto row `LIMIT`, cancel and detached runs that survive navigation, a virtualized results grid with approval-gated inline/JSON edits (batched per row), full mongosh scripts, index management from the Structure view, query plans, a visual JOIN builder, ClickHouse dashboards/widgets, "examine schema with an agent", file import and streaming CSV/format export. | Reuses connection profiles; engines configured here. |
 | [Message Brokers (Kafka)](./message-brokers.md) | Connect Kafka clusters (incl. **AWS MSK over an SSH bastion** via the in-process Kafka-aware proxy), browse topics, peek/produce, consumer-group lag, topic configs, Schema Registry, and an Overview with CPU/RAM. PLAINTEXT/TLS + SASL PLAIN/SCRAM, prod/read-only guards. | Add a cluster; MSK path documented step-by-step. |
 | [Browser](./browser.md) | A workspace-scoped web browser: reader tabs (fetch → markdown, JS-capable via a Lightpanda sidecar with plain-fetch fallback), DOM annotations you can send into a live session or save to the Vault, a CSS-selector query, page summarize, Keychain-backed Site Credentials with opt-in governed agent login, and 5 `browser_*` agent MCP tools. Every fetch is netguard-checked. | Paste a URL in the Browser tab; no setup needed (`brew install lightpanda-io/tap/lightpanda` for JS-rendered pages). |
@@ -178,3 +179,7 @@ contract owners.
   gated by `Git`, and repo rules by `Context`. The `Finding` disposition machine
   (`open · accepted · false_positive · fixed · verified · waived`) is distinct
   from the engine detection `state`. See [review-findings](./review-findings.md).
+
+- [Workspace context](projects.md) — workspaces are the shared project boundary: instructions, references, memory and decisions automatically apply to their agent sessions.
+
+- [Subscription accounts](subscription-accounts.md) — separate Claude/Codex subscription logins, per-session selection and stable resume identity.
