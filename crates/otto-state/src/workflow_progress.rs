@@ -37,6 +37,7 @@ fn project(value: &Value, checkpoint: bool) -> Result<Value> {
         "duration_ms",
         "attempts",
         "sessions",
+        "review_ids",
     ] {
         if let Some(value) = value.get(key) {
             out.insert(key.into(), value.clone());
@@ -577,5 +578,18 @@ mod tests {
             detail(&pool, &id, "missing", true).await,
             Err(Error::NotFound(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod review_association_tests {
+    #[test]
+    fn lightweight_projection_retains_review_association() {
+        let full = serde_json::json!({"node_id":"review", "status":"success",
+            "review_ids":["review-id"], "sessions":["first"], "output":{"large":"body"}});
+        let summary = super::project(&full, false).unwrap();
+        assert_eq!(summary["review_ids"], full["review_ids"]);
+        assert_eq!(summary["sessions"], full["sessions"]);
+        assert!(summary["output"].is_null());
     }
 }

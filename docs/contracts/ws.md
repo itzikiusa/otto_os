@@ -295,8 +295,9 @@ instead of waiting for the next timed tick.
 }
 ```
 
-- `session_id` — the orchestrating session that owns the review; may be `null`
-  for externally-triggered reviews.
+- `session_id` — the session associated with this update; the summarizer's
+  managed session on early publication, or the orchestrating session when known.
+  May be `null` for review-level status updates.
 - `review_id` — UUID of the `reviews` row that changed.
 - `status` — the new status string (mirrors the `status` column in `reviews`).
 - UI routing: `ReviewPanel.svelte` subscribes to `review_changed` events and
@@ -940,3 +941,12 @@ monitoring cycle of an enabled cluster (see `api.md` "Kubernetes monitoring").
 - Clients on the Monitor dashboard re-fetch `GET /k8s/monitor/overview` and the
   open cluster's `…/monitor/workloads`; nothing else needs to react.
 - TypeScript: `{ type: 'k8s_monitor_cycle'; cluster_id: Id; ok: boolean; pods_scraped: number; pods_failed: number; cycle_ms: number }`.
+
+Workflow node updates include additive `NodeRunState.review_ids: string[]`
+(default `[]`). The association is emitted when each review starts, before its
+sessions or result exist, and retained when the node finishes. `review_changed`
+is also emitted when the managed summarizer's session ID is persisted; its
+`session_id` identifies that session. Consumers fetch `GET /reviews/{review_id}`
+for the existing agent `status`, `fallback`, and `note` fields, including retries
+after workflow completion. No new event type is introduced.
+

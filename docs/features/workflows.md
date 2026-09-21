@@ -435,6 +435,25 @@ already inline their matching method skill **by kind** (`grill` / `jira-story-wr
 / `story-task-breakdown`), and `review_run` consumes `skills`/`lenses` as *reviewer
 lens* skills (below) rather than prompt-prepended text.
 
+### Watching the review summarizer
+
+The run's **Agents** panel includes each review's **Summarizer**, its configured
+provider, actual review status, and elapsed time while it runs. Expand the row to
+watch its live terminal. All providers use managed sessions; an empty provider
+setting defaults to Claude, and the configured model is preserved.
+
+The panel keeps discovering review sessions even when a step uses `await:false`
+or a summarizer is retried after the workflow finishes. Reloading the run restores
+the review association and current summarizer; session IDs already captured by
+the workflow remain in its history. Completed attempts release their live PTYs
+while retaining the session record.
+
+Failures, the absolute finding-count timeout (2–20 minutes), and empty summaries
+when findings exist use the deterministic summary. The Agents panel labels this
+**Deterministic fallback**. Cancelling a review stops its summarizer and leaves
+the review cancelled, without creating a fallback summary. Each retry uses a new
+session and result file; incomplete JSON is never a completion signal.
+
 ### `review_run`, gating & auto-PR
 `review_run` drives the **same multi-agent engine as a PR review**. By default it
 fans out one reviewer agent per `providers[]` × `lenses[]` pair (e.g.

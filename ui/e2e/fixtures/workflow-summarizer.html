@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Workflow Agents fixture</title></head>
+<body style="margin:0;width:700px;height:700px;background:#20242b;color:white">
+<script type="module">
+  import { mount } from 'svelte';
+  import RunAgents from '/src/modules/workflows/RunAgents.svelte';
+  mount(RunAgents, { target: document.body, props: { run: {
+    id: 'run', status: 'success', nodes: [{ node_id: 'review', status: 'success',
+      logs: [], sessions: ['historic'], review_ids: ['r'] }],
+  } } });
+</script>
+</body></html>

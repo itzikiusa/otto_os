@@ -1022,11 +1022,18 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
 | POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
+| GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
 | POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
+
+The trailing summarizer row uses a managed session on every configured provider
+(empty provider defaults to Claude). Its `session_id` is persisted and broadcast
+before awaiting the result, and retained after cleanup. Each retry creates a new
+session and isolated result file. `fallback` and `note` describe deterministic
+fallback; cancellation does not produce fallback or overwrite `cancelled`.
 
 **Review agent rows** (`Review.agents[]`, `ReviewAgentState`): `status` is
 `pending · running · waiting · done · error · skipped`; `lens` (optional, absent
@@ -4237,6 +4244,15 @@ Transcript session/history GETs reuse bounded immutable folds (32 retained entri
 `GET /api/v1/workflow-runs/{id}/nodes/{node_id}` and `GET /api/v1/workflow-runs/{id}/checkpoints/{node_id}` return `{rev,detail_version,body}` with exact NodeRunState or WorkflowCheckpoint recovery body. URL-encode node IDs (including `#`). Body/version come from one SQL snapshot; clients reject stale selected-body responses. All endpoints recheck run workspace Viewer permission; missing run/node returns404. Full legacy run GET and mutation responses retain their existing bodies.
 
 `GET /api/v1/workflows/{id}/runs?summary=true` returns up to 50 lightweight `{id,workflow_id,status,started_at,rev}` rows, newest first, for the run menu. Default `summary=false` preserves the existing full-row response. It has the same workspace Viewer requirement as the legacy list. The UI uses summaries for opening/polling and fetches exact node/checkpoint bodies only for expanded or selected details.
+
+**Workflow review association.** `NodeRunState.review_ids: string[]` (default `[]`)
+is recorded as soon as a `review_run` starts each review, before waiting. It is
+included in full runs, lightweight progress responses, and node recovery bodies.
+`NodeRunState.sessions` retains already captured session IDs. Clients can read
+`GET /reviews/{review_id}` to discover current sessions after `await:false`
+steps finish and when the summarizer is retried after workflow completion.
+
+
 ## Common projects (all providers)
 
 Projects belong to a workspace and share the existing Swarm project identity.

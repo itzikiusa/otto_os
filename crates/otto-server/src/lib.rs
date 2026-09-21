@@ -60,6 +60,7 @@ pub mod report_delivery;
 pub mod resource_sessions;
 pub mod review_fallback;
 pub mod review_session;
+mod review_summarizer;
 pub mod routes;
 pub mod run_callback;
 pub mod run_channels;

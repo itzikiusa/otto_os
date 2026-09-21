@@ -3135,7 +3135,7 @@ export interface ReviewAgentState {
   /** This agent's own findings (before summarization). */
   findings?: ReviewFinding[];
   /** True on the summarizer row when its output came from the deterministic
-   *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
+   *  Rust-side dedupe/rank fallback (configured summarizer unavailable). */
   fallback?: boolean;
   /** The configured reviewer (lens) this row expanded from; rows sharing a
    *  lens are the same lens on different providers. Absent on the summarizer
@@ -3168,7 +3168,7 @@ export interface Review {
   blocker_count?: number | null;
   summary_md?: string | null;
   /** true when the final comments came from the deterministic summarizer
-   *  fallback (claude unavailable) — derived from the agents' fallback flags. */
+   *  fallback (configured summarizer unavailable) — derived from the agents' fallback flags. */
   summary_fallback?: boolean;
 }
 
@@ -4838,6 +4838,8 @@ export interface NodeRunState {
   attempts?: number | null;
   /** Session ids this node drove (e.g. agent_prompt / review_run). */
   sessions?: string[];
+  /** Reviews started by this step; retained for async completion and retries. */
+  review_ids?: string[];
   /** Present only while the node runs (agent steps): phase + sub-agents. */
   activity?: NodeActivity | null;
 }

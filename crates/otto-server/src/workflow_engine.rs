@@ -39,6 +39,23 @@ use serde_json::{json, Value};
 use crate::state::ServerCtx;
 use crate::turn_oracle::{self, cap_node_logs, CompleteVia, Phase};
 
+/// Session and review associations share the ordered progress stream. Reviews
+/// are recorded as soon as they exist, even when the step does not await them.
+enum AgentAssociation {
+    Session(String),
+    Review(String),
+}
+
+fn record_association(state: &mut NodeRunState, association: AgentAssociation) -> bool {
+    let (ids, id) = match association {
+        AgentAssociation::Session(id) => (&mut state.sessions, id),
+        AgentAssociation::Review(id) => (&mut state.review_ids, id),
+    };
+    if ids.contains(&id) { return false; }
+    ids.push(id);
+    true
+}
+
 /// Cap on a node's kept log lines. Phase lines are chatty (a 20-agent sweep
 /// changes its count 40 times), so they are kept only up to here — and the cap
 /// evicts ONLY phase lines, never a `▶`/`✓`/`⚠`/`↻`/`✗`, retry, edge or persist
@@ -1425,6 +1442,7 @@ pub async fn run_workflow(
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            review_ids: Vec::new(),
             activity: None,
         })
         .collect();
@@ -1994,7 +2012,7 @@ pub async fn run_workflow(
         let mut attempt: u32 = 0;
         let mut backoff = policy.backoff_ms;
         let mut retry_logs: Vec<String> = vec![];
-        let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (sess_tx, mut sess_rx) = tokio::sync::mpsc::unbounded_channel::<AgentAssociation>();
         // Live per-node log lines (R9): the loop node streams iteration/sub-step
         // progress here so the run detail updates AS IT RUNS. Per-node channel, so
         // lines never leak into the next node.
@@ -2068,8 +2086,7 @@ pub async fn run_workflow(
                 tokio::select! {
                     biased;
                     Some(sid) = sess_rx.recv() => {
-                        if !states[idx].sessions.contains(&sid) {
-                            states[idx].sessions.push(sid);
+                        if record_association(&mut states[idx], sid) {
                             let rev = repo
                                 .update_run_progress(&run_id, &states)
                                 .await
@@ -2164,9 +2181,7 @@ pub async fn run_workflow(
         };
         // Drain any session ids reported right as the node finished.
         while let Ok(sid) = sess_rx.try_recv() {
-            if !states[idx].sessions.contains(&sid) {
-                states[idx].sessions.push(sid);
-            }
+            record_association(&mut states[idx], sid);
         }
         // Drain any trailing live-log lines — kept on EVERY path now (R5.5): the
         // phase lines ARE the record of how the step completed.
@@ -2347,6 +2362,13 @@ pub async fn run_workflow(
     }
 
     if canceled {
+        // Reviews can outlive an await:false step and spawn sessions after its
+        // polling loop ended. Cancel their work, not only the harvested PTYs.
+        for review_id in states.iter().flat_map(|s| s.review_ids.iter()) {
+            if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+                crate::modules::cancel_running_review(&ctx, &review, &workflow.workspace_id).await;
+            }
+        }
         // Stop every agent session this run spawned — a cancel must halt the live
         // agents (each is a real claude/codex PTY that would otherwise keep working
         // and burning tokens), not just flip the run row. Includes agent steps AND
@@ -2949,7 +2971,7 @@ async fn execute_node(
     input: Value,
     env: &RunEnv,
     scope: &StepScope,
-    session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
     // Live per-node log lines: streamed to the run detail AS THE NODE RUNS (the
     // loop node uses this so the user sees iteration/sub-step progress instead of a
     // frozen "loop started"). Harvested next to `session_tx` in `run_workflow`.
@@ -4712,6 +4734,7 @@ async fn execute_node(
                             return Err(e);
                         }
                     };
+                let _ = session_tx.send(AgentAssociation::Review(review_id.clone()));
                 // Publish the RESOLVED branch from here on — the loop harvest,
                 // the repos registry and a downstream git_pr must target what
                 // was actually reviewed, not the pre-resolution wish.
@@ -4734,7 +4757,7 @@ async fn execute_node(
                 // them running (per-lens reviewers + the checks reviewer), not just
                 // an opaque "review started". Ids flow through `session_tx` →
                 // `states[idx].sessions`; a set dedups repeated poll harvests. The
-                // headless summarizer has no session_id (nothing to open) — skipped.
+                // summarizer publishes its managed session while it is running too.
                 let mut seen_sessions: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 if await_done {
@@ -4746,7 +4769,7 @@ async fn execute_node(
                             for a in &r.agents {
                                 if let Some(sid) = &a.session_id {
                                     if seen_sessions.insert(sid.clone()) {
-                                        let _ = session_tx.send(sid.clone());
+                                        let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
                                     }
                                 }
                             }
@@ -4785,7 +4808,7 @@ async fn execute_node(
                         for a in &r.agents {
                             if let Some(sid) = &a.session_id {
                                 if seen_sessions.insert(sid.clone()) {
-                                    let _ = session_tx.send(sid.clone());
+                                    let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
                                 }
                             }
                         }
@@ -6100,7 +6123,7 @@ async fn run_node_agent(
     // box until the stall trip errors the step. `None` for steps whose reply
     // must come from the transcript (canvas/goals/PR-draft agents).
     done_file: Option<std::path::PathBuf>,
-    session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
     // The node's LIVE log channel: the oracle's phase lines stream here as the
     // turn runs and are kept in the step's logs afterwards (R1.4/R5.5).
     log_tx: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -6198,6 +6221,7 @@ async fn run_node_agent(
         stuck_after,
         crate::agent_session::TurnOpts {
             done_file,
+            done_file_validator: None,
             // Providers with no pollable artifact at all (agy/custom) still
             // complete on sustained PTY silence — a finished TUI sits
             // repaint-free at its input box. claude/codex use the oracle.
@@ -6210,7 +6234,7 @@ async fn run_node_agent(
             outcome_tx: Some(outcome_tx),
         },
         move |id| {
-            let _ = tx.send(id.to_string());
+            let _ = tx.send(AgentAssociation::Session(id.to_string()));
             if let Ok(mut slot) = sid_slot.lock() {
                 *slot = Some(id.clone());
             }
@@ -7456,6 +7480,7 @@ mod tests {
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            review_ids: Vec::new(),
             activity: None,
         }
     }
@@ -8030,6 +8055,7 @@ mod tests {
             duration_ms: Some(10),
             attempts: Some(1),
             sessions: vec![],
+            review_ids: Vec::new(),
             activity: None,
         };
         let states = vec![
@@ -8487,6 +8513,19 @@ mod tests {
     }
 
     #[test]
+    fn review_association_survives_completed_async_steps_and_retry_sessions() {
+        let mut state = nstate("review", NodeStatus::Running);
+        assert!(record_association(&mut state, AgentAssociation::Review("review-id".into())));
+        assert!(record_association(&mut state, AgentAssociation::Session("first".into())));
+        assert!(!record_association(&mut state, AgentAssociation::Review("review-id".into())));
+        state.status = NodeStatus::Success; // await:false has already returned.
+        let mut restored: NodeRunState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(restored.review_ids, ["review-id"]);
+        record_association(&mut restored, AgentAssociation::Session("retry".into()));
+        assert_eq!(restored.sessions, ["first", "retry"]);
+    }
+
+    #[test]
     fn success_suspends_step_session_unless_keep_session() {
         // A resumable provider is SUSPENDED (the row stays Reconnectable, so
         // "Open session" on the finished step still resumes the transcript);
@@ -8628,6 +8667,7 @@ mod tests {
             duration_ms: None,
             attempts: Some(1),
             sessions: vec!["01ABCDEF".into()],
+            review_ids: Vec::new(),
             activity: Some(a),
         };
         let n = serde_json::to_string(&state).unwrap().len();
