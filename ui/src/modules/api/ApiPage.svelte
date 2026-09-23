@@ -2,6 +2,7 @@
   // Full API-client module page: a left sidebar (Collections / History / Env
   // tabs) and a center column with the RequestBuilder over the ResponseViewer.
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
   import CollectionsTree from './CollectionsTree.svelte';
@@ -80,9 +81,12 @@
   ];
 </script>
 
-<div class="api-page">
-  <aside class="api-side" style:width={isPhone ? null : `${ui.apiSideWidth}px`}>
-    <div class="side-tabs" role="tablist">
+<div class="api-root">
+<!-- The sidebar's section switch lives in the unified header bar as one
+     segmented control (it used to wrap into a 2×2 grid in the 280px pane). -->
+<PageHeader title="API">
+  {#snippet tabs()}
+    <div class="side-tabs" role="tablist" aria-label="API sidebar">
       {#each sideTabs as t (t.id)}
         <button
           class="side-tab"
@@ -97,6 +101,10 @@
         </button>
       {/each}
     </div>
+  {/snippet}
+</PageHeader>
+<div class="api-page">
+  <aside class="api-side" style:width={isPhone ? null : `${ui.apiSideWidth}px`}>
     <div class="side-body">
       {#if sideTab === 'collections'}
         <CollectionsTree />
@@ -159,10 +167,17 @@
     </div>
   </div>
 </div>
+</div>
 
 <style>
-  .api-page {
+  .api-root {
     height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .api-page {
+    flex: 1;
     display: flex;
     min-height: 0;
   }
@@ -176,18 +191,18 @@
   }
   .side-tabs {
     display: flex;
-    flex-wrap: wrap;
     gap: 2px;
-    padding: 10px 8px 8px;
-    border-bottom: 1px solid var(--border);
-    overflow: hidden;
+    padding: 2px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
   }
   .side-tab {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    height: 26px;
-    padding: 0 7px;
+    height: 24px;
+    padding: 0 8px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;

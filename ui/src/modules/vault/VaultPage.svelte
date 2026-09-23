@@ -5,6 +5,8 @@
   // OKF). Files on disk are the truth; the daemon keeps a derived index.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
@@ -162,113 +164,131 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div class="vault-page" class:resizing>
-  <header class="topbar">
-    <button
-      class="tool"
-      title={leftOpen ? 'Hide file tree' : 'Show file tree'}
-      onclick={() => {
-        leftOpen = !leftOpen;
-        localStorage.setItem('otto_vault_left_open', leftOpen ? '1' : '0');
-      }}
-    >
-      <Icon name="panel" size={14} />
-    </button>
-    <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
-      <Icon name="globe" size={14} />
-      <span>{vault.current?.name ?? 'No vault'}</span>
-      <span class="tri">▾</span>
-    </button>
-    {#if vault.current?.okf}
-      <span class="okf-chip" title="OKF (Open Knowledge Format) vault">OKF</span>
-    {/if}
-    {#if scanning}
-      <span class="scan-chip">Indexing vault…</span>
-    {:else if scanError}
-      <span class="scan-chip err" title={vault.status?.scan_state}>index error</span>
-    {/if}
-    {#if vault.activeDocsRuns.length > 0}
-      <!-- Always-visible signal that agents are writing into this vault right
-           now (runs may be launched from here, MCP, or a workflow) — clicking
-           jumps to the Docs agent view where each run can be watched. -->
-      <button
-        class="run-chip"
-        title={vault.activeDocsRuns
-          .map((r) => (r.kind === 'refine' ? `refine: ${r.note_path}` : r.prompt))
-          .join('\n')}
-        onclick={() => vault.openDocsAgents('')}
-      >
-        <Icon name="zap" size={12} />
-        {vault.activeDocsRuns.length === 1
-          ? '1 agent run active'
-          : `${vault.activeDocsRuns.length} agent runs active`}
-      </button>
-    {/if}
-    <div class="spacer"></div>
-    {#if vault.current}
-      <button class="tool" title="Trash and restore" onclick={() => void vault.openTrash()}><Icon name="trash" size={14} /></button>
-      <button class="tool" title="Edit history" onclick={() => void vault.openHistory()}><Icon name="clock" size={14} /></button>
-      <div class="counts">
-        {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ??
-          vault.current.links} links
-        {#if (vault.status?.unresolved ?? 0) > 0}
-          · {vault.status?.unresolved} unresolved
-        {/if}
-      </div>
+  <!-- Unified header: vault switcher as the title, status chips as badges,
+       tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
+  <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
+    {#snippet leading()}
       <button
         class="tool"
-        class:active={vault.centerMode === 'graph'}
-        title="Graph view"
+        title={leftOpen ? 'Hide file tree' : 'Show file tree'}
+        aria-label={leftOpen ? 'Hide file tree' : 'Show file tree'}
         onclick={() => {
-          vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
-          vault.persistView();
+          leftOpen = !leftOpen;
+          localStorage.setItem('otto_vault_left_open', leftOpen ? '1' : '0');
         }}
       >
-        <Icon name="share" size={14} />
+        <Icon name="panel" size={14} />
       </button>
-      <button
-        class="tool"
-        class:active={vault.centerMode === 'docs-agents'}
-        title="Docs agent — have agents write documentation into this vault"
-        onclick={() => {
-          if (vault.centerMode === 'docs-agents') {
-            vault.centerMode = vault.note ? 'note' : 'empty';
+    {/snippet}
+    {#snippet titleContent()}
+      <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
+        <Icon name="globe" size={14} />
+        <span>{vault.current?.name ?? 'No vault'}</span>
+        <span class="tri">▾</span>
+      </button>
+    {/snippet}
+    {#snippet badge()}
+      {#if vault.current?.okf}
+        <span class="okf-chip" title="OKF (Open Knowledge Format) vault">OKF</span>
+      {/if}
+      {#if scanning}
+        <span class="scan-chip">Indexing vault…</span>
+      {:else if scanError}
+        <span class="scan-chip err" title={vault.status?.scan_state}>index error</span>
+      {/if}
+      {#if vault.activeDocsRuns.length > 0}
+        <!-- Always-visible signal that agents are writing into this vault right
+             now (runs may be launched from here, MCP, or a workflow) — clicking
+             jumps to the Docs agent view where each run can be watched. -->
+        <button
+          class="run-chip"
+          title={vault.activeDocsRuns
+            .map((r) => (r.kind === 'refine' ? `refine: ${r.note_path}` : r.prompt))
+            .join('\n')}
+          onclick={() => vault.openDocsAgents('')}
+        >
+          <Icon name="zap" size={12} />
+          {vault.activeDocsRuns.length === 1
+            ? '1 agent run active'
+            : `${vault.activeDocsRuns.length} agent runs active`}
+        </button>
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      {#if vault.current}
+        <div class="counts">
+          {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ??
+            vault.current.links} links
+          {#if (vault.status?.unresolved ?? 0) > 0}
+            · {vault.status?.unresolved} unresolved
+          {/if}
+        </div>
+        <button class="tool" title="Trash and restore" aria-label="Trash and restore" data-icon="trash" data-overflow="-1" onclick={() => void vault.openTrash()}><Icon name="trash" size={14} /></button>
+        <button class="tool" title="Edit history" aria-label="Edit history" data-icon="clock" data-overflow="-1" onclick={() => void vault.openHistory()}><Icon name="clock" size={14} /></button>
+        <button
+          class="tool"
+          class:active={vault.centerMode === 'graph'}
+          title="Graph view"
+          aria-label="Graph view"
+          data-icon="share"
+          onclick={() => {
+            vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
             vault.persistView();
-          } else {
-            vault.openDocsAgents('');
-          }
-        }}
-      >
-        <Icon name="zap" size={14} />
-      </button>
-      <button class="tool" title="Quick switcher (⌘O)" onclick={() => (vault.switcherOpen = true)}>
-        <Icon name="search" size={14} />
-      </button>
-      <button class="tool" title="New note (⌘N)" onclick={() => openNewNote('')}>
-        <Icon name="plus" size={14} />
-      </button>
-      <button
-        class="tool"
-        title="Toggle right panel"
-        onclick={() => {
-          rightOpen = !rightOpen;
-          localStorage.setItem('otto_vault_right_open', rightOpen ? '1' : '0');
-        }}
-      >
-        <Icon name="sidebar" size={14} />
-      </button>
-    {/if}
-  </header>
+          }}
+        >
+          <Icon name="share" size={14} />
+        </button>
+        <button
+          class="tool"
+          class:active={vault.centerMode === 'docs-agents'}
+          title="Docs agent — have agents write documentation into this vault"
+          aria-label="Docs agent"
+          data-label="Docs agent"
+          data-icon="zap"
+          onclick={() => {
+            if (vault.centerMode === 'docs-agents') {
+              vault.centerMode = vault.note ? 'note' : 'empty';
+              vault.persistView();
+            } else {
+              vault.openDocsAgents('');
+            }
+          }}
+        >
+          <Icon name="zap" size={14} />
+        </button>
+        <button class="tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
+          <Icon name="search" size={14} />
+        </button>
+        <button class="tool" title="New note (⌘N)" aria-label="New note" data-icon="plus" data-overflow="1" onclick={() => openNewNote('')}>
+          <Icon name="plus" size={14} />
+        </button>
+        <button
+          class="tool"
+          title="Toggle right panel"
+          aria-label="Toggle right panel"
+          data-icon="sidebar"
+          data-overflow="1"
+          onclick={() => {
+            rightOpen = !rightOpen;
+            localStorage.setItem('otto_vault_right_open', rightOpen ? '1' : '0');
+          }}
+        >
+          <Icon name="sidebar" size={14} />
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
 
   {#if !vault.current && !vault.loading}
-    <div class="onboard">
-      <h2>The docs home</h2>
-      <p>
-        A vault is a folder of markdown files on disk — point Otto at an existing Obsidian vault or
-        create a fresh one. Files stay yours; Otto indexes links, tags and full text, and agents
-        read/write it over MCP in OKF.
-      </p>
-      <button class="primary" onclick={() => (createOpen = true)}>Add a vault</button>
-    </div>
+    <EmptyState
+      variant="page"
+      icon="note"
+      title="The docs home"
+      body="A vault is a folder of markdown files on disk — point Otto at an existing Obsidian vault or create a fresh one. Files stay yours; Otto indexes links, tags and full text, and agents read/write it over MCP in OKF."
+      actionLabel="Add a vault"
+      actionIcon="plus"
+      onaction={() => (createOpen = true)}
+    />
   {:else if vault.current}
     <div class="panes">
       {#if leftOpen}
@@ -460,13 +480,6 @@
   .vault-page.resizing {
     cursor: col-resize;
   }
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-  }
   .vault-pick {
     display: inline-flex;
     align-items: center;
@@ -537,6 +550,13 @@
     font-size: 11.5px;
     color: var(--text-dim);
     white-space: nowrap;
+    margin-inline-end: 4px;
+  }
+  /* Narrow panes: the tools matter more than the tally. */
+  @media (max-width: 1100px) {
+    .counts {
+      display: none;
+    }
   }
   .tool {
     display: inline-flex;
@@ -699,24 +719,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .onboard {
-    max-width: 480px;
-    margin: 12vh auto;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding: 0 20px;
-  }
-  .onboard h2 {
-    margin: 0;
-  }
-  .onboard p {
-    color: var(--text-dim);
-    font-size: 13.5px;
-    line-height: 1.55;
-  }
-  .onboard .primary,
   .actions .primary {
     background: var(--accent, #4c6fff);
     border: none;
