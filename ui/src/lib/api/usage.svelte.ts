@@ -201,6 +201,11 @@ class UsageStore {
   /** Default auto-refresh cadence in ms (mirrors the Brokers panel pattern). */
   static readonly AUTO_REFRESH_MS = 60_000;
 
+  /** Request token for summary fetches: clicking 90d then 7d must never let
+   *  the slower 90-day response land last under the "7d" label (or into a
+   *  `-7d` CSV export). Every summary load bumps it; only the newest writes. */
+  private summarySeq = 0;
+
   // --- Metrics-tick throttle -----------------------------------------------
   private lastMetricsFetch = 0;
   private metricsFetching = false;
@@ -224,11 +229,12 @@ class UsageStore {
     try {
       await this.loadStatus();
       if (this.status?.available) {
+        const mine = ++this.summarySeq;
         const [summary, metrics] = await Promise.all([
           api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
           api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
         ]);
-        this.summary = summary;
+        if (mine === this.summarySeq) this.summary = summary;
         this.metrics = metrics;
         this.lastMetricsFetch = Date.now();
       } else {
@@ -325,10 +331,12 @@ class UsageStore {
 
   private async refreshSummary(): Promise<void> {
     if (!this.status?.available) return;
+    const mine = ++this.summarySeq;
     try {
-      this.summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      if (mine === this.summarySeq) this.summary = summary;
     } catch (e) {
-      toasts.error('Could not load usage', errMsg(e));
+      if (mine === this.summarySeq) toasts.error('Could not load usage', errMsg(e));
     }
   }
 
