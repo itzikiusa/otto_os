@@ -17,6 +17,7 @@ import { confirmer } from '../confirm.svelte';
 import type {
   Connection,
   DbAssistMode,
+  DbCancelOutcome,
   DbCapabilities,
   DbCompletionItem,
   DbDashboard,
@@ -2474,8 +2475,10 @@ class DatabaseStore {
       return result;
     } catch (e) {
       // A user-initiated abort isn't an error — leave the prior result intact.
+      // What the Stop actually achieved is reported by `abortQuery` from the
+      // server's cancel outcome — this only drops our wait, so it must not
+      // claim the query stopped.
       if (isAbortError(e) || controller.signal.aborted) {
-        toasts.info('Query stopped');
         return null;
       }
       // The server answered → the query itself finished with an error.
@@ -2672,15 +2675,17 @@ class DatabaseStore {
    * fetch (drops our HTTP wait) AND tells the server to cancel the query
    * engine-side (`POST …/db/cancel` with the run's `query_id`) so the database
    * stops the heavy work and frees the cached connection — not just our client.
-   * The server cancel is best-effort/fire-and-forget: an unknown/finished query
-   * is a no-op there, and a cancel failure must not block stopping the UI.
+   * The server cancel never blocks stopping the UI. `report` (the user's Stop
+   * button / Esc) toasts what the server says the Stop ACHIEVED — "stopped"
+   * only when it really stopped; tab closes and superseded runs stay quiet.
    */
-  abortQuery(tabId?: number): void {
+  abortQuery(tabId?: number, opts?: { report?: boolean }): void {
+    const report = opts?.report === true;
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
     const t = this.tabs.find((x) => x.id === id);
     if (t) {
-      this.abortRunForTab(t);
+      this.abortRunForTab(t, report);
       this.persistTabs(); // the pending marker is persisted with the tabs
       return;
     }
@@ -2688,12 +2693,40 @@ class DatabaseStore {
     const entry = this.runControllers.get(id);
     if (!entry) return;
     this.runControllers.delete(id);
-    void api
-      .post(`${this.connBase(entry.connId)}/cancel`, { query_id: entry.queryId })
-      .catch(() => {
-        /* best-effort: server may have already finished/evicted the query */
-      });
+    this.sendCancel(entry.connId, entry.queryId, report);
     entry.controller.abort();
+  }
+
+  /** Ask the server to cancel a run (`POST …/db/cancel`). With `report`, toast
+   *  its outcome: only `cancelled` means the database stopped the work. */
+  private sendCancel(connId: Id, queryId: string, report: boolean): void {
+    void api
+      .post<DbCancelOutcome | undefined>(`${this.connBase(connId)}/cancel`, { query_id: queryId })
+      .then((out) => {
+        if (!report) return;
+        switch (out?.status) {
+          case 'aborted':
+            toasts.warn(
+              'Query stopped in Otto',
+              'No further statement will run, but a statement already sent may still finish on the server.',
+            );
+            break;
+          case 'not_stoppable':
+            toasts.warn(
+              'Query is still running',
+              'This engine cannot cancel it — it runs until it finishes or reaches its timeout.',
+            );
+            break;
+          case 'not_running':
+            toasts.info('Query had already finished');
+            break;
+          default:
+            toasts.info('Query stopped');
+        }
+      })
+      .catch((e) => {
+        if (report) toasts.error('Could not stop the query', errMsg(e));
+      });
   }
 
   /**
@@ -2704,17 +2737,13 @@ class DatabaseStore {
    * The run's identity is the live controller entry, or — when the HTTP wait
    * was already lost and the tab is in re-attach mode — its pending marker.
    */
-  private abortRunForTab(t: QueryTab): void {
+  private abortRunForTab(t: QueryTab, report = false): void {
     const entry = this.runControllers.get(t.id);
     const target = entry ?? (t.pending ? { ...t.pending } : null);
     if (!target) return;
     this.runControllers.delete(t.id);
-    // 1) Ask the server to cancel the query engine-side (fire-and-forget).
-    void api
-      .post(`${this.connBase(target.connId)}/cancel`, { query_id: target.queryId })
-      .catch(() => {
-        /* best-effort: server may have already finished/evicted the query */
-      });
+    // 1) Ask the server to cancel the query engine-side (never awaited).
+    this.sendCancel(target.connId, target.queryId, report);
     // 2) Abort our fetch (if still held) and clear the tab's run state. A user
     // Stop also forgets the pending marker — re-attach must not resurrect a
     // query the user explicitly killed.

@@ -5224,6 +5224,16 @@ export interface QueryStats {
   bytes_read?: number | null;
 }
 
+/** Response of `POST /connections/{id}/db/cancel` — mirrors `CancelOutcome` /
+ *  `CancelStatus` in `crates/otto-dbviewer/src/service.rs`. Only `cancelled`
+ *  means the database stopped the work; `aborted` means Otto dropped its side
+ *  (mongosh killed, no further statement sent) while a statement already on
+ *  the server may still complete; `not_stoppable` means it keeps running. */
+export type DbCancelStatus = 'cancelled' | 'aborted' | 'not_running' | 'not_stoppable';
+export interface DbCancelOutcome {
+  status: DbCancelStatus;
+}
+
 /** Body of `POST /connections/{id}/db/query` — mirrors `QueryRequest` in
  *  `crates/otto-dbviewer/src/types.rs` (contract §"Database Explorer"). Every
  *  field but `statement` is `#[serde(default)]` on the wire, so the client only

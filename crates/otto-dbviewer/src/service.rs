@@ -159,6 +159,41 @@ struct InFlightQuery {
     user_id: Id,
     resolved: Option<Resolved>,
     token: CancelToken,
+    /// The detached execution task (set right after it is spawned; `None` for
+    /// inline governed execution). A cancel ABORTS it when the engine has no
+    /// native handle — or the native cancel did not end it — so a Stop really
+    /// stops Otto's side: a mongosh child is killed (`kill_on_drop`) and no
+    /// further statement of a batch is sent.
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+/// How long a cancel waits for an execution to end on its own after an
+/// engine-native cancel (so the driver's "interrupted" error is recorded in
+/// history like any other outcome) before aborting the task outright.
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// What a Stop actually achieved. Reported to the client so the UI never says
+/// "stopped" about work that is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelStatus {
+    /// An engine-native cancel was issued and the execution ended.
+    Cancelled,
+    /// Otto dropped the execution: its `mongosh` process is killed and no
+    /// further statement is sent, but a statement ALREADY sent to the server
+    /// (a Mongo write, a Redis command) may still complete there.
+    Aborted,
+    /// Nothing is running under that id (already finished, or unknown).
+    NotRunning,
+    /// Still running: the engine has no native cancel for it and the execution
+    /// is not one Otto can drop from here.
+    NotStoppable,
+}
+
+/// Body of `POST …/db/cancel`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CancelOutcome {
+    pub status: CancelStatus,
 }
 
 /// How long a finished-but-unclaimed query outcome is parked for re-attach.
@@ -1469,6 +1504,7 @@ impl DbViewerService {
                     user_id: user_id.clone(),
                     resolved: Some(r.clone()),
                     token: token.clone(),
+                    abort: None,
                 },
             );
         }
@@ -1494,7 +1530,8 @@ impl DbViewerService {
         let (out_tx, out_rx) = tokio::sync::oneshot::channel();
         let svc = self.clone();
         let (cid, uid, req_owned) = (conn_id.clone(), user_id.clone(), req.clone());
-        tokio::spawn(async move {
+        let abort_key = qid.clone();
+        let task = tokio::spawn(async move {
             let _guard = guard;
             let result = svc
                 .execute_recorded(r, &cid, &uid, &req_owned, &token)
@@ -1508,9 +1545,17 @@ impl DbViewerService {
             // `_guard` drops here — AFTER parking — so `query_status` never
             // reports "unknown" in the gap between running and parked.
         });
+        // Let a cancel abort the task. If it already finished, its guard removed
+        // the entry and there is nothing to attach to.
+        if let Ok(mut map) = self.in_flight.lock() {
+            if let Some(entry) = map.get_mut(&abort_key) {
+                entry.abort = Some(task.abort_handle());
+            }
+        }
         out_rx
             .await
-            .map_err(|_| Error::Internal("query task dropped its result".into()))?
+            // The task only ends without sending when a cancel aborted it.
+            .map_err(|_| Error::Conflict("query was stopped before it returned a result".into()))?
     }
 
     /// Drive the resolved driver, apply opt-in masking, and record history —
@@ -2184,7 +2229,22 @@ impl DbViewerService {
     /// `conn_id` is the connection the client *thinks* the query belongs to (the
     /// route is connection-scoped for role-gating); we additionally require the
     /// registry entry to match it, so a cancel can't reach across connections.
-    pub async fn cancel(&self, conn_id: &Id, user_id: &Id, query_id: &str) -> Result<()> {
+    /// Stop an in-flight query and report what that achieved.
+    ///
+    /// The engine-native cancel (`KILL QUERY`, `pg_cancel_backend`, `killOp`)
+    /// runs first when the driver captured a handle; the execution then gets
+    /// [`CANCEL_GRACE`] to end on its own. When there is no handle (mongosh
+    /// scripts, Mongo writes, Redis), or the native cancel did not end it, the
+    /// detached task is ABORTED: dropping it kills a mongosh child and stops a
+    /// batch before its next statement. Only a real end is reported as
+    /// [`CancelStatus::Cancelled`]; an abort is [`CancelStatus::Aborted`],
+    /// because a statement already on the server may still complete there.
+    pub async fn cancel(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        query_id: &str,
+    ) -> Result<CancelOutcome> {
         self.authorize(conn_id, user_id, None, "discover").await?;
         let key = if self.is_enforced(conn_id).await? {
             format!("{user_id}:{query_id}")
@@ -2198,12 +2258,47 @@ impl DbViewerService {
             .get(&key)
             .filter(|q| &q.conn_id == conn_id && &q.user_id == user_id)
             .cloned();
-        if let Some(target) = target {
-            if let (Some(handle), Some(r)) = (target.token.handle(), target.resolved) {
-                r.driver.cancel(&r.config, &handle).await?;
+        let Some(target) = target else {
+            return Ok(CancelOutcome {
+                status: CancelStatus::NotRunning,
+            });
+        };
+        let native = match (target.token.handle(), target.resolved.as_ref()) {
+            (Some(handle), Some(r)) => match r.driver.cancel(&r.config, &handle).await {
+                Ok(()) => true,
+                // No task to fall back on: surface the failure as before.
+                Err(e) if target.abort.is_none() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %e, "native query cancel failed; aborting the task");
+                    false
+                }
+            },
+            _ => false,
+        };
+        let status = match target.abort {
+            // Inline (governed) execution has no task to drop from here.
+            None if native => CancelStatus::Cancelled,
+            None => CancelStatus::NotStoppable,
+            Some(abort) => {
+                if native {
+                    let deadline = Instant::now() + CANCEL_GRACE;
+                    while !abort.is_finished() && Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                if abort.is_finished() {
+                    if native {
+                        CancelStatus::Cancelled
+                    } else {
+                        CancelStatus::NotRunning
+                    }
+                } else {
+                    abort.abort();
+                    CancelStatus::Aborted
+                }
             }
-        }
-        Ok(())
+        };
+        Ok(CancelOutcome { status })
     }
 
     pub async fn completion(
@@ -2541,6 +2636,7 @@ mod tests {
             user_id: "test".into(),
             resolved: None,
             token,
+            abort: None,
         }
     }
 

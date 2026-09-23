@@ -1483,11 +1483,15 @@ impl MongoDriver {
             .arg(file.path())
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
-        let out = match tokio::time::timeout(SCRIPT_TIMEOUT, cmd.output()).await {
+        // The tab's timeout bounds a script like any other statement; without
+        // one the generous default applies. On expiry the `output()` future is
+        // dropped and `kill_on_drop` kills the shell.
+        let timeout = script_timeout(req.timeout_ms, SCRIPT_TIMEOUT);
+        let out = match tokio::time::timeout(timeout, cmd.output()).await {
             Err(_) => {
                 return Err(types::upstream(format!(
-                    "mongosh script timed out after {} minutes",
-                    SCRIPT_TIMEOUT.as_secs() / 60
+                    "mongosh script timed out after {}",
+                    human_duration(timeout)
                 )))
             }
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1548,6 +1552,26 @@ impl MongoDriver {
             truncated,
             ..QueryResult::empty()
         })
+    }
+}
+
+/// The wall-clock bound for a mongosh script: the request's `timeout_ms` when
+/// set (0 = unset, like every other engine), else `default`.
+fn script_timeout(timeout_ms: Option<u64>, default: std::time::Duration) -> std::time::Duration {
+    timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(default)
+}
+
+/// `90s` / `30 minutes` — for the script-timeout message.
+fn human_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 60, secs % 60) {
+        (0, 0) => format!("{}ms", d.as_millis()),
+        (0, s) => format!("{s}s"),
+        (m, 0) => format!("{m} minutes"),
+        (m, s) => format!("{m}m {s}s"),
     }
 }
 
@@ -3187,6 +3211,24 @@ mod tests {
             tls: Default::default(),
             params,
         }
+    }
+
+    /// A script honours the tab timeout (it used to run for up to 30 minutes
+    /// whatever the tab said); 0 / unset keeps the generous default.
+    #[test]
+    fn script_timeout_honours_the_tab_timeout() {
+        use std::time::Duration;
+        let default = Duration::from_secs(30 * 60);
+        assert_eq!(script_timeout(None, default), default);
+        assert_eq!(script_timeout(Some(0), default), default);
+        assert_eq!(
+            script_timeout(Some(90_000), default),
+            Duration::from_secs(90)
+        );
+        assert_eq!(human_duration(default), "30 minutes");
+        assert_eq!(human_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(human_duration(Duration::from_secs(5)), "5s");
+        assert_eq!(human_duration(Duration::from_millis(250)), "250ms");
     }
 
     /// The database selected in the tree wins over a profile `db` param for

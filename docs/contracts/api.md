@@ -717,7 +717,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
-| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
+| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | `DbCancelOutcome` `{status}` — what the Stop achieved: `cancelled` (engine-native cancel issued and the run ended), `aborted` (Otto dropped the run: a mongosh child is killed and no further statement is sent, but a statement already on the server may still complete), `not_running` (unknown / already finished), `not_stoppable` (no native cancel and nothing Otto can drop — it runs until it ends or times out) |
 | POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
 | POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard; rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
 | POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
@@ -796,7 +796,11 @@ database stops the heavy query and frees the cached connection, not just the
 client's HTTP wait. Cancel is gated at the same role as `query` (`ws editor`;
 global connections: `Database:Edit`). Cancelling an unknown / already-finished
 query, a query on a different connection, or one on an engine without a native
-per-query cancel (Redis) is a no-op success (`204`).
+per-query cancel is still a success (`200`): the body's `status` says whether
+anything actually stopped. Without a native handle (mongosh scripts, Mongo writes,
+Redis) the detached run is aborted instead (`aborted`); after a native cancel the
+run gets a short grace period to end on its own (`cancelled`) before it is
+aborted. A mongosh script also honours the request's `timeout_ms`.
 
 **MongoDB cancel.** A tracked run (`query_id` set) stamps its `find` /
 `aggregate` / `countDocuments` with `comment: "otto:<query_id>"` (a cursor's
