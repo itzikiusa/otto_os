@@ -144,7 +144,7 @@ impl ConfluenceClient {
     /// Uses `?expand=body.storage,version,space`.
     pub async fn get_page(&self, id: &str) -> Result<ConfluencePage> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{id}"));
+        let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
         let resp = self
             .http
             .get(&url)
@@ -239,7 +239,10 @@ impl ConfluenceClient {
     /// Best-effort and silent: never fails the caller's publish.
     async fn set_full_width(&self, page_id: &str) {
         for key in ["content-appearance-published", "content-appearance-draft"] {
-            let url = self.api(&format!("/content/{page_id}/property"));
+            let url = self.api(&format!(
+                "/content/{}/property",
+                crate::jira::path_seg(page_id)
+            ));
             let _ = self
                 .http
                 .post(&url)
@@ -261,7 +264,7 @@ impl ConfluenceClient {
         version: i64,
     ) -> Result<ConfluencePage> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{id}"));
+        let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
         let payload = serde_json::json!({
             "version": { "number": version + 1 },
             "type": "page",
@@ -519,7 +522,10 @@ impl ConfluenceClient {
     /// storage XHTML to Markdown via [`storage_to_markdown`].
     pub async fn list_comments(&self, page_id: &str) -> Result<Vec<PageComment>> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{page_id}/child/comment"));
+        let url = self.api(&format!(
+            "/content/{}/child/comment",
+            crate::jira::path_seg(page_id)
+        ));
 
         // Paginate with start/limit to the last page: the endpoint returns one
         // default-sized page, so newer comments past it were silently invisible

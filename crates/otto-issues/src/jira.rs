@@ -624,7 +624,7 @@ impl JiraClient {
 
     /// Fetch a single issue by key (e.g. "PROJ-123").
     pub async fn get_issue(&self, key: &str) -> Result<IssueDetail> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -695,7 +695,11 @@ impl JiraClient {
     ///
     /// Returns a [`CommentRef`] with the new comment's `id` and optional `self` URL.
     pub async fn add_comment(&self, key: &str, body_text: &str) -> Result<CommentRef> {
-        let url = format!("{}/rest/api/3/issue/{}/comment", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/comment",
+            self.base_url,
+            path_seg(key)
+        );
         let adf_body = text_to_adf(body_text);
         let payload = serde_json::json!({ "body": adf_body });
 
@@ -743,7 +747,11 @@ impl JiraClient {
     ///
     /// Each comment's ADF body is converted to Markdown via [`adf_to_markdown`].
     pub async fn list_comments(&self, key: &str) -> Result<Vec<IssueComment>> {
-        let url = format!("{}/rest/api/3/issue/{}/comment", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/comment",
+            self.base_url,
+            path_seg(key)
+        );
 
         // Paginate to the LAST page: the endpoint returns one default-sized
         // page ordered oldest-first, so on a busy issue the NEWEST comments —
@@ -836,7 +844,7 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?expand=changelog,names,renderedFields&fields=*all`
     pub async fn get_issue_full(&self, key: &str) -> Result<IssueFull> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -875,7 +883,7 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?fields=id`.
     pub async fn get_issue_id(&self, key: &str) -> Result<String> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -974,7 +982,11 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}/transitions`
     pub async fn list_transitions(&self, key: &str) -> Result<Vec<JiraTransition>> {
-        let url = format!("{}/rest/api/3/issue/{}/transitions", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/transitions",
+            self.base_url,
+            path_seg(key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -1004,7 +1016,11 @@ impl JiraClient {
     ///
     /// Uses `POST /rest/api/3/issue/{key}/transitions` with `{"transition":{"id":"..."}}`
     pub async fn transition_issue(&self, key: &str, transition_id: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}/transitions", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/transitions",
+            self.base_url,
+            path_seg(key)
+        );
         let payload = serde_json::json!({ "transition": { "id": transition_id } });
 
         let resp = self
@@ -1065,7 +1081,11 @@ impl JiraClient {
     ///
     /// Uses `PUT /rest/api/3/issue/{key}/assignee` with `{"accountId":"..."}`
     pub async fn assign_issue(&self, key: &str, account_id: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}/assignee", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/assignee",
+            self.base_url,
+            path_seg(key)
+        );
         let payload = serde_json::json!({ "accountId": account_id });
 
         let resp = self
@@ -1099,7 +1119,8 @@ impl JiraClient {
     pub async fn attachment_bytes(&self, attachment_id: &str) -> Result<(String, Vec<u8>)> {
         let url = format!(
             "{}/rest/api/3/attachment/content/{}",
-            self.base_url, attachment_id
+            self.base_url,
+            path_seg(attachment_id)
         );
         let resp = self
             .http
@@ -1134,7 +1155,7 @@ impl JiraClient {
 
     /// Update the description of an issue. The `body_md` text is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         // The Markdown the editor saved came from `adf_to_markdown`, which drops
         // screenshots, mentions, smart links, dates, status lozenges and
         // emoji; writing it back (via the plain-text `text_to_adf`) silently
@@ -1179,7 +1200,7 @@ impl JiraClient {
 
     /// The issue's raw description ADF (`Value::Null` when it has none).
     async fn description_adf(&self, key: &str) -> Result<serde_json::Value> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -1212,7 +1233,11 @@ impl JiraClient {
     /// Uses `GET /rest/api/3/issue/{key}/editmeta` and flattens the
     /// `fields` map into a `Vec<EditableField>` sorted by display name.
     pub async fn editmeta(&self, key: &str) -> Result<Vec<EditableField>> {
-        let url = format!("{}/rest/api/3/issue/{}/editmeta", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/editmeta",
+            self.base_url,
+            path_seg(key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -1243,7 +1268,7 @@ impl JiraClient {
     ///
     /// Uses `PUT /rest/api/3/issue/{key}` with `{"fields": fields}`.
     pub async fn update_fields(&self, key: &str, fields: serde_json::Value) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let payload = serde_json::json!({ "fields": fields });
 
         let resp = self
@@ -1328,7 +1353,11 @@ impl JiraClient {
     /// `subtask == true`) are excluded so callers only see top-level types
     /// such as "Story", "Task", "Bug", and "Epic".
     pub async fn list_issue_types(&self, project_key: &str) -> Result<Vec<String>> {
-        let url = format!("{}/rest/api/3/project/{}", self.base_url, project_key);
+        let url = format!(
+            "{}/rest/api/3/project/{}",
+            self.base_url,
+            path_seg(project_key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -2118,6 +2147,27 @@ fn is_issue_key(s: &str) -> bool {
 }
 
 /// Escape double quotes in a JQL string value.
+/// Percent-encode one URL path segment (an issue key, project key or
+/// attachment id). Keys come from users, agents and imported URLs; unencoded,
+/// a crafted value such as `X/../../myself` walked the request to a different
+/// Jira endpoint. Real keys (`PROJ-123`, `10042`) contain only unreserved
+/// characters and pass through unchanged.
+pub(crate) fn path_seg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    // `.` / `..` survive the escaping above but are still path steps.
+    if out == "." || out == ".." {
+        return out.replace('.', "%2E");
+    }
+    out
+}
+
 /// Whether a `/rest/api/3/search/jql` failure means "this deployment has no
 /// such endpoint" (→ try the classic `/rest/api/3/search`) rather than a real
 /// error about the request.
@@ -2434,6 +2484,15 @@ mod tests {
             jql.contains(r#"summary ~ "x\\\" OR key = \"Y-1*""#),
             "{jql}"
         );
+    }
+
+    #[test]
+    fn path_segments_cannot_traverse_to_other_endpoints() {
+        assert_eq!(path_seg("PROJ-123"), "PROJ-123");
+        assert_eq!(path_seg("10042"), "10042");
+        assert_eq!(path_seg("X/../../myself"), "X%2F..%2F..%2Fmyself");
+        assert_eq!(path_seg(".."), "%2E%2E");
+        assert_eq!(path_seg("a b?c#d"), "a%20b%3Fc%23d");
     }
 
     #[test]
