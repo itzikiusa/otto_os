@@ -634,6 +634,38 @@ export interface Repo {
   forge?: GitProviderKind | 'unrecognized' | null;
 }
 
+/** One row of the agent-facing repo directory (`GET /git/repos/directory`,
+ *  `GET /git/repos/resolve`): a repo plus the workspace it is registered in.
+ *  `current` marks the caller's own workspace (the session's, or the hint). */
+export interface RepoDirectoryEntry {
+  id: Id;
+  name: string;
+  path: string;
+  remote_url: string | null;
+  provider: GitProviderKind | null;
+  workspace_id: Id;
+  workspace_name: string;
+  current: boolean;
+}
+
+/** `GET /git/repos/directory` — every repo in every workspace the caller can
+ *  read, current workspace first. */
+export interface RepoDirectory {
+  repos: RepoDirectoryEntry[];
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** How `GET /git/repos/resolve` matched a friendly repo reference. */
+export type RepoMatchedBy = 'id' | 'path' | 'remote' | 'name' | 'session_cwd';
+
+/** `GET /git/repos/resolve?ref=&workspace_id=` — 404 lists what IS available,
+ *  409 lists the ambiguous candidates (both in the Problem `message`). */
+export interface RepoResolveResp {
+  repo: RepoDirectoryEntry;
+  matched_by: RepoMatchedBy;
+}
+
 /** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
  *  `name` is the provider-native handle to submit in `CreatePrReq.reviewers`. */
 export interface Collaborator {

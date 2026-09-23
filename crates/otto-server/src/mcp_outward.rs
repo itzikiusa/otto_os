@@ -191,6 +191,22 @@ const OPT_IN_READS: &[&str] = &[
 ];
 const MAX_WAIT_SECS: u64 = 30;
 
+/// The git tools whose `repo_id` is a friendly reference resolved server-side
+/// (id, name, local path, or remote — across every workspace the caller can
+/// read; omitted → the calling session's repo). See [`fill_repo_ref`].
+pub(crate) const REPO_REF_TOOLS: &[&str] = &[
+    "git_status",
+    "list_prs",
+    "get_pr",
+    "create_pr",
+    "comment_pr",
+    "start_pr_review",
+    "open_pr_draft",
+];
+
+/// Shared schema text for [`REPO_REF_TOOLS`]' `repo_id`.
+const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just the current one. Omit it inside an Otto session to use the repo the session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+
 /// Static catalog of the outward `otto.*` tools. Each entry carries a `category`
 /// so the control-plane UI can group the (now large) checklist. Adding a tool here
 /// surfaces it in the control plane automatically (`GET /mcp/otto-server`).
@@ -222,8 +238,8 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "connection_id":{"type":"string"},"statement":{"type":"string"},"max_rows":{"type":"integer"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
-            "inputSchema":{"type":"object","required":["repo_id","base"],"properties":{
-                "repo_id":{"type":"string"},"base":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["base"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"base":{"type":"string"}}}}),
         json!({"name":"otto.get_proof_pack","mutating":false,"category":"Code & Context",
             "description":"Assemble an evidence bundle for a target: git status/recent-commits/diffstat for a repo and a goal loop's machine-checked acceptance criteria.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
@@ -318,33 +334,33 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "workspace_id":{"type":"string"},"automation_id":{"type":"string"}}}}),
         // ================= Git =================
         json!({"name":"otto.list_repos","mutating":false,"category":"Git",
-            "description":"List a workspace's git repositories (id, name, branch, remote). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List the git repositories in EVERY workspace you can read — `{repos, current_workspace_id, workspace_count}`, each row carrying id, name, path, remote_url, workspace_id + workspace_name (your current workspace first). A repo is registered in exactly one workspace, so look here before concluding a repo is missing. Optional `workspace_id` narrows to one workspace. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":"Optional: only this workspace's repos."}}}}),
         json!({"name":"otto.git_status","mutating":false,"category":"Git",
             "description":"Get a repo's git status (current branch, staged/unstaged/untracked files). Read-only.",
-            "inputSchema":{"type":"object","required":["repo_id"],"properties":{"repo_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","properties":{"repo_id":{"type":"string","description":REPO_REF_DESC}}}}),
         json!({"name":"otto.list_prs","mutating":false,"category":"Git",
             "description":"List a repo's pull requests as `{items, has_more, page, per_page}`. Optional `state` filter (open|merged|declined|all). Read-only.",
-            "inputSchema":{"type":"object","required":["repo_id"],"properties":{
-                "repo_id":{"type":"string"},"state":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"state":{"type":"string"}}}}),
         json!({"name":"otto.get_pr","mutating":false,"category":"Git",
             "description":"Get one pull request's detail (title, description, state, branches) by number. Read-only.",
-            "inputSchema":{"type":"object","required":["repo_id","number"],"properties":{
-                "repo_id":{"type":"string"},"number":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["number"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer"}}}}),
         json!({"name":"otto.create_pr","mutating":true,"category":"Git",
-            "description":"Open a pull request on a repo's provider. DANGEROUS: outward-facing publish — approval-gated.",
-            "inputSchema":{"type":"object","required":["repo_id","title","description","source_branch","target_branch"],"properties":{
-                "repo_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},
+            "description":"Open a pull request on a repo's provider. `repo_id` may be a repo name, path or remote — the repo is found across all your workspaces. DANGEROUS: outward-facing publish — approval-gated.",
+            "inputSchema":{"type":"object","required":["title","description","source_branch","target_branch"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"title":{"type":"string"},"description":{"type":"string"},
                 "source_branch":{"type":"string"},"target_branch":{"type":"string"}}}}),
         json!({"name":"otto.comment_pr","mutating":true,"category":"Git",
             "description":"Post a comment on a pull request — general, inline when `path` (and optionally `line`) anchor it to a file in the diff, or a threaded reply when `in_reply_to` names an existing comment id. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["repo_id","number","body"],"properties":{
-                "repo_id":{"type":"string"},"number":{"type":"integer"},"body":{"type":"string"},
+            "inputSchema":{"type":"object","required":["number","body"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer"},"body":{"type":"string"},
                 "path":{"type":"string"},"line":{"type":"integer"},"in_reply_to":{"type":"string"}}}}),
         json!({"name":"otto.start_pr_review","mutating":true,"category":"Code Review",
             "description":"Start Otto's multi-agent review of a pull request (fan-out). DANGEROUS: spawns agents — approval-gated.",
-            "inputSchema":{"type":"object","required":["repo_id","pr_number"],"properties":{
-                "repo_id":{"type":"string"},"pr_number":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["pr_number"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"pr_number":{"type":"integer"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
             "description":"Search Jira issues for an issue account. `query` is JQL (empty → recent). Optional `project`. Read-only.",
@@ -1058,6 +1074,36 @@ pub(crate) async fn governed_invoke(
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
 
+    // Git tools take a FRIENDLY repo reference (name / path / remote, or none
+    // → the calling session's repo), resolved across every workspace the
+    // caller can read. Deliberately AFTER the scope + enable gates above, so a
+    // token that may not call this tool never learns the repo directory from a
+    // resolution error. Like `fill_vault_workspace`, the resolved arguments
+    // (canonical `repo_id` + the repo's own `workspace_id`) replace the
+    // caller's for everything below — audit, approval scope, args-hash (so a
+    // name and an id for the same repo reuse one approval), and execution.
+    let repo_fill = match fill_repo_ref(ctx, auth, &short, arguments).await {
+        Ok(fill) => fill,
+        Err(Error::Forbidden(reason)) => {
+            return Ok(deny_audit(ctx, &mut audit, &reason).await);
+        }
+        Err(e) => return Ok(unresolved_audit(ctx, &mut audit, &e).await),
+    };
+    let repo_label = repo_fill.as_ref().and_then(|f| f.label.clone());
+    let arguments = repo_fill.as_ref().map_or(arguments, |f| &f.args);
+    if repo_fill.is_some() {
+        audit.args_redacted_json = otto_core::redact::redact_json(arguments).value.to_string();
+        // The workspace pin, re-checked against the RESOLVED repo's workspace.
+        // Resolution already only sees the pinned workspace; this keeps the
+        // pin's one source of truth (`McpScope::deny_reason`) in the path.
+        if let Some(scope) = &auth.mcp_scope {
+            let ws_arg = arguments.get("workspace_id").and_then(Value::as_str);
+            if let Some(reason) = scope.deny_reason(&short, tool_is_mutating(&short), ws_arg) {
+                return Ok(deny_audit(ctx, &mut audit, &format!("token scope: {reason}")).await);
+            }
+        }
+    }
+
     let dangerous = DANGEROUS.contains(&short.as_str());
     // An operator who granted this specific tool in the control plane has already
     // made the call — don't ask a second time for the same decision. Exemption is
@@ -1120,7 +1166,14 @@ pub(crate) async fn governed_invoke(
                         server_name: Some("otto".into()),
                         tool: Some(tool.to_string()),
                         title: format!("otto MCP server → {tool}"),
-                        detail: Some(dangerous_detail(tool, arguments)),
+                        detail: Some(match &repo_label {
+                            // The resolved repo by name, so the approver isn't
+                            // judging an opaque id.
+                            Some(label) => {
+                                format!("{} — repo {label}", dangerous_detail(tool, arguments))
+                            }
+                            None => dangerous_detail(tool, arguments),
+                        }),
                         args_redacted_json: audit.args_redacted_json.clone(),
                         args_hash: Some(args_hash.clone()),
                         risk_label: Some("dangerous".into()),
@@ -1225,6 +1278,19 @@ async fn deny_audit(ctx: &ServerCtx, audit: &mut NewCallLog, reason: &str) -> Va
     json!({"decision":"denied","executed":false,"reason":reason})
 }
 
+/// Audit + envelope for a repo reference that did not resolve (unknown or
+/// ambiguous). Nothing executed, so it is an `error` row, not a denial; the
+/// message lists the candidates / what IS available so the agent can retry
+/// with a concrete id in one step.
+async fn unresolved_audit(ctx: &ServerCtx, audit: &mut NewCallLog, err: &Error) -> Value {
+    let msg = otto_core::redact::redact_text(&err.to_string()).value;
+    audit.decision = "error".into();
+    audit.decision_reason = Some("repo reference did not resolve".into());
+    audit.error = Some(msg.clone());
+    let _ = ctx.mcp.call_log().insert(audit.clone()).await;
+    json!({"decision":"error","executed":false,"is_error":true,"content":{"error":msg}})
+}
+
 /// Poll an approval up to a bounded wait. `Some(true)`=approved, `Some(false)`=denied,
 /// `None`=still pending after the wait (caller resubmits later).
 async fn wait_for_decision(
@@ -1322,6 +1388,67 @@ async fn fill_vault_workspace(
     let mut filled = args.clone();
     filled["workspace_id"] = json!(ws);
     Ok(Some(filled))
+}
+
+/// Resolved arguments for a git tool (see [`fill_repo_ref`]).
+struct RepoFill {
+    args: Value,
+    /// `name (workspace: X)` of the resolved repo, for the approval prompt.
+    label: Option<String>,
+}
+
+/// The repo analogue of [`fill_vault_workspace`]. A repo is registered in
+/// exactly ONE workspace, but the caller (often an agent session opened in a
+/// different one) knows it by name, path or remote — so for
+/// [`REPO_REF_TOOLS`] the `repo_id` argument is resolved across every
+/// workspace the caller can read (`repo_directory::resolve_repo`: Git:View +
+/// workspace Viewer, narrowed to a token's workspace pin; omitted → the
+/// calling session's cwd) and rewritten to the canonical id, with the repo's
+/// OWN `workspace_id` added so the pin check, the approval's workspace and
+/// the args-hash all key on where the repo actually lives. `list_repos`
+/// without a `workspace_id` from a pinned token is narrowed to the pin — the
+/// executor's self-call is unpinned and would otherwise list every workspace.
+/// `None` when the tool needs no filling.
+async fn fill_repo_ref(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<RepoFill>, Error> {
+    let ws_arg = args
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if tool == "list_repos" {
+        let pin = auth
+            .mcp_scope
+            .as_ref()
+            .and_then(|s| s.workspace_id.as_deref())
+            .filter(|s| !s.is_empty());
+        return Ok(match (ws_arg, pin) {
+            (None, Some(pin)) => {
+                let mut filled = args.clone();
+                filled["workspace_id"] = json!(pin);
+                Some(RepoFill {
+                    args: filled,
+                    label: None,
+                })
+            }
+            _ => None,
+        });
+    }
+    if !REPO_REF_TOOLS.contains(&tool) {
+        return Ok(None);
+    }
+    let reference = args.get("repo_id").and_then(Value::as_str);
+    let resolved = crate::repo_directory::resolve_repo(ctx, auth, reference, ws_arg).await?;
+    let mut filled = args.clone();
+    filled["repo_id"] = json!(resolved.entry.repo.id);
+    filled["workspace_id"] = json!(resolved.entry.repo.workspace_id);
+    Ok(Some(RepoFill {
+        args: filled,
+        label: Some(resolved.label()),
+    }))
 }
 
 /// Pick the workspace an omitted-`workspace_id` vault call is scoped to: the
@@ -1684,8 +1811,18 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             )
         }
         "list_repos" => {
-            let ws = arg_str(args, "workspace_id")?;
-            SelfCall::get(format!("/api/v1/workspaces/{}/repos", seg(&ws)))
+            // Every workspace the caller can read (the workspace-annotated
+            // directory), unless narrowed to one. A pinned token never gets
+            // here without its pin filled in (`fill_repo_ref`).
+            let mut path = "/api/v1/git/repos/directory".to_string();
+            if let Some(ws) = args
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                path.push_str(&format!("?workspace_id={}", seg(ws)));
+            }
+            SelfCall::get(path)
         }
         "git_status" => {
             let repo = arg_str(args, "repo_id")?;
@@ -3645,6 +3782,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("review_mode"));
+    }
+
+    #[test]
+    fn git_tools_take_a_friendly_repo_ref_and_list_repos_spans_workspaces() {
+        let specs = otto_tool_specs();
+        let spec = |short: &str| {
+            specs
+                .iter()
+                .find(|t| t["name"] == format!("otto.{short}"))
+                .unwrap_or_else(|| panic!("otto.{short}"))
+                .clone()
+        };
+        for short in REPO_REF_TOOLS {
+            let s = spec(short);
+            let schema = &s["inputSchema"];
+            assert_eq!(
+                schema["properties"]["repo_id"]["description"],
+                json!(REPO_REF_DESC),
+                "{short}"
+            );
+            // Optional: omitted inside a session → the session's repo. And no
+            // `workspace_id` property, so the in-session bridge never narrows
+            // the cross-workspace resolution to the session's own workspace.
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            assert!(!required.contains(&json!("repo_id")), "{short}");
+            assert!(schema["properties"].get("workspace_id").is_none(), "{short}");
+        }
+        let lr = spec("list_repos");
+        assert!(lr["inputSchema"]["required"].is_null(), "workspace_id is optional");
+        assert!(lr["description"].as_str().unwrap().contains("EVERY workspace"));
+        assert_eq!(
+            route_for("list_repos", &json!({})).unwrap().path,
+            "/api/v1/git/repos/directory"
+        );
+        assert_eq!(
+            route_for("list_repos", &json!({"workspace_id":"ws 1"}))
+                .unwrap()
+                .path,
+            "/api/v1/git/repos/directory?workspace_id=ws%201"
+        );
     }
 
     #[test]

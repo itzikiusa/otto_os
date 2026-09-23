@@ -276,6 +276,35 @@ per-service feature grants (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`,
 (surfaced when the server is on) or the opt-in set; every mutating tool is in
 `DANGEROUS` (off by default, approval-gated). A unit test enforces this invariant.
 
+**Git: finding the repo across workspaces.** A repo is registered in exactly one
+workspace (`repos.path` is unique), but an agent session runs in whichever
+workspace it was opened in — so the git tools never assume "this workspace":
+
+- `otto.list_repos` / `otto_list_repos` list the repos of **every** workspace the
+  caller can read (Git:View + workspace Viewer), each row carrying `workspace_id` +
+  `workspace_name`, the session's own workspace first (`GET /git/repos/directory`).
+  An optional `workspace_id` narrows to one workspace.
+- Every tool that takes a `repo_id` (`git_status`, `list_prs`, `get_pr`,
+  `create_pr`, `comment_pr`, `start_pr_review`, `open_pr_draft`, and the native
+  `otto_git_pr_review`) accepts a **friendly reference** — the id, the repo name,
+  a local path inside the checkout, or the remote (`owner/repo` or any URL
+  spelling). Omit it inside a session to use the repo the session is working in
+  (its cwd, or — for a workflow clone outside every registered path — the
+  checkout's `origin` remote). Resolution is server-side
+  (`GET /git/repos/resolve`, and in-process in the governed choke point).
+- An **ambiguous** reference (the same name/remote registered twice) is settled by
+  the caller's own workspace when exactly one candidate lives there; otherwise the
+  call fails listing the candidates (id, name, workspace). An **unknown** one fails
+  listing the closest matches or what IS available — the agent can retry with an
+  id at once, never "search again".
+- Safety: resolution only sees workspaces the effective user can read; a
+  `kind='mcp'` token pinned to a workspace only sees that workspace, and the pin is
+  re-checked against the **resolved** repo's workspace. The resolved `repo_id` +
+  the repo's own `workspace_id` replace the caller's arguments for audit, the
+  approval's workspace and args-hash (a name and the id reuse one approval) and
+  execution. A repo that isn't registered anywhere is not auto-registered — add
+  it under **Git → Add repository**.
+
 The same feature **reads** are also injected into Otto's *own* agent
 sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
 `otto_list_broker_clusters`, `otto_search_memory` (keyword memory search),
