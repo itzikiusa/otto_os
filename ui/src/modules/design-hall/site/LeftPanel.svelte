@@ -263,7 +263,7 @@
                 data-testid="site-block-tile"
                 data-block={def.block}
               >
-                <span class="thumb" aria-hidden="true">
+                <span class="thumb" aria-hidden="true" style:background={theme.surface}>
                   <span class="mini os-site os-still" {style}>{@html preview(def)}</span>
                 </span>
                 <span class="tile-label">{def.label.replace(/^[^·]+·\s*/, '') || def.label}</span>
@@ -294,7 +294,7 @@
                 title={`${sectionLabel(l.section)} · from ${l.siteTitle} v${l.seq}`}
                 data-testid="site-library-tile"
               >
-                <span class="thumb" aria-hidden="true">
+                <span class="thumb" aria-hidden="true" style:background={theme.surface}>
                   <span class="mini os-site os-still" {style}>{@html renderSection(l.section, tileCtx)}</span>
                 </span>
                 <span class="tile-label">{sectionLabel(l.section)}</span>

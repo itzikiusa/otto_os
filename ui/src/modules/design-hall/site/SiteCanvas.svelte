@@ -95,7 +95,30 @@
     key: string;
     el: HTMLElement;
     original: string;
+    originalHtml: string;
     frozen: string;
+  }
+
+  /**
+   * The text of an edited element as authored — NOT `innerText`, which
+   * applies CSS (`text-transform: uppercase` on eyebrows would save capitals).
+   * `<br>` is a line break, a paragraph a blank line.
+   */
+  function readText(el: HTMLElement): string {
+    let out = '';
+    const walk = (n: Node) => {
+      for (const c of Array.from(n.childNodes)) {
+        if (c.nodeType === Node.TEXT_NODE) out += c.textContent ?? '';
+        else if (c.nodeName === 'BR') out += '\n';
+        else {
+          if (c.nodeName === 'P' && out.trim()) out = out.replace(/\n*$/, '') + '\n\n';
+          else if (c.nodeName === 'DIV' && out && !out.endsWith('\n')) out += '\n';
+          walk(c);
+        }
+      }
+    };
+    walk(el);
+    return out;
   }
   let editing = $state<Editing | null>(null);
   function shown(id: string): string {
@@ -106,7 +129,7 @@
 
   function startEdit(el: HTMLElement, sectionId: string, blockId: string | null, key: string): void {
     if (readonly || editing) return;
-    editing = { sectionId, blockId, key, el, original: el.innerText, frozen: html.get(sectionId) ?? '' };
+    editing = { sectionId, blockId, key, el, original: readText(el), originalHtml: el.innerHTML, frozen: html.get(sectionId) ?? '' };
     try {
       el.contentEditable = 'plaintext-only';
     } catch {
@@ -131,10 +154,12 @@
     ed.el.removeEventListener('blur', onEditBlur);
     ed.el.removeAttribute('contenteditable');
     ed.el.classList.remove('os-editing');
-    let value = ed.el.innerText.replace(/ /g, ' ').replace(/\n+$/, '');
+    let value = readText(ed.el).replace(/ /g, ' ').replace(/\n+$/, '');
     if (!MULTILINE.has(ed.key)) value = value.replace(/\s*\n\s*/g, ' ');
     if (!commit || value === ed.original) {
-      ed.el.innerText = ed.original;
+      // Nothing changes in the document, so nothing re-renders: put the
+      // authored markup back by hand.
+      ed.el.innerHTML = ed.originalHtml;
       editing = null;
       return;
     }
