@@ -797,11 +797,23 @@ class VaultStore {
 
   // -- note operations ---------------------------------------------------------------
 
-  async createNote(path: string, content: string): Promise<void> {
-    if (!this.current) return;
-    await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
+  /** Every caller fires this with `void`, so failures (the note already
+   *  exists → 409, a bad path → 400) must surface here, not as an unhandled
+   *  rejection with no feedback. */
+  async createNote(path: string, content: string): Promise<boolean> {
+    if (!this.current) return false;
+    try {
+      await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
+    } catch (e) {
+      toasts.error(
+        `Create ${path}`,
+        e instanceof ApiError && e.status === 409 ? 'A note already exists at that path.' : msg(e),
+      );
+      return false;
+    }
     await this.refreshTree();
     await this.open(path, { edit: true });
+    return true;
   }
 
   async createFolder(path: string): Promise<void> {
