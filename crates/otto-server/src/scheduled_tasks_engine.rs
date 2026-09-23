@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{ScheduledTask, SessionKind};
+use otto_core::domain::{ScheduledTask, ScheduledTaskRun, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
 use otto_state::{FinishRun, NewScheduledRun};
@@ -150,8 +150,55 @@ fn emit(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str, status: &str) {
 /// report, and (for `trigger == "schedule"`) advances the cursor. Returns the run
 /// id; the run row carries the outcome (`ok`/`error`) so a manual caller can poll.
 pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> Result<String> {
-    let repo = &ctx.scheduled_tasks;
-    let run = repo
+    let run = open_run(ctx, task, trigger).await?;
+    complete_run(ctx, task, &run.id, trigger).await
+}
+
+/// Start a run in the BACKGROUND and return its freshly-opened (`running`)
+/// row at once — the manual "Run now" path. Running the whole task inside the
+/// HTTP request made the MCP self-call time out at 30s (the agent was told
+/// the tool failed while the run went on), greyed the UI out for minutes, and
+/// a dropped request cancelled `run_task` mid-await: its row stayed `running`
+/// until the next daemon restart, the agent session ran on with nobody
+/// collecting its report, and the concurrency permit was released early.
+/// Refuses (409) while another run of the task is still `running`.
+pub async fn spawn_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    trigger: &str,
+) -> Result<ScheduledTaskRun> {
+    let busy = ctx
+        .scheduled_tasks
+        .list_runs(&task.id, 1)
+        .await?
+        .first()
+        .is_some_and(|r| r.status == "running");
+    if busy {
+        return Err(otto_core::Error::Conflict(
+            "a run of this task is already in progress".into(),
+        ));
+    }
+    let run = open_run(ctx, task, trigger).await?;
+    let (ctx2, task2, run_id, trigger2) = (
+        ctx.clone(),
+        task.clone(),
+        run.id.clone(),
+        trigger.to_string(),
+    );
+    tokio::spawn(async move {
+        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2).await;
+    });
+    Ok(run)
+}
+
+/// Open the run row (`running`) and announce it.
+async fn open_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    trigger: &str,
+) -> Result<ScheduledTaskRun> {
+    let run = ctx
+        .scheduled_tasks
         .create_run(NewScheduledRun {
             task_id: task.id.clone(),
             workspace_id: task.workspace_id.clone(),
@@ -159,9 +206,22 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
         })
         .await?;
     emit(ctx, task, &run.id, "running");
+    Ok(run)
+}
+
+/// Execute an opened run to completion and settle its row (+ the cursor for
+/// a scheduled run). Returns the run id.
+async fn complete_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    trigger: &str,
+) -> Result<String> {
+    let repo = &ctx.scheduled_tasks;
+    let run_id = run_id.to_string();
     let tz = cadence::task_tz(&task.timezone);
 
-    match execute(ctx, task, &run.id).await {
+    match execute(ctx, task, &run_id).await {
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&task.id, now);
@@ -178,7 +238,7 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
             let hash = report_hash(&out.report);
             let unchanged = task.notify_on_change
                 && repo
-                    .last_ok_report_hash(&task.id, &run.id)
+                    .last_ok_report_hash(&task.id, &run_id)
                     .await
                     .ok()
                     .flatten()
@@ -194,13 +254,13 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
 
             // --- attach proof pack ---
             let proof_pack_id = if task.attach_proof {
-                build_proof_pack(ctx, task, &run.id, &out).await
+                build_proof_pack(ctx, task, &run_id, &out).await
             } else {
                 None
             };
 
             repo.finish_run(
-                &run.id,
+                &run_id,
                 FinishRun {
                     status: "ok".into(),
                     summary: out.summary.clone(),
@@ -225,15 +285,15 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
                     .await;
             }
             prune(ctx, &task.id).await;
-            emit(ctx, task, &run.id, "ok");
-            Ok(run.id)
+            emit(ctx, task, &run_id, "ok");
+            Ok(run_id)
         }
         Err(e) => {
             let msg = e.to_string();
             warn!(task = %task.id, "scheduled task run failed: {msg}");
             let _ = repo
                 .finish_run(
-                    &run.id,
+                    &run_id,
                     FinishRun {
                         status: "error".into(),
                         error: Some(msg),
@@ -248,8 +308,8 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
                     .set_runtime(&task.id, Some(&now.to_rfc3339()), "error", next.as_deref())
                     .await;
             }
-            emit(ctx, task, &run.id, "error");
-            Ok(run.id)
+            emit(ctx, task, &run_id, "error");
+            Ok(run_id)
         }
     }
 }
