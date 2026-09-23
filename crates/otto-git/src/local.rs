@@ -2691,12 +2691,25 @@ impl LocalGit {
     pub async fn conflict_file(&self, path: &str) -> Result<ConflictFile> {
         let abs = self.safe_join(path)?;
         let (ours_present, theirs_present) = self.conflict_sides(path).await?;
-        let (bytes, worktree_present) = match tokio::fs::read(&abs).await {
-            Ok(bytes) => (bytes, true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
-            Err(e) => return Err(Error::Internal(format!("read {path}: {e}"))),
+        // Read only a regular file confined to the tree (see
+        // `confined_worktree_file`): a conflicted SYMLINK would otherwise be
+        // read through to wherever it points and served to a Viewer. Such an
+        // entry is shown as binary — resolved by taking a side.
+        let readable = match self.confined_worktree_file(path, false).await {
+            Ok(_) => true,
+            Err(Error::Invalid(_)) => false,
+            Err(e) => return Err(e),
         };
-        let is_binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
+        let (bytes, worktree_present) = if !readable {
+            (Vec::new(), tokio::fs::symlink_metadata(&abs).await.is_ok())
+        } else {
+            match tokio::fs::read(&abs).await {
+                Ok(bytes) => (bytes, true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+                Err(e) => return Err(Error::Internal(format!("read {path}: {e}"))),
+            }
+        };
+        let is_binary = !readable || bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
         Ok(ConflictFile {
             path: path.to_string(),
             is_binary,
@@ -2714,21 +2727,26 @@ impl LocalGit {
 
     /// Index stages distinguish a deleted side from an empty file. Read them
     /// before taking a side so modify/delete and binary conflicts share one flow.
+    ///
+    /// Doubles as THE "is this exact path conflicted right now" gate for every
+    /// resolver write: only entries whose name equals `path` byte for byte
+    /// count (a literal pathspec, so `*` or a directory prefix can't borrow
+    /// another file's conflict).
     async fn conflict_sides(&self, path: &str) -> Result<(bool, bool)> {
         Self::guard_path(path)?;
         let entries = self
-            .run_read(&["ls-files", "--unmerged", "-z", "--", path])
+            .exec_text(&GitCmd::read(&["ls-files", "--unmerged", "-z"]).paths([path]))
             .await?;
-        if entries.is_empty() {
+        let stages: Vec<&str> = nul_records(&entries)
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter(|(_, name)| *name == path)
+            .filter_map(|(meta, _)| meta.split_whitespace().nth(2))
+            .collect();
+        if stages.is_empty() {
             return Err(Error::Conflict(
                 "this file is no longer conflicted — refresh first".into(),
             ));
         }
-        let stages: Vec<&str> = entries
-            .split('\0')
-            .filter_map(|entry| entry.split_once('\t'))
-            .filter_map(|(meta, _)| meta.split_whitespace().nth(2))
-            .collect();
         Ok((stages.contains(&"2"), stages.contains(&"3")))
     }
 
@@ -2748,39 +2766,111 @@ impl LocalGit {
             }
         };
         if delete {
-            self.run(&["rm", "--force", "--", path]).await?;
+            self.exec_locked(&GitCmd::write(&["rm", "--force"]).paths([path]))
+                .await?;
         } else {
             if side != "keep" {
-                self.run(&[
-                    "checkout",
-                    if side == "ours" { "--ours" } else { "--theirs" },
-                    "--",
-                    path,
-                ])
-                .await?;
+                let flag = if side == "ours" { "--ours" } else { "--theirs" };
+                self.exec_locked(&GitCmd::write(&["checkout", flag]).paths([path]))
+                    .await?;
             } else if !self.safe_join(path)?.exists() {
                 return Err(Error::Conflict(
                     "the working file is absent; choose Delete instead".into(),
                 ));
             }
-            self.run(&["add", "--", path]).await?;
+            self.exec_locked(&GitCmd::write(&["add"]).paths([path]))
+                .await?;
         }
         Ok(())
     }
 
     /// Write the fully-resolved content of `path` and stage it.
+    ///
+    /// Security boundary (the resolver is reachable by any Editor and by
+    /// agents through the local API): this writes ONLY a file that is
+    /// conflicted right now, and only INSIDE the working tree. Unchecked, a
+    /// `{path:".git/config"}` body planted `core.fsmonitor` — a command the
+    /// daemon's own next `git status` runs as the user. So: the exact path
+    /// must have unmerged index entries ([`Self::conflict_sides`]), and
+    /// [`Self::confined_worktree_file`] rejects `.git` components, `..`,
+    /// absolute paths, a symlinked final component and any parent that
+    /// resolves (symlinks followed) outside the tree or into the git dir.
     pub async fn write_resolution(&self, path: &str, content: &str) -> Result<()> {
-        let abs = self.safe_join(path)?;
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir for {path}: {e}")))?;
-        }
+        self.conflict_sides(path).await?;
+        let abs = self.confined_worktree_file(path, true).await?;
         tokio::fs::write(&abs, content)
             .await
             .map_err(|e| Error::Internal(format!("write {path}: {e}")))?;
-        self.run(&["add", "--", path]).await?;
+        self.exec_locked(&GitCmd::write(&["add"]).paths([path]))
+            .await?;
         Ok(())
+    }
+
+    /// The absolute location of repo-relative `rel`, proven to be a regular
+    /// file slot INSIDE this working tree and outside every git dir.
+    ///
+    /// Checked on the real filesystem, symlinks followed: the nearest existing
+    /// ancestor of `rel` is canonicalized and must stay under the canonical
+    /// work-tree root and out of the canonical `$GIT_DIR`; with `create_dirs`
+    /// the missing directories below it (plain names — they did not exist)
+    /// are then created. A final component that is a symlink is refused, as
+    /// a write or read would follow it wherever it points.
+    async fn confined_worktree_file(&self, rel: &str, create_dirs: bool) -> Result<PathBuf> {
+        let abs = self.safe_join(rel)?;
+        let refuse = |why: &str| Error::Invalid(format!("refusing path {rel}: {why}"));
+        if Path::new(rel)
+            .components()
+            .any(|c| matches!(c, std::path::Component::Normal(n) if is_git_dir_name(n)))
+        {
+            return Err(refuse("it is inside the git directory"));
+        }
+        let io = |e: std::io::Error| Error::Internal(format!("resolve {rel}: {e}"));
+        let root = tokio::fs::canonicalize(&self.repo_path).await.map_err(io)?;
+        let git_dir = match self.git_dir().await {
+            Some(gd) => tokio::fs::canonicalize(&gd).await.ok(),
+            None => None,
+        };
+        // Walk up to the nearest ancestor that exists and resolve it.
+        let parent = abs.parent().ok_or_else(|| refuse("no parent directory"))?;
+        let mut existing = parent.to_path_buf();
+        loop {
+            match tokio::fs::symlink_metadata(&existing).await {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if !existing.pop() {
+                        return Err(refuse("no existing ancestor"));
+                    }
+                }
+                Err(e) => return Err(io(e)),
+            }
+        }
+        let real = tokio::fs::canonicalize(&existing).await.map_err(io)?;
+        if !real.starts_with(&root) {
+            return Err(refuse("it resolves outside the working tree"));
+        }
+        if git_dir.as_ref().is_some_and(|gd| real.starts_with(gd)) {
+            return Err(refuse("it resolves into the git directory"));
+        }
+        if let Ok(inner) = real.strip_prefix(&root) {
+            if inner
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(n) if is_git_dir_name(n)))
+            {
+                return Err(refuse("it resolves into the git directory"));
+            }
+        }
+        if create_dirs && existing.as_path() != parent {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Internal(format!("mkdir for {rel}: {e}")))?;
+        }
+        match tokio::fs::symlink_metadata(&abs).await {
+            Ok(m) if m.file_type().is_symlink() => Err(refuse(
+                "it is a symlink — take a side instead of writing through it",
+            )),
+            Ok(m) if m.is_dir() => Err(refuse("it is a directory")),
+            _ => Ok(abs),
+        }
     }
 
     /// Conclude the in-progress operation: commit a merge, `--continue` a
@@ -2930,6 +3020,12 @@ impl LocalGit {
         }
         Ok(self.repo_path.join(p))
     }
+}
+
+/// `.git` as a path component, compared the way the default case-insensitive
+/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
+fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git"))
 }
 
 /// stderr lines that SSH/git emit as benign chatter — never the reason a command
@@ -5446,6 +5542,83 @@ mod tests {
         let p = git.merge_preview("side", "main").await.unwrap();
         assert!(p.conflicts);
         assert_eq!(p.conflicted_files, vec!["c.txt".to_string()]);
+    }
+
+    /// Two branches that change the same line of `rel` → `merge side`
+    /// conflicts on it. Returns (tmp, repo).
+    fn conflicted_fixture(rel: &str) -> (tempfile::TempDir, PathBuf) {
+        let (tmp, dir) = fixture_on_branch("main");
+        write(&dir, rel, "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "base"]);
+        sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+        write(&dir, rel, "side\n");
+        sh_git(&dir, &["commit", "-qam", "side"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, rel, "main\n");
+        sh_git(&dir, &["commit", "-qam", "main"]);
+        (tmp, dir)
+    }
+
+    /// G-4: the resolver writes ONLY a currently-conflicted file, inside the
+    /// working tree — never `.git/config` (fsmonitor = code execution), never
+    /// through a symlink or a symlinked parent.
+    #[tokio::test]
+    async fn write_resolution_is_confined_to_conflicted_worktree_files() {
+        let (tmp, dir) = conflicted_fixture("sub/c.txt");
+        let git = LocalGit::new(&dir);
+        let _ = git.run(&["merge", "side"]).await;
+        assert_eq!(git.conflicted_paths().await.unwrap(), vec!["sub/c.txt"]);
+
+        let config_before = std::fs::read(dir.join(".git/config")).unwrap();
+        let payload = "[core]\n\tfsmonitor = /tmp/otto-pwn.sh\n";
+        for bad in [
+            ".git/config",
+            ".GIT/config",
+            "a.txt",
+            "sub",
+            "sub/*",
+            "../outside.txt",
+            "/etc/hosts",
+        ] {
+            assert!(git.write_resolution(bad, payload).await.is_err(), "{bad}");
+        }
+        assert_eq!(std::fs::read(dir.join(".git/config")).unwrap(), config_before);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello\n");
+
+        // The conflicted file itself swapped for a symlink to a file outside.
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "keep\n").unwrap();
+        let conflicted = dir.join("sub/c.txt");
+        let marked = std::fs::read(&conflicted).unwrap();
+        std::fs::remove_file(&conflicted).unwrap();
+        std::os::unix::fs::symlink(&outside, &conflicted).unwrap();
+        assert!(matches!(
+            git.write_resolution("sub/c.txt", "pwned\n").await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep\n");
+        std::fs::remove_file(&conflicted).unwrap();
+
+        // …and a symlinked PARENT directory that leads out of the tree.
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("c.txt"), "keep\n").unwrap();
+        std::fs::rename(dir.join("sub"), tmp.path().join("sub_parked")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, dir.join("sub")).unwrap();
+        assert!(git.write_resolution("sub/c.txt", "pwned\n").await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside_dir.join("c.txt")).unwrap(),
+            "keep\n"
+        );
+        std::fs::remove_file(dir.join("sub")).unwrap();
+        std::fs::rename(tmp.path().join("sub_parked"), dir.join("sub")).unwrap();
+        std::fs::write(&conflicted, marked).unwrap();
+
+        // The legitimate write still resolves and stages the file.
+        git.write_resolution("sub/c.txt", "resolved\n").await.unwrap();
+        assert!(git.conflicted_paths().await.unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&conflicted).unwrap(), "resolved\n");
     }
 
 }
