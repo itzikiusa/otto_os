@@ -439,10 +439,14 @@ channels, skills, self-improvement) and the **seven Scheduled-Tasks tools** — 
 category table is in **§3.3**, and see the
 [Scheduled Tasks guide](./scheduled-tasks.md#9-mcp-surface-the-7-otto-tools).
 
-`otto.query_db_readonly` is enforced read-only **server-side**: the executor
-classifies the statement itself (only `SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`, single
-statement) and forces `confirm_write=false`, **regardless** of the connection's
-write-guard flag.
+`otto.query_db_readonly` is enforced read-only **server-side**, in two layers,
+**regardless** of the connection's write-guard flag: the tool classifies the
+statement itself (only `SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`, single statement),
+then runs it through `/connections/{id}/db/mcp-query` — the same path the
+per-session DB tools use — which re-classifies with the engine's own lexer and
+executes inside the engine's read-only mode (a read-only transaction on
+MySQL/Postgres, `readonly` on ClickHouse), with sensitive cells masked. An
+optional `node` (e.g. `db:<name>`) scopes the query.
 
 ---
 
