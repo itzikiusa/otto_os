@@ -114,6 +114,12 @@ fn update_config(
 
 /// Mark `cwd` as trusted for `provider`. Failures are logged, never fatal.
 pub fn ensure_trusted(provider: &str, cwd: &str) {
+    // The throwaway E2E daemon (`OTTO_E2E=1`) runs with the user's REAL `HOME`;
+    // a test must never write trust grants into their real agent configs
+    // (`~/.claude.json` holds their OAuth/account state and MCP settings).
+    if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        return;
+    }
     let result = match provider {
         "claude" => trust_claude(cwd),
         "codex" => trust_codex(cwd),
