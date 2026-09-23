@@ -790,22 +790,23 @@ pub async fn create_environment(
     }
     // The row never holds a value for a key marked secret; those arrive only
     // via the write-only `secret_values` and go straight to the Keychain.
+    let secret_keys = req.secret_keys.clone().unwrap_or_default();
     let variables = api_secrets::strip_secret_variables(
         &normalize_json_object(req.variables),
-        &req.secret_keys,
+        &secret_keys,
     );
     let env = repo(&ctx)
         .create_environment(NewApiEnvironment {
             workspace_id: wid,
             name: req.name.trim().to_string(),
             variables,
-            secret_keys: req.secret_keys.clone(),
+            secret_keys: secret_keys.clone(),
         })
         .await?;
     let blob: BTreeMap<String, String> = req
         .secret_values
         .into_iter()
-        .filter(|(k, _)| req.secret_keys.contains(k))
+        .filter(|(k, _)| secret_keys.contains(k))
         .collect();
     api_secrets::store_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id), &blob)?;
     Ok(Json(env))
@@ -820,31 +821,57 @@ pub async fn update_environment(
 ) -> ApiResult<Json<ApiEnvironment>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
-    ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
+    let existing = repo.get_environment(&id).await?;
+    ensure_in_workspace(&existing.workspace_id, &wid)?;
+    // Omitted `secret_keys` keeps the stored set (a PATCH that leaves it out
+    // must not silently delete every Keychain secret).
+    let secret_keys: Vec<String> = req
+        .secret_keys
+        .clone()
+        .unwrap_or_else(|| existing.secret_keys.clone());
     let vars = api_secrets::strip_secret_variables(
         &normalize_json_object(req.variables),
-        &req.secret_keys,
+        &secret_keys,
     );
-    // Keychain blob: keep stored values for keys still marked secret, overlay
-    // the write-only new/changed values, drop everything unmarked.
     let sref = api_secrets::env_ref(&id);
     let mut blob = api_secrets::load_blob(ctx.secrets.as_ref(), &sref);
-    blob.retain(|k, _| req.secret_keys.contains(k));
-    for (k, v) in req.secret_values {
-        if req.secret_keys.contains(&k) {
-            blob.insert(k, v);
-        }
-    }
+    apply_secret_changes(&mut blob, &secret_keys, &req.secret_renames, req.secret_values);
     api_secrets::store_blob(ctx.secrets.as_ref(), &sref, &blob)?;
     let env = repo
         .update_environment(
             &id,
             Some(req.name.trim()),
             Some(&vars),
-            Some(&req.secret_keys),
+            Some(&secret_keys),
         )
         .await?;
     Ok(Json(env))
+}
+
+/// Update an environment's Keychain blob in place: renamed secrets carry
+/// their stored value to the new name first (`renames` = old → new, only onto
+/// a key that is still secret), then values for keys no longer marked secret
+/// are dropped, then the write-only new/changed values are overlaid.
+pub(crate) fn apply_secret_changes(
+    blob: &mut BTreeMap<String, String>,
+    secret_keys: &[String],
+    renames: &BTreeMap<String, String>,
+    new_values: BTreeMap<String, String>,
+) {
+    for (old, new) in renames {
+        if old == new || !secret_keys.contains(new) {
+            continue;
+        }
+        if let Some(value) = blob.remove(old) {
+            blob.entry(new.clone()).or_insert(value);
+        }
+    }
+    blob.retain(|k, _| secret_keys.contains(k));
+    for (k, v) in new_values {
+        if secret_keys.contains(&k) {
+            blob.insert(k, v);
+        }
+    }
 }
 
 /// `DELETE /workspaces/{wid}/api-client/environments/{id}`
@@ -4216,6 +4243,49 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn renaming_a_secret_moves_its_keychain_value() {
+        let stored = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let keys = |ks: &[&str]| -> Vec<String> { ks.iter().map(|k| k.to_string()).collect() };
+
+        // Rename without retyping: the value follows the new name.
+        let mut blob = stored(&[("API_TOKEN", "tk"), ("OTHER", "o")]);
+        let renames = stored(&[("API_TOKEN", "API_TOKEN_PROD")]);
+        apply_secret_changes(
+            &mut blob,
+            &keys(&["API_TOKEN_PROD", "OTHER"]),
+            &renames,
+            BTreeMap::new(),
+        );
+        assert_eq!(blob, stored(&[("API_TOKEN_PROD", "tk"), ("OTHER", "o")]));
+
+        // A freshly typed value for the new name wins over the moved one.
+        let mut blob = stored(&[("A", "old")]);
+        apply_secret_changes(
+            &mut blob,
+            &keys(&["B"]),
+            &stored(&[("A", "B")]),
+            stored(&[("B", "new")]),
+        );
+        assert_eq!(blob, stored(&[("B", "new")]));
+
+        // Without a rename, a key dropped from secret_keys loses its value
+        // (explicit un-marking), and untouched secrets are kept.
+        let mut blob = stored(&[("A", "a"), ("B", "b")]);
+        apply_secret_changes(&mut blob, &keys(&["B"]), &BTreeMap::new(), BTreeMap::new());
+        assert_eq!(blob, stored(&[("B", "b")]));
+
+        // A rename onto a key that is not secret moves nothing.
+        let mut blob = stored(&[("A", "a")]);
+        apply_secret_changes(&mut blob, &keys(&[]), &stored(&[("A", "PLAIN")]), BTreeMap::new());
+        assert!(blob.is_empty());
     }
 
     #[test]

@@ -2032,7 +2032,11 @@ SQLite: on save the daemon moves a plaintext member to the macOS Keychain
 touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
 `secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
 write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
-holds non-secret pairs only and GET never returns a secret value. Markers resolve in-memory
+holds non-secret pairs only and GET never returns a secret value. On update an OMITTED
+(`null`/absent) `secret_keys` keeps the stored set and values — only an explicit list
+replaces it (a key dropped from the list loses its Keychain value). `UpdateEnvironmentReq`
+also accepts `secret_renames:{old_name:new_name}`: a renamed secret's stored value moves to
+the new name (a `secret_values` entry for the new name still wins). Markers resolve in-memory
 only at execute/automation time — the ref must point at a request in the same workspace
 (else 400) — and every export path (OpenAPI, git-sync, history) sees markers or `***`, never
 values. History snapshots redact secret members to `"***"`. `secure-all` additionally marks

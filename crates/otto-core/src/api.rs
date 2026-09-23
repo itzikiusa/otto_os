@@ -2770,13 +2770,21 @@ pub struct UpsertApiEnvironmentReq {
     /// from the row (its value belongs in `secret_values`).
     #[serde(default)]
     pub variables: Value,
-    /// Names of variables whose values are Keychain-backed.
+    /// Names of variables whose values are Keychain-backed. On update,
+    /// OMITTED (absent / `null`) keeps the stored set and its values — only an
+    /// explicit list replaces it (a key dropped from the list loses its
+    /// Keychain value). On create, omitted = none.
     #[serde(default)]
-    pub secret_keys: Vec<String>,
+    pub secret_keys: Option<Vec<String>>,
     /// WRITE-ONLY: new/changed secret values, keyed by variable name. Absent
     /// keys keep their previously stored value; values are never echoed back.
     #[serde(default)]
     pub secret_values: std::collections::BTreeMap<String, String>,
+    /// Update only: `{old_name: new_name}` for renamed secret variables — the
+    /// stored Keychain value moves to the new name (no retyping, nothing
+    /// lost). A value sent for the new name in `secret_values` still wins.
+    #[serde(default)]
+    pub secret_renames: std::collections::BTreeMap<String, String>,
 }
 
 /// `POST /workspaces/{wid}/api-client/execute` — run a request through the
