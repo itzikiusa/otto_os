@@ -648,6 +648,25 @@ export function uniqueName(base: string, taken: Iterable<string>): string {
   for (let i = 2; ; i++) if (!set.has(`${base}-${i}`)) return `${base}-${i}`;
 }
 
+const BRAND_WORDS = /\b(brand|tokens?|colou?rs?|contrast|palette|fonts?|typeface|typography|radius|radii|spacing)\b/i;
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The learned team rules that talk about this kit: they mention brand words
+ * (colour, font, contrast, spacing …) or one of the kit's token names / colour
+ * roles ("amber is never text" → an `accent` colour named in a description
+ * doesn't count; the word must appear in the rule).
+ */
+export function rulesForKit<T extends { rule: string }>(rules: readonly T[], doc: unknown): T[] {
+  const names = TOKEN_GROUPS.flatMap((g) => Object.keys(rec(rec(doc)?.[g]) ?? {}))
+    .filter((n) => n.length >= 3)
+    .map((n) => new RegExp(`\\b${escapeRe(cssIdent(n).replace(/-/g, ' '))}\\b|\\b${escapeRe(n)}\\b`, 'i'));
+  return rules.filter((r) => BRAND_WORDS.test(r.rule) || names.some((re) => re.test(r.rule)));
+}
+
 /** A readable label for a token key: `color.surface-alt` → `Surface alt`. */
 export function tokenLabel(name: string): string {
   const words = cssIdent(name).split('-').filter(Boolean).join(' ');

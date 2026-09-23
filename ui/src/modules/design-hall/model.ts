@@ -102,7 +102,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     blurb: 'Colours, type and logos every studio uses',
     icon: 'palette',
     phase: 'ready',
-    note: 'A brand kit is a versioned token document. Token editing with an impact preview lands in Phase 1.',
+    note: 'A brand kit is a versioned token document every studio reads by name. Edit it with live contrast and see which designs a change reaches before you save.',
     roadmap: null,
     formats: ['otto-brand'],
   },
@@ -773,24 +773,30 @@ export function titleFromPrompt(prompt: string): string {
   return t.length > 60 ? `${t.slice(0, 59).trimEnd()}…` : t;
 }
 
-/** The starter brand-kit document (DTCG-style token groups). */
+/** A minimal `otto-brand/1` kit (the Brand Kit page offers richer starter kits
+ *  in brand/starters.ts; this one backs the generic "New → Brand kit" row). */
 export function brandStarter(name: string): Record<string, unknown> {
   return {
-    type: 'otto-brand',
-    version: 1,
+    $schema: 'otto-brand/1',
     name,
     color: {
-      primary: { $type: 'color', $value: '#4F46E5' },
-      accent: { $type: 'color', $value: '#F59E0B' },
-      ink: { $type: 'color', $value: '#111827' },
-      surface: { $type: 'color', $value: '#FFFFFF' },
-      success: { $type: 'color', $value: '#15803D' },
+      primary: { $value: '#4F46E5' },
+      accent: { $value: '#F59E0B' },
+      ink: { $value: '#111827' },
+      surface: { $value: '#FFFFFF' },
+      success: { $value: '#15803D' },
     },
-    typography: {
-      display: { $type: 'typography', $value: { fontFamily: 'system-ui', fontSize: '64px', fontWeight: 800, lineHeight: '72px' } },
-      body: { $type: 'typography', $value: { fontFamily: 'system-ui', fontSize: '17px', fontWeight: 400, lineHeight: '28px' } },
+    font: {
+      display: { $value: '-apple-system, system-ui, sans-serif', weights: [700, 800] },
+      body: { $value: '-apple-system, system-ui, sans-serif', weights: [400, 600] },
     },
-    radius: { card: { $type: 'dimension', $value: '14px' } },
+    type: {
+      display: { size: 64, line: 72, weight: 800 },
+      body: { size: 17, line: 28, weight: 400 },
+    },
+    radius: { card: { $value: 14 } },
+    space: { sm: { $value: 8 }, md: { $value: 16 }, lg: { $value: 32 } },
+    logos: [],
     voice: { summary: 'Warm, confident, never salesy.' },
   };
 }

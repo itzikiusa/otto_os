@@ -20,6 +20,7 @@ import {
   parseTokenRef,
   renameKey,
   resolveToken,
+  rulesForKit,
   serializeBrandDoc,
   tokenLabel,
   tokenRefs,
@@ -27,6 +28,7 @@ import {
   validateBrandDoc,
 } from '../src/modules/design-hall/brand/tokens.ts';
 import { STARTER_KITS, starterKit } from '../src/modules/design-hall/brand/starters.ts';
+import { brandStarter } from '../src/modules/design-hall/model.ts';
 
 const acme = {
   $schema: 'otto-brand/1',
@@ -203,6 +205,7 @@ test('every starter kit validates and has readable primaries', () => {
     assert.equal(doc.logos.length, 3);
   }
   assert.equal(starterKit('nope').id, 'vivid');
+  assert.deepEqual(validateBrandDoc(brandStarter('Generic')), [], 'the generic New → Brand kit starter validates too');
 });
 
 test('editing helpers keep order and pick unique names', () => {
@@ -216,6 +219,14 @@ test('editing helpers keep order and pick unique names', () => {
   assert.equal(fontRoleForStyle('H2'), 'display');
   assert.equal(fontRoleForStyle('codeBlock'), 'mono');
   assert.equal(fontRoleForStyle('caption'), 'body');
+  const rules = [
+    { key: 'a', rule: 'Amber is never text' },
+    { key: 'b', rule: 'Keep contrast at AA for body copy' },
+    { key: 'c', rule: 'Prefer the calm variant direction' },
+    { key: 'd', rule: 'Use the surface alt background behind cards' },
+  ];
+  assert.deepEqual(rulesForKit(rules, { color: { amber: { $value: '#FFB547' }, surfaceAlt: { $value: '#fff' } } }).map((r) => r.key), ['a', 'b', 'd']);
+  assert.deepEqual(rulesForKit(rules, {}).map((r) => r.key), ['b']);
   const pal = brandPalette({ color: { brand: { $value: '#123456' } } });
   assert.equal(pal.primary, '#123456');
   assert.equal(pal.surface, '#FFFFFF');
