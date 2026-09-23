@@ -654,17 +654,39 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** The everyday name of a colour's hue (`#FFB547` → `amber`), for matching
+ *  how people talk about a kit ("amber is never text"). */
+export function hueName(hex: string): string | null {
+  const h = normalizeHex(hex);
+  if (!h) return null;
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (s < 0.12 || d < 0.04) return l < 0.15 ? 'black' : l > 0.9 ? 'white' : 'gray';
+  let hue = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  hue = (hue * 60 + 360) % 360;
+  const bands: [number, string][] = [
+    [15, 'red'], [30, 'orange'], [50, 'amber'], [65, 'yellow'], [160, 'green'], [185, 'teal'],
+    [200, 'cyan'], [235, 'blue'], [248, 'indigo'], [285, 'violet'], [320, 'purple'], [345, 'pink'], [360, 'red'],
+  ];
+  return bands.find(([edge]) => hue < edge)?.[1] ?? 'red';
+}
+
 /**
  * The learned team rules that talk about this kit: they mention brand words
- * (colour, font, contrast, spacing …) or one of the kit's token names / colour
- * roles ("amber is never text" → an `accent` colour named in a description
- * doesn't count; the word must appear in the rule).
+ * (colour, font, contrast, spacing …), one of the kit's token names, or the
+ * hue of one of its colours ("amber is never text" for a `#FFB547` accent).
  */
 export function rulesForKit<T extends { rule: string }>(rules: readonly T[], doc: unknown): T[] {
-  const names = TOKEN_GROUPS.flatMap((g) => Object.keys(rec(rec(doc)?.[g]) ?? {}))
-    .filter((n) => n.length >= 3)
-    .map((n) => new RegExp(`\\b${escapeRe(cssIdent(n).replace(/-/g, ' '))}\\b|\\b${escapeRe(n)}\\b`, 'i'));
-  return rules.filter((r) => BRAND_WORDS.test(r.rule) || names.some((re) => re.test(r.rule)));
+  const words = [
+    ...TOKEN_GROUPS.flatMap((g) => Object.keys(rec(rec(doc)?.[g]) ?? {})).flatMap((n) => [n, cssIdent(n).replace(/-/g, ' ')]),
+    ...colorTokens(doc).map((c) => hueName(c.hex)).filter((x): x is string => !!x && !['black', 'white', 'gray'].includes(x)),
+  ].filter((n) => n.length >= 3);
+  const res = [...new Set(words)].map((w) => new RegExp(`\\b${escapeRe(w)}\\b`, 'i'));
+  return rules.filter((r) => BRAND_WORDS.test(r.rule) || res.some((re) => re.test(r.rule)));
 }
 
 /** A readable label for a token key: `color.surface-alt` → `Surface alt`. */

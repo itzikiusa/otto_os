@@ -133,17 +133,18 @@
         </div>
       </div>
     {/each}
-    {#if !readonly}
-      <button class="swc add" onclick={add} data-testid="brand-color-add"><Icon name="plus" size={14} /> Add colour</button>
-    {/if}
   </div>
 
-  {#if !readonly && primaryName}
+  {#if !readonly}
     <div class="presets">
-      <span class="dim">Try a {tokenLabel(primaryName).toLowerCase()}</span>
-      {#each PRESETS as [h, n] (h)}
-        <button class="pchip" style:background={h} onclick={() => preset(h)} aria-label="Set {primaryName} to {n} {h}" title="{n} {h}"></button>
-      {/each}
+      <button class="btn small" onclick={add} data-testid="brand-color-add"><Icon name="plus" size={12} /> Add colour</button>
+      {#if primaryName}
+        <span class="sep" aria-hidden="true"></span>
+        <span class="dim">Try a {tokenLabel(primaryName).toLowerCase()}</span>
+        {#each PRESETS as [h, n] (h)}
+          <button class="pchip" style:background={h} onclick={() => preset(h)} aria-label="Set {primaryName} to {n} {h}" title="{n} {h}"></button>
+        {/each}
+      {/if}
     </div>
   {/if}
 </section>
@@ -316,21 +317,11 @@
     color: var(--danger);
     background: var(--danger-soft);
   }
-  .add {
-    align-items: center;
-    justify-content: center;
-    flex-direction: row;
-    gap: 6px;
-    min-height: 150px;
-    border-style: dashed;
-    color: var(--text-dim);
-    background: transparent;
-    font: inherit;
-    cursor: pointer;
-  }
-  .add:hover {
-    color: var(--text);
-    background: var(--hover);
+  .sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin-inline: 4px;
   }
   .presets {
     display: flex;

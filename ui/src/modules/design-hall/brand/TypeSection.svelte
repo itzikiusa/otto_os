@@ -206,7 +206,7 @@
   }
   .frow {
     display: grid;
-    grid-template-columns: 40px 120px minmax(0, 1fr) 110px auto;
+    grid-template-columns: 40px 160px minmax(0, 1fr) 110px auto;
     align-items: center;
     gap: 12px;
     padding: 10px 14px;

@@ -53,7 +53,7 @@
         {:else}
           {impact.changes.length} token {impact.changes.length === 1 ? 'change' : 'changes'} compared with
           {impact.base === 'approved' ? `the approved v${impact.base_seq}` : impact.base === 'head' ? `v${impact.base_seq} (nothing approved yet)` : 'the empty kit'}
-          reach <b>{impact.affected_count} {impact.affected_count === 1 ? 'design' : 'designs'}</b> in
+          {impact.changes.length === 1 ? 'reaches' : 'reach'} <b>{impact.affected_count} {impact.affected_count === 1 ? 'design' : 'designs'}</b> in
           <b>{impact.affected_studio_count} {impact.affected_studio_count === 1 ? 'studio' : 'studios'}</b>.
         {/if}
       </p>

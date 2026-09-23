@@ -100,7 +100,7 @@
     {#each doc.logos ?? [] as logo, i (i)}
       {@const aid = logo.asset ? parseOttoUri(logo.asset)?.artifactId : null}
       <figure class="ltile" class:mono={logo.kind === 'mono'}>
-        <div class="lt-in">
+        <div class="lt-in" style:background={logo.kind === 'mono' ? undefined : pal.surface}>
           {#if aid && urls[aid]}
             <img src={urls[aid]} alt={logo.name} />
           {:else}
@@ -125,17 +125,17 @@
               <button class="icon-btn" aria-label="Open the {logo.name} design" title="Open design" onclick={() => openArtifact(aid)}><Icon name="external" size={14} /></button>
             {/if}
             {#if !readonly}
-              <button class="icon-btn" aria-label="{aid ? 'Replace' : 'Upload'} {logo.name}" title={aid ? 'Replace file' : 'Upload file'} onclick={() => pick(i)} disabled={uploading}><Icon name="download" size={14} /></button>
+              <button class="icon-btn" aria-label="{aid ? 'Replace' : 'Upload'} {logo.name}" title={aid ? 'Replace file' : 'Upload file'} onclick={() => pick(i)} disabled={uploading}><Icon name="image" size={14} /></button>
               <button class="icon-btn" aria-label="Remove {logo.name}" title="Remove" onclick={() => remove(i)}><Icon name="trash" size={14} /></button>
             {/if}
           </div>
         </figcaption>
       </figure>
     {/each}
-    {#if !readonly && (doc.logos?.length ?? 0) < 16}
-      <button class="ltile add" onclick={add}><Icon name="plus" size={14} /> Add logo</button>
-    {/if}
   </div>
+  {#if !readonly && (doc.logos?.length ?? 0) < 16}
+    <button class="btn small addbtn" onclick={add}><Icon name="plus" size={12} /> Add logo</button>
+  {/if}
   <input bind:this={fileInput} class="file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp" onchange={onFile} tabindex="-1" aria-hidden="true" />
 </section>
 
@@ -221,21 +221,8 @@
   .grow {
     flex: 1;
   }
-  .add {
-    align-items: center;
-    justify-content: center;
-    flex-direction: row;
-    gap: 6px;
-    min-height: 190px;
-    border-style: dashed;
-    color: var(--text-dim);
-    background: transparent;
-    font: inherit;
-    cursor: pointer;
-  }
-  .add:hover {
-    color: var(--text);
-    background: var(--hover);
+  .addbtn {
+    align-self: flex-start;
   }
   .file {
     display: none;

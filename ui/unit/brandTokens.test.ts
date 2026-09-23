@@ -11,6 +11,7 @@ import {
   diffTokens,
   flatTokens,
   fontRoleForStyle,
+  hueName,
   inkOf,
   isValidAsset,
   normalizeBrandDoc,
@@ -227,6 +228,15 @@ test('editing helpers keep order and pick unique names', () => {
   ];
   assert.deepEqual(rulesForKit(rules, { color: { amber: { $value: '#FFB547' }, surfaceAlt: { $value: '#fff' } } }).map((r) => r.key), ['a', 'b', 'd']);
   assert.deepEqual(rulesForKit(rules, {}).map((r) => r.key), ['b']);
+  // The hue of a colour counts too: "amber" for a #FFB547 accent.
+  assert.deepEqual(rulesForKit(rules, { color: { accent: { $value: '#FFB547' } } }).map((r) => r.key), ['a', 'b']);
+  assert.equal(hueName('#FFB547'), 'amber');
+  assert.equal(hueName('#5B3DF5'), 'violet');
+  assert.equal(hueName('#0F9D8A'), 'teal');
+  assert.equal(hueName('#F97316'), 'orange');
+  assert.equal(hueName('#14122B'), 'indigo');
+  assert.equal(hueName('#777777'), 'gray');
+  assert.equal(hueName('nope'), null);
   const pal = brandPalette({ color: { brand: { $value: '#123456' } } });
   assert.equal(pal.primary, '#123456');
   assert.equal(pal.surface, '#FFFFFF');
