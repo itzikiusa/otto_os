@@ -685,6 +685,17 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
             "workflow belongs to a different workspace".into(),
         ));
     }
+    // Overlap guard (the workflow schedule-trigger scheduler has the same one):
+    // this path stops waiting after WORKFLOW_WAIT and releases the task's
+    // in-flight guard, so a 40-minute workflow on a 15-minute cadence used to
+    // get a second — then third — concurrent run, each with its own worktrees
+    // and agents.
+    if repo.has_active_run(&workflow.id).await? {
+        return Err(Error::Conflict(format!(
+            "skipped: a run of workflow \"{}\" is still in progress",
+            workflow.name
+        )));
+    }
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
     let run = repo
