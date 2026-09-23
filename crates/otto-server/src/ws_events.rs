@@ -284,6 +284,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::DesignArtifactUpdated { workspace_id, .. }
         | Event::DesignLinkUpdated { workspace_id, .. }
         | Event::DesignLearningUpdate { workspace_id, .. }
+        // Design-assist turn states + variant-run completion: workspace
+        // members, like the canvas/mockup agent-session-started signals.
+        | Event::DesignAssistUpdated { workspace_id, .. }
+        | Event::DesignVariantsReady { workspace_id, .. }
         // Live DB-Assistant answer edits + the assist-agent-started signal go to the
         // connection's workspace members (same delivery as canvas/mockup).
         | Event::DbAssistUpdated { workspace_id, .. }
@@ -817,6 +821,25 @@ mod tests {
                 kind: "shipped".into(),
                 signal_id: None,
                 artifact_id: None,
+            },
+            Event::DesignAssistUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                turn_id: "t1".into(),
+                status: "done".into(),
+                mode: "refine".into(),
+                branch: "main".into(),
+                session_id: None,
+                version_id: Some("v2".into()),
+                error: None,
+            },
+            Event::DesignVariantsReady {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                run_id: "r1".into(),
+                base_version_id: None,
+                version_ids: vec![],
+                failed: 0,
             },
         ] {
             assert!(

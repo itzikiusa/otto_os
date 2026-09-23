@@ -25,19 +25,28 @@
 //! require workspace `Viewer`, writes `Editor`, hard deletes `Admin`; the
 //! `Feature::Design` capability axis is enforced upstream by the server's
 //! deny-by-default policy middleware (`/design/admin/*` = Design:Admin).
+//!
+//! Phase 1 agent co-design building blocks (the agent turn itself runs in
+//! `otto-server`'s `design_assist`): `variants` (side branches
+//! `variant/<run>/<k>` + accept = fast-forward main), `cite` (verifying an
+//! agent's `[R1]` citations against the references it was offered) and
+//! `learn` (the deterministic signal → candidate-rule extractor).
 
 pub mod blobs;
+pub mod cite;
 pub mod diff;
 pub mod extract;
 pub mod format;
 pub mod graph;
 pub mod http;
 pub mod import;
+pub mod learn;
 pub mod retention;
 pub mod service;
 pub mod store;
 pub mod types;
 pub mod uri;
+pub mod variants;
 
 pub use http::{router, DesignCtx};
 pub use service::DesignService;

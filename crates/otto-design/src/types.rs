@@ -67,10 +67,16 @@ pub const POLICIES: &[&str] = &["follow_approved", "follow_latest", "pinned"];
 /// candidates (and only through the opt-in prune).
 pub const VERSION_KINDS: &[&str] = &["autosave", "named", "agent", "import", "sync", "restore"];
 
-/// Captured learning signals (proposal §6.2).
+/// Captured learning signals (proposal §6.2). `variant_chosen` is the
+/// client-recorded pick (a tray "Apply"); `variant_accepted` is recorded by the
+/// server when `POST …/variants/{v}/accept` fast-forwards main — the learner
+/// treats both the same. `agent_draft` marks a version a design-assist turn
+/// committed (main or a variant branch).
 pub const SIGNAL_KINDS: &[&str] = &[
     "variant_chosen",
+    "variant_accepted",
     "variant_rejected",
+    "agent_draft",
     "edit_after_draft",
     "review_comment",
     "critique_finding",
