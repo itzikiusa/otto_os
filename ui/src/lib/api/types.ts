@@ -8912,7 +8912,16 @@ export type DesignSignalKind =
   | 'brand_correction'
   | 'rule_feedback'
   | 'status_change'
-  | 'shipped';
+  | 'shipped'
+  /** An older version saved again as the new head — `version_id` = the new
+   *  head, `payload.from_version_id` (required) = the version restored. */
+  | 'restored'
+  /** A library artifact added as a reference — `payload.target_artifact_id`
+   *  (required). */
+  | 'reference_added'
+  /** "Start from this": recorded on the NEW artifact, `payload.source_artifact_id`
+   *  (required; `source_version_id` optional). */
+  | 'forked';
 export type DesignArtifactChange =
   | 'created'
   | 'content'

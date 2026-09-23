@@ -71,7 +71,11 @@ pub const VERSION_KINDS: &[&str] = &["autosave", "named", "agent", "import", "sy
 /// client-recorded pick (a tray "Apply"); `variant_accepted` is recorded by the
 /// server when `POST …/variants/{v}/accept` fast-forwards main — the learner
 /// treats both the same. `agent_draft` marks a version a design-assist turn
-/// committed (main or a variant branch).
+/// committed (main or a variant branch). `restored` (an older version saved
+/// again as the new head), `reference_added` (a library artifact added as a
+/// reference) and `forked` ("Start from this" — a `derived_from` copy) are
+/// client-recorded and carry a required payload key, see
+/// [`SIGNAL_PAYLOAD_KEYS`].
 pub const SIGNAL_KINDS: &[&str] = &[
     "variant_chosen",
     "variant_accepted",
@@ -85,6 +89,19 @@ pub const SIGNAL_KINDS: &[&str] = &[
     "rule_feedback",
     "status_change",
     "shipped",
+    "restored",
+    "reference_added",
+    "forked",
+];
+
+/// Signal kinds whose API payload must name what they point at: `(kind,
+/// required non-empty string key)`. `restored` is recorded on the artifact
+/// (its `version_id` = the new head) with the version it restored; the other
+/// two name the other artifact of the pair.
+pub const SIGNAL_PAYLOAD_KEYS: &[(&str, &str)] = &[
+    ("restored", "from_version_id"),
+    ("reference_added", "target_artifact_id"),
+    ("forked", "source_artifact_id"),
 ];
 
 /// Who authored a version / emitted a signal.

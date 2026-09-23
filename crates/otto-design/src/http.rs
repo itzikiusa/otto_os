@@ -1321,4 +1321,45 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json_of(&p)["applied"], false);
     }
+
+    #[tokio::test]
+    async fn restored_reference_added_and_forked_signals_need_their_key() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "A" })),
+        )
+        .await;
+        let created = json_of(&b);
+        let aid = created["artifact"]["id"].as_str().unwrap().to_string();
+        let v1 = created["version"]["id"].as_str().unwrap().to_string();
+        for (kind, key) in [
+            ("restored", "from_version_id"),
+            ("reference_added", "target_artifact_id"),
+            ("forked", "source_artifact_id"),
+        ] {
+            let (st, _, _) = call(
+                &app,
+                Method::POST,
+                "/design/signals",
+                Some(serde_json::json!({ "artifact_id": aid, "kind": kind })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{kind} without {key}");
+            let (st, s, _) = call(
+                &app,
+                Method::POST,
+                "/design/signals",
+                Some(serde_json::json!({
+                    "artifact_id": aid, "kind": kind, "version_id": v1,
+                    "payload": { key: "x1" }
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{}", String::from_utf8_lossy(&s));
+            assert_eq!(json_of(&s)["kind"], kind);
+        }
+    }
 }

@@ -172,8 +172,12 @@ bounded signal (≤ 8 KB JSON object). Captured automatically:
 `edit_after_draft` (a human save within 2 h of an agent version — the payload
 is a structural summary, never the content), `status_change`, `shipped`,
 `agent_draft` (every committed assist turn) and `variant_accepted` /
-`variant_rejected` (a variant accept). `GET /design/signals` reads the log;
-§5.3 turns repeated signals into team-rule proposals.
+`variant_rejected` (a variant accept). Clients record `restored` (an older
+version saved again — `payload.from_version_id`), `reference_added`
+(`payload.target_artifact_id`) and `forked` (on the new artifact —
+`payload.source_artifact_id`); those three are refused (400) without their
+key. `GET /design/signals` reads the log; §5.3 turns repeated signals into
+team-rule proposals.
 
 ## 4. Legacy import
 
