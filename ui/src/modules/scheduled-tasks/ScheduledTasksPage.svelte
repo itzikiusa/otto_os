@@ -1,5 +1,9 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { authedText } from '../../lib/api/client';
@@ -328,11 +332,27 @@
   }
 </script>
 
+<div class="sched-page">
+<PageHeader
+  title={creating || editId ? (editId ? 'Edit scheduled task' : 'New scheduled task') : 'Scheduled Tasks'}
+  subtitle={creating || editId ? undefined : 'Recurring agent jobs — run a prompt on a cadence, produce a report, and deliver it to Slack, email, or a webhook. Also driveable over MCP.'}
+>
+  {#snippet leading()}
+    {#if creating || editId}
+      <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={() => { creating = false; editId = null; }}>
+        <Icon name="chevronLeft" size={15} />
+      </button>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if !(creating || editId) && list.length > 0}
+      <button class="btn primary" onclick={startCreate}>New task</button>
+    {/if}
+  {/snippet}
+</PageHeader>
+<PageBody width="readable">
 <div class="sched">
   {#if creating || editId}
-    <header class="head">
-      <h1>{editId ? 'Edit scheduled task' : 'New scheduled task'}</h1>
-    </header>
     <div class="form">
       {#if error}<div class="err" role="alert">{error}</div>{/if}
 
@@ -521,17 +541,6 @@
       </div>
     </div>
   {:else}
-    <header class="head">
-      <div>
-        <h1>Scheduled Tasks</h1>
-        <p class="sub">
-          Recurring agent jobs — run a prompt on a cadence, produce a report, and deliver it to
-          Slack, email, or a webhook. Also driveable over MCP.
-        </p>
-      </div>
-      <button class="btn primary" onclick={startCreate}>New task</button>
-    </header>
-
     {#if error}<div class="err" role="alert">{error}</div>{/if}
 
     {#if convertedWfId}
@@ -544,7 +553,15 @@
     {/if}
 
     {#if list.length === 0}
-      <div class="empty">No scheduled tasks yet. Create one to run an agent on a cadence.</div>
+      <EmptyState
+        variant="page"
+        icon="clock"
+        title="No scheduled tasks yet"
+        body="Create one to run an agent on a cadence and deliver its report."
+        actionLabel="New task"
+        actionIcon="plus"
+        onaction={startCreate}
+      />
     {:else}
       <ul class="tasks">
         {#each list as t (t.id)}
@@ -619,15 +636,14 @@
     </div>
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
   /* Colors come from the app theme tokens (tokens.css) so the page adapts to
      light + dark. Buttons reuse the global `.btn`/`.btn.small/.primary/.danger`. */
-  .sched { padding: 1rem 1.25rem; max-width: 980px; margin: 0 auto; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 0.75rem; }
-  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
-  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 60ch; }
-  .empty, .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
+  .sched-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .err {
     background: color-mix(in srgb, var(--status-exited) 12%, transparent);
     color: var(--status-exited); padding: 0.5rem 0.75rem;

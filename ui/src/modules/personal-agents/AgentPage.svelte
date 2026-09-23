@@ -6,6 +6,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentDocuments from './AgentDocuments.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -183,36 +186,44 @@
     (auth.isRoot || ['editor', 'admin'].includes(ws.workspaces.find((w) => w.id === agent?.workspace_id)?.my_role ?? 'viewer')));
 </script>
 
-<div class="page">
-  <header class="head">
-    <button class="btn small" onclick={() => router.go('personal-agents')}>← Agents</button>
+<div class="agent-page">
+<PageHeader title={agent ? agent.name : 'Personal agent'} tabsPlacement="below">
+  {#snippet leading()}
+    <button class="icon-btn" title="Back to Personal Agents" aria-label="Back to Personal Agents" onclick={() => router.go('personal-agents')}>
+      <Icon name="chevronLeft" size={15} />
+    </button>
+    {#if agent}<span class="avatar" aria-hidden="true">{agent.avatar || agent.name.slice(0, 1)}</span>{/if}
+  {/snippet}
+  {#snippet badge()}
     {#if agent}
-      <span class="avatar" aria-hidden="true">{agent.avatar || agent.name.slice(0, 1)}</span>
-      <h1>{agent.name}</h1>
       <span class="chip mono">{agent.provider}{agent.model ? ` · ${agent.model}` : ''}</span>
       {#if !agent.enabled}<span class="pill">paused</span>{/if}
       {#if agent.browser}<span class="pill" title="otto-browser MCP attached to runs and chat">browser</span>{/if}
-      <span class="grow"></span>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if agent}
       <button class="btn small" disabled={busy} onclick={() => runNow()}>Run now</button>
       <button class="btn small" onclick={() => (editing = true)}>Edit</button>
-    {:else}
-      <h1>Personal agent</h1>
     {/if}
-  </header>
-
+  {/snippet}
+  {#snippet tabs()}
+    <div class="tabs" role="tablist" aria-label="Agent sections">
+      {#each [['overview', 'Overview'], ['schedules', 'Schedules'], ['runs', 'Runs'], ['chat', 'Chat'], ['memory', 'Memory'], ['context', 'Context']] as [id, label] (id)}
+        <button
+          class="tab"
+          class:active={tab === id}
+          role="tab"
+          aria-selected={tab === id}
+          onclick={() => (tab = id as Tab)}
+        >{label}</button>
+      {/each}
+    </div>
+  {/snippet}
+</PageHeader>
+<PageBody width="readable">
+<div class="agent-body">
   {#if error}<div class="err" role="alert">{error}</div>{/if}
-
-  <div class="tabs" role="tablist" aria-label="Agent sections">
-    {#each [['overview', 'Overview'], ['schedules', 'Schedules'], ['runs', 'Runs'], ['chat', 'Chat'], ['memory', 'Memory'], ['context', 'Context']] as [id, label] (id)}
-      <button
-        class="tab"
-        class:active={tab === id}
-        role="tab"
-        aria-selected={tab === id}
-        onclick={() => (tab = id as Tab)}
-      >{label}</button>
-    {/each}
-  </div>
 
   {#if !agent}
     <div class="muted">{personalAgents.loadingAgents ? 'Loading…' : 'Agent not found in this workspace.'}</div>
@@ -388,21 +399,20 @@
     </div>
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
-  .page { padding: 1rem 1.25rem; max-width: 980px; margin: 0 auto; }
-  .head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-  .head h1 { margin: 0; font-size: 1.2rem; color: var(--text); }
+  .agent-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .avatar {
-    width: 2rem; height: 2rem; border-radius: var(--radius-m); display: inline-flex;
+    width: 1.6rem; height: 1.6rem; border-radius: var(--radius-m); display: inline-flex;
     align-items: center; justify-content: center; font-size: 1.1rem;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
-  .grow { flex: 1; }
   .chip { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
   .mono { font-family: var(--font-mono); }
   .wrap { word-break: break-all; }
-  .tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border); margin-bottom: 0.75rem; overflow-x: auto; }
+  .tabs { display: flex; gap: 0.25rem; overflow-x: auto; }
   .tab {
     background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-dim);
     padding: 0.45rem 0.7rem; font: inherit; font-size: 0.88rem; cursor: pointer;
