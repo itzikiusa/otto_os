@@ -135,21 +135,20 @@ fn seatbelt_agent_profile_confines_otto_data_dir() {
     let home = std::env::var("HOME").unwrap_or_default();
     let pol = SandboxPolicy::for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
 
-    let q = |p: &Path| shell_quote(p);
-    let (ok, _) = run_sandboxed(&pol, &format!("echo x > {}", q(&data.join("bin").join("ottod"))));
+    let (ok, _) = run_sandboxed(&pol, &format!("echo x > {}", shell_quote(&data.join("bin").join("ottod"))));
     assert!(!ok, "agent replaced the daemon binary");
-    let (ok, _) = run_sandboxed(&pol, &format!("echo x >> {}", q(&data.join("otto.db"))));
+    let (ok, _) = run_sandboxed(&pol, &format!("echo x >> {}", shell_quote(&data.join("otto.db"))));
     assert!(!ok, "agent wrote the state DB");
-    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", q(&data.join("secrets.json"))));
+    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", shell_quote(&data.join("secrets.json"))));
     assert!(!ok, "agent read secrets.json");
-    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", q(&data.join("otto.db.before-x.bak"))));
+    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", shell_quote(&data.join("otto.db.before-x.bak"))));
     assert!(!ok, "agent read a state DB backup");
-    let (ok, err) = run_sandboxed(&pol, &format!("cat {} >/dev/null", q(&data.join("bin").join("ottod"))));
+    let (ok, err) = run_sandboxed(&pol, &format!("cat {} >/dev/null", shell_quote(&data.join("bin").join("ottod"))));
     assert!(ok, "the daemon binary must stay readable/executable: {err}");
     let step = data.join("workflow-context").join("step1.md");
-    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", q(&step)));
+    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", shell_quote(&step)));
     assert!(ok, "workflow handoff dir must stay writable: {err}");
-    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", q(&cwd.join("f.txt"))));
+    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", shell_quote(&cwd.join("f.txt"))));
     assert!(ok, "cwd must stay writable: {err}");
     // LaunchServices (how `open -a Terminal x.command` escapes the sandbox) is
     // not reachable: `lsappinfo front` answers an `ASN:` with the blanket
