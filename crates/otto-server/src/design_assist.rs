@@ -3061,6 +3061,10 @@ mod tests {
             created_session_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            created_by_name: None,
+            last_editor_id: None,
+            last_editor_kind: None,
+            last_editor_name: None,
         };
         for i in 0..(TURN_HISTORY + 5) {
             put_turn(new_turn(

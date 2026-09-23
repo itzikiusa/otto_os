@@ -148,6 +148,20 @@ pub struct DesignArtifact {
     pub created_session_id: Option<Id>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // -- Resolved on read (joined in by the store; never written) ----------
+    /// Display name of `created_by` (`users.display_name`, else the
+    /// username); `null` for a system author such as the legacy import.
+    #[serde(default)]
+    pub created_by_name: Option<String>,
+    /// `author_id` of the head version — who (or whose agent) saved last.
+    #[serde(default)]
+    pub last_editor_id: Option<String>,
+    /// `author_kind` of the head version (`user` | `agent` | `system`).
+    #[serde(default)]
+    pub last_editor_kind: Option<String>,
+    /// Display name of `last_editor_id` (`null` when it is not a user).
+    #[serde(default)]
+    pub last_editor_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +180,10 @@ pub struct DesignVersion {
     pub message: String,
     pub provenance: Value,
     pub created_at: DateTime<Utc>,
+    /// Display name of `author_id` (`users.display_name`, else the
+    /// username), resolved on read; `null` when the author is not a user.
+    #[serde(default)]
+    pub author_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

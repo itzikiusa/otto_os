@@ -8975,6 +8975,15 @@ export interface DesignArtifact {
   created_session_id: Id | null;
   created_at: string;
   updated_at: string;
+  // Resolved on read (never written):
+  /** Display name of `created_by` (display name, else username); `null` for
+   *  a system author such as the legacy import. */
+  created_by_name: string | null;
+  /** `author_id` / `author_kind` of the head version — who saved last. */
+  last_editor_id: string | null;
+  last_editor_kind: DesignAuthorKind | null;
+  /** Display name of `last_editor_id` (`null` when it is not a user). */
+  last_editor_name: string | null;
 }
 
 export interface DesignVersion {
@@ -8992,6 +9001,8 @@ export interface DesignVersion {
   message: string;
   provenance: Record<string, unknown>;
   created_at: string;
+  /** Display name of `author_id`, resolved on read (`null`: not a user). */
+  author_name: string | null;
 }
 
 export interface DesignLink {

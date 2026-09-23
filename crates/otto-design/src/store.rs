@@ -118,7 +118,16 @@ fn row_artifact(r: &sqlx::sqlite::SqliteRow) -> Result<DesignArtifact> {
         created_session_id: r.get("created_session_id"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
+        created_by_name: opt_col(r, "created_by_name"),
+        last_editor_id: opt_col(r, "last_editor_id"),
+        last_editor_kind: opt_col(r, "last_editor_kind"),
+        last_editor_name: opt_col(r, "last_editor_name"),
     })
+}
+
+/// A nullable TEXT column that only some selects join in (absent → `None`).
+fn opt_col(r: &sqlx::sqlite::SqliteRow, col: &str) -> Option<String> {
+    r.try_get::<Option<String>, _>(col).ok().flatten()
 }
 
 fn row_version(r: &sqlx::sqlite::SqliteRow) -> Result<DesignVersion> {
@@ -140,6 +149,7 @@ fn row_version(r: &sqlx::sqlite::SqliteRow) -> Result<DesignVersion> {
             Value::Object(Default::default()),
         ),
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        author_name: opt_col(r, "author_name"),
     })
 }
 
@@ -197,8 +207,45 @@ fn row_publish(r: &sqlx::sqlite::SqliteRow) -> Result<DesignPublish> {
     })
 }
 
-const ART_SELECT: &str = "SELECT a.*, v.seq AS head_seq FROM design_artifacts a \
-     LEFT JOIN design_versions v ON v.id = a.head_version_id";
+/// SQL for a user's display name (`display_name`, else `username`); `$col`
+/// is the column holding the user id. Unknown ids (system authors) → NULL.
+macro_rules! user_name_of {
+    ($col:literal) => {
+        concat!(
+            "(SELECT COALESCE(NULLIF(u.display_name, ''), u.username) FROM users u WHERE u.id = ",
+            $col,
+            ")"
+        )
+    };
+}
+
+/// Read-time enrichment of an artifact row (`a` + its head version `v`):
+/// people and the head's author. Every artifact select carries these columns;
+/// `row_artifact` reads them leniently.
+macro_rules! art_enrich_cols {
+    () => {
+        concat!(
+            user_name_of!("a.created_by"),
+            " AS created_by_name, v.author_id AS last_editor_id, \
+             v.author_kind AS last_editor_kind, ",
+            user_name_of!("v.author_id"),
+            " AS last_editor_name"
+        )
+    };
+}
+
+const ART_SELECT: &str = concat!(
+    "SELECT a.*, v.seq AS head_seq, ",
+    art_enrich_cols!(),
+    " FROM design_artifacts a LEFT JOIN design_versions v ON v.id = a.head_version_id"
+);
+
+/// Every version select: the row plus its author's display name.
+const VER_SELECT: &str = concat!(
+    "SELECT design_versions.*, ",
+    user_name_of!("design_versions.author_id"),
+    " AS author_name FROM design_versions"
+);
 
 const PROJECT_SELECT: &str = "SELECT p.*, (SELECT COUNT(*) FROM design_artifacts a \
      WHERE a.project_id = p.id AND a.status != 'archived') AS artifact_count \
@@ -897,6 +944,7 @@ impl Store {
             }
         })?;
         tx.commit().await.map_err(dberr("design.commit"))?;
+        let author_name = self.user_display_name(&v.author_id).await;
         Ok(DesignVersion {
             id,
             artifact_id: v.artifact_id,
@@ -912,11 +960,12 @@ impl Store {
             message: v.message,
             provenance: v.provenance,
             created_at: ts(&now_s)?,
+            author_name,
         })
     }
 
     pub async fn get_version(&self, id: &str) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query("SELECT * FROM design_versions WHERE id = ?")
+        let row = sqlx::query(&format!("{VER_SELECT} WHERE id = ?"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -929,7 +978,7 @@ impl Store {
         artifact_id: &str,
         seq: i64,
     ) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query("SELECT * FROM design_versions WHERE artifact_id = ? AND seq = ?")
+        let row = sqlx::query(&format!("{VER_SELECT} WHERE artifact_id = ? AND seq = ?"))
             .bind(artifact_id)
             .bind(seq)
             .fetch_optional(&self.pool)
@@ -947,10 +996,10 @@ impl Store {
         offset: i64,
     ) -> Result<Vec<DesignVersion>> {
         let limit = if limit > 0 { limit.min(1_000) } else { 200 };
-        let rows = sqlx::query(
-            "SELECT * FROM design_versions WHERE artifact_id = ? AND (? IS NULL OR kind = ?)
-             ORDER BY seq DESC LIMIT ? OFFSET ?",
-        )
+        let rows = sqlx::query(&format!(
+            "{VER_SELECT} WHERE artifact_id = ? AND (? IS NULL OR kind = ?)
+             ORDER BY seq DESC LIMIT ? OFFSET ?"
+        ))
         .bind(artifact_id)
         .bind(kind)
         .bind(kind)
@@ -1037,6 +1086,7 @@ impl Store {
             }
         })?;
         tx.commit().await.map_err(dberr("design.side"))?;
+        let author_name = self.user_display_name(&v.author_id).await;
         Ok(DesignVersion {
             id,
             artifact_id: v.artifact_id,
@@ -1052,6 +1102,7 @@ impl Store {
             message: v.message,
             provenance: v.provenance,
             created_at: ts(&now_s)?,
+            author_name,
         })
     }
 
@@ -1063,11 +1114,11 @@ impl Store {
         artifact_id: &str,
         prefix: &str,
     ) -> Result<Vec<DesignVersion>> {
-        let rows = sqlx::query(
-            "SELECT * FROM design_versions
+        let rows = sqlx::query(&format!(
+            "{VER_SELECT}
              WHERE artifact_id = ?1 AND substr(branch, 1, length(?2)) = ?2
-             ORDER BY seq LIMIT 1000",
-        )
+             ORDER BY seq LIMIT 1000"
+        ))
         .bind(artifact_id)
         .bind(prefix)
         .fetch_all(&self.pool)
@@ -1417,6 +1468,20 @@ impl Store {
         }))
     }
 
+    /// A user's display name (`display_name`, else `username`); `None` for
+    /// an unknown id (a system author) or a lookup error — names are cosmetic.
+    pub async fn user_display_name(&self, user_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+    }
+
     pub async fn story_workspace(&self, story_id: &str) -> Result<Option<Id>> {
         sqlx::query_scalar("SELECT workspace_id FROM product_stories WHERE id = ?")
             .bind(story_id)
@@ -1623,15 +1688,17 @@ impl Store {
         let mut args = Vec::new();
         let sql = if self.has_fts().await {
             args.push(Arg::S(mq));
-            let mut sql = String::from(
-                "SELECT a.*, v.seq AS head_seq,
+            let mut sql = String::from(concat!(
+                "SELECT a.*, v.seq AS head_seq, ",
+                art_enrich_cols!(),
+                ",
                         snippet(design_search_fts, -1, '\u{2039}', '\u{203a}', '\u{2026}', 12) AS snip,
                         bm25(design_search_fts) AS rank
                  FROM design_search_fts
                  JOIN design_artifacts a ON a.id = design_search_fts.artifact_id
                  LEFT JOIN design_versions v ON v.id = a.head_version_id
                  WHERE design_search_fts MATCH ?"
-            );
+            ));
             f.push_where(&mut sql, &mut args);
             sql.push_str(&format!(" ORDER BY {STATUS_ORDER}, rank LIMIT ? OFFSET ?"));
             sql
@@ -1927,5 +1994,68 @@ mod tests {
         );
         assert_eq!(fts_match("a: (x) -").as_deref(), None);
         assert_eq!(fts_match("LOY-142").as_deref(), Some("\"loy\" \"142\"*"));
+    }
+
+    /// Seed a `users` row (the enrichment joins resolve names from it).
+    async fn user(s: &Store, id: &str, username: &str, display: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, created_at)
+             VALUES (?, ?, 'x', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(display)
+        .execute(s.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn artifacts_and_versions_carry_resolved_people() {
+        let s = store().await;
+        user(&s, "u1", "ada", "Ada Lovelace").await;
+        user(&s, "u2", "grace", "").await; // no display name → username
+        s.insert_artifact(&art("A", "w1")).await.unwrap();
+        // No version yet: creator resolved, no last editor.
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.created_by_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(a.last_editor_id, None);
+        assert_eq!(a.last_editor_name, None);
+
+        let v1 = s.commit_version(ver("A", "s1"), None).await.unwrap();
+        assert_eq!(v1.author_name.as_deref(), Some("Ada Lovelace"));
+        let mut by_grace = ver("A", "s2");
+        by_grace.author_id = "u2".into();
+        by_grace.author_kind = "agent".into();
+        let v2 = s.commit_version(by_grace, None).await.unwrap();
+        assert_eq!(v2.author_name.as_deref(), Some("grace"));
+
+        // The artifact's last editor is the head's author, on every select.
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.last_editor_id.as_deref(), Some("u2"));
+        assert_eq!(a.last_editor_kind.as_deref(), Some("agent"));
+        assert_eq!(a.last_editor_name.as_deref(), Some("grace"));
+        let listed = s.list_artifacts(&ArtifactFilter::default()).await.unwrap();
+        assert_eq!(listed[0].last_editor_name.as_deref(), Some("grace"));
+        assert_eq!(listed[0].created_by_name.as_deref(), Some("Ada Lovelace"));
+
+        // Versions resolve their author on read; a system author stays null.
+        let mut sys = ver("A", "s3");
+        sys.author_id = "import".into();
+        sys.author_kind = "system".into();
+        s.commit_version(sys, None).await.unwrap();
+        let vs = s.list_versions("A", None, 0, 0).await.unwrap();
+        let names: Vec<Option<&str>> = vs.iter().map(|v| v.author_name.as_deref()).collect();
+        assert_eq!(names, vec![None, Some("grace"), Some("Ada Lovelace")]);
+        assert_eq!(
+            s.get_version(&v1.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .author_name
+                .as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(s.user_display_name("nobody").await, None);
     }
 }

@@ -3067,6 +3067,16 @@ never a blob. Retention is opt-in (`/design/admin/prune`, dry run unless
 Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
 ("Design Hall"). Timestamps are RFC 3339.
 
+**Resolved on read** (joined in by the store on every artifact / version
+read — list, detail, search, links, save results; never written, no schema
+column): `DesignArtifact.created_by_name` (the creator's `display_name`, else
+`username`; `null` for a system author such as the legacy import),
+`last_editor_id` / `last_editor_kind` / `last_editor_name` (the head
+version's `author_id` / `author_kind` / its user's name — `null` before the
+first version or for a system author) and `DesignVersion.author_name` (same
+rule for `author_id`). An agent version's `author_id` is the user who
+launched the agent, so its name is that user's with `author_kind: "agent"`.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /api/v1/design/projects | design view | `?workspace_id=&include_archived=` | `DesignProject[]` (newest-updated first; `artifact_count` = non-archived) |
