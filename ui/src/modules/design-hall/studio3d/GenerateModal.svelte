@@ -172,9 +172,9 @@
     </label>
 
     {#if blocked && provider.where === 'local'}
-      <p class="note warn" role="status"><Icon name="warning" size={12} /> {blocked}</p>
+      <p class="note warn" role="status"><Icon name="warning" size={12} /> <span>{blocked}</span></p>
     {:else}
-      <p class="note"><Icon name="info" size={12} /> The result lands as a new <strong>agent</strong> version of this scene — review it, keep it or restore the previous one.</p>
+      <p class="note"><Icon name="info" size={12} /> <span>The result lands as a new <strong>agent</strong> version of this scene — review it, keep it or restore the previous one.</span></p>
     {/if}
     {#if error}<p class="note err" role="alert">{error}</p>{/if}
   </div>

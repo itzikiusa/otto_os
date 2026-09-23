@@ -5,8 +5,9 @@
 //     (a GLB/glTF Design Hall artifact) or a legacy `attachment_id` (a Design
 //     Hall artifact id, else a Product attachment — the extractor resolves the
 //     same way);
-//   • the brand kit — the scene's `brand` URI, else the first `otto-brand` kit
-//     of its project, else of its workspace (Brand Kit v1 owns the kit editor;
+//   • the brand kit — the scene's `brand` URI, else the project's chosen kit
+//     (`brand_kit_id`), else the first `otto-brand` kit of its project, else of
+//     its workspace (Brand Kit v1 owns the kit editor;
 //     `token:color.<name>` resolution is `scene3d/tokens.ts`).
 import { authedBlobUrl } from '../../../lib/api/client';
 import { fetchContent, getArtifact, listArtifacts } from '../../../lib/api/design';
@@ -77,7 +78,12 @@ export interface BrandKit {
  * project's (then the workspace's) first `otto-brand` kit — approved first.
  * Null when there is none (tokens then render with a neutral fallback).
  */
-export async function loadBrandKit(sceneBrand: string | undefined, artifact: DesignArtifact): Promise<BrandKit | null> {
+export async function loadBrandKit(
+  sceneBrand: string | undefined,
+  artifact: DesignArtifact,
+  /** The project's chosen kit (`DesignProject.brand_kit_id`), when known. */
+  projectKitId?: string | null,
+): Promise<BrandKit | null> {
   let kit: DesignArtifact | null = null;
   let version: string | null = null;
   const uri = sceneBrand ? parseOttoUri(sceneBrand) : null;
@@ -86,7 +92,8 @@ export async function loadBrandKit(sceneBrand: string | undefined, artifact: Des
     version = versionFor(kit, uri.selector);
   } else {
     const pick = (xs: DesignArtifact[]) => xs.find((a) => a.approved_version_id) ?? xs[0] ?? null;
-    if (artifact.project_id) kit = pick(await listArtifacts({ project_id: artifact.project_id, format: 'otto-brand', limit: 10 }));
+    if (projectKitId) kit = await getArtifact(projectKitId).then((d) => d.artifact, () => null);
+    if (!kit && artifact.project_id) kit = pick(await listArtifacts({ project_id: artifact.project_id, format: 'otto-brand', limit: 10 }));
     if (!kit) kit = pick(await listArtifacts({ workspace_id: artifact.workspace_id, format: 'otto-brand', limit: 10 }));
     if (!kit) return null;
     version = kit.approved_version_id;

@@ -58,6 +58,7 @@
   import { blenderRefinePrompt, blockoutPrompt, type Gen3dContext, type Gen3dKind } from './providers';
   import { loadBrandKit, resolveModelRef, type BrandKit } from './sources';
   import { openArtifact } from '../nav';
+  import { library } from '../library.svelte';
   import { policyLabel, type LinkRow } from '../model';
 
   interface Props {
@@ -118,7 +119,7 @@
     if (!doc || key === kitKey) return;
     kitKey = key;
     const brandUri = doc.brand;
-    void loadBrandKit(brandUri, artifact).then(
+    void loadBrandKit(brandUri, artifact, library.projectOf(artifact.project_id)?.brand_kit_id ?? null).then(
       (k) => {
         if (kitKey === key) kit = k;
       },
@@ -572,6 +573,10 @@
         <span class="grow"></span>
         {#if agent}
           <span class="agent" role="status" data-testid="s3d-agent"><span class="pulse" aria-hidden="true"></span> Otto · {agent.label}…</span>
+        {:else if agentDraft && head}
+          <span class="draft-banner" role="status" data-testid="s3d-draft">
+            <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved
+          </span>
         {/if}
         {#if notices}{@render notices()}{/if}
       </div>
@@ -596,11 +601,6 @@
           onchange={edit}
           resolveAttachment={resolveModelRef}
         />
-        {#if agentDraft && head}
-          <div class="draft-banner" role="status">
-            <Icon name="sparkle" size={12} /> Showing <strong>v{head.seq} draft</strong> by Otto · not approved
-          </div>
-        {/if}
         <div class="states-host">
           <StatesBar {doc} {stateId} {selectedId} {readonly} onpick={(id) => (stateId = id ?? initialState(doc!))} onchange={edit} />
         </div>
@@ -871,6 +871,13 @@
     flex: 1;
     min-height: 0;
     display: flex;
+    container: s3dstage / inline-size;
+  }
+  /* A narrow viewport stacks the stats pill above the states bar. */
+  @container s3dstage (max-width: 600px) {
+    .stage :global(.s3d-status.compact) {
+      inset-block-end: 64px;
+    }
   }
   .stage > :global(.s3d-viewport) {
     border-radius: 0;
@@ -879,31 +886,22 @@
     flex: 1;
   }
   .draft-banner {
-    position: absolute;
-    inset-block-start: 12px;
-    inset-inline-start: 50%;
-    transform: translateX(-50%);
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 12px;
+    padding: 2px 10px;
     border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--accent-text);
     font-size: var(--fs-s);
     white-space: nowrap;
-    pointer-events: none;
-    backdrop-filter: blur(6px);
-  }
-  :global([dir='rtl']) .draft-banner {
-    transform: translateX(50%);
   }
   .states-host {
     position: absolute;
     inset-block-end: 12px;
     inset-inline-start: 12px;
-    max-width: calc(100% - 240px);
+    max-width: calc(100% - 24px);
   }
   .tabs {
     display: flex;
@@ -1096,10 +1094,6 @@
       border-inline-start: 0;
       border-block-start: 1px solid var(--border);
       max-height: 60vh;
-    }
-    .states-host {
-      max-width: calc(100% - 24px);
-      inset-block-end: 52px;
     }
   }
 </style>

@@ -182,15 +182,18 @@ export const ENV_PRESETS: readonly EnvPresetDef[] = [
   {
     id: 'studio-soft',
     label: 'Studio soft',
-    sky: ['#f4f3f8', '#dcdbe4', '#b9b8c2'],
+    sky: ['#f1f0f6', '#cfcdd9', '#a9a8b4'],
     panels: [
-      { dir: [0.6, 0.7, 0.4], color: '#ffffff', intensity: 5, size: [6, 4] },
-      { dir: [-0.8, 0.4, 0.3], color: '#f1efff', intensity: 2.5, size: [5, 5] },
+      // key softbox (upper right), a tall fill strip (left), a low front strip
+      // that paints a soft gradient band across glossy faces, a top box and a rim.
+      { dir: [0.7, 0.6, 0.5], color: '#ffffff', intensity: 6, size: [6, 4] },
+      { dir: [-0.8, 0.3, 0.6], color: '#f1efff', intensity: 3, size: [3, 7] },
+      { dir: [0.15, 0.05, 1], color: '#ffffff', intensity: 1.4, size: [6, 1.6] },
+      { dir: [0, 1, 0], color: '#ffffff', intensity: 1.4, size: [10, 10] },
       { dir: [0, 0.3, -1], color: '#ffffff', intensity: 3, size: [8, 3] },
-      { dir: [0, 1, 0], color: '#ffffff', intensity: 1.6, size: [10, 10] },
     ],
     backdrop: ['#f5f4fa', '#dedce8'],
-    exposure: 1,
+    exposure: 0.95,
   },
   {
     id: 'sunset',
