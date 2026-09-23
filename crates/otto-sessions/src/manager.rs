@@ -4914,12 +4914,12 @@ mod tests {
             let auth = mgr.auth.as_ref().unwrap();
             let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
             assert!(auth.authenticate(&token).await.is_ok());
-            match operation {
+            let outcome = match operation {
                 "archive" => mgr.archive(&id).await.map(|_| ()),
                 "suspend" => mgr.suspend(&id).await,
                 _ => mgr.kill_session(&id).await,
-            }
-            .unwrap();
+            };
+            outcome.unwrap();
             assert!(
                 auth.authenticate(&token).await.is_err(),
                 "{operation} left the session's MCP credential valid"
