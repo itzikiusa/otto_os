@@ -96,7 +96,7 @@ fn update_config(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
-        let Some(next) = merge(&current)? else {
+        let Some(next) = merge(current.as_str())? else {
             return Ok(false);
         };
         if let Some(dir) = path.parent() {
