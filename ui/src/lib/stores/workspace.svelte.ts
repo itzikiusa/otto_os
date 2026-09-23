@@ -2,6 +2,7 @@
 
 import { api } from '../api/client';
 import { listActiveWorkflowRuns } from '../api/workflows';
+import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
 import type {
   ActiveWorkflowRun,
@@ -1270,7 +1271,7 @@ class WorkspaceStore {
    *  could revert keys changed since (e.g. api_client.allow_local). */
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
-    const fresh = await api.get<Workspace>(`/workspaces/${wsId}`);
+    const fresh = await fetchWorkspace(wsId);
     const settings = { ...fresh.settings, notes };
     const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
     this.workspaces = this.workspaces.map((w) =>

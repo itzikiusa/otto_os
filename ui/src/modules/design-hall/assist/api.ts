@@ -9,6 +9,7 @@
 
 import { api } from '../../../lib/api/client';
 import { improveApi } from '../../../lib/api/improve';
+import { fetchWorkspace } from '../../../lib/api/workspaces';
 import type {
   DesignAssistReq,
   DesignAssistTurn,
@@ -85,7 +86,7 @@ export function listDesignMemories(workspaceId: Id) {
  * since (the same pattern as `ws.saveNotes`). Workspace-admin gated.
  */
 export async function setLearningMode(workspaceId: Id, mode: 'suggest' | 'off'): Promise<Workspace> {
-  const fresh = await api.get<Workspace>(`/workspaces/${enc(workspaceId)}`);
+  const fresh = await fetchWorkspace(workspaceId);
   const settings = { ...(fresh.settings ?? {}), design_learning: mode };
   return api.patch<Workspace>(`/workspaces/${enc(workspaceId)}`, { settings });
 }
