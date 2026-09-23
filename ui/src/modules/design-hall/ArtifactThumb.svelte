@@ -47,8 +47,11 @@
     live?: boolean;
     /** A small cell (mosaics): the placeholder shows the badge only. */
     compact?: boolean;
+    /** Render this version instead of the head (a variant tray card). The
+     *  stored thumbnail belongs to the head, so it is skipped. */
+    versionId?: string | null;
   }
-  let { artifact, live = false, compact = false }: Props = $props();
+  let { artifact, live = false, compact = false, versionId = null }: Props = $props();
 
   type Pic =
     | { kind: 'img'; src: string }
@@ -57,13 +60,13 @@
   let pic = $state<Pic>({ kind: 'none' });
   let boxW = $state(0);
 
-  const version = $derived(artifact.head_version_id ?? 'none');
+  const version = $derived(versionId ?? artifact.head_version_id ?? 'none');
   const rk = $derived(renderKind(artifact.format));
 
-  async function sourceOf(a: DesignArtifact): Promise<string | null> {
-    return remember(texts, `${a.id}:${a.head_version_id}`, async () => {
+  async function sourceOf(a: DesignArtifact, v: string | null): Promise<string | null> {
+    return remember(texts, `${a.id}:${v ?? a.head_version_id}`, async () => {
       try {
-        const d = await getArtifact(a.id, { content: true });
+        const d = await getArtifact(a.id, v ? { content: true, version: v } : { content: true });
         return d.content_truncated ? null : d.content;
       } catch {
         return null;
@@ -82,28 +85,29 @@
   let gen = 0;
   $effect(() => {
     const a = artifact;
+    const v = versionId;
     void version;
     const myGen = ++gen;
     void (async () => {
       let next: Pic = { kind: 'none' };
-      if (a.thumb_blob) {
+      if (a.thumb_blob && !v) {
         const u = await remember(urls, `t:${a.id}:${a.thumb_blob}`, () => thumbnailUrl(a.id).catch(() => null), revoke);
         if (u) next = { kind: 'img', src: u };
       } else if (live && isImageFormat(a.format)) {
         const u = await remember(
           urls,
-          `c:${a.id}:${a.head_version_id}`,
-          () => fetchContent(a.id, { asText: false }).then((c) => c.blobUrl, () => null),
+          `c:${a.id}:${v ?? a.head_version_id}`,
+          () => fetchContent(a.id, v ? { asText: false, version: v } : { asText: false }).then((c) => c.blobUrl, () => null),
           revoke,
         );
         if (u) next = { kind: 'img', src: u };
       } else if (live && (rk === 'html' || rk === 'svg' || rk === 'mermaid' || rk === 'd2')) {
-        const src = await sourceOf(a);
+        const src = await sourceOf(a, v);
         if (src && src.trim()) {
           if (rk === 'html') next = { kind: 'doc', html: src };
           else if (rk === 'svg') next = { kind: 'doc', html: svgDoc(src) };
           else {
-            const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${myGen}`, src) : await renderD2(a.id, src);
+            const r = rk === 'mermaid' ? await renderMermaid(`dh-thumb-${a.id}-${v ?? 'h'}-${myGen}`, src) : await renderD2(a.id, src);
             if (r.svg) next = { kind: 'doc', html: svgDoc(r.svg) };
           }
         }

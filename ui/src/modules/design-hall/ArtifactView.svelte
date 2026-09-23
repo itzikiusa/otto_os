@@ -48,6 +48,7 @@
   import CompareModal, { type CompareSide } from './CompareModal.svelte';
   import LinksPanel from './LinksPanel.svelte';
   import ReferencesPanel from './ReferencesPanel.svelte';
+  import OttoPanel from './assist/OttoPanel.svelte';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
@@ -81,7 +82,7 @@
 
   let selected = $state<string[]>([]);
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
-  let rightTab = $state<'inspector' | 'links' | 'references'>('links');
+  let rightTab = $state<'inspector' | 'otto' | 'links' | 'references'>('links');
   let showSource = $state(false);
   let device = $state<DeviceKind>('none');
   let sceneSel = $state<string | null>(null);
@@ -151,7 +152,7 @@
       newerHead = null;
       phase = 'ready';
       loadError = null;
-      if (first && renderKind(d.artifact.format) === 'scene3d') rightTab = 'inspector';
+      if (first && renderKind(d.artifact.format) === 'scene3d' && rightTab !== 'otto') rightTab = 'inspector';
     } catch (e) {
       if (my !== loadSeq) return;
       if (e instanceof ApiError && e.status === 404) phase = 'gone';
@@ -240,7 +241,8 @@
       selected = [];
       compare = null;
       sceneSel = null;
-      rightTab = 'links';
+      // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
+      rightTab = router.parts[3] === 'otto' ? 'otto' : 'links';
       phase = 'loading';
       void load(target);
       void loadVersions();
@@ -604,6 +606,22 @@
     const r = parseScene(source);
     return r.ok ? r.doc : null;
   });
+  // What the Otto tab focuses a turn on: the selected 3D object today (Site
+  // Studio's section selection plugs in here when it lands).
+  const assistSelection = $derived.by(() => {
+    if (kind !== 'scene3d' || !sceneSel || !sceneDoc) return null;
+    const o = sceneDoc.objects.find((x) => x.id === sceneSel);
+    return { node_id: sceneSel, label: o?.name || sceneSel };
+  });
+  const assistBlocked = $derived(
+    !canEdit
+      ? 'You can view this design, but asking Otto to change it needs edit access.'
+      : imported
+        ? 'Mirrored from Product/Canvas — make an editable copy to work on it with Otto.'
+        : !textual
+          ? 'Otto edits text and JSON designs. Images, PDFs and 3D models can’t be changed by an agent.'
+          : null,
+  );
   function onScene(d: Scene3dDoc): void {
     if (!readonly) source = serializeScene(d);
   }
@@ -616,6 +634,7 @@
       { id: 'design.named', title: 'Save named version…', group: 'Design Hall', keywords: 'commit message', run: () => void saveNamed() },
       { id: 'design.compare', title: 'Compare versions', group: 'Design Hall', keywords: 'diff history restore', run: openCompare },
       { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => (rightTab = 'references') },
+      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => (rightTab = 'otto') },
     ]);
   });
 
@@ -768,6 +787,9 @@
             {#if kind === 'scene3d'}
               <button role="tab" aria-selected={rightTab === 'inspector'} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')}>Inspector</button>
             {/if}
+            <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+              Otto
+            </button>
             <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
@@ -776,7 +798,7 @@
             </button>
           </div>
           <div class="panel" role="tabpanel">
-            {#if brief && rightTab !== 'inspector'}
+            {#if brief && rightTab !== 'inspector' && rightTab !== 'otto'}
               <div class="brief">
                 <span class="k"><Icon name="sparkle" size={12} /> Brief</span>
                 <p>{brief}</p>
@@ -788,6 +810,9 @@
               {:else}
                 <p class="dim pad">Fix the scene document to inspect it.</p>
               {/if}
+            {:else if rightTab === 'otto'}
+              <OttoPanel {artifact} {versions} {head} uses={split.uses} {dirty} selection={assistSelection}
+                readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
             {:else if rightTab === 'links'}
               <LinksPanel {artifact} uses={split.uses} usedIn={split.usedIn} loading={linksLoading} error={linksError}
                 readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} />
