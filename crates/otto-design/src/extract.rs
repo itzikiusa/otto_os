@@ -96,6 +96,7 @@ pub fn extract(format: &str, bytes: &[u8]) -> Extraction {
     match format {
         "html" | "svg" => extract_html(text, &mut out),
         "mermaid" | "d2" => extract_diagram(text, &mut out),
+        "otto-brand" => out = crate::brand::extract(text),
         "png" | "jpeg" | "gif" | "webp" | "pdf" | "glb" => {}
         _ => match serde_json::from_str::<Value>(text) {
             Ok(v) => extract_json(format, &v, &mut out),
