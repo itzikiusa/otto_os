@@ -26,6 +26,7 @@
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
+  import SiteStudio from './site/SiteStudio.svelte';
 
   interface Props {
     artifact: DesignArtifact;
@@ -183,7 +184,9 @@
 
 <div class="stage" class:split={hasSourcePane} class:compact>
   <div class="view" data-testid="design-stage">
-    {#if kind === 'html' || inner.kind === 'html'}
+    {#if artifact.format === 'otto-site'}
+      <SiteStudio {artifact} {source} readonly={!editable} {compact} onchange={(s) => editable && onchange?.(s)} />
+    {:else if kind === 'html' || inner.kind === 'html'}
       {#if compact || device === 'none'}
         <!-- Fit: render at a 1280px desktop viewport and scale it into the pane,
              so a page reads as a page (not reflowed to the pane's width). -->

@@ -9422,3 +9422,74 @@ export interface DesignLearnExtractResp {
   skipped: number;
   candidates: DesignRuleCandidate[];
 }
+
+// ── Site Studio (otto-site v1): static export, local preview, publishes ─────
+// Mirrors crates/otto-design/src/site/{export,http}.rs; contract:
+// docs/contracts/api.md § "Site Studio". The document schema itself is typed in
+// ui/src/modules/design-hall/site/engine/types.ts (it is content, not wire DTOs).
+
+/** One row of `design_publishes`: a publish of ONE version, with the exact
+ *  versions of everything it rendered (brand kit, 3D embeds, images). */
+export interface DesignPublish {
+  id: Id;
+  artifact_id: Id;
+  version_id: Id;
+  /** `zip` | `local` today; `artifact` / `gh_pages` / `netlify` / `cloudflare` are reserved. */
+  target: string;
+  url: string | null;
+  pinned_set: DesignSitePinnedSet;
+  created_by: Id;
+  created_at: string;
+}
+
+/** A reference a publish resolved to a concrete version. */
+export interface DesignPinnedRef {
+  /** `brand` | `embed` | `image`. */
+  role: string;
+  /** The reference as the document wrote it (`otto://design/<id>@approved`). */
+  uri: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+  title: string;
+  /** What the document asked for: `follow_approved` | `follow_latest` | `pinned`. */
+  policy: string;
+  /** Unresolvable (missing artifact/version, no access) — rendered as a stand-in. */
+  missing: boolean;
+}
+
+export interface DesignSitePinnedSet {
+  format: 'otto-site';
+  site: { artifact_id: Id; version_id: Id; seq: number };
+  brand_kit: DesignPinnedRef | null;
+  refs: DesignPinnedRef[];
+}
+
+/** `POST /design/artifacts/{id}/export`. */
+export interface DesignSiteExportReq {
+  /** `zip` → the static site as a download; `local` → a loopback preview URL. */
+  target: 'zip' | 'local';
+  /** Version id / `v12` / `12`; default the head. */
+  version?: string;
+}
+
+export interface DesignSitePage {
+  id: string;
+  title: string;
+  slug: string;
+  /** File name in the zip (`index.html`, `tiers.html`). */
+  file: string;
+  /** Loopback preview path of this page (bearer-authenticated). */
+  url: string;
+}
+
+/** `POST …/export {target:"local"}` (the zip target answers with the archive). */
+export interface DesignSiteLocalResp {
+  publish: DesignPublish;
+  /** `/api/v1/design/artifacts/{id}/preview?publish=<id>`. */
+  url: string;
+  pages: DesignSitePage[];
+  pinned: DesignSitePinnedSet;
+  /** Non-fatal problems (a missing embed rendered as a stand-in, …). */
+  warnings: string[];
+}

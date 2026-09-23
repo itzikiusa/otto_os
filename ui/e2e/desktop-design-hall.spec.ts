@@ -77,8 +77,8 @@ test('the lobby shows every studio and its menus stay inside the viewport', asyn
   await page.keyboard.press('Escape');
 
   // A planned studio opens an explanation, never a dead click.
-  await page.getByTestId('design-studio-site').click();
-  await expect(page.getByTestId('design-studio-note')).toContainText('Phase 1');
+  await page.getByTestId('design-studio-spatial').click();
+  await expect(page.getByTestId('design-studio-note')).toContainText('v3');
 });
 
 test('create → edit → new version → compare → restore', async ({ page }) => {
