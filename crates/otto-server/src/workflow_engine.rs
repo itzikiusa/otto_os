@@ -2724,6 +2724,9 @@ pub async fn run_workflow(
     // automations must not accumulate one worktree/branch per run.
     clear_skip_markers(&ctx, &run_id);
     reap_run_worktrees(&ctx, &run_id).await;
+    // Reap earlier runs whose worktrees were kept for a reopenable session
+    // that has since gone (or aged past the reopen TTL).
+    sweep_stale_run_worktrees(&ctx).await;
 }
 
 /// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
@@ -7266,12 +7269,27 @@ async fn resolve_wf_base(git: &otto_git::LocalGit, base: &str) -> Option<String>
 /// a failed run's reap destroyed an implement step's uncommitted test suite —
 /// the branch policy alone protects only what was committed). If that sweep
 /// fails, the worktree directory is kept rather than destroyed.
+///
+/// Reopen policy: while a step session whose cwd is one of these worktrees can
+/// still be reopened, the worktrees stay ([`run_worktrees_in_use`]) — "Open
+/// session" on a finished step resumes the agent IN its worktree, and reaping
+/// it under the session re-created an empty non-git dir that the next
+/// startup sweep then deleted with whatever the user did there. Deferred
+/// runs are reaped by the next sweep once their sessions are gone (or the
+/// reopen TTL has passed).
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return, // nothing provisioned
     };
+    if run_worktrees_in_use(ctx, run_id, &dir).await {
+        tracing::info!(
+            "wf reap: keeping {} — a step session there can still be reopened",
+            dir.display()
+        );
+        return;
+    }
     let branch = format!("otto-wf/{run_id}");
     let mut kept_any = false;
     for entry in entries.flatten() {
@@ -7282,14 +7300,20 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         let wt_str = wt.to_string_lossy().to_string();
         // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
         let wt_git = otto_git::LocalGit::new(&wt_str);
+        // Not (or no longer) a readable git worktree: its content can't be
+        // swept into a commit, so the directory cleanup below must not
+        // bulldoze it either.
         let Ok(common) = wt_git
             .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .await
         else {
+            tracing::warn!("wf reap: {wt_str} is not a readable git worktree — keeping it");
+            kept_any = true;
             continue;
         };
         let common = common.trim();
         let Some(root) = std::path::Path::new(common).parent() else {
+            kept_any = true;
             continue;
         };
         match wt_git
@@ -7348,6 +7372,12 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
 /// from ottod startup after [`reconcile_interrupted_runs`] — runs it chose to
 /// resume are `pending` again by then, so their worktrees survive.
 pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
+    // One sweep at a time: it also runs at every run end (deferred reaps), and
+    // two sweeps committing/removing the same worktree would race.
+    static SWEEP: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let Ok(_sweeping) = SWEEP.get_or_init(|| tokio::sync::Mutex::new(())).try_lock() else {
+        return;
+    };
     let base = ctx.data_dir.join("workflow-runs");
     let entries = match std::fs::read_dir(&base) {
         Ok(e) => e,
@@ -7372,6 +7402,47 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
         }
         reap_run_worktrees(ctx, &run_id).await;
     }
+}
+
+/// How long a FINISHED run's worktrees outlive it while one of its step
+/// sessions is still reopenable (suspended). A LIVE session — a
+/// `keep_session: true` step, or one still at its prompt — holds them for as
+/// long as it lives.
+const RUN_WORKTREE_REOPEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether any step session of `run_id` still works in (or can be reopened
+/// in) the run's worktree dir `dir`: a live session always holds it, a
+/// suspended (`reconnectable`) one within [`RUN_WORKTREE_REOPEN_TTL`] of the
+/// run's end. Sessions elsewhere (review fleets, interactive ones) never hold.
+async fn run_worktrees_in_use(ctx: &ServerCtx, run_id: &str, dir: &std::path::Path) -> bool {
+    use otto_core::domain::SessionStatus;
+    let Ok(run) = WorkflowsRepo::new(ctx.pool.clone())
+        .get_run(&run_id.to_string())
+        .await
+    else {
+        return false;
+    };
+    let ttl = chrono::Duration::from_std(RUN_WORKTREE_REOPEN_TTL)
+        .unwrap_or_else(|_| chrono::Duration::hours(24));
+    let reopen_window = run.finished_at.is_none_or(|f| chrono::Utc::now() - f < ttl);
+    for sid in run.nodes.iter().flat_map(|n| n.sessions.iter()) {
+        let Ok(s) = ctx.manager.get(sid).await else {
+            continue;
+        };
+        if !std::path::Path::new(&s.cwd).starts_with(dir) {
+            continue;
+        }
+        match s.status {
+            SessionStatus::Exited => {}
+            SessionStatus::Reconnectable => {
+                if reopen_window {
+                    return true;
+                }
+            }
+            SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle => return true,
+        }
+    }
+    false
 }
 
 async fn resolve_repo_entries(
