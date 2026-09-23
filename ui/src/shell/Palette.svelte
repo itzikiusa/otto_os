@@ -13,6 +13,7 @@
     OrchestrateResp,
     SearchHit,
   } from '../lib/api/types';
+  import { untrack } from 'svelte';
   import { registry, type Command } from '../lib/commands.svelte';
   import {
     parseCommand,
@@ -196,32 +197,38 @@
   });
 
   $effect(() => {
-    // reset on open + focus, honoring the requested mode + prefill
-    if (ui.paletteOpen) {
-      mode = ui.paletteMode;
-      query = '';
-      selected = 0;
-      plan = null;
-      optimizedText = null;
-      searchHits = [];
-      searchBusy = false;
-      if (mode === 'english') englishText = ui.palettePrefill;
-      ui.palettePrefill = '';
-      queueMicrotask(() => {
-        if (mode === 'commands') inputEl?.focus();
-        else {
-          textareaEl?.focus();
-          // place caret at the end (after any prefill like "broadcast ")
-          const len = englishText.length;
-          textareaEl?.setSelectionRange(len, len);
-        }
-      });
-    } else {
-      // Palette closed — cancel any pending search so we don't waste a round-trip.
-      if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
-      searchAbort?.abort();
-      searchAbort = null;
-    }
+    // Reset on open + focus, honoring the requested mode + prefill. Track ONLY
+    // `ui.paletteOpen`: the body reads `mode` after writing it, so without the
+    // untrack a Commands↔English toggle (or askOtto) re-ran this effect, which
+    // flipped `mode` back and wiped `query` / `plan`.
+    const open = ui.paletteOpen;
+    untrack(() => {
+      if (open) {
+        mode = ui.paletteMode;
+        query = '';
+        selected = 0;
+        plan = null;
+        optimizedText = null;
+        searchHits = [];
+        searchBusy = false;
+        if (mode === 'english') englishText = ui.palettePrefill;
+        ui.palettePrefill = '';
+        queueMicrotask(() => {
+          if (mode === 'commands') inputEl?.focus();
+          else {
+            textareaEl?.focus();
+            // place caret at the end (after any prefill like "broadcast ")
+            const len = englishText.length;
+            textareaEl?.setSelectionRange(len, len);
+          }
+        });
+      } else {
+        // Palette closed — cancel any pending search so we don't waste a round-trip.
+        if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
+        searchAbort?.abort();
+        searchAbort = null;
+      }
+    });
   });
 
   // Free text in commands mode is always offered as an orchestrator ask, so
