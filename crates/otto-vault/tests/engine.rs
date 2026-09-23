@@ -1094,10 +1094,7 @@ async fn regression_asset_symlink_cannot_escape_the_vault() {
         td.path().join("assets/logo.png"),
     )
     .unwrap();
-    let err = eng
-        .asset_path(WS, id, "assets/logo.png")
-        .await
-        .unwrap_err();
+    let err = eng.asset_path(WS, id, "assets/logo.png").await.unwrap_err();
     assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
     // A regular attachment (and an in-vault symlink) still streams.
     assert!(eng.asset_path(WS, id, "assets/arch.png").await.is_ok());
