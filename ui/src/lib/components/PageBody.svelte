@@ -45,15 +45,18 @@
   .page-body.fill.padded {
     padding-bottom: 16px;
   }
+  /* Block flow by default (children keep their intrinsic widths — an inline
+     segmented control must not stretch to the column); `fill` turns it into
+     a flex column pinned to the pane so a child with `flex: 1` fills it. */
   .page-body-inner {
     flex: 1 0 auto;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
   }
   .fill > .page-body-inner {
     flex: 1 1 0;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .page-body-inner.readable {
     width: 100%;

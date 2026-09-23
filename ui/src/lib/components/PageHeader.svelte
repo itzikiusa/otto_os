@@ -290,9 +290,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 0 1 auto;
-    min-width: 80px;
-    max-width: 50%;
+    /* Keeps its natural width (no reserved minimum, so short titles don't
+       leave a gap before inline tabs); long titles ellipsize at the cap. */
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: 45%;
   }
   /* A snippet whose content is conditional can render nothing; the empty slot
      must not eat a flex gap. */
