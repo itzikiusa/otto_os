@@ -123,6 +123,7 @@ fn row_artifact(r: &sqlx::sqlite::SqliteRow) -> Result<DesignArtifact> {
         last_editor_kind: opt_col(r, "last_editor_kind"),
         last_editor_name: opt_col(r, "last_editor_name"),
         story_ids: split_ids(opt_col(r, "story_ids_joined")),
+        created_session_title: opt_col(r, "created_session_title"),
     })
 }
 
@@ -234,8 +235,9 @@ macro_rules! user_name_of {
 }
 
 /// Read-time enrichment of an artifact row (`a` + its head version `v`):
-/// people, the head's author and the linked story ids. Every artifact
-/// select carries these columns; `row_artifact` reads them leniently.
+/// people, the head's author, the linked story ids and the creating
+/// session's title. Every artifact select carries these columns;
+/// `row_artifact` reads them leniently.
 macro_rules! art_enrich_cols {
     () => {
         concat!(
@@ -245,7 +247,9 @@ macro_rules! art_enrich_cols {
             user_name_of!("v.author_id"),
             " AS last_editor_name, \
              (SELECT group_concat(l.dst_id, char(10)) FROM design_links l \
-              WHERE l.src_artifact_id = a.id AND l.dst_kind = 'story') AS story_ids_joined"
+              WHERE l.src_artifact_id = a.id AND l.dst_kind = 'story') AS story_ids_joined, \
+             (SELECT s.title FROM sessions s WHERE s.id = a.created_session_id) \
+              AS created_session_title"
         )
     };
 }
@@ -2200,5 +2204,43 @@ mod tests {
         assert_eq!(seen.len(), 5, "{seen:?}");
         assert!(parse_cursor("nope").is_err());
         assert!(parse_cursor("2026-01-01T00:00:00Z|").is_err());
+    }
+
+    #[tokio::test]
+    async fn artifacts_carry_their_creating_session_title() {
+        let s = store().await;
+        for stmt in [
+            "INSERT INTO users (id, username, password_hash, created_at)
+             VALUES ('u1', 'ada', 'x', 'now')",
+            "INSERT INTO workspaces (id, name, root_path, created_at)
+             VALUES ('w1', 'W', '/tmp/w', 'now')",
+            "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd,
+                                   created_by, created_at, last_active_at)
+             VALUES ('sess1', 'w1', 'agent', 'claude', 'Design the hero', 'idle', '/tmp/w',
+                     'u1', 'now', 'now')",
+        ] {
+            sqlx::query(stmt).execute(s.pool()).await.unwrap();
+        }
+        let mut a = art("A", "w1");
+        a.created_session_id = Some("sess1".into());
+        s.insert_artifact(&a).await.unwrap();
+        let mut b = art("B", "w1");
+        b.created_session_id = Some("gone".into());
+        s.insert_artifact(&b).await.unwrap();
+        s.insert_artifact(&art("C", "w1")).await.unwrap();
+        let got = s
+            .artifacts_by_ids(&["A".into(), "B".into(), "C".into()])
+            .await
+            .unwrap();
+        let title = |id: &str| {
+            got.iter()
+                .find(|x| x.id == id)
+                .unwrap()
+                .created_session_title
+                .clone()
+        };
+        assert_eq!(title("A").as_deref(), Some("Design the hero"));
+        assert_eq!(title("B"), None, "a deleted session degrades to null");
+        assert_eq!(title("C"), None);
     }
 }

@@ -3077,7 +3077,9 @@ first version or for a system author) and `DesignVersion.author_name` (same
 rule for `author_id`). An agent version's `author_id` is the user who
 launched the agent, so its name is that user's with `author_kind: "agent"`.
 `DesignArtifact.story_ids` lists the product stories the artifact is linked
-to (`dst_kind: "story"` — `implements` — links), sorted.
+to (`dst_kind: "story"` — `implements` — links), sorted;
+`created_session_title` is the title of the `created_session_id` session
+(`null` when unset or the session row is gone).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|

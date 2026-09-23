@@ -183,6 +183,10 @@ pub struct DesignArtifact {
     /// `implements`), sorted.
     #[serde(default)]
     pub story_ids: Vec<Id>,
+    /// Title of `created_session_id`'s session (`null` when unset or the
+    /// session row is gone).
+    #[serde(default)]
+    pub created_session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8995,6 +8995,8 @@ export interface DesignArtifact {
   last_editor_name: string | null;
   /** Product stories this artifact is linked to (`implements`), sorted. */
   story_ids: Id[];
+  /** Title of the `created_session_id` session (`null`: unset or gone). */
+  created_session_title: string | null;
 }
 
 export interface DesignVersion {
