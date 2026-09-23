@@ -123,6 +123,20 @@ fn row_to_iter(r: &sqlx::sqlite::SqliteRow) -> Result<GoalLoopIteration> {
 // Repository
 // ---------------------------------------------------------------------------
 
+/// Seconds of the active window a loop interrupted by a daemon death gets
+/// charged: from `run_started_at` to the last time the controller was known
+/// alive (every runtime write touches `updated_at`), never to "now". Charging
+/// up to now billed the whole downtime / laptop sleep, so a loop resumed the
+/// next morning hit its time cap ("Exhausted") without doing any work.
+fn interrupted_window_secs(
+    started: chrono::DateTime<Utc>,
+    last_alive: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> u64 {
+    let until = last_alive.min(now).max(started);
+    (until - started).num_seconds().max(0) as u64
+}
+
 impl GoalLoopsRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -641,8 +655,11 @@ impl GoalLoopsRepo {
         let now = fmt(Utc::now());
         for l in &loops {
             if let Some(started) = l.run_started_at {
-                self.add_elapsed(&l.id, (Utc::now() - started).num_seconds().max(0) as u64)
-                    .await?;
+                self.add_elapsed(
+                    &l.id,
+                    interrupted_window_secs(started, l.updated_at, Utc::now()),
+                )
+                .await?;
             }
             sqlx::query(
                 "UPDATE goal_loops SET status = CASE WHEN status = 'blocked' THEN 'blocked' ELSE 'paused' END, error = ?, phase = 'done',
@@ -805,5 +822,17 @@ mod tests {
         let after = repo.get(&l.id).await.unwrap();
         assert_eq!(after.status, GoalLoopStatus::Paused);
         assert_eq!(after.error.as_deref(), Some("interrupted"));
+    }
+
+    /// F4: a daemon death charges the active window only up to the controller's
+    /// last sign of life, never the downtime that followed.
+    #[test]
+    fn interrupted_window_stops_at_the_last_sign_of_life() {
+        let t = |h: i64| Utc::now() - chrono::Duration::hours(h);
+        // Started 12h ago, last write 10h ago, daemon back now → 2h, not 12h.
+        let secs = interrupted_window_secs(t(12), t(10), Utc::now());
+        assert!((7190..=7210).contains(&secs), "{secs}");
+        // A touch older than the start (clock skew) never goes negative.
+        assert_eq!(interrupted_window_secs(t(1), t(2), Utc::now()), 0);
     }
 }
