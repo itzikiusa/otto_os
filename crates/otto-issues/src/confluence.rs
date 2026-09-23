@@ -757,13 +757,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // ── Helper functions ───────────────────────────────────────────────────
 
     fn decode_entities(s: &str) -> String {
-        s.replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
+        decode_html_entities(s)
     }
 
     macro_rules! push_block_sep {
@@ -1277,6 +1271,70 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     collapse_excess_newlines(&result)
 }
 
+/// Decode HTML/XML character references in ONE pass: named (`&amp;`, `&lt;`,
+/// `&rsquo;`, `&mdash;`, …) and numeric (`&#8217;`, `&#x2019;`). The old chain
+/// of `replace`s decoded `&amp;lt;` twice (to `<`, not the literal `&lt;`) and
+/// left `&rsquo;`/`&#8217;` alone — which the publish path then re-escaped
+/// into a visible "don&amp;rsquo;t". Unknown references are kept verbatim.
+fn decode_html_entities(s: &str) -> String {
+    fn named(name: &str) -> Option<char> {
+        if let Some(num) = name.strip_prefix('#') {
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse::<u32>().ok()?,
+            };
+            return char::from_u32(code);
+        }
+        Some(match name {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            "nbsp" => ' ',
+            "lsquo" => '\u{2018}',
+            "rsquo" => '\u{2019}',
+            "ldquo" => '\u{201C}',
+            "rdquo" => '\u{201D}',
+            "ndash" => '\u{2013}',
+            "mdash" => '\u{2014}',
+            "hellip" => '\u{2026}',
+            "bull" => '\u{2022}',
+            "middot" => '\u{00B7}',
+            "larr" => '\u{2190}',
+            "rarr" => '\u{2192}',
+            "times" => '\u{00D7}',
+            "deg" => '\u{00B0}',
+            "copy" => '\u{00A9}',
+            "reg" => '\u{00AE}',
+            "trade" => '\u{2122}',
+            _ => return None,
+        })
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let decoded = after
+            .find(';')
+            .filter(|&semi| semi <= 10)
+            .and_then(|semi| named(&after[..semi]).map(|c| (c, semi)));
+        match decoded {
+            Some((c, semi)) => {
+                out.push(c);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Join the CDATA sections of a storage text body into plain text
 /// (`<![CDATA[a]]>` → `a`; a `]]>` inside code is split by Confluence into
 /// `]]]]><![CDATA[>`, which this rejoins). Text without CDATA is returned as-is.
@@ -1425,6 +1483,12 @@ fn collapse_excess_newlines(s: &str) -> String {
 /// `**bold**`, `*italic*`, `[text](url)`.  Escapes `&`, `<`, `>` in plain text.
 pub fn markdown_to_storage(md: &str) -> String {
     let mut out = String::new();
+    // Control characters (an ANSI escape pasted from a terminal, a stray NUL)
+    // are invalid in XML 1.0 and make Confluence reject the whole page (400).
+    let md: String = md
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect();
     let lines: Vec<&str> = md.lines().collect();
     let mut i = 0;
 
@@ -1508,9 +1572,11 @@ pub fn markdown_to_storage(md: &str) -> String {
                     let after_start = j + close_bracket + 2;
                     if let Some(close_paren) = find_ch(after_start, ')') {
                         let url_part = span(after_start, after_start + close_paren);
+                        // `"` must be escaped inside the attribute — a raw one
+                        // ended it early and Confluence rejected the page (400).
                         out.push_str(&format!(
                             "<a href=\"{}\">{}</a>",
-                            escape_xml_char_str(&url_part),
+                            escape_xml_char_str(&url_part).replace('"', "&quot;"),
                             escape_xml_char_str(&text_part)
                         ));
                         j += close_bracket + 2 + close_paren + 1;
@@ -2189,6 +2255,32 @@ mod tests {
             "<p>b</p><ac:image ac:alt=\"z\"><ri:attachment ri:filename=\"f.png\"",
         );
         let _ = storage_to_markdown("<ac:image");
+    }
+
+    #[test]
+    fn entities_decode_once_and_cover_typographic_quotes() {
+        assert_eq!(decode_html_entities("&amp;lt;b&amp;gt;"), "&lt;b&gt;");
+        assert_eq!(
+            decode_html_entities("don&rsquo;t &#8217; &#x2019;"),
+            "don’t ’ ’"
+        );
+        assert_eq!(decode_html_entities("a &mdash; b&nbsp;c"), "a — b c");
+        // Unknown / unterminated references are kept verbatim.
+        assert_eq!(decode_html_entities("AT&T & &bogus; &"), "AT&T & &bogus; &");
+        let md = storage_to_markdown("<p>don&rsquo;t &amp;lt;tag&amp;gt;</p>");
+        assert_eq!(md, "don’t &lt;tag&gt;");
+    }
+
+    #[test]
+    fn markdown_to_storage_escapes_href_quotes_and_drops_control_chars() {
+        let s = markdown_to_storage("see [x](https://e.x/?q=\"a\")");
+        assert!(
+            s.contains("href=\"https://e.x/?q=&quot;a&quot;\""),
+            "got: {s:?}"
+        );
+        let s = markdown_to_storage("red \u{1b}[31mtext\u{0}");
+        assert!(!s.contains('\u{1b}') && !s.contains('\u{0}'), "got: {s:?}");
+        assert!(s.contains("red [31mtext"), "got: {s:?}");
     }
 
     #[test]
