@@ -487,8 +487,9 @@ export function versionAuthor(v: DesignVersion, meId: string | null | undefined)
   if (v.author_kind === 'agent') return 'Otto';
   if (v.author_kind === 'system') return v.kind === 'sync' ? 'sync' : 'import';
   if (meId && v.author_id === meId) return 'you';
-  // Other people: user ids are opaque ULIDs — never show them as a name.
-  return 'teammate';
+  // Other people: the daemon resolves `author_name`; user ids are opaque
+  // ULIDs — never show them as a name.
+  return v.author_name?.trim() || 'teammate';
 }
 
 /** Version strip order: oldest → newest (the strip reads left to right). */
@@ -734,7 +735,11 @@ export type DesignRoute =
   | { view: 'studio'; id: DesignStudio }
   | { view: 'story'; id: string }
   | { view: 'brand' }
-  | { view: 'learned'; tab: 'signals' | 'rules' | 'memory' };
+  | { view: 'learned'; tab: LearnedTab };
+
+/** The "What Otto learned" tabs; `#/design/learned` opens on Pending. */
+export type LearnedTab = 'pending' | 'rules' | 'memory' | 'signals' | 'settings';
+const LEARNED_TABS: LearnedTab[] = ['pending', 'rules', 'memory', 'signals', 'settings'];
 
 /** `router.parts` (with parts[0] === 'design') → the Design Hall view. */
 export function parseDesignRoute(parts: string[]): DesignRoute {
@@ -757,7 +762,7 @@ export function parseDesignRoute(parts: string[]): DesignRoute {
     case 'brand':
       return { view: 'brand' };
     case 'learned':
-      return { view: 'learned', tab: b === 'rules' || b === 'memory' ? b : 'signals' };
+      return { view: 'learned', tab: LEARNED_TABS.includes(b as LearnedTab) ? (b as LearnedTab) : 'pending' };
     default:
       return { view: 'lobby' };
   }
