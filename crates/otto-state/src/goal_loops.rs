@@ -260,6 +260,33 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
+    /// [`update_runtime`] for the CONTROLLER's own progress writes: it applies
+    /// only while the loop is still `running`. A pause/stop that lands after
+    /// the controller's last stop check wrote `paused`; the controller's
+    /// unconditional `running` write then flipped it back, leaving a loop that
+    /// shows as running with no controller. Returns whether it applied.
+    pub async fn update_running_runtime(
+        &self,
+        id: &Id,
+        phase: GoalLoopPhase,
+        current_iteration: u32,
+        progress_pct: u32,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE goal_loops SET phase = ?, current_iteration = ?, progress_pct = ?,
+             updated_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(phase.as_str())
+        .bind(current_iteration as i64)
+        .bind(progress_pct as i64)
+        .bind(self.touch())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update goal-loop runtime (running)"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Just the phase (cheap, for phase-only transitions within an iteration).
     pub async fn set_phase(&self, id: &Id, phase: GoalLoopPhase) -> Result<()> {
         sqlx::query("UPDATE goal_loops SET phase = ?, updated_at = ? WHERE id = ?")
@@ -834,5 +861,44 @@ mod tests {
         assert!((7190..=7210).contains(&secs), "{secs}");
         // A touch older than the start (clock skew) never goes negative.
         assert_eq!(interrupted_window_secs(t(1), t(2), Utc::now()), 0);
+    }
+
+    /// F10: the controller's progress write never flips a paused loop back to
+    /// running.
+    #[tokio::test]
+    async fn controller_runtime_write_needs_a_running_loop() {
+        let pool = mem_pool().await;
+        let repo = GoalLoopsRepo::new(pool.clone());
+        let l = repo.create(new_loop()).await.unwrap();
+        repo.update_runtime(
+            &l.id,
+            GoalLoopStatus::Running,
+            GoalLoopPhase::Planning,
+            1,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .update_running_runtime(&l.id, GoalLoopPhase::Evaluating, 1, 40)
+            .await
+            .unwrap());
+        assert_eq!(repo.get(&l.id).await.unwrap().progress_pct, 40);
+        repo.update_runtime(
+            &l.id,
+            GoalLoopStatus::Paused,
+            GoalLoopPhase::Evaluating,
+            1,
+            40,
+        )
+        .await
+        .unwrap();
+        assert!(!repo
+            .update_running_runtime(&l.id, GoalLoopPhase::Digesting, 1, 40)
+            .await
+            .unwrap());
+        let after = repo.get(&l.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Paused);
+        assert_eq!(after.phase, GoalLoopPhase::Evaluating);
     }
 }
