@@ -6,6 +6,7 @@
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
@@ -117,8 +118,8 @@
               label: 'Unregister vault (keeps files)',
               icon: 'trash',
               danger: true,
-              action: () => {
-                if (confirm(`Unregister "${vault.current?.name}"? Files on disk are untouched.`)) {
+              action: async () => {
+                if (await confirmer.ask(`Unregister "${vault.current?.name}"? Files on disk are untouched.`, { title: 'Unregister vault', confirmLabel: 'Unregister' }) && vault.current) {
                   void vault.unregister(vault.current!.id);
                 }
               },

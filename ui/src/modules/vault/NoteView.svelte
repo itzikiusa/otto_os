@@ -9,6 +9,7 @@
   import { authedBlobUrl } from '../../lib/api/client';
   import { assetPath, vaultNote } from '../../lib/api/vault';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
@@ -90,7 +91,9 @@
     if (raw && t.getAttribute('data-unresolved')) {
       e.preventDefault();
       const p = raw.endsWith('.md') ? raw : `${raw}.md`;
-      if (confirm(`Create "${p}"?`)) void vault.createNote(p, `# ${raw}\n\n`);
+      void confirmer.ask(`Create "${p}"?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
+        if (ok) void vault.createNote(p, `# ${raw}\n\n`);
+      });
     }
   }
 

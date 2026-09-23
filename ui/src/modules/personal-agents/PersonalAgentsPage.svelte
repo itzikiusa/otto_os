@@ -4,6 +4,7 @@
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal rows.
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -44,7 +45,7 @@
   }
 
   async function remove(a: PersonalAgent): Promise<void> {
-    if (!confirm(`Delete personal agent "${a.name}"? Its schedules and run history go with it.`)) return;
+    if (!(await confirmer.ask(`Delete personal agent "${a.name}"? Its schedules and run history go with it.`, { title: 'Delete personal agent' }))) return;
     try {
       await personalAgents.remove(a.id);
     } catch (e) {

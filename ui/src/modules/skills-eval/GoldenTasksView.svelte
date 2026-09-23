@@ -5,6 +5,7 @@
   // add/edit/delete a task and kick off a single score-only run against the
   // workspace's working tree — the result opens in the run detail via `onopenrun`.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { GoldenTask, GoldenTaskReq, SkillEval } from '../../lib/api/types';
@@ -158,7 +159,7 @@
   }
 
   async function remove(t: GoldenTask): Promise<void> {
-    if (!window.confirm(`Delete golden task “${t.name}”? This cannot be undone.`)) return;
+    if (!(await confirmer.ask(`Delete golden task “${t.name}”? This cannot be undone.`, { title: 'Delete golden task' }))) return;
     try {
       await skillsEvalApi.deleteGolden(t.id);
       tasks = tasks.filter((x) => x.id !== t.id);

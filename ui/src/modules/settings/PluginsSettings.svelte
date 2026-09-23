@@ -3,6 +3,7 @@
   // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
   // users is granted per-plugin in Settings → Users.
   import { onMount } from 'svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { plugins, type PluginRecord } from '../../lib/stores/plugins.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -63,7 +64,7 @@
   }
 
   async function remove(p: PluginRecord) {
-    if (!window.confirm(`Remove plugin "${p.name}"? Its files under ~/otto-plugins are kept.`)) return;
+    if (!(await confirmer.ask(`Remove plugin "${p.name}"? Its files under ~/otto-plugins are kept.`, { title: 'Remove plugin', confirmLabel: 'Remove' }))) return;
     busy = true;
     error = null;
     try {

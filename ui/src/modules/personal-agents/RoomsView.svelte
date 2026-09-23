@@ -4,6 +4,7 @@
   // live message feed (WS agent_room_message + `after` paging) and the user
   // post box on the right.
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -73,8 +74,8 @@
       {
         label: 'Rename',
         icon: 'edit',
-        action: () => {
-          const name = prompt('Room name', r.room.name)?.trim();
+        action: async () => {
+          const name = await confirmer.promptText('Room name', { title: 'Rename room', confirmLabel: 'Rename', initial: r.room.name });
           if (name) void personalAgents.renameRoom(r.room.id, name).catch(() => {});
         },
       },
@@ -82,8 +83,8 @@
         label: 'Delete room',
         icon: 'trash',
         danger: true,
-        action: () => {
-          if (confirm(`Delete room "${r.room.name}" and its transcript?`)) {
+        action: async () => {
+          if (await confirmer.ask(`Delete room "${r.room.name}" and its transcript?`, { title: 'Delete room' })) {
             void personalAgents.deleteRoom(r.room.id).catch(() => {});
           }
         },

@@ -5,6 +5,7 @@
   // auto-enabled — each server is off until you flip it on, and it's only written
   // to `.mcp.json` the next time a session spawns in the workspace.
   import { auth } from '../../lib/stores/auth.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mcpApi } from '../../lib/api/mcp';
   import { api } from '../../lib/api/client';
@@ -226,7 +227,7 @@
 
   async function remove(s: McpServer): Promise<void> {
     if (!wsId) return;
-    if (!confirm(`Remove MCP server "${s.name}"?`)) return;
+    if (!(await confirmer.ask(`Remove MCP server "${s.name}"?`, { title: 'Remove MCP server', confirmLabel: 'Remove' }))) return;
     busyId = s.id;
     try {
       await mcpApi.remove(s.id);

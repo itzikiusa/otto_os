@@ -3,6 +3,7 @@
   // (e.g. "Ronaldo", "Messi") and manage your own custom name lists (family
   // names, …). Per-user; backed by /name-themes.
   import { api } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
     NameThemesResp,
@@ -80,7 +81,7 @@
   }
 
   async function deleteTheme(t: NameThemeInfo): Promise<void> {
-    if (!confirm(`Delete custom theme “${t.label}”?`)) return;
+    if (!(await confirmer.ask(`Delete custom theme “${t.label}”?`, { title: 'Delete theme' }))) return;
     try {
       await api.del(`/name-themes/${t.id}`);
       await load();
