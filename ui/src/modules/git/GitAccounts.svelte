@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Git accounts settings page: provider, label, username, token (write-only),
   // api_base_url for self-hosted GitLab.
   import { api } from '../../lib/api/client';
@@ -217,14 +219,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Git Accounts</h1>
-      <div class="sub">Tokens live in the macOS Keychain and authenticate PR actions + https pushes.</div>
-    </div>
-    <button class="btn primary" onclick={openAdd}>Add Account</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Git Accounts" subtitle="Tokens live in the macOS Keychain and authenticate PR actions + https pushes.">
+    {#snippet actions()}
+      <button class="btn primary" onclick={openAdd}>Add Account</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={2} height={48} />
@@ -287,6 +288,7 @@
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 {#if addOpen}
@@ -391,6 +393,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .acct-list {
     display: flex;
     flex-direction: column;
@@ -452,9 +461,6 @@
      can't push the page wider than the viewport; bump icon-button + segmented
      tap targets. The modal box is already viewport-clamped by Modal.svelte. ── */
   @media (max-width: 1024px) {
-    .page {
-      padding: 16px 12px 32px;
-    }
     .acct-list {
       max-width: none;
     }

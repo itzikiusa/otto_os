@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Personal Access Tokens (PAT) management — mint long-lived API tokens,
   // view existing ones (prefix + last-seen), and revoke them individually.
   // Routes: POST/GET/DELETE /api/v1/auth/tokens  (api.md #87-89).
@@ -117,17 +119,9 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Personal Access Tokens</h1>
-      <div class="sub">
-        Long-lived tokens for scripts, CI, and the Otto CLI API.
-        Tokens are scoped to your account and inherit your permissions.
-        Impersonation sessions cannot mint PATs.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Personal Access Tokens" subtitle="Long-lived tokens for scripts, CI, and the Otto CLI API. Tokens are scoped to your account and inherit your permissions. Impersonation sessions cannot mint PATs." />
+  <PageBody width="readable">
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}
@@ -234,9 +228,17 @@
     </p>
     <pre class="code-block">curl -H "Authorization: Bearer &lt;token&gt;" http://127.0.0.1:7700/api/v1/auth/me</pre>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .token-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
   .session-badge { display: block; color: var(--text-dim); font-size: 11px; }
   .empty {

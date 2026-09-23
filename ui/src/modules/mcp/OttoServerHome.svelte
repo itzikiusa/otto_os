@@ -437,11 +437,12 @@
 
 <style>
   .otto {
-    padding: 16px;
+    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    max-width: 820px;
+    max-width: var(--page-readable);
+    box-sizing: border-box;
   }
   .hero,
   .panel {

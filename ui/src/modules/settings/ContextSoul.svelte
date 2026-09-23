@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Context & Soul settings page: per-workspace context provisioning. Pick which
   // library skills are active, which soul (persona) to use, free-form extra
   // context, and whether to inline the workspace MEMORY.md. A "Materialize now"
@@ -192,18 +194,9 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Workspace context</h1>
-      <div class="sub">
-        {ws.current?.name ?? 'Your workspace'} is the shared project for its sessions.
-        Goals, instructions, memory and references apply across agent providers when sessions start or restart.
-        Running conversations keep their current context.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Workspace context" subtitle={`${ws.current?.name ?? 'Your workspace'} is the shared project for its sessions. Goals, instructions, memory and references apply across agent providers when sessions start or restart. Running conversations keep their current context.`} />
+  <PageBody width="readable">
 
   {#if !wsId}
     <!-- No workspace selected -->
@@ -391,9 +384,17 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .form {
     margin: 0;
     min-width: 0;

@@ -235,9 +235,9 @@ test('MCP Control Plane page renders and lists the seeded server', async ({ page
 
   await page.goto('/#/mcp/servers');
   await expect(page.locator('.mcp-page')).toBeVisible({ timeout: 30_000 });
-  // Scope to the page header (.mcp-page .h) — the sidebar nav also has a
-  // "MCP Control Plane" label, which would make a bare getByText ambiguous.
-  await expect(page.locator('.mcp-page .mcp-head .h')).toHaveText('MCP Control Plane');
+  // Scope to the page header — the sidebar nav also has a "MCP Control Plane"
+  // label, which would make a bare getByText ambiguous.
+  await expect(page.locator('.mcp-page [data-testid="page-header"] h1')).toHaveText('MCP Control Plane');
 
   // The Servers section lists the seeded "mock" server.
   await expect(page.locator('.srow .nm', { hasText: 'mock' }).first()).toBeVisible({

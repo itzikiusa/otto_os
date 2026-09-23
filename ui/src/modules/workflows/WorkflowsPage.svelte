@@ -6,6 +6,9 @@
   import { marked } from 'marked';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
@@ -278,6 +281,45 @@
     return `${Math.floor(m / 60)}h ago`;
   }
 
+  // Never open onto an empty "build a workflow" pane when the workspace has
+  // workflows: restore the last-opened one (or the first) once per workspace
+  // load. Not on a phone, where the sidebar list is the first screen.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (current) {
+      autoPickedFor = wsId;
+      return;
+    }
+    // The list still holds the previous workspace's rows until load() lands.
+    const mine = workflows.filter((w) => w.workspace_id === wsId);
+    if (mine.length === 0) return;
+    autoPickedFor = wsId;
+    const id = initialSelection('workflows', mine, (w) => w.id);
+    const wf = mine.find((w) => w.id === id);
+    if (wf) untrack(() => open(wf));
+  });
+  $effect(() => {
+    if (current?.id) rememberSelection('workflows', current.id);
+  });
+
+  // The Node palette / Runs popovers hang off header buttons, but the header's
+  // action row clips overflow — so they render at the top of the editor pane,
+  // horizontally under their button (clamped into the pane).
+  let mainEl = $state<HTMLElement | null>(null);
+  let popRight = $state(8);
+  function anchorPop(e: MouseEvent, width: number): void {
+    const b = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+    const m = mainEl?.getBoundingClientRect();
+    // A button collapsed into the header's "⋯" menu has no box — pin right.
+    if (!b || !m || b.width === 0) {
+      popRight = 8;
+      return;
+    }
+    popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+  }
+
   async function load(): Promise<void> {
     try {
       if (types.length === 0) types = await api.get<NodeTypeSpec[]>('/workflows/node-types');
@@ -443,13 +485,19 @@
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
 
-  function startRename(wf: Workflow): void {
+  // Where the rename was started: the page header's title, or the sidebar row.
+  // Only that one surface shows the input (two autofocused inputs bound to the
+  // same value would steal focus from each other and commit on blur).
+  let renameInBar = $state(false);
+  function startRename(wf: Workflow, inBar = false): void {
     renamingId = wf.id;
     renameValue = wf.name;
+    renameInBar = inBar;
   }
   function cancelRename(): void {
     renamingId = null;
     renameValue = '';
+    renameInBar = false;
   }
   async function commitRename(wf: Workflow): Promise<void> {
     const name = renameValue.trim();
@@ -1236,6 +1284,126 @@
   </div>
 {/snippet}
 
+<div class="wf-root">
+<PageHeader class="wf-bar" title={current?.name ?? 'Workflows'}>
+  {#snippet titleContent()}
+    {#if current && renamingId === current.id && renameInBar}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="wf-title-edit"
+        bind:value={renameValue}
+        autofocus
+        aria-label="Workflow name"
+        onkeydown={(e) => {
+          if (e.key === 'Enter') commitRename(current!);
+          else if (e.key === 'Escape') cancelRename();
+        }}
+        onblur={() => commitRename(current!)}
+      />
+    {:else}
+      {current?.name ?? 'Workflows'}
+    {/if}
+  {/snippet}
+  {#snippet badge()}
+    {#if current && !(renamingId === current.id && renameInBar)}
+      <button class="title-edit" title="Rename workflow" aria-label="Rename workflow" onclick={() => current && startRename(current, true)}>
+        <Icon name="edit" size={13} />
+      </button>
+    {/if}
+    {#if current && dirty}<span class="badge">unsaved</span>{/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if current}
+      <button class="btn small" data-overflow="1" data-icon="plus" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+        <Icon name="plus" size={12} /> Node
+      </button>
+      {#if selectedId}
+        <button class="btn small" data-label="Delete selected" data-icon="trash" title="Delete selected" aria-label="Delete selected" onclick={removeSelected}><Icon name="trash" size={12} /></button>
+      {/if}
+      <button class="btn small" data-overflow="1" disabled={!dirty} onclick={save}>Save</button>
+      <button class="btn small" data-overflow="1" data-icon="clock" onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
+        <Icon name="clock" size={12} /> Runs
+      </button>
+
+      <!-- Instructions toggle: standing rules every step follows -->
+      <button
+        class="btn small"
+        data-overflow="-1"
+        data-icon="note"
+        onclick={() => (instructionsOpen = !instructionsOpen)}
+        title="Standing rules every step follows, by the letter"
+        data-label="Instructions"
+      >
+        <Icon name="note" size={12} /> Instructions
+      </button>
+
+      <!-- Triggers config toggle -->
+      <button class="btn small" data-overflow="1" data-icon="clock" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers" data-label="Triggers">
+        <Icon name="clock" size={12} /> Triggers
+      </button>
+
+      <!-- Tidy: reflow the graph into a few readable rows -->
+      <button class="btn small" data-overflow="-2" data-icon="grid" onclick={tidy} title="Tidy layout into rows" data-label="Tidy">
+        <Icon name="grid" size={12} /> Tidy
+      </button>
+
+      <!-- Version history toggle -->
+      <button
+        class="btn small"
+        data-overflow="-1"
+        data-icon="commit"
+        onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
+        title="Version history"
+        data-label="Versions"
+      >
+        <Icon name="commit" size={12} /> Versions
+      </button>
+
+      <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
+      <button
+        class="btn small"
+        data-overflow="-2"
+        data-icon="sidebar"
+        class:active={sideDock}
+        onclick={() => ui.setWfDockSide(!sideDock)}
+        title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
+        data-label={sideDock ? 'Dock inspector to the bottom' : 'Dock inspector to the side'}
+      >
+        <Icon name="sidebar" size={12} /> Dock
+      </button>
+
+      <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
+           (no second full-height rail beside the app shell's right rail). -->
+      {#if viewport.isDesktop && run && run.context_dir}
+        <button
+          class="btn small"
+          data-icon="panel"
+          class:active={ui.wfCtxOpen}
+          onclick={() => ui.toggleWfCtx()}
+          title="Context files & agents panel"
+          data-label="Context panel"
+          data-testid="ctx-sidebar-toggle"
+        >
+          <Icon name="panel" size={12} /> Panel
+        </button>
+      {/if}
+
+      <button class="btn small" data-overflow="1" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
+      {#if running}
+        <button class="btn small danger" data-keep onclick={stop}><Icon name="square" size={11} /> Stop</button>
+      {/if}
+      <button
+        class="btn primary small"
+        class:active={runInputOpen}
+        disabled={running}
+        onclick={openRunInput}
+        title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
+      >
+        {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 <div class="wf">
   <aside class="side" style="width:{ui.wfSideWidth}px">
     <div class="gen">
@@ -1326,7 +1494,7 @@
       <div class="list-h">Workflows</div>
       {#each workflows as wf (wf.id)}
         <div class="row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
-          {#if renamingId === wf.id}
+          {#if renamingId === wf.id && !renameInBar}
             <!-- svelte-ignore a11y_autofocus -->
             <input
               class="row-rename"
@@ -1364,6 +1532,7 @@
   </aside>
 
   <main
+    bind:this={mainEl}
     class="main"
     class:side-dock={sideDock}
     style={sideDock
@@ -1371,139 +1540,34 @@
       : ''}
   >
     {#if current}
-      <header class="bar">
-        {#if renamingId === current.id}
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="wf-title-edit"
-            bind:value={renameValue}
-            autofocus
-            aria-label="Workflow name"
-            onkeydown={(e) => {
-              if (e.key === 'Enter') commitRename(current!);
-              else if (e.key === 'Escape') cancelRename();
-            }}
-            onblur={() => commitRename(current!)}
-          />
-        {:else}
-          <span class="wf-title">{current.name}</span>
-          <button class="title-edit" title="Rename workflow" onclick={() => current && startRename(current)}>
-            <Icon name="edit" size={13} />
-          </button>
-        {/if}
-        {#if dirty}<span class="badge">unsaved</span>{/if}
-        <span class="grow"></span>
-
-        <div class="menu-wrap">
-          <button class="btn small" onclick={() => (paletteOpen = !paletteOpen)}>
-            <Icon name="plus" size={12} /> Node
-          </button>
-          {#if paletteOpen}
-            <div class="palette">
-              {#each types as t (t.kind)}
-                <button class="pal-item" onclick={() => addNode(t)}>
-                  <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
-                  <span class="pal-body">
-                    <span class="pal-name">{t.label}</span>
-                    <span class="pal-cat">{t.category}</span>
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {/if}
+      <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
+      {#if paletteOpen}
+        <div class="palette wf-pop" style="right:{popRight}px">
+          {#each types as t (t.kind)}
+            <button class="pal-item" onclick={() => addNode(t)}>
+              <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
+              <span class="pal-body">
+                <span class="pal-name">{t.label}</span>
+                <span class="pal-cat">{t.category}</span>
+              </span>
+            </button>
+          {/each}
         </div>
-
-        {#if selectedId}
-          <button class="btn small" onclick={removeSelected}><Icon name="trash" size={12} /></button>
-        {/if}
-        <button class="btn small" disabled={!dirty} onclick={save}>Save</button>
-
-        <div class="menu-wrap">
-          <button class="btn small" onclick={() => { runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
-            <Icon name="clock" size={12} /> Runs
-          </button>
-          {#if runsOpen}
-            <div class="palette runs-pop">
-              {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
-              {#each runs as r (r.id)}
-                <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
-                  <span class="dot {r.status}"></span>
-                  <span class="run-status">{runStatusLabel(r.status)}</span>
-                  <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
-                  <span class="grow"></span>
-                  <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
-                </button>
-              {/each}
-            </div>
-          {/if}
+      {/if}
+      {#if runsOpen}
+        <div class="palette runs-pop wf-pop" style="right:{popRight}px">
+          {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
+          {#each runs as r (r.id)}
+            <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
+              <span class="dot {r.status}"></span>
+              <span class="run-status">{runStatusLabel(r.status)}</span>
+              <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
+              <span class="grow"></span>
+              <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
+            </button>
+          {/each}
         </div>
-
-        <!-- Instructions toggle: standing rules every step follows -->
-        <button
-          class="btn small"
-          onclick={() => (instructionsOpen = !instructionsOpen)}
-          title="Standing rules every step follows, by the letter"
-        >
-          <Icon name="note" size={12} /> Instructions
-        </button>
-
-        <!-- Triggers config toggle -->
-        <button class="btn small" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers">
-          <Icon name="clock" size={12} /> Triggers
-        </button>
-
-        <!-- Tidy: reflow the graph into a few readable rows -->
-        <button class="btn small" onclick={tidy} title="Tidy layout into rows">
-          <Icon name="grid" size={12} /> Tidy
-        </button>
-
-        <!-- Version history toggle -->
-        <button
-          class="btn small"
-          onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
-          title="Version history"
-        >
-          <Icon name="commit" size={12} /> Versions
-        </button>
-
-        <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
-        <button
-          class="btn small"
-          class:active={sideDock}
-          onclick={() => ui.setWfDockSide(!sideDock)}
-          title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
-        >
-          <Icon name="sidebar" size={12} /> Dock
-        </button>
-
-        <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
-             (no second full-height rail beside the app shell's right rail). -->
-        {#if viewport.isDesktop && run && run.context_dir}
-          <button
-            class="btn small"
-            class:active={ui.wfCtxOpen}
-            onclick={() => ui.toggleWfCtx()}
-            title="Context files & agents panel"
-            data-testid="ctx-sidebar-toggle"
-          >
-            <Icon name="panel" size={12} /> Panel
-          </button>
-        {/if}
-
-        <button class="btn small" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
-        {#if running}
-          <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
-        {/if}
-        <button
-          class="btn primary small"
-          class:active={runInputOpen}
-          disabled={running}
-          onclick={openRunInput}
-          title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
-        >
-          {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
-        </button>
-      </header>
+      {/if}
 
       <!-- Manual-run input editor: this is WHERE you provide the run input the
            trigger emits (repo_id, story_id, goals, msg, jira_ticket, …). -->
@@ -2726,11 +2790,15 @@
         </div>
       {/if}
     {:else}
-      <div class="placeholder">
-        <Icon name="split" size={40} />
-        <h2>Build a workflow</h2>
-        <p>Describe what you want on the left and we’ll wire it up — or start blank and drag nodes.</p>
-      </div>
+      <!-- The sidebar's Generate / Start blank form is this page's CTA. -->
+      <EmptyState
+        variant="page"
+        icon="split"
+        title={workflows.length > 0 ? 'Pick a workflow' : 'Build a workflow'}
+        body={workflows.length > 0
+          ? 'Open one from the list on the left, or describe a new one.'
+          : 'Describe what you want on the left and we’ll wire it up — or start blank and drag nodes.'}
+      />
     {/if}
   </main>
 
@@ -2799,6 +2867,7 @@
     </aside>
   {/if}
 </div>
+</div>
 
 <!-- Big editor for a cramped node-form JSON field (R10). Edits write straight
      back to the selected node's param via onParamJson. -->
@@ -2818,9 +2887,15 @@
 
 <style>
   .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
-  .wf {
+  .wf-root {
     display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .wf {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .side {
@@ -3203,22 +3278,6 @@
     line-height: 1.5;
     margin: 0;
   }
-  .bar {
-    display: flex;
-    align-items: center;
-    /* The action row must WRAP, never overflow: `.main` doesn't clip, so an
-       unwrapped bar slides its last buttons (Dock / Panel / Run…) under the
-       context sidebar, where they are painted over and unclickable. */
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .wf-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
   .title-edit {
     background: none;
     border: none;
@@ -3232,9 +3291,8 @@
     color: var(--accent);
   }
   .wf-title-edit {
-    font-size: 13px;
-    font-weight: 600;
-    padding: 4px 8px;
+    font: inherit;
+    padding: 2px 8px;
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--accent);
@@ -3252,8 +3310,12 @@
   .grow {
     flex: 1;
   }
-  .menu-wrap {
-    position: relative;
+  /* Header popovers anchored at the top of the editor pane (right = inline). */
+  .palette.wf-pop {
+    top: 6px;
+    left: auto;
+    inset-inline-end: auto;
+    max-height: min(320px, calc(100% - 12px));
   }
   .palette {
     position: absolute;
@@ -3819,24 +3881,6 @@
   .dot.pending,
   .dot.skipped {
     background: var(--text-dim);
-  }
-  .placeholder {
-    margin: auto;
-    text-align: center;
-    color: var(--text-dim);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-  }
-  .placeholder h2 {
-    margin: 8px 0 0;
-    font-size: 16px;
-    color: var(--text);
-  }
-  .placeholder p {
-    font-size: 12.5px;
-    max-width: 340px;
   }
   .spin {
     width: 11px;

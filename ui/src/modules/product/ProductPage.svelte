@@ -7,6 +7,10 @@
   import './product.css';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { untrack } from 'svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -232,6 +236,28 @@
   /** The epic tree over the FILTERED list (the tag filter applies to the
    *  flattened list; a matching child whose epic didn't match shows at top level). */
   const tree = $derived(buildTree(filteredStories));
+
+  /** Stories view with nothing at all to list: the empty list pane is hidden
+   *  (≥641px) and the page EmptyState owns the ONE import CTA. */
+  const noStories = $derived(product.view === 'stories' && !product.loadingStories && product.stories.length === 0);
+
+  // List/detail never opens onto an empty "pick one" pane: once a workspace's
+  // stories are in, restore the last story opened here (or the first in the
+  // tree). Once per workspace, so closing a story is respected. Not on phone —
+  // there the accordion's list panel is the landing view.
+  let autoPickedFor: string | null = null;
+  $effect(() => {
+    const w = ws.currentId;
+    if (!w || autoPickedFor === w || product.loadingStories || product.view !== 'stories') return;
+    if (product.stories.length === 0) return;
+    untrack(() => {
+      autoPickedFor = w;
+      if (product.selectedId || viewport.isPhone) return;
+      const last = recallSelection('product');
+      const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
+      if (pick) void product.select(pick.id);
+    });
+  });
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
   const selectedStory = $derived(product.detail?.story ?? null);
   const selectedParent = $derived(product.parentOf(selectedStory));
@@ -347,6 +373,7 @@
 
   function selectStory(s: ProductStory): void {
     void product.select(s.id);
+    rememberSelection('product', s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
     // On mobile, switch to the content panel so the picked story is visible.
@@ -469,27 +496,10 @@
   </div>
 {/snippet}
 
-<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
-  <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
-  <button
-    class="m-acc-head"
-    aria-expanded={mobileSection === 'list'}
-    onclick={() => (mobileSection = 'list')}
-  >
-    <Icon name={mobileSection === 'list' ? 'chevronDown' : 'chevronRight'} size={14} />
-    <span class="m-acc-title">{product.view === 'learnings' ? 'Learnings' : 'Stories'}</span>
-    {#if product.view === 'stories'}
-      <span class="m-acc-count">{product.stories.length}</span>
-    {/if}
-  </button>
-
-  <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
-  <aside class="product-side">
-    <!-- The ONE Stories|Learnings toggle, at every breakpoint — a compact
-         segmented control above the list, rather than a duplicate in the main
-         content header. (It's still absent from view while the mobile content
-         panel is open — this whole sidebar collapses then — but that's fine:
-         you pick Stories/Learnings before diving into a story's content.) -->
+<div class="product-shell">
+<PageHeader title="Product" subtitle="Analyse Jira / Confluence stories — questions, plans and test cases, published back.">
+  {#snippet tabs()}
+    <!-- The ONE Stories|Learnings toggle, at every breakpoint. -->
     <div class="m-view-toggle" role="tablist" aria-label="View">
       <button
         class="vt"
@@ -506,27 +516,47 @@
         onclick={() => (product.view = 'learnings')}
       >Learnings</button>
     </div>
+  {/snippet}
+  {#snippet actions()}
+    {#if product.view === 'stories'}
+      <button
+        class="btn"
+        onclick={newMenu}
+        title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
+        disabled={draftCreating}
+        data-label="New draft or epic…"
+      >
+        <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
+      </button>
+      <!-- The ONE import affordance (the empty state owns it while the list is empty). -->
+      {#if !noStories}
+        <button class="btn primary" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+          <Icon name="plus" size={12} /> Import
+        </button>
+      {/if}
+    {/if}
+  {/snippet}
+</PageHeader>
+<div class="product-page" class:no-stories={noStories} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
+  <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
+  <button
+    class="m-acc-head"
+    aria-expanded={mobileSection === 'list'}
+    onclick={() => (mobileSection = 'list')}
+  >
+    <Icon name={mobileSection === 'list' ? 'chevronDown' : 'chevronRight'} size={14} />
+    <span class="m-acc-title">{product.view === 'learnings' ? 'Learnings' : 'Stories'}</span>
+    {#if product.view === 'stories'}
+      <span class="m-acc-count">{product.stories.length}</span>
+    {/if}
+  </button>
+
+  <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
+  <aside class="product-side">
     {#if product.view === 'stories'}
       <!-- Stories sidebar -->
       <div class="side-head">
         <span class="side-title">Stories</span>
-        <div class="side-head-actions">
-          <button
-            class="p-btn"
-            onclick={newMenu}
-            title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
-            disabled={draftCreating}
-          >
-            <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
-          </button>
-          <button
-            class="p-btn primary"
-            onclick={() => (importOpen = true)}
-            title="Import an existing Jira issue / Confluence page"
-          >
-            <Icon name="plus" size={12} /> Import
-          </button>
-        </div>
       </div>
 
       <!-- Tag filter row (only when tags exist) -->
@@ -551,11 +581,7 @@
         {#if product.loadingStories}
           <div class="list-empty">Loading…</div>
         {:else if product.stories.length === 0}
-          <div class="list-empty">
-            No stories yet.
-            <button class="link" onclick={createDraft} disabled={draftCreating}>Start a draft →</button>
-            <button class="link" onclick={() => (importOpen = true)}>Import one →</button>
-          </div>
+          <div class="list-empty">No stories yet.</div>
         {:else if filteredStories.length === 0}
           <div class="list-empty">No stories match the selected tag.</div>
         {:else}
@@ -586,12 +612,6 @@
         {/if}
       </div>
 
-      <div class="side-footer">
-        <button class="import-btn" onclick={() => (importOpen = true)}>
-          <Icon name="plus" size={13} />
-          Import story
-        </button>
-      </div>
     {:else}
       <!-- Learnings sidebar — filter nav -->
       <div class="side-head">
@@ -718,24 +738,23 @@
     <div class="product-body">
       {#if product.view === 'learnings'}
         <LearningsView filter={learningsFilter} />
+      {:else if noStories}
+        <EmptyState
+          variant="page"
+          icon="file"
+          title="Analyse a story"
+          body="Import a Jira / Confluence issue, then ask questions, draft a plan and test cases, and publish back. Or start a blank draft from New."
+          actionLabel="Import story"
+          actionIcon="plus"
+          onaction={() => (importOpen = true)}
+        />
       {:else if !product.selectedId}
-        <div class="empty-wrap">
-          <EmptyState
-            icon="file"
-            title="Analyse a story"
-            body="Ask questions, draft a plan and test cases, then publish back — on an existing Jira/Confluence issue or a blank draft."
-          />
-          <div class="empty-actions">
-            <button class="p-btn primary" onclick={createDraft} disabled={draftCreating}>
-              <Icon name="plus" size={13} />
-              {draftCreating ? 'Creating…' : 'Start a draft'}
-            </button>
-            <button class="p-btn" onclick={() => (importOpen = true)}>
-              <Icon name="plus" size={13} />
-              Import story
-            </button>
-          </div>
-        </div>
+        <EmptyState
+          variant="page"
+          icon="file"
+          title="Pick a story"
+          body="Select a story on the left to analyse it."
+        />
       {:else if product.tab === 'overview'}
         <OverviewTab />
       {:else if product.tab === 'chat'}
@@ -766,16 +785,30 @@
     </div>
   </div>
 </div>
+</div>
 
 {#if importOpen}
   <ImportDialog onclose={() => (importOpen = false)} />
 {/if}
 
 <style>
-  .product-page {
+  .product-shell {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .product-page {
+    flex: 1;
     display: flex;
     min-height: 0;
+  }
+  /* Nothing to list → no empty list pane beside the empty state (the phone
+     accordion keeps its two sections). */
+  @media (min-width: 641px) {
+    .product-page.no-stories .product-side {
+      display: none;
+    }
   }
 
   /* ── Sidebar ─────────────────────────────────────────────────── */
@@ -813,11 +846,6 @@
     padding: 8px 10px 4px;
     flex-shrink: 0;
   }
-  .side-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
   .draft-badge {
     font-size: 9px;
     font-weight: 700;
@@ -849,14 +877,6 @@
     color: var(--text-dim);
     padding: 8px 4px;
     line-height: 1.5;
-  }
-  .link {
-    border: none;
-    background: none;
-    color: var(--accent);
-    cursor: pointer;
-    font-size: 11.5px;
-    padding: 0;
   }
   /* Wrapper handles hover background + shows delete btn */
   .story-row-wrap {
@@ -1165,29 +1185,6 @@
     opacity: 0.85;
   }
 
-  .side-footer {
-    padding: 8px;
-    border-top: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .import-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 10px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    transition: border-color 120ms, color 120ms;
-  }
-  .import-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
 
   /* ── Main area ───────────────────────────────────────────────── */
   .product-main {
@@ -1291,18 +1288,6 @@
     display: flex;
     flex-direction: column;
   }
-  .empty-wrap {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-  }
-  .empty-actions {
-    display: flex;
-    gap: 8px;
-  }
   .mono {
     font-family: var(--font-mono, monospace);
   }
@@ -1351,7 +1336,6 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    margin: 8px 8px 2px;
     padding: 2px;
     border-radius: var(--radius-m, 8px);
     background: color-mix(in srgb, var(--text-dim) 7%, transparent);
@@ -1387,11 +1371,8 @@
     }
 
     /* Slightly bigger touch target for the segmented view toggle. */
-    .m-view-toggle {
-      margin: 6px 8px 4px;
-    }
     .m-view-toggle .vt {
-      height: 32px;
+      height: 30px;
       font-size: 13px;
       padding: 0 12px;
     }
@@ -1479,8 +1460,7 @@
       font-size: 13px;
       padding: 6px 11px;
     }
-    .list-empty,
-    .link {
+    .list-empty {
       font-size: 14px;
     }
     .story-title {
@@ -1497,10 +1477,6 @@
     .story-tag-chip {
       font-size: 12px;
     }
-    .import-btn {
-      font-size: 14px;
-      padding: 9px 12px;
-    }
     .st {
       height: 38px;
       font-size: 14px;
@@ -1515,10 +1491,6 @@
     .learn-filter-btn {
       font-size: 14.5px;
       padding: 10px 12px;
-    }
-    .empty-actions .p-btn {
-      font-size: 14px;
-      padding: 9px 16px;
     }
     .product-body {
       padding: 14px;

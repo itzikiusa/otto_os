@@ -5,7 +5,6 @@
   // probe said `denied`, and hidden outright when the user lacks the feature's
   // View grant. Right-click / ⋯ on an account → edit / refresh perms / delete.
   import { aws, AWS_SERVICES } from '../../lib/stores/aws.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -17,12 +16,10 @@
     activeService: AwsService | null;
     onedit: (a: AwsAccount) => void;
     ondelete: (a: AwsAccount) => void;
-    onadd: () => void;
   }
-  let { activeId, activeService, onedit, ondelete, onadd }: Props = $props();
+  let { activeId, activeService, onedit, ondelete }: Props = $props();
 
   let collapsed: Record<string, boolean> = $state({});
-  const canAdmin = $derived(auth.isRoot);
 
   function featureOf(svc: AwsService): Feature {
     return `aws_${svc}` as Feature;
@@ -59,11 +56,6 @@
 <nav class="rail" aria-label="AWS accounts">
   <div class="rail-head">
     <span>Accounts</span>
-    {#if canAdmin}
-      <button class="mini" onclick={onadd} title="Add account" aria-label="Add account">
-        <Icon name="plus" size={13} />
-      </button>
-    {/if}
   </div>
   {#each aws.accounts as a (a.id)}
     {@const open = !collapsed[a.id]}
@@ -138,17 +130,6 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
-  }
-  .mini {
-    display: grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
   }
   .acct-row {
     display: flex;

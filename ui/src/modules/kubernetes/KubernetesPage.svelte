@@ -10,6 +10,7 @@
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import ClustersOverview from './ClustersOverview.svelte';
@@ -77,24 +78,31 @@
 
 <div class="k8s-page" data-testid="k8s-page">
   {#if k8s.unavailable}
+    <PageHeader title="Kubernetes" />
     <EmptyState
+      variant="page"
       icon="helm"
       title="Kubernetes console isn't available"
       body="This daemon doesn't serve /k8s/* yet. Update Otto (or restart the daemon after upgrading) and reopen this page."
     />
   {:else if !k8s.status && k8s.statusError}
-    <EmptyState icon="helm" title="Couldn't reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
+    <PageHeader title="Kubernetes" />
+    <EmptyState variant="page" icon="helm" title="Couldn't reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
   {:else if !k8s.status}
+    <PageHeader title="Kubernetes" />
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>
   {:else if needsInstall}
-    <InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} />
+    <PageHeader title="Kubernetes" />
+    <div class="k8s-scroll"><InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} /></div>
   {:else if isFleet}
     <MonitorFleet tab={fleetTab} />
   {:else if isMonitor && monitorClusterId}
     {#if monitorCluster}
       <MonitorCluster cluster={monitorCluster} tab={monitorTab} />
     {:else if k8s.clustersLoaded}
+      <PageHeader title="Monitor" crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]} />
       <EmptyState
+        variant="page"
         icon="helm"
         title="Cluster not found"
         body="It may have been removed. Pick another cluster from the Monitor overview."
@@ -102,6 +110,7 @@
         onaction={() => router.go('kubernetes/monitor')}
       />
     {:else}
+      <PageHeader title="Monitor" crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]} />
       <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
     {/if}
   {:else if isMonitor}
@@ -110,7 +119,9 @@
     {#if cluster}
       {#key `${cluster.id}/${k8s.accessRevision}`}<ClusterWorkspace {cluster} />{/key}
     {:else if k8s.clustersLoaded}
+      <PageHeader title="Kubernetes" />
       <EmptyState
+        variant="page"
         icon="helm"
         title="Cluster not found"
         body="It may have been removed. Pick another cluster from the overview."
@@ -118,6 +129,7 @@
         onaction={() => router.go('kubernetes')}
       />
     {:else}
+      <PageHeader title="Kubernetes" />
       <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
     {/if}
   {:else}
@@ -134,6 +146,11 @@
     overflow: hidden;
   }
   .k8s-boot {
-    padding: 24px;
+    padding: 18px 20px;
+  }
+  .k8s-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 </style>

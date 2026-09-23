@@ -77,7 +77,9 @@ test('the Add-account wizard opens fully inside the viewport', async ({ page }) 
   test.skip(!backend.present, backend.reason);
   test.skip(!backend.installed, 'aws CLI not installed on the test daemon — the overview (and its wizard) is behind the install panel');
   await openPage(page, 'aws');
-  await page.getByTestId('aws-add-account').click();
+  // One "Add account" CTA per page: the header's (testid) once accounts exist,
+  // the empty state's while there are none.
+  await page.getByRole('button', { name: 'Add account' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Add AWS account' });
   await expect(dialog).toBeVisible();
   await expect(page.getByTestId('aws-account-wizard')).toBeVisible();

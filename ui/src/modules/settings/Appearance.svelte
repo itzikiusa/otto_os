@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
     ui,
@@ -46,13 +48,9 @@
   };
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Appearance</h1>
-      <div class="sub">Themes apply instantly and persist per device.</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Appearance" subtitle="Themes apply instantly and persist per device." />
+  <PageBody width="readable">
 
   <div class="section-title">Theme</div>
   <div class="theme-grid">
@@ -230,9 +228,17 @@
   <div class="row">
     <button class="btn small" onclick={() => ui.resetSidebar()}>Reset to default</button>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .theme-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

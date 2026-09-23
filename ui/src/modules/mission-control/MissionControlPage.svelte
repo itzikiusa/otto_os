@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
   import { missionControlApi } from '../../lib/api/missionControl';
@@ -178,19 +181,19 @@
   }
 </script>
 
-<div class="page mission-control" class:detail-open={selectedId}>
-  <div class="page-header head-row">
-    <div>
-      <h1>Mission Control</h1>
-      <div class="sub dim">Every agentic activity as one traceable unit — sessions, swarms, loops, workflows, reviews, stories, PRs &amp; triggers.</div>
-    </div>
-    <div class="head-actions">
-      <button class="btn small" disabled={backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
-        <Icon name="refresh" size={13} /> {backfilling ? 'Refreshing…' : 'Refresh'}
-      </button>
-    </div>
-  </div>
-
+<div class="mc-page">
+<PageHeader
+  title="Mission Control"
+  subtitle="Every agentic activity as one traceable unit — sessions, swarms, loops, workflows, reviews, stories, PRs & triggers."
+>
+  {#snippet actions()}
+    <button class="btn small" disabled={backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
+      <Icon name="refresh" size={13} /> {backfilling ? 'Refreshing…' : 'Refresh'}
+    </button>
+  {/snippet}
+</PageHeader>
+<PageBody>
+<div class="mission-control" class:detail-open={selectedId}>
   <!-- summary tiles -->
   <div class="tiles">
     <div class="tile">
@@ -245,23 +248,16 @@
   <div class="mc-body">
     <div class="mc-main">
       {#if items.length === 0 && !loading}
-        <div class="empty card">
-          <div class="empty-icon"><Icon name="radar" size={28} /></div>
-          <h3>No work items{hasFilters ? ' match these filters' : ' yet'}</h3>
-          <p class="dim">
-            {#if hasFilters}
-              Try clearing the filters, or refresh to re-derive the graph from every module.
-            {:else}
-              Mission Control unifies every agentic activity. Start a session, swarm, loop, workflow,
-              review, or story — or press Refresh to materialize existing work.
-            {/if}
-          </p>
-          <div class="empty-actions">
-            {#if hasFilters}<button class="btn small" onclick={clearFilters}>Clear filters</button>{/if}
-            <button class="btn primary small" disabled={backfilling} onclick={runBackfill}>
-              {backfilling ? 'Refreshing…' : 'Refresh / backfill'}
-            </button>
-          </div>
+        <div class="card">
+          <EmptyState
+            icon="radar"
+            title={hasFilters ? 'No work items match these filters' : 'No work items yet'}
+            body={hasFilters
+              ? 'Try clearing the filters, or refresh to re-derive the graph from every module.'
+              : 'Mission Control unifies every agentic activity. Start a session, swarm, loop, workflow, review, or story — or press Refresh to materialize existing work.'}
+            actionLabel={hasFilters ? 'Clear filters' : backfilling ? 'Refreshing…' : 'Refresh / backfill'}
+            onaction={hasFilters ? clearFilters : runBackfill}
+          />
         </div>
       {:else if view === 'list'}
         <WorkItemList {items} needsApproval={needsApprovalIds} {selectedId} onOpen={(id) => (selectedId = id)} />
@@ -293,6 +289,8 @@
     {/if}
   </div>
 </div>
+</PageBody>
+</div>
 
 <style>
   .mission-control {
@@ -301,19 +299,11 @@
     gap: 12px;
     min-height: 100%;
   }
-  .head-row {
+  .mc-page {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
-  .sub {
-    font-size: 12px;
-    margin-top: 2px;
-    max-width: 640px;
-  }
-  .head-actions {
-    flex: 0 0 auto;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .tiles {
     display: grid;
@@ -440,34 +430,6 @@
   }
   .detail-resizer:hover {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
-  }
-  .empty {
-    text-align: center;
-    padding: 40px 20px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    min-height: 240px;
-    justify-content: center;
-  }
-  .empty-icon {
-    color: var(--text-dim);
-    opacity: 0.7;
-  }
-  .empty h3 {
-    margin: 4px 0 0;
-    font-size: 15px;
-  }
-  .empty p {
-    margin: 0;
-    max-width: 460px;
-    font-size: 12.5px;
-  }
-  .empty-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 6px;
   }
   @media (max-width: 900px) {
     .tiles {

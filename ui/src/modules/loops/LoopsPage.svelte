@@ -2,6 +2,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import GoalDefineForm from './GoalDefineForm.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoopDetail from './LoopDetail.svelte';
 
   let selectedId = $state<string | null>(null);
@@ -51,24 +54,32 @@
   {:else if creating}
     <GoalDefineForm oncancel={() => (creating = false)} oncreated={open} />
   {:else}
-    <header class="head">
-      <div>
-        <h1>Goal Loops</h1>
-        <p class="sub">
-          Give a goal + a budget; a team of agents iterates toward it on an isolated branch
-          until the acceptance criteria are met or a limit is hit.
-        </p>
-      </div>
-      <button class="btn primary" onclick={() => (creating = true)}>New goal loop</button>
-    </header>
+    <PageHeader
+      title="Goal Loops"
+      subtitle="Give a goal + a budget; a team of agents iterates toward it on an isolated branch until the acceptance criteria are met or a limit is hit."
+    >
+      {#snippet actions()}
+        <!-- One primary per page: while the list is empty the empty state owns
+             the "New goal loop" CTA. -->
+        {#if list.length > 0}
+          <button class="btn primary" onclick={() => (creating = true)}>New goal loop</button>
+        {/if}
+      {/snippet}
+    </PageHeader>
+    <PageBody>
 
     {#if loops.loadingList && list.length === 0}
       <p class="muted">Loading…</p>
     {:else if list.length === 0}
-      <div class="empty">
-        <p>No goal loops yet.</p>
-        <button class="btn primary" onclick={() => (creating = true)}>Define your first goal</button>
-      </div>
+      <EmptyState
+        variant="page"
+        icon="refresh"
+        title="No goal loops yet"
+        body="Define a goal and a budget — agents iterate on an isolated branch until it's met."
+        actionLabel="New goal loop"
+        actionIcon="plus"
+        onaction={() => (creating = true)}
+      />
     {:else}
       <ul class="cards">
         {#each list as l (l.id)}
@@ -89,41 +100,18 @@
         {/each}
       </ul>
     {/if}
+    </PageBody>
   {/if}
 </div>
 
 <style>
   .loops {
-    padding: 18px 22px;
-    overflow-y: auto;
-    height: 100%;
-  }
-  .head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 18px;
-  }
-  h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
-  }
-  .sub {
-    margin: 0;
-    max-width: 60ch;
-    color: var(--text-dim);
-    font-size: 12.5px;
-  }
-  .muted {
-    color: var(--text-dim);
-  }
-  .empty {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    padding: 60px 0;
+    height: 100%;
+    min-height: 0;
+  }
+  .muted {
     color: var(--text-dim);
   }
   .cards {

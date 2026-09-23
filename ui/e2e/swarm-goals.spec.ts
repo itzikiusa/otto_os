@@ -167,12 +167,13 @@ test('settings: standing goals tab + the Triggers tab show seeded data', async (
   await openSwarm(page);
   // The swarm Settings button has a unique title (avoids matching other buttons).
   const settingsBtn = page.locator('button[title*="channel triggers"]').first();
-  // On a phone the header controls collapse — expand them so Settings is reachable.
-  if (!(await settingsBtn.isVisible())) {
-    await page.locator('.head-toggle').first().click();
+  // On a narrow screen the page header collapses Settings into its "⋯" menu.
+  if (await settingsBtn.isVisible()) {
+    await settingsBtn.click();
+  } else {
+    await page.locator('.swarm-head .ph-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Settings' }).click();
   }
-  await expect(settingsBtn).toBeVisible({ timeout: 10_000 });
-  await settingsBtn.click();
   const modal = page.locator('[role="dialog"]', { hasText: 'Swarm settings' }).first();
   await expect(modal).toBeVisible({ timeout: 15_000 });
   // The default "Standing goals" tab is present.

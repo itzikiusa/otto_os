@@ -131,7 +131,7 @@ test('Workflow agent node offers provider + model from the registry', async ({ p
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Open the node palette and add an Agent node.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await expect(nodeBtn).toBeVisible({ timeout: 10_000 });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
@@ -149,7 +149,7 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Add + select a node so the inspector shows.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
@@ -158,8 +158,16 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   // Bottom dock by default (no .side).
   await expect(inspector).not.toHaveClass(/\bside\b/);
 
-  // Toggle to the side dock → the inspector becomes a right column.
-  await page.getByRole('button', { name: 'Dock' }).click();
+  // Toggle to the side dock → the inspector becomes a right column. "Dock" is
+  // a low-priority header action: at this width (with a node selected) it may
+  // sit in the header's ⋯ overflow menu instead of the bar.
+  const clickDock = async (): Promise<void> => {
+    const dock = page.locator('[data-testid="page-header"] .ph-actions button', { hasText: 'Dock' });
+    if (await dock.isVisible()) return dock.click();
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /^Dock/ }).click();
+  };
+  await clickDock();
   await expect(inspector).toHaveClass(/\bside\b/);
   const box = await inspector.boundingBox();
   const vw = page.viewportSize()!.width;
@@ -178,7 +186,7 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   expect(after).toBeGreaterThan(before + 80);
 
   // Toggle back to the bottom dock.
-  await page.getByRole('button', { name: 'Dock' }).click();
+  await clickDock();
   await expect(inspector).not.toHaveClass(/\bside\b/);
 });
 
@@ -187,7 +195,7 @@ test('Provider "default" option reads claude (the daemon fallback), not agy', as
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Add + select an Agent node → its Provider select renders.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
@@ -204,7 +212,7 @@ test('Provider "default" option reads claude (the daemon fallback), not agy', as
 async function addWfNode(page: import('@playwright/test').Page, label: string): Promise<void> {
   await openPage(page, 'workflows');
   await page.getByRole('button', { name: 'Start blank' }).click();
-  await page.locator('.menu-wrap button', { hasText: 'Node' }).click();
+  await page.locator('[data-testid="page-header"] button', { hasText: 'Node' }).click();
   await page.locator('.pal-item', { hasText: label }).first().click();
 }
 

@@ -15,6 +15,7 @@
   import PrMergeModal from './PrMergeModal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
@@ -253,16 +254,14 @@
   }
 </script>
 
-<div class="prd">
-  {#if loading && !pr}
-    <div style="padding: 16px"><Skeleton rows={5} height={40} /></div>
-  {:else if pr}
-    <header class="prd-head">
-      <button class="btn ghost small" onclick={() => router.go(`git/${repoId}/prs`)}>
-        <span class="back-arrow" aria-hidden="true">←</span> Pull Requests
-      </button>
-      <span class="grow"></span>
-      <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on">
+<div class="prd-page">
+<PageHeader
+  title={pr ? `Pull request #${pr.number}` : 'Pull request'}
+  crumbs={[{ label: 'Pull Requests', onclick: () => router.go(`git/${repoId}/prs`) }]}
+>
+  {#snippet actions()}
+    {#if pr}
+      <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on" aria-label="Review agent">
         {#each agentProviders() as p (p)}
           <option value={p}>{p}</option>
         {/each}
@@ -271,16 +270,22 @@
         <Icon name="terminal" size={11} /> Open as session
       </button>
       <button class="btn small" onclick={() => openExternal(pr?.url)}>View on provider</button>
-    </header>
+    {/if}
+  {/snippet}
+</PageHeader>
+<div class="prd">
+  {#if loading && !pr}
+    <div style="padding: 16px"><Skeleton rows={5} height={40} /></div>
+  {:else if pr}
 
     <div class="prd-title-block">
       {#if editMode}
         <input class="input prd-title-input" bind:value={editTitle} />
       {:else}
-        <h1 class="prd-title">
+        <h2 class="prd-title">
           <span class="dim">#{pr.number}</span>
           {pr.title}
-        </h1>
+        </h2>
       {/if}
       <div class="prd-meta">
         <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{pr.state}</span>
@@ -517,6 +522,7 @@
     {/if}
   {/if}
 </div>
+</div>
 
 {#if mergeOpen && pr}
   <PrMergeModal
@@ -538,17 +544,18 @@
 {/if}
 
 <style>
-  .prd {
+  .prd-page {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .prd {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 12px 18px 48px;
-  }
-  .prd-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
+    padding: 14px 20px 48px;
   }
   .prd-provider-select {
     height: 28px;
@@ -765,13 +772,11 @@
     font-size: 11.5px;
   }
 
-  /* Direction-aware arrows: the back chevron and the source→target separator
-     mirror in place under RTL so they point with the reading direction. */
-  .back-arrow,
+  /* Direction-aware arrow: the source→target separator mirrors in place under
+     RTL so it points with the reading direction. */
   .dir-arrow {
     display: inline-block;
   }
-  :global([dir='rtl']) .back-arrow,
   :global([dir='rtl']) .dir-arrow {
     transform: scaleX(-1);
   }
@@ -781,9 +786,6 @@
   @media (max-width: 1024px) {
     .prd { padding: 12px 12px 48px; }
     /* Header actions wrap instead of overflowing; comfortable touch targets. */
-    .prd-head { flex-wrap: wrap; gap: 6px; }
-    .prd-head .btn { height: 34px; }
-    .prd-head .grow { display: none; }
     .prd-title { font-size: 18px; overflow-wrap: anywhere; }
     .prd-title-input { height: 38px; font-size: 16px; }
     .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; min-width: 0; }

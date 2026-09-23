@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Users admin (root): create/disable users + per-workspace role matrix + feature grants.
   import { api } from '../../lib/api/client';
   import type { GrantEntry, MemberEntry, User, UserGrantsResp, WorkspaceRole } from '../../lib/api/types';
@@ -337,14 +339,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Users</h1>
-      <div class="sub">Root manages accounts and per-workspace roles.</div>
-    </div>
-    <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Users" subtitle="Root manages accounts and per-workspace roles.">
+    {#snippet actions()}
+      <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={3} height={40} />
@@ -569,6 +570,7 @@
       {/if}
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 {#if createOpen}
@@ -599,6 +601,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .user-filter-row {
     display: flex;
     align-items: center;

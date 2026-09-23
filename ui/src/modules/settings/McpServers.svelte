@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // MCP Servers settings page: per-workspace, user-managed MCP servers that Otto
   // merges into the workspace's `.mcp.json` when an agent session spawns there
   // (alongside Otto's own managed entries, e.g. the browser server). Nothing is
@@ -241,21 +243,16 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>MCP Servers</h1>
-      <div class="sub">
-        Per-workspace Model Context Protocol servers. Enabled servers are merged into this
-        workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own
-        managed entries (e.g. the browser). Nothing is auto-enabled — a server is only written once
-        you turn it on.
-      </div>
-    </div>
-    {#if wsId}
-      <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
-    {/if}
-  </div>
+<div class="settings-section">
+  <PageHeader title="MCP Servers" subtitle="Per-workspace Model Context Protocol servers.">
+    {#snippet actions()}
+      {#if wsId}
+        <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
+  <p class="section-intro">Enabled servers are merged into this workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own managed entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</p>
 
   <div class="card otto" data-testid="connections-mcp">
     <div class="otto-row">
@@ -420,29 +417,35 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    padding: 20px 24px;
-    max-width: min(760px, 92vw);
-  }
-  .page-header {
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-  h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .sub {
     font-size: 12.5px;
     color: var(--text-dim);
     line-height: 1.5;
     max-width: 560px;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
   }
   code {
     font-family: var(--font-mono, monospace);

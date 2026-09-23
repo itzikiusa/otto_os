@@ -24,6 +24,8 @@
   } from '../../../lib/api/types';
   import type { MetricChartSeries, MetricChartUnit } from '../../../lib/metric-format';
   import Icon from '../../../lib/components/Icon.svelte';
+  import PageHeader from '../../../lib/components/PageHeader.svelte';
+  import PageBody from '../../../lib/components/PageBody.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import MetricChart from '../../../lib/components/MetricChart.svelte';
@@ -425,26 +427,26 @@
   const arrow = (on: boolean, d: 'asc' | 'desc'): string => (on ? (d === 'asc' ? ' ↑' : ' ↓') : '');
 </script>
 
-<div class="page" data-testid="k8s-fleet">
-  <div class="page-header">
-    <div>
-      <h1>
-        <button class="crumb" onclick={() => router.go('kubernetes')}>Kubernetes</button>
-        <span class="sep">/</span>
-        <button class="crumb" onclick={() => router.go('kubernetes/monitor')}>Monitor</button>
-        <span class="sep">/</span> Fleet
-      </h1>
-      <div class="sub">Every monitored cluster in one dashboard — restarts &amp; OOMs, memory, requests, latency — straight from ClickHouse. Filters, grouping and ordering stick.</div>
+<div class="fleet-page" data-testid="k8s-fleet">
+<PageHeader
+  title="Fleet"
+  crumbs={[
+    { label: 'Kubernetes', onclick: () => router.go('kubernetes') },
+    { label: 'Monitor', onclick: () => router.go('kubernetes/monitor') },
+  ]}
+  subtitle="Every monitored cluster in one dashboard — restarts & OOMs, memory, requests, latency — straight from ClickHouse. Filters, grouping and ordering stick."
+>
+  {#snippet actions()}
+    <div class="seg" role="radiogroup" aria-label="Window" data-keep>
+      {#each WINDOWS as w (w)}
+        <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+      {/each}
     </div>
-    <div class="actions">
-      <div class="seg" role="radiogroup" aria-label="Window">
-        {#each WINDOWS as w (w)}
-          <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
-        {/each}
-      </div>
-      <button class="btn ghost" onclick={refresh} title="Refresh" aria-label="Refresh fleet"><Icon name="refresh" size={14} /></button>
-    </div>
-  </div>
+    <button class="icon-btn" onclick={refresh} title="Refresh" aria-label="Refresh fleet"><Icon name="refresh" size={14} /></button>
+  {/snippet}
+</PageHeader>
+<PageBody>
+<div class="fleet">
 
   <!-- Filters: cluster pills (none = all) + namespace / workload / pod selects. -->
   <div class="filters card" data-testid="k8s-fleet-filters">
@@ -696,54 +698,20 @@
     {/if}
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
-  .page {
-    padding: 16px 20px 24px;
+  .fleet-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .fleet {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    height: 100%;
-    overflow-y: auto;
-  }
-  .page-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  h1 {
-    margin: 0;
-    font-size: 17px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .crumb {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .crumb:hover {
-    color: var(--text);
-  }
-  .sep {
-    color: var(--text-dim);
-  }
-  .sub {
-    font-size: 12px;
-    color: var(--text-dim);
-    margin-top: 2px;
-    max-width: 720px;
-  }
-  .actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
   .seg {
     display: inline-flex;
@@ -996,9 +964,6 @@
     gap: 6px;
   }
   @media (max-width: 720px) {
-    .page {
-      padding: 12px;
-    }
     .charts {
       grid-template-columns: 1fr;
     }
