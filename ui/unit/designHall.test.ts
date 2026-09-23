@@ -124,7 +124,9 @@ test('route parser maps every Design Hall path and falls back to the lobby', () 
   assert.deepEqual(parseDesignRoute(['design', 'studio', 'brand']), { view: 'brand' });
   assert.deepEqual(parseDesignRoute(['design', 'studio', 'nope']), { view: 'lobby' });
   assert.deepEqual(parseDesignRoute(['design', 'learned', 'rules']), { view: 'learned', tab: 'rules' });
-  assert.deepEqual(parseDesignRoute(['design', 'learned', 'x']), { view: 'learned', tab: 'signals' });
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'x']), { view: 'learned', tab: 'pending' });
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'signals']), { view: 'learned', tab: 'signals' });
+  assert.deepEqual(parseDesignRoute(['design', 'learned', 'settings']), { view: 'learned', tab: 'settings' });
   assert.deepEqual(parseDesignRoute(['design', 'a']), { view: 'lobby' });
 });
 
