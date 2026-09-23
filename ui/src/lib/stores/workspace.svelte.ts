@@ -1128,11 +1128,16 @@ class WorkspaceStore {
           this.unread = { ...this.unread, [ev.session_id]: true };
         }
         this.statusMap[ev.session_id] = ev.status;
+        // The daemon stamps `last_active_at` on every status write; mirror it so
+        // the idle "suspends in N" countdown starts from THIS transition instead
+        // of whatever the row said when the list loaded (a session that just
+        // went working → idle showed "37m idle · suspending…").
+        const lastActiveAt = new Date().toISOString();
         this.sessions = this.sessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status } : s,
+          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
         );
         this.otherWsSessions = this.otherWsSessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status } : s,
+          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
         );
         // The agent resuming work means the operator already responded to
         // whatever it was blocked on — clear the sticky "needs you" flag. Also
