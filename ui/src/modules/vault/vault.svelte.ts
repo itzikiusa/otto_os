@@ -204,6 +204,7 @@ class VaultStore {
   okfBusy = $state(false);
 
   private noteLoadSeq = 0;
+  private searchSeq = 0;
   private savePromise: Promise<boolean> | null = null;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -262,6 +263,7 @@ class VaultStore {
     this.note = null;
     this.notePath = null;
     this.backlinks = [];
+    this.searchHits = [];
     this.okfReport = null;
     this.roots = [];
     this.docsRun = null;
@@ -628,6 +630,8 @@ class VaultStore {
     if (!this.current) return;
     // Leaving a dirty note for a file view must not lose the edit.
     if (!(await this.canLeaveNote())) return;
+    // Supersede any note load still in flight so it cannot replace this file.
+    this.noteLoadSeq += 1;
     this.claimTab({ kind: 'file', path }, opts.newTab);
     await this.loadFile(path);
     this.persistView();
@@ -681,11 +685,15 @@ class VaultStore {
 
   async reloadBacklinks(): Promise<void> {
     if (!this.current || !this.notePath) return;
+    // Late replies must not show note A's backlinks under note B (or vault B).
+    const id = this.current.id, path = this.notePath;
+    let next: VaultBacklink[];
     try {
-      this.backlinks = await vaultBacklinks(this.wsId, this.current.id, this.notePath);
+      next = await vaultBacklinks(this.wsId, id, path);
     } catch {
-      this.backlinks = [];
+      next = [];
     }
+    if (this.current?.id === id && this.notePath === path) this.backlinks = next;
   }
 
   setView(edit: boolean): void {
@@ -976,13 +984,18 @@ class VaultStore {
       this.searchHits = [];
       return;
     }
+    // Newest query + same vault only: hits from vault A (or an older query)
+    // landing in vault B's list 404 when clicked.
+    const id = this.current.id, seq = ++this.searchSeq;
+    const current = () => this.current?.id === id && this.searchSeq === seq;
     this.searching = true;
     try {
-      this.searchHits = await vaultSearch(this.wsId, this.current.id, { query: q, limit: 50 });
+      const hits = await vaultSearch(this.wsId, id, { query: q, limit: 50 });
+      if (current()) this.searchHits = hits;
     } catch (e) {
-      toasts.error(`Search: ${msg(e)}`);
+      if (current()) toasts.error(`Search: ${msg(e)}`);
     } finally {
-      this.searching = false;
+      if (current()) this.searching = false;
     }
   }
 
@@ -994,11 +1007,14 @@ class VaultStore {
 
   async loadTags(): Promise<void> {
     if (!this.current) return;
+    const id = this.current.id;
+    let next: typeof this.tags;
     try {
-      this.tags = await vaultTags(this.wsId, this.current.id);
+      next = await vaultTags(this.wsId, id);
     } catch {
-      this.tags = [];
+      next = [];
     }
+    if (this.current?.id === id) this.tags = next;
   }
 
   async switcherQuery(q: string): Promise<VaultSwitchHit[]> {
