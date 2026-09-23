@@ -271,6 +271,46 @@ export class CanvasRefsBus {
 
 export const canvasRefsBus = new CanvasRefsBus();
 
+// ---------------------------------------------------------------------------
+// design_artifact_updated / design_link_updated / design_learning_update —
+// the Design Hall graph. Events land in a short, sequenced log (several can
+// arrive in one tick — a save emits artifact + link events together) so every
+// open view processes each one exactly once: it remembers the last `seq` it
+// handled and reads `since(lastSeq)` when `seq` changes. A WS reconnect bumps
+// `resyncTick` (events were lost → views reload).
+// ---------------------------------------------------------------------------
+
+export type DesignBusEvent = Extract<
+  OttoEvent,
+  { type: 'design_artifact_updated' } | { type: 'design_link_updated' } | { type: 'design_learning_update' }
+>;
+
+export class DesignBus {
+  /** Sequence number of the newest event (0 = none yet). */
+  seq: number = $state(0);
+  /** Bumped when events may have been missed (WS reconnect). */
+  resyncTick: number = $state(0);
+  private log: { seq: number; ev: DesignBusEvent }[] = [];
+
+  apply(ev: DesignBusEvent): void {
+    const seq = this.seq + 1;
+    this.log.push({ seq, ev });
+    if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+    this.seq = seq;
+  }
+
+  /** Events newer than `after`, oldest first. */
+  since(after: number): DesignBusEvent[] {
+    return this.log.filter((e) => e.seq > after).map((e) => e.ev);
+  }
+
+  resync(): void {
+    this.resyncTick += 1;
+  }
+}
+
+export const designBus = new DesignBus();
+
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
 class EventsClient {
@@ -331,6 +371,7 @@ class EventsClient {
     void swarm.resync();
     transcript.resyncVisible();
     missionControlBus.resync();
+    designBus.resync();
     void ws.refreshSessions().catch(() => {
       /* transient — the next reconnect or workspace switch retries */
     });
@@ -486,6 +527,14 @@ class EventsClient {
             parsed.format,
             parsed.content ?? null,
           );
+        } else if (
+          parsed.type === 'design_artifact_updated' ||
+          parsed.type === 'design_link_updated' ||
+          parsed.type === 'design_learning_update'
+        ) {
+          // Design Hall graph: the lobby, the open artifact, its Links panel and
+          // the learning log each re-fetch what the event touches.
+          designBus.apply(parsed);
         } else if (parsed.type === 'mockup_session_started') {
           // The mockup agent session is live (turn start) → attach its shell.
           mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id);
