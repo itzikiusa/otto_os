@@ -18,6 +18,7 @@ import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
+import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES } from './splitLayout';
 
@@ -108,7 +109,7 @@ class WorkspaceStore {
   /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
    *  Mission Control work-queue surface. */
   viewMode: 'tabs' | 'tiled' | 'mission' = $state(
-    (localStorage.getItem(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
+    (lsGet(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
   );
 
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
@@ -235,11 +236,11 @@ class WorkspaceStore {
 
   /** Sidebar toggle: also list sessions from every OTHER workspace, grouped by
    *  workspace name. Persisted app-wide; default ON. */
-  allWorkspaces = $state(localStorage.getItem(LS_ALL_WS) !== '0');
+  allWorkspaces = $state(lsGet(LS_ALL_WS) !== '0');
 
   setAllWorkspaces(on: boolean): void {
     this.allWorkspaces = on;
-    localStorage.setItem(LS_ALL_WS, on ? '1' : '0');
+    lsSet(LS_ALL_WS, on ? '1' : '0');
     if (on) void this.refreshOtherSessions();
   }
 
@@ -424,7 +425,7 @@ class WorkspaceStore {
     } catch {
       this.scratch = null;
     }
-    const saved = localStorage.getItem(winKey(LS_CURRENT));
+    const saved = lsGet(winKey(LS_CURRENT));
     const found = this.workspaces.find((w) => w.id === saved);
     const target = found ?? this.workspaces[0] ?? null;
     if (target) await this.select(target.id);
@@ -435,7 +436,7 @@ class WorkspaceStore {
     if (this.currentId === id && this.sessions.length > 0) return;
     const generation = ++this.selectionGeneration;
     this.currentId = id;
-    localStorage.setItem(winKey(LS_CURRENT), id);
+    lsSet(winKey(LS_CURRENT), id);
     // Pin both persistence keys NOW, before the await below: the route→store
     // effect may `openSession` while sessions are still loading, and that
     // persist must land under this workspace so `restoreLayout` sees it.
@@ -491,7 +492,7 @@ class WorkspaceStore {
     // otherwise write the OLD workspace's tabs under the NEW id.
     this.tabsKey = key;
     // restore tabs for this workspace
-    const raw = localStorage.getItem(winKey(LS_TABS + key));
+    const raw = lsGet(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
@@ -615,7 +616,7 @@ class WorkspaceStore {
 
   private persistTabs(): void {
     if (!this.tabsHydrated) return;
-    localStorage.setItem(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
+    lsSet(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
   }
 
   /** Persist the split layout per workspace, so an arrangement of up to
@@ -999,7 +1000,7 @@ class WorkspaceStore {
   setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {
     this.viewMode = mode;
     if (mode === 'tabs') this.maximizedId = null;
-    localStorage.setItem(winKey('otto_view_mode'), mode);
+    lsSet(winKey('otto_view_mode'), mode);
   }
 
   /**
