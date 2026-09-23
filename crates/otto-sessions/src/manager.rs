@@ -946,6 +946,13 @@ const WORKING_WINDOW: Duration = Duration::from_secs(5);
 /// Status poll interval.
 const STATUS_TICK: Duration = Duration::from_secs(2);
 
+/// How long [`SessionManager::input`] waits for its bytes to drain into the
+/// PTY before reporting "not accepting input". The write itself runs on the
+/// PTY's own writer thread (never a tokio worker) and stays queued in order,
+/// so a timeout loses nothing — a 60 KB prompt paste into a TUI that is still
+/// booting drains once it starts reading.
+const INPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long a LIVE resumable session must be idle (no output) AND unattached
 /// (no WS viewer) before its PTY is suspended to free RAM. The conversation
 /// stays resumable, so reopening it auto-resumes via `--resume`.
@@ -2968,7 +2975,10 @@ impl SessionManager {
         tokio::spawn(async move {
             let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
             tokio::time::sleep(Duration::from_millis(400)).await;
-            match handle.write(format!("{cmd}\n").as_bytes()) {
+            match handle
+                .write_async(format!("{cmd}\n").as_bytes(), INPUT_WRITE_TIMEOUT)
+                .await
+            {
                 Ok(()) => tracing::info!(
                     session = %sid, %cmd,
                     "typed the nested agent's resume command into the respawned shell"
@@ -3175,7 +3185,10 @@ impl SessionManager {
                 probe.raw.extend_from_slice(&data[..data.len().min(room)]);
             }
         }
-        handle.write(data)
+        // Never a blocking `write_all` on a tokio worker: a child that stops
+        // reading its tty used to park one worker per keystroke/paste until
+        // the pool was exhausted and the whole daemon froze.
+        handle.write_async(data, INPUT_WRITE_TIMEOUT).await
     }
 
     /// Resize a live session's terminal.

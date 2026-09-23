@@ -5,7 +5,8 @@ pub mod ring;
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -52,6 +53,136 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
 
+/// Pause between kill-escalation steps: `SIGHUP` → grace → `SIGTERM` → grace
+/// → `SIGKILL`, each step skipped once the child has exited.
+pub const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// Depth (in write jobs) of a PTY's input queue. The macOS tty input queue is
+/// ~1 KiB, so a child that is not reading its terminal (TUI still booting, a
+/// hung event loop, a stopped job) stalls the writer; jobs beyond this depth
+/// are refused instead of parking more callers behind it.
+const INPUT_QUEUE_DEPTH: usize = 256;
+
+/// Signalling state of the direct child, shared with the waiter thread.
+///
+/// The waiter observes the exit WITHOUT reaping (`waitid(WNOWAIT)`), flips
+/// `exited` under the mutex, and only then reaps. A signaller checks `exited`
+/// under the same mutex, so it only ever signals a pid that still belongs to
+/// our (possibly zombie) child — never a recycled pid.
+#[derive(Default)]
+struct ChildState {
+    exited: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl ChildState {
+    fn mark_exited(&self) {
+        *lock_unpoisoned(&self.exited) = true;
+        self.cv.notify_all();
+    }
+
+    fn has_exited(&self) -> bool {
+        *lock_unpoisoned(&self.exited)
+    }
+
+    /// Block up to `timeout` for the child to exit; true once it has.
+    fn wait_exited(&self, timeout: Duration) -> bool {
+        let guard = lock_unpoisoned(&self.exited);
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, timeout, |exited| !*exited)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
+    }
+
+    /// Send `sig` to the child's process group (the child is a session leader,
+    /// so its pgid is its pid) and to `fg_pgrp` — the terminal's foreground
+    /// job, when that is a different group — unless the child already exited.
+    /// Returns whether anything was signalled.
+    fn signal(&self, pid: u32, fg_pgrp: Option<i32>, sig: i32) -> bool {
+        let exited = lock_unpoisoned(&self.exited);
+        if *exited {
+            return false;
+        }
+        signal_tree(pid as i32, fg_pgrp, sig);
+        drop(exited);
+        true
+    }
+}
+
+#[cfg(unix)]
+fn signal_tree(pid: i32, fg_pgrp: Option<i32>, sig: i32) {
+    // SAFETY: plain signal syscalls on ids owned by this PTY's session; the
+    // caller guarantees `pid` is our not-yet-reaped child.
+    unsafe {
+        if libc::killpg(pid, sig) != 0 {
+            libc::kill(pid, sig);
+        }
+        if let Some(pg) = fg_pgrp {
+            if pg > 0 && pg != pid {
+                libc::killpg(pg, sig);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_tree(_pid: i32, _fg_pgrp: Option<i32>, _sig: i32) {}
+
+#[cfg(unix)]
+const SIGHUP: i32 = libc::SIGHUP;
+#[cfg(unix)]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGHUP: i32 = 1;
+#[cfg(not(unix))]
+const SIGTERM: i32 = 15;
+#[cfg(not(unix))]
+const SIGKILL: i32 = 9;
+
+/// Block until `pid` has exited, WITHOUT reaping it (it stays a zombie, so its
+/// pid cannot be recycled until the caller reaps it). Returns on any error too
+/// — the caller then reaps as before.
+#[cfg(unix)]
+fn wait_exit_unreaped(pid: u32) {
+    loop {
+        // SAFETY: `siginfo_t` is plain data; all-zero is a valid out-param.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            return;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_exit_unreaped(_pid: u32) {}
+
+/// Who is waiting for a queued input write to reach the PTY.
+enum WriteDone {
+    /// A synchronous caller blocked on the write (old `write` semantics).
+    Blocking(SyncSender<std::io::Result<()>>),
+    /// An async caller awaiting it with a timeout (never parks a worker).
+    Async(tokio::sync::oneshot::Sender<std::io::Result<()>>),
+}
+
+struct WriteJob {
+    data: Vec<u8>,
+    done: WriteDone,
+}
+
 /// Scrollback rows retained by the vt100 emulator — the replay depth clients
 /// rebuild from on reconnect. See the comment at the `Parser` construction in
 /// [`PtyHandle::spawn_sized`] for the memory tradeoff.
@@ -69,8 +200,13 @@ pub struct CommandSpec {
 /// A live PTY child process: write input, watch output, observe exit.
 pub struct PtyHandle {
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Bounded input queue drained by a dedicated writer thread, so a child
+    /// that stops reading its tty blocks that thread — never a daemon worker.
+    input_tx: SyncSender<WriteJob>,
+    /// Fallback killer for a child whose pid the OS didn't report.
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// Exit state shared with the waiter thread (pid-reuse-safe signalling).
+    child_state: Arc<ChildState>,
     ring: Arc<Mutex<RingBuffer>>,
     /// Headless terminal emulator tracking the CURRENT screen, so a fresh
     /// attach can reproduce the live screen in one coherent frame (no replay
@@ -210,20 +346,53 @@ impl PtyHandle {
 
         // Capture the child's OS pid before the waiter thread takes ownership.
         let child_pid = child.process_id();
+        let child_state = Arc::new(ChildState::default());
 
-        // Waiter thread: reap the child and publish the exit code.
+        // Waiter thread: observe the exit, mark it (so no signal can target a
+        // recycled pid), THEN reap the child and publish the exit code.
+        {
+            let child_state = Arc::clone(&child_state);
+            std::thread::spawn(move || {
+                if let Some(pid) = child_pid {
+                    wait_exit_unreaped(pid);
+                }
+                child_state.mark_exited();
+                let code = match child.wait() {
+                    Ok(status) => status.exit_code() as i32,
+                    Err(_) => -1,
+                };
+                let _ = exit_tx.send(Some(code));
+            });
+        }
+
+        // Writer thread: drains the bounded input queue in order. A failed
+        // write (child gone → EIO) ends it; queued and later jobs then fail
+        // fast with "input closed" instead of blocking.
+        let (input_tx, input_rx) = sync_channel::<WriteJob>(INPUT_QUEUE_DEPTH);
         std::thread::spawn(move || {
-            let code = match child.wait() {
-                Ok(status) => status.exit_code() as i32,
-                Err(_) => -1,
-            };
-            let _ = exit_tx.send(Some(code));
+            let mut writer = writer;
+            while let Ok(job) = input_rx.recv() {
+                let res = writer.write_all(&job.data).and_then(|()| writer.flush());
+                let failed = res.is_err();
+                match job.done {
+                    WriteDone::Blocking(tx) => {
+                        let _ = tx.send(res);
+                    }
+                    WriteDone::Async(tx) => {
+                        let _ = tx.send(res);
+                    }
+                }
+                if failed {
+                    break;
+                }
+            }
         });
 
         Ok(PtyHandle {
             master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
+            input_tx,
             killer: Mutex::new(killer),
+            child_state,
             ring,
             parser,
             tx,
@@ -240,12 +409,52 @@ impl PtyHandle {
         self.child_pid
     }
 
-    /// Write bytes to the child's stdin.
+    /// Write bytes to the child's stdin, blocking until they reached the PTY
+    /// (the synchronous API; use [`Self::write_async`] from async code).
     pub fn write(&self, data: &[u8]) -> Result<()> {
-        let mut w = lock_unpoisoned(&self.writer);
-        w.write_all(data)
-            .and_then(|()| w.flush())
-            .map_err(|e| Error::Internal(format!("pty write: {e}")))
+        let (tx, rx) = sync_channel(1);
+        self.input_tx
+            .send(WriteJob {
+                data: data.to_vec(),
+                done: WriteDone::Blocking(tx),
+            })
+            .map_err(|_| input_closed())?;
+        match rx.recv() {
+            Ok(res) => res.map_err(|e| Error::Internal(format!("pty write: {e}"))),
+            Err(_) => Err(input_closed()),
+        }
+    }
+
+    /// Queue bytes for the child's stdin and await their delivery for at most
+    /// `timeout`, without ever blocking the calling thread. Writes keep their
+    /// order (one queue per PTY, shared with [`Self::write`]).
+    ///
+    /// Errors: `Conflict` when the child is not accepting input — the queue is
+    /// full, or the bytes weren't drained within `timeout` (they then stay
+    /// queued and are delivered if the child resumes reading); `Internal` when
+    /// the PTY is gone.
+    pub async fn write_async(&self, data: &[u8], timeout: Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match self.input_tx.try_send(WriteJob {
+            data: data.to_vec(),
+            done: WriteDone::Async(tx),
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                return Err(Error::Conflict(
+                    "session is not accepting input (its input queue is full — the process is not reading its terminal)".into(),
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => return Err(input_closed()),
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(res)) => res.map_err(|e| Error::Internal(format!("pty write: {e}"))),
+            Ok(Err(_)) => Err(input_closed()),
+            Err(_) => Err(Error::Conflict(format!(
+                "session is not accepting input (not drained within {}s; still queued)",
+                timeout.as_secs()
+            ))),
+        }
     }
 
     /// Current emulator grid as `(cols, rows)`.
@@ -278,11 +487,46 @@ impl PtyHandle {
             .map_err(|e| Error::Internal(format!("pty resize: {e}")))
     }
 
-    /// Kill the child process.
+    /// Kill the child process and its process group: `SIGHUP` now (to the
+    /// child's group and the terminal's foreground job), then — on a helper
+    /// thread, only while the child is still alive — `SIGTERM` after
+    /// [`KILL_GRACE`] and `SIGKILL` after another. A CLI that traps or ignores
+    /// HUP therefore can't outlive `kill_session` / suspend / archive.
+    ///
+    /// Idempotent and pid-reuse safe: once the child has exited nothing is
+    /// signalled (its pid may already belong to an unrelated process).
     pub fn kill(&self) -> Result<()> {
-        lock_unpoisoned(&self.killer)
-            .kill()
-            .map_err(|e| Error::Internal(format!("pty kill: {e}")))
+        let Some(pid) = self.child_pid else {
+            return lock_unpoisoned(&self.killer)
+                .kill()
+                .map_err(|e| Error::Internal(format!("pty kill: {e}")));
+        };
+        if self.child_state.has_exited() {
+            return Ok(());
+        }
+        // The foreground job (e.g. a command run from a shell session) may sit
+        // in its own process group; capture it now, while the tty exists.
+        #[cfg(unix)]
+        let fg_pgrp = lock_unpoisoned(&self.master).process_group_leader();
+        #[cfg(not(unix))]
+        let fg_pgrp: Option<i32> = None;
+        if !self.child_state.signal(pid, fg_pgrp, SIGHUP) {
+            return Ok(());
+        }
+        let state = Arc::clone(&self.child_state);
+        std::thread::spawn(move || {
+            for sig in [SIGTERM, SIGKILL] {
+                if state.wait_exited(KILL_GRACE) || !state.signal(pid, fg_pgrp, sig) {
+                    return;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// True once the direct child has exited (it may not be reaped yet).
+    pub fn has_exited(&self) -> bool {
+        self.child_state.has_exited()
     }
 
     /// Subscribe to live output chunks.
@@ -411,17 +655,24 @@ impl PtyHandle {
     }
 }
 
+fn input_closed() -> Error {
+    Error::Internal("pty write: input closed (the process is gone)".into())
+}
+
 /// RAII: a [`PtyHandle`] owns its child process, so terminate it when the handle
 /// is fully dropped (its last `Arc` released). Without this, dropping a handle —
 /// e.g. evicting it from a tracking map, or overwriting it on respawn — would
 /// leave the child running forever (the leak that orphaned resumed agent
-/// processes). The `SIGKILL` is best-effort and idempotent: on an already-exited
-/// child the killer simply errors and we ignore it. Callers that want a tracked,
+/// processes). This is [`PtyHandle::kill`]: `SIGHUP` to the process group,
+/// escalating to `SIGTERM`/`SIGKILL` while the child survives — and a no-op
+/// once it has exited, which matters here because the last `Arc` (e.g. a
+/// terminal tab left open) can outlive the child by hours, by which time its
+/// pid may belong to an unrelated process. Callers that want a tracked,
 /// observable shutdown still call [`PtyHandle::kill`] explicitly; this only
 /// catches the paths that drop a handle without an explicit kill.
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        let _ = lock_unpoisoned(&self.killer).kill();
+        let _ = self.kill();
     }
 }
 
@@ -535,6 +786,99 @@ mod tests {
             gone,
             "child pid {pid} still alive after dropping the handle"
         );
+    }
+
+    /// Spawn `script` under /bin/sh and wait until it printed READY.
+    fn spawn_ready(script: &str) -> PtyHandle {
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn(&spec).expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if String::from_utf8_lossy(&handle.scrollback(20)).contains("READY") {
+                return handle;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("child never printed READY");
+    }
+
+    async fn exits_within(handle: &PtyHandle, within: Duration) -> bool {
+        let mut exit = handle.on_exit();
+        let res = tokio::time::timeout(within, exit.wait_for(|v| v.is_some())).await;
+        res.is_ok()
+    }
+
+    /// A CLI that ignores SIGHUP used to survive every kill path (suspend,
+    /// archive, kill_session): kill must escalate to SIGTERM.
+    #[tokio::test]
+    async fn kill_escalates_past_an_ignored_sighup() {
+        let handle = spawn_ready("trap '' HUP; echo READY; while :; do sleep 0.2; done");
+        handle.kill().expect("kill");
+        assert!(
+            exits_within(&handle, KILL_GRACE + Duration::from_secs(3)).await,
+            "HUP-ignoring child survived the SIGTERM escalation"
+        );
+    }
+
+    /// …and to SIGKILL when TERM is ignored as well.
+    #[tokio::test]
+    async fn kill_escalates_to_sigkill() {
+        let handle = spawn_ready("trap '' HUP TERM; echo READY; while :; do sleep 0.2; done");
+        handle.kill().expect("kill");
+        assert!(
+            exits_within(&handle, KILL_GRACE * 2 + Duration::from_secs(3)).await,
+            "HUP+TERM-ignoring child survived the SIGKILL escalation"
+        );
+    }
+
+    /// Pid-reuse guard: once the child exited (and was reaped), kill must not
+    /// signal anything — the pid may already belong to another process.
+    #[tokio::test]
+    async fn kill_after_exit_signals_nothing() {
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn(&spec).expect("spawn");
+        assert!(exits_within(&handle, Duration::from_secs(10)).await);
+        // The exit is published only after the child was marked exited.
+        assert!(handle.has_exited());
+        assert!(!handle.child_state.signal(
+            handle.pid().expect("pid"),
+            None,
+            SIGHUP
+        ));
+        handle.kill().expect("kill after exit is a no-op");
+    }
+
+    /// The async input path delivers in order alongside the blocking one.
+    #[tokio::test]
+    async fn write_async_delivers_in_order() {
+        let handle = spawn_ready("echo READY; exec cat");
+        handle
+            .write_async(b"alpha-", Duration::from_secs(5))
+            .await
+            .expect("async write");
+        handle.write(b"bravo-").expect("blocking write");
+        handle
+            .write_async(b"charlie\n", Duration::from_secs(5))
+            .await
+            .expect("async write");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if String::from_utf8_lossy(&handle.scrollback(20)).contains("alpha-bravo-charlie") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "input not echoed in order");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
