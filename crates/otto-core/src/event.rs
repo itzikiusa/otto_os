@@ -296,6 +296,49 @@ pub enum Event {
         /// re-fetch `GET /product/attachments/{aid}` instead.
         content: Option<String>,
     },
+    /// Design Hall: an artifact in the design graph changed — a new committed
+    /// version (content save, named commit, legacy import/sync) or a
+    /// metadata-only change (title/status/tags/approve/archive). Supersedes
+    /// `MockupUpdated`/`CanvasUpdated` for graph-aware clients; both legacy
+    /// events keep firing for their own routes.
+    DesignArtifactUpdated {
+        workspace_id: Id,
+        artifact_id: Id,
+        /// The artifact's format (`html` | `scene3d` | `otto-canvas` | `png` …).
+        format: String,
+        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`.
+        change: String,
+        /// The newly committed version, when the change created one.
+        version_id: Option<Id>,
+        /// The new source for text formats ≤ 4 MB; an explicit `null` (never
+        /// omitted) for binaries, oversized payloads and metadata-only changes —
+        /// clients re-fetch `GET /design/artifacts/{id}/content` then.
+        content: Option<String>,
+    },
+    /// Design Hall: a link touching `artifact_id` changed — an explicit link was
+    /// created/deleted, the document's extracted links were rebuilt, or the
+    /// link's TARGET moved (a new approved version for `follow_approved`
+    /// consumers, a new head for `follow_latest` ones). Consumers show a pulse +
+    /// "now vN" badge and re-fetch `GET /design/artifacts/{id}/links`.
+    DesignLinkUpdated {
+        workspace_id: Id,
+        /// The consumer (link source) artifact.
+        artifact_id: Id,
+        link_id: Option<Id>,
+        target_artifact_id: Option<Id>,
+        target_version_id: Option<Id>,
+        /// `created` | `deleted` | `extracted` | `target_approved` | `target_updated`.
+        reason: String,
+    },
+    /// Design Hall learning loop: a design signal was captured (Phase 0 only
+    /// captures; later phases also emit this when a learned rule is proposed).
+    DesignLearningUpdate {
+        workspace_id: Id,
+        /// The signal kind (`variant_chosen`, `edit_after_draft`, …).
+        kind: String,
+        signal_id: Option<Id>,
+        artifact_id: Option<Id>,
+    },
     /// A mockup agent session just became live (at the START of a turn). Lets the
     /// Mockups Assistant panel attach the agent's shell/Terminal immediately,
     /// instead of only after the turn finishes.
@@ -560,5 +603,45 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
+    }
+
+    /// Design Hall events: snake_case tags, and the optional ids / `content`
+    /// travel as explicit `null` (never omitted), like `mockup_updated`.
+    #[test]
+    fn design_event_wire_shapes() {
+        let v = serde_json::to_value(Event::DesignArtifactUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            format: "png".into(),
+            change: "meta".into(),
+            version_id: None,
+            content: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_artifact_updated");
+        assert!(v.get("content").is_some_and(|c| c.is_null()));
+        assert!(v.get("version_id").is_some_and(|c| c.is_null()));
+
+        let v = serde_json::to_value(Event::DesignLinkUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            link_id: Some("l1".into()),
+            target_artifact_id: Some("a2".into()),
+            target_version_id: None,
+            reason: "target_approved".into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_link_updated");
+        assert_eq!(v["target_artifact_id"], "a2");
+
+        let v = serde_json::to_value(Event::DesignLearningUpdate {
+            workspace_id: "ws1".into(),
+            kind: "variant_chosen".into(),
+            signal_id: Some("s1".into()),
+            artifact_id: Some("a1".into()),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_learning_update");
+        assert_eq!(v["kind"], "variant_chosen");
     }
 }

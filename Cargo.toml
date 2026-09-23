@@ -29,6 +29,7 @@ members = [
     "crates/otto-netguard",
     "crates/otto-ssh",
     "crates/otto-canvas",
+    "crates/otto-design",
     "crates/otto-workgraph",
     "crates/otto-mcp",
     "crates/otto-sandbox",
@@ -72,6 +73,7 @@ otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }
 otto-ssh = { path = "crates/otto-ssh" }
 otto-canvas = { path = "crates/otto-canvas" }
+otto-design = { path = "crates/otto-design" }
 otto-workgraph = { path = "crates/otto-workgraph" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-sandbox = { path = "crates/otto-sandbox" }

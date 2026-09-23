@@ -278,6 +278,12 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
         | Event::MockupSessionStarted { workspace_id, .. }
+        // Design Hall graph events (artifact content/meta, link moves, captured
+        // learning signals) go to the artifact's workspace members, exactly like
+        // the canvas/mockup live-edit events they supersede.
+        | Event::DesignArtifactUpdated { workspace_id, .. }
+        | Event::DesignLinkUpdated { workspace_id, .. }
+        | Event::DesignLearningUpdate { workspace_id, .. }
         // Live DB-Assistant answer edits + the assist-agent-started signal go to the
         // connection's workspace members (same delivery as canvas/mockup).
         | Event::DbAssistUpdated { workspace_id, .. }
@@ -783,5 +789,40 @@ mod tests {
             }),
             Scope::Workspace(_)
         ));
+    }
+
+    /// Design Hall graph events are workspace-member scoped (like the canvas /
+    /// mockup live-edit events they supersede), never global.
+    #[test]
+    fn design_events_are_workspace_scoped() {
+        for ev in [
+            Event::DesignArtifactUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                format: "html".into(),
+                change: "content".into(),
+                version_id: Some("v1".into()),
+                content: Some("<p>x</p>".into()),
+            },
+            Event::DesignLinkUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                link_id: None,
+                target_artifact_id: None,
+                target_version_id: None,
+                reason: "extracted".into(),
+            },
+            Event::DesignLearningUpdate {
+                workspace_id: "ws1".into(),
+                kind: "shipped".into(),
+                signal_id: None,
+                artifact_id: None,
+            },
+        ] {
+            assert!(
+                matches!(scope_of(&ev), Scope::Workspace(w) if w == "ws1"),
+                "{ev:?}"
+            );
+        }
     }
 }
