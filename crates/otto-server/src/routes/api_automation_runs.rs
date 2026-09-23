@@ -151,6 +151,9 @@ pub async fn start(
                     request: json!({"source":"automation_run","automation_run_id":run.id,"automation_id":run.automation_id,"request_id":request.id,"dataset_row":row_idx,"step_result_id":step_id}),
                     response: value,
                 }).await;
+                // Same runtime history retention as interactive runs.
+                let (max_rows, max_days) = super::api_client::history_retention(&ctx, &wid).await;
+                let _ = api.prune_history(&wid, max_rows, max_days).await;
                 run.report.steps.push(result);
                 run.result_rows.push(row_idx);
                 run.result_ids.push(step_id);

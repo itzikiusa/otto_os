@@ -132,6 +132,16 @@ export function isDirtyGitRefusal(e: unknown): boolean {
   );
 }
 
+/** The API client's `409 needs_confirm=new_host` refusal: a stored secret
+ *  would be sent to a host it isn't bound to. Returns that host (or `''`
+ *  when the message doesn't name one), `null` for any other error. */
+export function newHostConfirmHost(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.message.includes('needs_confirm=new_host')) {
+    return null;
+  }
+  return /host '([^']*)'/.exec(e.message)?.[1] ?? '';
+}
+
 /** True when an error is a fetch abort (caller cancelled via AbortSignal). */
 export function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === 'AbortError';

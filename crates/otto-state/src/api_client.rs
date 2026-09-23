@@ -721,6 +721,40 @@ impl ApiClientRepo {
         row_to_history(&r)
     }
 
+    /// Retention for `ws`'s request history: drop rows older than
+    /// `max_age_days` (0 = no age limit), then keep only the newest `max_rows`
+    /// (0 = no row cap). Runs after each insert — a runtime cap, no migration;
+    /// existing rows beyond the cap are trimmed on the workspace's next run.
+    /// Returns the number of rows deleted.
+    pub async fn prune_history(&self, ws: &Id, max_rows: i64, max_age_days: i64) -> Result<u64> {
+        let mut deleted = 0u64;
+        if max_age_days > 0 {
+            let cutoff = fmt(Utc::now() - chrono::Duration::days(max_age_days));
+            deleted += sqlx::query("DELETE FROM api_history WHERE workspace_id = ? AND executed_at < ?")
+                .bind(ws)
+                .bind(&cutoff)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("prune api history"))?
+                .rows_affected();
+        }
+        if max_rows > 0 {
+            deleted += sqlx::query(
+                "DELETE FROM api_history WHERE workspace_id = ? AND id IN (
+                    SELECT id FROM api_history WHERE workspace_id = ?
+                    ORDER BY executed_at DESC, id DESC LIMIT -1 OFFSET ?)",
+            )
+            .bind(ws)
+            .bind(ws)
+            .bind(max_rows)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("prune api history"))?
+            .rows_affected();
+        }
+        Ok(deleted)
+    }
+
     pub async fn clear_history(&self, ws: &Id) -> Result<()> {
         sqlx::query("DELETE FROM api_history WHERE workspace_id = ?")
             .bind(ws)
@@ -1023,6 +1057,44 @@ mod tests {
 
         repo.clear_history(&ws).await.unwrap();
         assert!(repo.list_history(&ws, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prune_history_caps_rows_and_age_per_workspace() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool.clone());
+        let row = |url: &str| NewApiHistory {
+            workspace_id: ws.clone(),
+            method: "GET".into(),
+            url: url.into(),
+            status: Some(200),
+            duration_ms: Some(1),
+            request: jval!({}),
+            response: jval!({"status": 200}),
+        };
+        for i in 0..5 {
+            repo.insert_history(row(&format!("https://h.test/{i}")))
+                .await
+                .unwrap();
+        }
+        // Age out one row by back-dating it well past the limit.
+        let old = fmt(Utc::now() - chrono::Duration::days(400));
+        sqlx::query("UPDATE api_history SET executed_at = ? WHERE url = 'https://h.test/0'")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Limits of 0 disable pruning entirely.
+        assert_eq!(repo.prune_history(&ws, 0, 0).await.unwrap(), 0);
+        assert_eq!(repo.list_history(&ws, 10).await.unwrap().len(), 5);
+
+        // Age: the back-dated row goes; then the row cap keeps the newest 2.
+        let deleted = repo.prune_history(&ws, 2, 90).await.unwrap();
+        assert_eq!(deleted, 3);
+        let left = repo.list_history(&ws, 10).await.unwrap();
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|h| h.url != "https://h.test/0"));
     }
 
     #[tokio::test]

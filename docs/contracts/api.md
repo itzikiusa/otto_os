@@ -2006,12 +2006,12 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
-| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request |
+| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
-| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token |
+| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only) |
 | GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
 | DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
@@ -2060,13 +2060,37 @@ SQLite: on save the daemon moves a plaintext member to the macOS Keychain
 touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
 `secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
 write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
-holds non-secret pairs only and GET never returns a secret value. Markers resolve in-memory
+holds non-secret pairs only and GET never returns a secret value. On update an OMITTED
+(`null`/absent) `secret_keys` keeps the stored set and values — only an explicit list
+replaces it (a key dropped from the list loses its Keychain value). `UpdateEnvironmentReq`
+also accepts `secret_renames:{old_name:new_name}`: a renamed secret's stored value moves to
+the new name (a `secret_values` entry for the new name still wins). Markers resolve in-memory
 only at execute/automation time — the ref must point at a request in the same workspace
 (else 400) — and every export path (OpenAPI, git-sync, history) sees markers or `***`, never
 values. History snapshots redact secret members to `"***"`. `secure-all` additionally marks
 environment variables with secret-shaped NAMES (token/secret/passw/api-key/authorization/
 credential) as secret; it is idempotent and requires ws editor. The `oauth2/token` endpoint
 accepts `client_secret`/`password`/`refresh_token` as plain strings or `$secret` markers.
+
+**Secret host binding (caller-built requests).** On the routes where the CALLER chooses
+the URL — ad-hoc `execute`, the SSE/WebSocket stream (`/ws/api-client/stream`) and
+`oauth2/token` — a stored secret may only travel to the host it belongs to: a
+`{"$secret":"otto.api.request.<id>"}` marker to the host of that saved request's URL
+(after `{{var}}` substitution; for `oauth2/token`, the request's saved `token_url`), and a
+Keychain-backed environment variable (referenced directly, nested through another
+variable, or via a runtime override) to the hosts of the workspace's human-authored saved
+requests. Anything else is refused with `409 needs_confirm=new_host` before any secret is
+resolved. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
+(boolean, default false) confirm it, and are honoured only for a person's credential —
+never for an agent (bridge/MCP headers, a managed-session token or an MCP token).
+
+**History retention.** After every recorded run (execute, saved run, automation step) the
+daemon trims the workspace's history: rows older than `settings.api_client.history_max_days`
+(default 90) are deleted, then only the newest `settings.api_client.history_max_rows`
+(default 1000) are kept; `0` disables either limit. Both live in the workspace settings JSON
+(`PATCH /workspaces/{id}`, admin). A history row keeps at most 64 KB of the response `body`
+(`truncated: true` when cut) — the live response is unaffected. There is no migration:
+pre-existing rows beyond the limits are trimmed on the workspace's next run.
 
 **Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
 captured executing in one workspace are never replayed for another. The cookies endpoints

@@ -4,10 +4,12 @@
 //! failing against it.
 //!
 //! Callers are responsible for netguard-checking any user-supplied URL
-//! (`otto_netguard::is_blocked_ip` et al.) *before* it reaches
-//! [`BrowserService::page`] or [`FallbackEngine`] — this crate does not
-//! resolve/re-check hosts itself, to keep the SSRF policy defined exactly
-//! once (see `otto-netguard`).
+//! (`otto_netguard::check_url`) *before* it reaches [`BrowserService::page`]
+//! or [`FallbackEngine`]. What happens AFTER that first hop is guarded here,
+//! always through `otto-netguard` (the SSRF policy stays defined exactly
+//! once): the plain fetch uses the guarded resolver + redirect policy, and a
+//! guarded [`LightpandaEngine`] intercepts and vets every request the page
+//! makes (redirect hops, subresources, XHR).
 
 pub mod cdp;
 pub mod engine;
@@ -46,11 +48,29 @@ pub struct FallbackEngine {
     static_body: Option<String>,
 }
 
+/// The plain-fetch client: `otto-netguard`'s guarded resolver (every hostname
+/// — the initial one and each redirect hop's — is vetted at CONNECT time, so
+/// neither a 30x nor a DNS-rebinding answer can reach loopback / private /
+/// metadata addresses) plus its bounded, re-validating redirect policy (which
+/// also refuses IP-literal hops). The caller still vets the initial URL.
+fn guarded_client() -> reqwest::Client {
+    otto_netguard::guarded_client_builder()
+        .build()
+        .unwrap_or_else(|_| {
+            // Never expected (no TLS/proxy config that can fail); stay guarded
+            // on redirects even then.
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default()
+        })
+}
+
 impl FallbackEngine {
     /// Caller must netguard-check `url` first — see crate docs.
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: guarded_client(),
             static_body: None,
         }
     }
@@ -58,7 +78,7 @@ impl FallbackEngine {
     /// Test constructor: serve `body` for every URL instead of fetching.
     pub fn from_static(body: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: guarded_client(),
             static_body: Some(body.to_string()),
         }
     }
@@ -217,7 +237,7 @@ impl BrowserService {
     /// Caller must netguard-check `url` first — see crate docs.
     pub async fn page(&self, url: &str) -> Result<Page, EngineError> {
         let host = host_of(url);
-        if self.is_denylisted(&host) {
+        if self.is_denylisted(&host) || !self.engine.is_usable() {
             return self.fallback.fetch_page(url).await;
         }
         let mut attempt = self.engine.fetch_page(url).await;
@@ -256,7 +276,7 @@ impl BrowserService {
     /// Caller must netguard-check `url` first — see crate docs.
     pub async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
         let host = host_of(url);
-        if self.is_denylisted(&host) {
+        if self.is_denylisted(&host) || !self.engine.is_usable() {
             return self.fallback.query(url, selector).await.map(cap_matches);
         }
         let mut attempt = self.engine.query(url, selector).await;
@@ -347,6 +367,10 @@ impl BrowserEngine for SidecarBackedEngine {
 
     fn name(&self) -> &'static str {
         self.engine.name()
+    }
+
+    fn is_usable(&self) -> bool {
+        self.engine.is_usable()
     }
 }
 
@@ -518,6 +542,53 @@ mod tests {
     /// after buffering it whole — spin up a tiny raw TCP/HTTP server that
     /// chunks out well over the cap and confirm `FallbackEngine` aborts with
     /// `TooLarge` (rather than OOMing on a fully-buffered multi-MB body).
+    /// A 302 into loopback must not be followed by the plain fetch: the
+    /// fixture serves a redirect to its own `/secret` (an internal address);
+    /// the guarded redirect policy refuses the hop, so the internal body never
+    /// comes back.
+    #[tokio::test]
+    async fn fallback_does_not_follow_redirects_into_internal_addresses() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let resp = if req.starts_with("GET /secret") {
+                        let body = "<html><title>SECRET</title>internal-only</html>";
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://{addr}/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                    };
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let engine = FallbackEngine::new();
+        let url = format!("http://{addr}/start");
+        // Either the hop is stopped (the 302 itself comes back, empty) or the
+        // fetch errors — never the internal page.
+        if let Ok(page) = engine.fetch_page(&url).await {
+            assert!(!page.html.contains("internal-only"), "{}", page.html);
+            assert_ne!(page.title, "SECRET");
+        }
+    }
+
     #[tokio::test]
     async fn raw_html_aborts_when_response_exceeds_byte_cap() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

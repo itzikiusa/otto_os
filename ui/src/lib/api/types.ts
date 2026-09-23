@@ -4357,10 +4357,14 @@ export interface UpsertApiEnvironmentReq {
   name: string;
   /** Non-secret variables (keys listed in secret_keys are stripped server-side). */
   variables?: Record<string, string>;
-  /** Names of variables whose values are Keychain-backed. */
-  secret_keys?: string[];
+  /** Names of variables whose values are Keychain-backed. On update, omitted
+   *  keeps the stored set + values; an explicit list replaces it. */
+  secret_keys?: string[] | null;
   /** WRITE-ONLY: new/changed secret values; absent keys keep stored values. */
   secret_values?: Record<string, string>;
+  /** Update only: `{old_name: new_name}` — a renamed secret keeps its stored
+   *  Keychain value (a value in secret_values for the new name still wins). */
+  secret_renames?: Record<string, string>;
 }
 
 export interface ExecuteApiReq {
@@ -4378,6 +4382,12 @@ export interface ExecuteApiReq {
   vars?: Record<string, string> | null;
   /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH). */
   ssh_connection_id?: Id | null;
+  /**
+   * Confirms sending a stored secret (a `$secret` marker or Keychain env
+   * variable) to a host it isn't bound to. Without it the daemon answers
+   * `409 needs_confirm=new_host`. Honoured for a person's credential only.
+   */
+  confirm_new_host?: boolean;
 }
 
 export interface ApiResponse {

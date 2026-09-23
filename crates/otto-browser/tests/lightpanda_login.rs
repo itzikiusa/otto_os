@@ -117,7 +117,7 @@ async fn login_fills_submits_and_detects_success_over_real_cdp() {
     let lp = otto_browser::Lightpanda::start(bin, tmp.path().into())
         .await
         .unwrap();
-    let engine = otto_browser::LightpandaEngine::new(lp.cdp_url());
+    let engine = otto_browser::LightpandaEngine::new_unguarded(lp.cdp_url());
 
     let addr = spawn_fixture().await;
     let url = format!("http://{addr}/login");
@@ -144,7 +144,7 @@ async fn login_reports_failure_when_credentials_are_wrong() {
     let lp = otto_browser::Lightpanda::start(bin, tmp.path().into())
         .await
         .unwrap();
-    let engine = otto_browser::LightpandaEngine::new(lp.cdp_url());
+    let engine = otto_browser::LightpandaEngine::new_unguarded(lp.cdp_url());
 
     let addr = spawn_fixture().await;
     let url = format!("http://{addr}/login");

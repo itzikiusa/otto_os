@@ -200,7 +200,8 @@ pub async fn resolve_walkthrough(
 /// it is an https URL) or `url` itself for a non-redirect answer.
 async fn resolve_one_hop(url: &str) -> Result<String, String> {
     otto_netguard::check_url(url).await?;
-    let client = reqwest::Client::builder()
+    // Guarded resolver: dial only the vetted address (no DNS rebinding).
+    let client = otto_netguard::guarded_client_builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("otto-walkthroughs")

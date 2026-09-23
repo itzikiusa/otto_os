@@ -6923,11 +6923,11 @@ struct BrowserProxyState {
 
 /// Root-level browser proxy router (self-authenticates via `?token=`).
 pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthenticator>) -> Router {
-    let http = reqwest::Client::builder()
+    // SSRF guard: the guarded resolver vets the address actually dialled (no
+    // DNS rebinding after the pre-flight check) and each redirect hop is capped
+    // + re-validated so an upstream 30x can't bounce the proxy inward.
+    let http = crate::routes::api_client::net_guard::guarded_client_builder()
         .user_agent("Mozilla/5.0 (compatible; OttoProxy/1.0)")
-        // SSRF guard: cap + re-validate each redirect hop's host so an upstream
-        // 30x can't bounce the proxy into a private/loopback address.
-        .redirect(crate::routes::api_client::net_guard::redirect_policy())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("failed to build reqwest client for browser proxy");

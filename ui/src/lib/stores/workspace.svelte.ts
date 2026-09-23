@@ -1292,6 +1292,33 @@ class WorkspaceStore {
     );
   }
 
+  /** API-client history retention for this workspace (the daemon trims after
+   *  every run): `settings.api_client.history_max_rows` / `history_max_days`,
+   *  defaults 1000 rows / 90 days; 0 disables that limit. */
+  get apiHistoryRetention(): { rows: number; days: number } {
+    const api = this.current?.settings?.api_client as
+      | { history_max_rows?: number; history_max_days?: number }
+      | undefined;
+    const pick = (v: unknown, fallback: number): number =>
+      typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
+    return { rows: pick(api?.history_max_rows, 1000), days: pick(api?.history_max_days, 90) };
+  }
+
+  /** Set the API-client history retention (admin-gated by the workspaces
+   *  PATCH route). Shallow-merges into the settings JSON. */
+  async setApiHistoryRetention(rows: number, days: number): Promise<void> {
+    if (!this.currentId || !this.current) return;
+    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
+    const settings = {
+      ...this.current.settings,
+      api_client: { ...prev, history_max_rows: rows, history_max_days: days },
+    };
+    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+    this.workspaces = this.workspaces.map((w) =>
+      w.id === updated.id ? { ...w, ...updated } : w,
+    );
+  }
+
   /** Set this workspace's default agent CLI. '' clears it (use the global
    *  default). Shallow-merges into the workspace settings JSON. */
   async saveDefaultAgent(provider: string): Promise<void> {

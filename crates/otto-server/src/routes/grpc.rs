@@ -18,7 +18,7 @@ use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MessageDescriptor, Met
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::Status;
 
 use otto_core::api::{ApiResponse, TraceStep};
@@ -259,10 +259,15 @@ pub async fn invoke(
 ) -> ApiResult<Json<ApiResponse>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
 
+    // The workspace's explicit opt-in for local/private targets (grpc against a
+    // dev server on localhost is a first-class API-client use case) — honoured
+    // by reflection AND invoke alike.
+    let allow_local = crate::routes::api_client::workspace_allows_local(&ctx, &wid).await;
+
     // Descriptors come from the uploaded .proto, or from server reflection when
     // none was provided.
     let pool = if req.proto.trim().is_empty() {
-        reflect_pool(&req.url, &req.headers).await?
+        reflect_pool(&req.url, &req.headers, allow_local).await?
     } else {
         pool_from_proto(&req.proto)?
     };
@@ -292,25 +297,8 @@ pub async fn invoke(
         level: "info".into(),
     }];
 
-    // SSRF guard: resolve + classify the target host before dialing — unless
-    // the workspace explicitly opted in to local/private targets (grpc against
-    // a dev server on localhost is a first-class API-client use case).
-    if !crate::routes::api_client::workspace_allows_local(&ctx, &wid).await {
-        crate::routes::api_client::net_guard::check_url(&req.url)
-            .await
-            .map_err(invalid)?;
-    }
-
-    // Build the channel (TLS for https/grpcs).
-    let uri = axum::http::Uri::from_str(&req.url).map_err(|e| invalid(format!("bad url: {e}")))?;
-    let scheme = uri.scheme_str().unwrap_or("http");
-    let mut endpoint = Channel::builder(uri.clone());
-    if scheme == "https" || scheme == "grpcs" {
-        let tls = ClientTlsConfig::new().with_webpki_roots();
-        endpoint = endpoint
-            .tls_config(tls)
-            .map_err(|e| upstream(format!("tls config: {e}")))?;
-    }
+    // SSRF guard (pinned) + channel build (TLS for https/grpcs).
+    let endpoint = grpc_endpoint(&req.url, allow_local).await?;
     let connect = tokio::time::timeout(Duration::from_secs(20), endpoint.connect()).await;
     let channel = match connect {
         Ok(Ok(c)) => c,
@@ -510,20 +498,66 @@ message ServiceResponse { string name = 1; }
 message ErrorResponse { int32 error_code = 1; string error_message = 2; }
 "#;
 
-async fn connect_channel(url: &str) -> Result<Channel, ApiError> {
-    // SSRF guard: resolve + classify the reflection target before dialing.
-    crate::routes::api_client::net_guard::check_url(url)
-        .await
-        .map_err(invalid)?;
+/// Build the tonic endpoint for `url` (TLS for `https`/`grpcs`).
+///
+/// SSRF guard: unless the workspace opted in to local/private targets, the host
+/// is resolved + vetted ONCE and the channel dials exactly that vetted address
+/// (pinned) — handing tonic the hostname would resolve it again at connect
+/// time, re-opening DNS rebinding. The original authority is kept as the
+/// request origin (`:authority`) and as the TLS server name, so virtual hosts
+/// and certificate verification behave exactly as for the hostname.
+async fn grpc_endpoint(url: &str, allow_local: bool) -> Result<Endpoint, ApiError> {
     let uri = axum::http::Uri::from_str(url).map_err(|e| invalid(format!("bad url: {e}")))?;
     let is_tls = matches!(uri.scheme_str(), Some("https") | Some("grpcs"));
-    let mut endpoint = Channel::builder(uri);
+    let mut endpoint = if allow_local {
+        Channel::builder(uri.clone())
+    } else {
+        let (host, addrs) = otto_netguard::resolve_checked(url)
+            .await
+            .map_err(invalid)?;
+        let mut addr = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
+            .ok_or_else(|| invalid(format!("host {host} did not resolve")))?;
+        if uri.port_u16().is_none() {
+            // `grpc`/`grpcs` have no registered default port in the URL parser.
+            addr.set_port(if is_tls { 443 } else { 80 });
+        }
+        // tonic only layers TLS on an `https` connect URI, so normalise the
+        // scheme (`grpc`/`grpcs` included) for both the dial and the origin.
+        let scheme = if is_tls { "https" } else { "http" };
+        let authority = uri
+            .authority()
+            .map(|a| a.as_str().to_string())
+            .ok_or_else(|| invalid("url has no host"))?;
+        let pinned = axum::http::Uri::from_str(&format!("{scheme}://{addr}"))
+            .map_err(|e| invalid(format!("bad url: {e}")))?;
+        let origin = axum::http::Uri::from_str(&format!("{scheme}://{authority}"))
+            .map_err(|e| invalid(format!("bad url: {e}")))?;
+        let mut endpoint = Channel::builder(pinned).origin(origin);
+        if is_tls {
+            let tls = ClientTlsConfig::new().with_webpki_roots().domain_name(host);
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| upstream(format!("tls config: {e}")))?;
+        }
+        return Ok(endpoint);
+    };
     if is_tls {
         let tls = ClientTlsConfig::new().with_webpki_roots();
         endpoint = endpoint
             .tls_config(tls)
             .map_err(|e| upstream(format!("tls config: {e}")))?;
     }
+    Ok(endpoint)
+}
+
+async fn connect_channel(url: &str, allow_local: bool) -> Result<Channel, ApiError> {
+    // SSRF guard (pinned, see `grpc_endpoint`) for the reflection target —
+    // honouring the workspace allow-local opt-in exactly like invoke does.
+    let endpoint = grpc_endpoint(url, allow_local).await?;
     match tokio::time::timeout(Duration::from_secs(20), endpoint.connect()).await {
         Ok(Ok(c)) => Ok(c),
         Ok(Err(e)) => Err(upstream(format!("connect failed: {e}"))),
@@ -548,7 +582,11 @@ fn metadata_from(headers: &[KV]) -> tonic::metadata::MetadataMap {
 }
 
 /// Build a descriptor pool by querying the server's reflection service.
-async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiError> {
+async fn reflect_pool(
+    url: &str,
+    headers: &[KV],
+    allow_local: bool,
+) -> Result<DescriptorPool, ApiError> {
     use futures_util::stream;
     use prost::Message as _;
     use prost_reflect::Value as PValue;
@@ -563,7 +601,7 @@ async fn reflect_pool(url: &str, headers: &[KV]) -> Result<DescriptorPool, ApiEr
     let path =
         PathAndQuery::from_static("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo");
 
-    let channel = connect_channel(url).await?;
+    let channel = connect_channel(url, allow_local).await?;
     let mut client = tonic::client::Grpc::new(channel);
     client
         .ready()
@@ -681,7 +719,8 @@ pub async fn reflect(
     Json(req): Json<GrpcReflectReq>,
 ) -> ApiResult<Json<GrpcDescribeResp>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let pool = reflect_pool(&req.url, &req.headers).await?;
+    let allow_local = crate::routes::api_client::workspace_allows_local(&ctx, &wid).await;
+    let pool = reflect_pool(&req.url, &req.headers, allow_local).await?;
     Ok(Json(GrpcDescribeResp {
         services: services_from_pool(&pool),
     }))
@@ -730,6 +769,23 @@ mod tests {
         let skeleton: Value = serde_json::from_str(&json_skeleton(&req, 0)).unwrap();
         assert_eq!(skeleton["name"], json!(""));
         assert_eq!(skeleton["count"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn endpoint_pins_vetted_address_and_honours_allow_local() {
+        // Guarded: a loopback target is refused (reflection included).
+        assert!(grpc_endpoint("grpc://127.0.0.1:50051", false).await.is_err());
+        assert!(grpc_endpoint("http://[::1]:50051", false).await.is_err());
+        // allow_local: the workspace opt-in lets a local dev server through.
+        assert!(grpc_endpoint("grpc://127.0.0.1:50051", true).await.is_ok());
+        // A public literal is dialled at the vetted address, scheme normalised.
+        let ep = grpc_endpoint("grpc://8.8.8.8:50051", false).await.unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("http"));
+        assert_eq!(ep.uri().host(), Some("8.8.8.8"));
+        assert_eq!(ep.uri().port_u16(), Some(50051));
+        let ep = grpc_endpoint("grpcs://8.8.8.8", false).await.unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("https"));
+        assert_eq!(ep.uri().port_u16(), Some(443));
     }
 
     #[test]

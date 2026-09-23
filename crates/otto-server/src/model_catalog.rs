@@ -265,9 +265,8 @@ pub fn parse_models_dev(json: &Value, provider: &str) -> Vec<(String, String)> {
 /// Netguard-checked GET with the shared redirect policy + fetch budget.
 async fn guarded_fetch_text(url: &str) -> Result<String, String> {
     otto_netguard::check_url(url).await?;
-    let client = reqwest::Client::builder()
+    let client = otto_netguard::guarded_client_builder()
         .timeout(FETCH_TIMEOUT)
-        .redirect(otto_netguard::redirect_policy())
         .user_agent("otto-model-catalog")
         .build()
         .map_err(|e| e.to_string())?;
