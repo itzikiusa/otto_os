@@ -1910,6 +1910,12 @@ impl SessionManager {
         if let Some(gitdir) = resolve_git_common_dir(&cwd).await {
             extra.push(gitdir);
         }
+        // A named-account session's CLI home lives under the data dir
+        // (`provider-accounts/<id>`), which the profile otherwise write-denies;
+        // `for_agent` re-opens an extra inside the data dir — only this one.
+        if let Some(account_home) = self.provider_home(session) {
+            extra.push(account_home);
+        }
         let policy =
             otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
         let (program, args) = policy.wrap(&spec.program, &spec.args);

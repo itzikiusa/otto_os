@@ -38,6 +38,8 @@ fn seatbelt_confines_writes_but_allows_reads_and_exec() {
         writable_roots: vec![inside_real.clone()],
         deny_read: Vec::new(),
         network: NetworkPolicy::Full,
+        mach_services: None,
+        trailing_rules: Vec::new(),
     };
 
     // 1. The profile must be accepted and a process must run + read at all.
@@ -107,6 +109,56 @@ fn seatbelt_allows_git_commit_in_the_workspace() {
     assert!(
         repo_real.join(".git").join("HEAD").exists(),
         "no .git created"
+    );
+}
+
+/// The agent profile as the OS enforces it: Otto's data dir is write-denied
+/// even under a writable root (here: the temp root), its agent work areas stay
+/// writable, secrets / the state DB are unreadable, the daemon binary stays
+/// readable (claude execs `ottod mcp-tools`), and LaunchServices is out of reach.
+#[test]
+fn seatbelt_agent_profile_confines_otto_data_dir() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let data = root.join("Otto Data");
+    let cwd = root.join("project");
+    for d in [data.join("bin"), data.join("workflow-context"), cwd.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(data.join("bin").join("ottod"), "bin").unwrap();
+    std::fs::write(data.join("otto.db"), "db").unwrap();
+    std::fs::write(data.join("otto.db.before-x.bak"), "bak").unwrap();
+    std::fs::write(data.join("secrets.json"), "s").unwrap();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let pol = SandboxPolicy::for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
+
+    let q = |p: &Path| shell_quote(p);
+    let (ok, _) = run_sandboxed(&pol, &format!("echo x > {}", q(&data.join("bin").join("ottod"))));
+    assert!(!ok, "agent replaced the daemon binary");
+    let (ok, _) = run_sandboxed(&pol, &format!("echo x >> {}", q(&data.join("otto.db"))));
+    assert!(!ok, "agent wrote the state DB");
+    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", q(&data.join("secrets.json"))));
+    assert!(!ok, "agent read secrets.json");
+    let (ok, _) = run_sandboxed(&pol, &format!("cat {}", q(&data.join("otto.db.before-x.bak"))));
+    assert!(!ok, "agent read a state DB backup");
+    let (ok, err) = run_sandboxed(&pol, &format!("cat {} >/dev/null", q(&data.join("bin").join("ottod"))));
+    assert!(ok, "the daemon binary must stay readable/executable: {err}");
+    let step = data.join("workflow-context").join("step1.md");
+    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", q(&step)));
+    assert!(ok, "workflow handoff dir must stay writable: {err}");
+    let (ok, err) = run_sandboxed(&pol, &format!("echo x > {}", q(&cwd.join("f.txt"))));
+    assert!(ok, "cwd must stay writable: {err}");
+    // LaunchServices (how `open -a Terminal x.command` escapes the sandbox) is
+    // not reachable: `lsappinfo front` answers an `ASN:` with the blanket
+    // mach-lookup and `[ NULL ]` under the agent allow-list.
+    let (prog, args) = pol.wrap("/usr/bin/lsappinfo", &["front".to_string()]);
+    let out = Command::new(prog).args(args).output().expect("spawn sandbox-exec");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("ASN:"),
+        "LaunchServices must be unreachable under the agent profile"
     );
 }
 

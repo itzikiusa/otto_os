@@ -159,7 +159,18 @@ Notes:
   Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
   agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
   the workspace cwd, the resolved git dir (so worktree commits still work), the
-  agent CLIs' own config/cache dirs and temp — while leaving reads global. `network`
+  agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
+  own data dir is write-denied even under those roots (only its agent work areas —
+  `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
+  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize` —
+  and the session's own `provider-accounts/<id>` home stay writable), and its
+  `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
+  that make unsandboxed programs run agent-chosen code are write-denied
+  (`~/.claude/settings.json`, `~/.claude/settings.local.json`,
+  `~/.codex/config.toml`, `~/.config/git/`), `/bin/launchctl` cannot be executed,
+  and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
+  network configuration + DNS, TLS trust and the keychain) — LaunchServices and
+  AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
   defaults to `full` (agents still reach their model API; loopback always allowed);
   `loopback`/`none` are stricter postures suited to non-model shells. `providers`
   defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
