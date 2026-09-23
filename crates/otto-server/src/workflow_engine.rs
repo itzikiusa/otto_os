@@ -1075,15 +1075,29 @@ pub fn spawn_run(
                 .await
             {
                 tracing::error!(%run_id, "persisting run scope failed: {e}");
-                let _ = WorkflowsRepo::new(ctx.pool.clone())
+                let nodes = prior_nodes.as_deref().unwrap_or(&[]);
+                let rev = WorkflowsRepo::new(ctx.pool.clone())
                     .update_run(
                         &run_id,
                         RunStatus::Error,
-                        prior_nodes.as_deref().unwrap_or(&[]),
+                        nodes,
                         Some(&format!("cannot persist execution scope: {e}")),
                         true,
                     )
-                    .await;
+                    .await
+                    .unwrap_or(0);
+                // Announce it: open run views otherwise kept showing "queued".
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "error",
+                    None,
+                    rev,
+                    None,
+                    nodes,
+                    false,
+                );
                 return;
             }
         }
@@ -1122,7 +1136,7 @@ pub fn spawn_run(
                 match pinned_repo.definition_for_run(&r).await {
                     Ok(definition) => definition,
                     Err(error) => {
-                        let _ = pinned_repo
+                        let rev = pinned_repo
                             .update_run(
                                 &run_id,
                                 RunStatus::Error,
@@ -1130,7 +1144,19 @@ pub fn spawn_run(
                                 Some(&error.to_string()),
                                 true,
                             )
-                            .await;
+                            .await
+                            .unwrap_or(0);
+                        emit_run_updated(
+                            &ctx,
+                            &workflow.workspace_id,
+                            &run_id,
+                            "error",
+                            None,
+                            rev,
+                            None,
+                            &r.nodes,
+                            false,
+                        );
                         return;
                     }
                 }
