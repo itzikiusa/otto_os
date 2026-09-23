@@ -527,7 +527,7 @@
               <div class="msg human">
                 <div class="who"><span class="av" aria-hidden="true">Y</span> <strong>You</strong></div>
                 {#if ask.selectionLabel}<span class="chip ctx"><Icon name="target" size={11} /> {ask.selectionLabel}</span>{/if}
-                <p class="bubble">{ask.prompt}</p>
+                <p class="bubble" title={ask.display && ask.display !== ask.prompt ? ask.prompt : undefined}>{ask.display ?? ask.prompt}</p>
               </div>
             {/if}
             <div class="msg agent">

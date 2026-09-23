@@ -14,11 +14,11 @@ export async function sendAsk(artifactId: string, req: AssistRequest, selectionL
   const at = new Date().toISOString();
   if (req.kind === 'variants') {
     const run = await startVariants(artifactId, req.body);
-    asks.add({ key: run.run_id, artifactId, prompt: req.prompt, intent: req.intent, selectionLabel, at });
+    asks.add({ key: run.run_id, artifactId, prompt: req.prompt, display: req.display, intent: req.intent, selectionLabel, at });
     return { kind: 'run', run };
   }
   const turn = await startAssist(artifactId, req.body);
-  asks.add({ key: turn.turn_id, artifactId, prompt: req.prompt, intent: req.intent, selectionLabel, at });
+  asks.add({ key: turn.turn_id, artifactId, prompt: req.prompt, display: req.display, intent: req.intent, selectionLabel, at });
   return { kind: 'turn', turn };
 }
 

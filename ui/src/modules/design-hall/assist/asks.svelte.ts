@@ -12,7 +12,10 @@ export interface Ask {
   /** turn_id (a single turn) or run_id (a variants run). */
   key: string;
   artifactId: string;
+  /** What the agent was sent. */
   prompt: string;
+  /** How the ask reads in the thread (a quick action's label); falls back to `prompt`. */
+  display?: string;
   intent: Intent;
   /** "Section: Hero" when the ask focused a selection. */
   selectionLabel: string | null;

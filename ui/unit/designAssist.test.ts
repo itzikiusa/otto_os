@@ -181,6 +181,7 @@ test('quick actions map to modes; checks never edit, fixes do', () => {
   assert.equal(a11y.body.provider, 'codex');
   assert.match(a11y.prompt, /Do not edit/);
   assert.match(a11y.prompt, /“Hero”/);
+  assert.equal(a11y.display, 'Check accessibility', 'the thread shows the label, not the recipe');
 
   const brand = quickActionRequest('brand_check');
   assert.equal(brand.kind === 'assist' && brand.body.mode, 'critique');
@@ -197,6 +198,7 @@ test('"3 variants" is a variants run of 3 focused on the selection', () => {
   if (r.kind !== 'variants') return;
   assert.equal(r.body.n, 3);
   assert.match(r.prompt, /Three distinct directions for “Hero”\. bolder/);
+  assert.equal(r.display, '3 variants — bolder');
   assert.deepEqual(r.body.references, ['a@v2']);
   assert.deepEqual(r.body.selection, { node_id: 'hero', label: 'Hero' });
 });

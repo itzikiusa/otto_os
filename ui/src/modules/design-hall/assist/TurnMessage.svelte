@@ -69,7 +69,7 @@
   const summary = $derived(
     typeof version?.provenance?.prompt_summary === 'string' ? (version.provenance.prompt_summary as string) : null,
   );
-  const asked = $derived(ask?.prompt ?? summary);
+  const asked = $derived(ask ? (ask.display ?? ask.prompt) : summary);
   const modeLabel = $derived(
     ({ generate: 'Generate', refine: 'Refine', critique: 'Review', a11y: 'Accessibility fix', variant: 'Variant' } as Record<string, string>)[
       turn.mode
@@ -85,7 +85,7 @@
       <div class="who"><span class="av" aria-hidden="true">Y</span> <strong>You</strong>
         {#if ask}<span class="when" title={new Date(ask.at).toLocaleString()}>{rel(ask.at)}</span>{/if}</div>
       {#if ask?.selectionLabel}<span class="chip ctx"><Icon name="target" size={11} /> {ask.selectionLabel}</span>{/if}
-      <p class="bubble">{asked}</p>
+      <p class="bubble" title={ask && ask.display && ask.display !== ask.prompt ? ask.prompt : undefined}>{asked}</p>
     </div>
   {/if}
 

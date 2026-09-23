@@ -260,9 +260,11 @@ export interface AssistContext {
   model?: string;
 }
 
+/** `prompt` is what the agent gets; `display` is how the ask reads in the
+ *  thread (a quick action's label, not its whole recipe). */
 export type AssistRequest =
-  | { kind: 'assist'; intent: Intent; prompt: string; body: DesignAssistReq }
-  | { kind: 'variants'; intent: Intent; prompt: string; body: DesignVariantsReq };
+  | { kind: 'assist'; intent: Intent; prompt: string; display: string; body: DesignAssistReq }
+  | { kind: 'variants'; intent: Intent; prompt: string; display: string; body: DesignVariantsReq };
 
 const QUICK_PROMPTS: Record<Exclude<QuickActionId, 'variants'>, { mode: DesignAssistMode; prompt: string }> = {
   engaging: {
@@ -328,11 +330,12 @@ export function quickActionRequest(id: QuickActionId, ctx: AssistContext = {}): 
     if (references) body.references = references;
     if (provider) body.provider = provider;
     if (model) body.model = model;
-    return { kind: 'variants', intent: 'variants', prompt, body };
+    return { kind: 'variants', intent: 'variants', prompt, display: `3 variants${extra ? ` —${extra}` : ''}`, body };
   }
   const q = QUICK_PROMPTS[id];
   const prompt = `${q.prompt}${focusSuffix(ctx.selection)}${extra}`;
-  return { kind: 'assist', intent: id, prompt, body: { prompt, mode: q.mode, ...common(ctx) } };
+  const label = QUICK_ACTIONS.find((a) => a.id === id)?.label ?? id;
+  return { kind: 'assist', intent: id, prompt, display: `${label}${extra ? ` —${extra}` : ''}`, body: { prompt, mode: q.mode, ...common(ctx) } };
 }
 
 /** Free text from the composer → one refine turn (or `n` variants). */
@@ -345,9 +348,9 @@ export function promptRequest(text: string, ctx: AssistContext = {}, n = 1, mode
     if (references) body.references = references;
     if (provider) body.provider = provider;
     if (model) body.model = model;
-    return { kind: 'variants', intent: mode === 'generate' ? 'generate' : 'prompt', prompt, body };
+    return { kind: 'variants', intent: mode === 'generate' ? 'generate' : 'prompt', prompt, display: prompt, body };
   }
-  return { kind: 'assist', intent: mode === 'generate' ? 'generate' : 'prompt', prompt, body: { prompt, mode, ...common(ctx) } };
+  return { kind: 'assist', intent: mode === 'generate' ? 'generate' : 'prompt', prompt, display: prompt, body: { prompt, mode, ...common(ctx) } };
 }
 
 export interface Finding {
@@ -389,6 +392,7 @@ export function fixRequest(findings: Finding[], a11y: boolean, ctx: AssistContex
     kind: 'assist',
     intent: a11y ? 'fix_a11y' : 'fix_findings',
     prompt,
+    display: findings.length === 1 ? 'Fix it' : `Fix all ${findings.length}`,
     body: { prompt, mode: a11y ? 'a11y' : 'refine', ...common(ctx) },
   };
 }
