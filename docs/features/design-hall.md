@@ -401,19 +401,29 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 | `#/design` · `#/design/spatial` | Lobby — Grid (prompt hero, the seven studios, Continue, Projects, Linked to Product, the learning + agent-activity rail) or the Spatial (beta) CSS gallery of project bays |
 | `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); 3D adds hierarchy + inspector |
 | `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with its classic-or-planned note) / the designs implementing a story |
-| `#/design/brand` · `#/design/learned[/rules\|/memory]` | Brand Kit scaffold (`otto-brand` kits) · the signals log (Rules and Memory are Phase 1 empty states) |
+| `#/design/brand` · `#/design/learned[/rules\|/memory]` | Brand Kit (`otto-brand` kits) · What Otto learned: Pending, Rules, Memory, Signals and Settings (approve / reject / roll back are human-only, via the self-improvement edit flow) |
 
-- **Phase 0 honesty.** The lobby prompt creates a *draft* in the chosen studio
-  (the brief is kept in `meta.brief`); generation is Phase 1. Frames/Graphics
+- **Generate.** The lobby prompt creates a draft in the chosen studio (the
+  brief is kept in `meta.brief`) and starts an agent turn — or a variants run
+  when Variants is 2–4 — opening the design on its Otto tab
+  (`#/design/a/<id>/otto`); "Draft only" skips generation. "Use references"
+  sends the team's closest past designs first as R1–R3. Frames/Graphics
   edit HTML (and SVG) as source with a live preview, 3D uses the arena's
   scene3d studio, Whiteboard edits Mermaid/D2/Excalidraw; Site Studio and
   Spatial Hall show their planned release instead of an editor.
 - **Saving** is explicit (Save / ⌘S): `PUT …/content` with `base_version`; a
   409 asks "Save mine on top" or "Load vN (discard my edits)".
-- **Signals the UI posts:** `variant_chosen` on Restore and when a conflicting
-  agent version is taken, `variant_rejected` when a person keeps their edits
-  over an agent version. Approve / status / shipped / edit-after-draft signals
-  are recorded by the daemon, not posted twice.
+- **Otto tab** (every studio): agent + model picker, live status from
+  `design_assist_updated`, an attributed thread with verified citation chips
+  (unverified ones flagged), quick actions (more engaging, accessibility,
+  on-brand, mobile, real copy from story, 3 variants), and a variants tray
+  (Apply / Compare / reject with a reason). A finished turn is a new version;
+  Restore undoes it.
+- **Signals the UI posts:** `restored`, `forked`, `reference_added`,
+  `variant_rejected` (with a reason, or when a person keeps their edits over an
+  agent draft), `a11y_fix` and `critique_finding`. Approve / status / shipped /
+  agent drafts / accepts / edit-after-draft are recorded by the daemon, not
+  posted twice.
 - **Live:** the `design_*` events refresh the lobby, the open artifact (a new
   head while you have unsaved edits shows a "newer version" notice instead of
   replacing your copy), its Links panel and the learning log.
