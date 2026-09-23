@@ -30,7 +30,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, repo_lock, ApiResult, GitCtx};
-use crate::local::{upstream_err, DiffTarget, LocalGit};
+use crate::local::{upstream_err, DiffTarget, GitCmd, LocalGit};
 
 /// Message of the stash `discard` leaves behind. Listed (not just created), so
 /// `GET /repos/{id}/stashes` shows it and the user can pop it back.
@@ -58,6 +58,8 @@ const STALE: &str = "the file changed since the diff was shown — refresh and r
 /// an unselected `+` is dropped (it exists on neither side of the patch); an
 /// unselected `-` becomes CONTEXT (it must survive the apply, so it has to be
 /// present in both images).
+///
+/// Text front-end of [`build_hunk_patch_bytes`], which is what the route uses.
 pub fn build_hunk_patch(
     raw_diff: &str,
     path: &str,
@@ -65,20 +67,37 @@ pub fn build_hunk_patch(
     hunk_header: &str,
     lines: Option<&[usize]>,
 ) -> Result<String> {
+    let patch = build_hunk_patch_bytes(raw_diff.as_bytes(), path, hunk_idx, hunk_header, lines)?;
+    // Every output byte is an input byte or ASCII, so UTF-8 in → UTF-8 out.
+    String::from_utf8(patch).map_err(|_| Error::Internal("hunk patch is not UTF-8".into()))
+}
+
+/// [`build_hunk_patch`] over git's RAW diff bytes, returning the patch as
+/// bytes. The route never decodes the diff: a lossy UTF-8 round-trip turned a
+/// Latin-1 `caf\xE9` into `caf\xEF\xBF\xBD`, and because the context lines
+/// still matched, `git apply` accepted the patch and the corruption was
+/// staged (or written back by unstage/discard).
+pub fn build_hunk_patch_bytes(
+    raw_diff: &[u8],
+    path: &str,
+    hunk_idx: usize,
+    hunk_header: &str,
+    lines: Option<&[usize]>,
+) -> Result<Vec<u8>> {
     // `split_inclusive` keeps every line's own terminator: CRLF endings and a
     // missing final newline round-trip byte for byte. `lines()` normalises both.
-    let all: Vec<&str> = raw_diff.split_inclusive('\n').collect();
+    let all: Vec<&[u8]> = raw_diff.split_inclusive(|b| *b == b'\n').collect();
     let starts: Vec<usize> = all
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.starts_with("diff --git "))
+        .filter(|(_, l)| l.starts_with(b"diff --git "))
         .map(|(i, _)| i)
         .collect();
     let (from, to) = starts
         .iter()
         .enumerate()
         .map(|(n, &s)| (s, starts.get(n + 1).copied().unwrap_or(all.len())))
-        .find(|&(s, _)| diff_git_targets(all[s], path))
+        .find(|&(s, _)| diff_git_targets(&String::from_utf8_lossy(all[s]), path))
         .ok_or_else(|| Error::NotFound(format!("no diff for {path}")))?;
     let block = &all[from..to];
 
@@ -86,9 +105,9 @@ pub fn build_hunk_patch(
     // no text hunks at all — neither can be applied a hunk at a time. The UI
     // turns this into "stage the whole file".
     if block.iter().any(|l| {
-        l.starts_with("rename from")
-            || l.starts_with("Binary files")
-            || l.starts_with("GIT binary patch")
+        l.starts_with(b"rename from")
+            || l.starts_with(b"Binary files")
+            || l.starts_with(b"GIT binary patch")
     }) {
         return Err(Error::Invalid("stage the whole file".into()));
     }
@@ -99,32 +118,35 @@ pub fn build_hunk_patch(
     // ' ', '+', '-' or '\'.
     let head_end = block
         .iter()
-        .position(|l| l.starts_with("@@"))
+        .position(|l| l.starts_with(b"@@"))
         .unwrap_or(block.len());
     let hstarts: Vec<usize> = block
         .iter()
         .enumerate()
         .skip(head_end)
-        .filter(|(_, l)| l.starts_with("@@"))
+        .filter(|(_, l)| l.starts_with(b"@@"))
         .map(|(i, _)| i)
         .collect();
-    let hunks: Vec<&[&str]> = hstarts
+    let hunks: Vec<&[&[u8]]> = hstarts
         .iter()
         .enumerate()
         .map(|(n, &s)| &block[s..hstarts.get(n + 1).copied().unwrap_or(block.len())])
         .collect();
 
+    // The client saw the header through the same lossy decode `parse_diff`
+    // renders with; compare in that space (the header itself is ASCII bar the
+    // function-context hint).
     let hunk = match hunks.get(hunk_idx) {
-        Some(h) if h[0].trim() == hunk_header.trim() => *h,
+        Some(h) if String::from_utf8_lossy(h[0]).trim() == hunk_header.trim() => *h,
         _ => return Err(Error::Conflict(STALE.into())),
     };
 
     // Pair each body line with the `\ No newline at end of file` marker that
     // follows it. Markers are not body lines: they neither consume an index nor
     // count towards the hunk's line counts.
-    let mut body: Vec<(&str, Option<&str>)> = Vec::new();
-    for l in &hunk[1..] {
-        if l.starts_with('\\') {
+    let mut body: Vec<(&[u8], Option<&[u8]>)> = Vec::new();
+    for &l in &hunk[1..] {
+        if l.starts_with(b"\\") {
             if let Some(last) = body.last_mut() {
                 last.1 = Some(l);
             }
@@ -151,9 +173,9 @@ pub fn build_hunk_patch(
     if selected.is_some() {
         let (mut old_marked, mut new_marked) = (false, false);
         for (i, (line, marker)) in body.iter().enumerate() {
-            let (in_old, in_new) = match line.chars().next().unwrap_or(' ') {
-                '+' => (false, is_sel(i)),
-                '-' => (true, !is_sel(i)),
+            let (in_old, in_new) = match line.first().copied().unwrap_or(b' ') {
+                b'+' => (false, is_sel(i)),
+                b'-' => (true, !is_sel(i)),
                 _ => (true, true),
             };
             if (in_old && old_marked) || (in_new && new_marked) {
@@ -170,34 +192,41 @@ pub fn build_hunk_patch(
         }
     }
 
-    let mut out = String::with_capacity(raw_diff.len());
+    let mut out: Vec<u8> = Vec::with_capacity(raw_diff.len());
     for l in &block[..head_end] {
-        out.push_str(l);
+        // A hunk operation moves CONTENT only. `old mode`/`new mode` would ride
+        // along with any single hunk, so discarding one hunk also reverted a
+        // `chmod +x` (and staging one staged it). Creation/deletion modes
+        // (`new file mode`, `deleted file mode`) are structural and stay.
+        if l.starts_with(b"old mode ") || l.starts_with(b"new mode ") {
+            continue;
+        }
+        out.extend_from_slice(l);
     }
 
     // Counts are recomputed for the SELECTION: `old` = context + every `-`
     // (kept or converted), `new` = context + kept `+` + converted `-`.
     let (mut old_count, mut new_count) = (0u32, 0u32);
-    let mut body_out = String::new();
+    let mut body_out: Vec<u8> = Vec::new();
     for (i, (line, marker)) in body.iter().enumerate() {
-        match line.chars().next().unwrap_or(' ') {
-            '+' => {
+        match line.first().copied().unwrap_or(b' ') {
+            b'+' => {
                 // An unselected `+` exists on neither side — it goes, and its
                 // marker goes with it.
                 if is_sel(i) {
-                    body_out.push_str(line);
+                    body_out.extend_from_slice(line);
                     push_marker(&mut body_out, *marker);
                     new_count += 1;
                 }
             }
-            '-' => {
+            b'-' => {
                 if is_sel(i) {
-                    body_out.push_str(line);
+                    body_out.extend_from_slice(line);
                     push_marker(&mut body_out, *marker);
                     old_count += 1;
                 } else {
-                    body_out.push(' ');
-                    body_out.push_str(&line[1..]);
+                    body_out.push(b' ');
+                    body_out.extend_from_slice(&line[1..]);
                     push_marker(&mut body_out, *marker);
                     old_count += 1;
                     new_count += 1;
@@ -206,7 +235,7 @@ pub fn build_hunk_patch(
             // Context (' '), and defensively anything else, is carried verbatim
             // on both sides.
             _ => {
-                body_out.push_str(line);
+                body_out.extend_from_slice(line);
                 push_marker(&mut body_out, *marker);
                 old_count += 1;
                 new_count += 1;
@@ -220,19 +249,20 @@ pub fn build_hunk_patch(
     // The text after the closing `@@` (git's function-context hint) and the
     // line terminator are preserved verbatim.
     let (old_start, new_start, trailer) = split_hunk_header(hunk[0])?;
-    out.push_str(&format!(
-        "@@ -{old_start},{old_count} +{new_start},{new_count} @@{trailer}"
-    ));
-    out.push_str(&body_out);
-    if !out.ends_with('\n') {
-        out.push('\n');
+    out.extend_from_slice(
+        format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@").as_bytes(),
+    );
+    out.extend_from_slice(trailer);
+    out.extend_from_slice(&body_out);
+    if out.last() != Some(&b'\n') {
+        out.push(b'\n');
     }
     Ok(out)
 }
 
-fn push_marker(out: &mut String, marker: Option<&str>) {
+fn push_marker(out: &mut Vec<u8>, marker: Option<&[u8]>) {
     if let Some(m) = marker {
-        out.push_str(m);
+        out.extend_from_slice(m);
     }
 }
 
@@ -270,13 +300,16 @@ fn diff_git_targets(line: &str, path: &str) -> bool {
     false
 }
 
-/// `@@ -12,7 +12,9 @@ fn foo() {\n` → `(12, 12, " fn foo() {\n")`.
-fn split_hunk_header(line: &str) -> Result<(u32, u32, &str)> {
+/// `@@ -12,7 +12,9 @@ fn foo() {\n` → `(12, 12, b" fn foo() {\n")`. The
+/// trailer stays bytes: git copies the function-context hint straight out of
+/// the file, in whatever encoding the file uses.
+fn split_hunk_header(line: &[u8]) -> Result<(u32, u32, &[u8])> {
     let bad = || Error::Invalid("unparsable hunk header".to_string());
-    let rest = line.strip_prefix("@@").ok_or_else(bad)?;
-    let close = rest.find("@@").ok_or_else(bad)?;
+    let rest = line.strip_prefix(b"@@").ok_or_else(bad)?;
+    let close = rest.windows(2).position(|w| w == b"@@").ok_or_else(bad)?;
+    let ranges = std::str::from_utf8(&rest[..close]).map_err(|_| bad())?;
     let (mut old_start, mut new_start) = (None, None);
-    for tok in rest[..close].split_whitespace() {
+    for tok in ranges.split_whitespace() {
         if let Some(v) = tok.strip_prefix('-') {
             old_start = v.split(',').next().and_then(|n| n.parse::<u32>().ok());
         } else if let Some(v) = tok.strip_prefix('+') {
@@ -299,7 +332,11 @@ impl LocalGit {
     /// `--no-index` diffs for untracked files (which `git apply` cannot stage
     /// and `git stash create` cannot back up), and commit/range targets have no
     /// index or worktree to apply to.
-    pub async fn diff_raw(&self, target: DiffTarget, path: &str) -> Result<String> {
+    ///
+    /// BYTES, built exactly like [`LocalGit::diff`]'s worktree/staged calls
+    /// (same [`GitCmd::diff`] format flags, literal `-- <path>`), so the
+    /// SHA-256 here equals the `FileDiff.fingerprint` the client was shown.
+    pub async fn diff_raw(&self, target: DiffTarget, path: &str) -> Result<Vec<u8>> {
         Self::guard_path(path)?;
         let cached = match target {
             DiffTarget::Worktree => false,
@@ -310,19 +347,11 @@ impl LocalGit {
                 ))
             }
         };
-        let mut args: Vec<&str> = vec![
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--no-color",
-            "-U3",
-            "-M",
-        ];
+        let mut cmd = GitCmd::diff("diff").args(["-U3", "-M"]);
         if cached {
-            args.push("--cached");
+            cmd = cmd.args(["--cached"]);
         }
-        args.extend_from_slice(&["--", path]);
-        self.run_read(&args).await
+        self.exec_bytes(&cmd.paths([path])).await
     }
 
     /// `git apply [--cached] [--reverse] --recount --whitespace=nowarn -`, with
@@ -330,7 +359,7 @@ impl LocalGit {
     /// can reach argv). `-U3` context is retained deliberately — no
     /// `--unidiff-zero` — so `apply` verifies placement instead of trusting the
     /// line numbers.
-    pub async fn apply_patch(&self, patch: &str, cached: bool, reverse: bool) -> Result<()> {
+    pub async fn apply_patch(&self, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
         let mut args: Vec<&str> = vec!["apply"];
         if cached {
             args.push("--cached");
@@ -343,7 +372,7 @@ impl LocalGit {
         for attempt in 1u64..=3 {
             // Bounded `LocalWrite` spawn: detached from the request so a client
             // abort never SIGKILLs a half-written index.
-            let (ok, stdout, stderr, code) = self.run_raw_stdin(&args, patch.as_bytes()).await?;
+            let (ok, stdout, stderr, code) = self.run_raw_stdin(&args, patch).await?;
             if ok {
                 return Ok(());
             }
@@ -450,10 +479,10 @@ pub(crate) async fn run_hunk_op(git: &LocalGit, req: &StageHunkReq) -> Result<St
     };
     let raw = git.diff_raw(target.clone(), &req.path).await?;
     use sha2::{Digest, Sha256};
-    if req.fingerprint != hex::encode(Sha256::digest(raw.as_bytes())) {
+    if req.fingerprint != hex::encode(Sha256::digest(raw.as_slice())) {
         return Err(Error::Conflict(STALE.into()));
     }
-    let patch = build_hunk_patch(
+    let patch = build_hunk_patch_bytes(
         &raw,
         &req.path,
         req.hunk_index,
@@ -795,6 +824,56 @@ index 1111111..2222222 100644
         assert_eq!(p, MARKED_ADD);
     }
 
+    /// A hunk op moves content only: a pending `chmod +x` must neither ride
+    /// along with one staged hunk nor be reverted by one discarded hunk.
+    #[test]
+    fn mode_change_lines_are_not_part_of_a_hunk_patch() {
+        let raw = "\
+diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+index 1111111..2222222
+--- a/run.sh
++++ b/run.sh
+@@ -1,2 +1,2 @@
+ r1
+-r2
++R2
+";
+        let p = build_hunk_patch(raw, "run.sh", 0, "@@ -1,2 +1,2 @@", None).unwrap();
+        assert!(!p.contains("old mode") && !p.contains("new mode"), "{p}");
+        assert!(p.starts_with("diff --git a/run.sh b/run.sh\nindex 1111111..2222222\n"), "{p}");
+        // `new file mode` is structural and stays.
+        let p = build_hunk_patch(NEW_FILE, "n.txt", 0, "@@ -0,0 +1,3 @@", None).unwrap();
+        assert!(p.contains("new file mode 100644\n"), "{p}");
+    }
+
+    /// Non-UTF-8 bytes pass through the builder untouched (no U+FFFD).
+    #[test]
+    fn non_utf8_lines_round_trip_bytes() {
+        let raw: &[u8] = b"diff --git a/l.txt b/l.txt\n\
+index 1111111..2222222 100644\n\
+--- a/l.txt\n\
++++ b/l.txt\n\
+@@ -1,2 +1,2 @@ caf\xe9()\n \
+l1\n\
+-caf\xe9\n\
++CAF\xc9\n";
+        let p = build_hunk_patch_bytes(raw, "l.txt", 0, "@@ -1,2 +1,2 @@ caf\u{fffd}()", None)
+            .unwrap();
+        assert_eq!(p, raw);
+        // A partial selection converting the `-` to context keeps its bytes.
+        let p = build_hunk_patch_bytes(
+            raw,
+            "l.txt",
+            0,
+            "@@ -1,2 +1,2 @@ caf\u{fffd}()",
+            Some(&[2]),
+        )
+        .unwrap();
+        assert!(p.ends_with(b" l1\n caf\xe9\n+CAF\xc9\n"), "{p:?}");
+    }
+
     #[test]
     fn stale_header_is_conflict() {
         let e = build_hunk_patch(TWO_HUNKS, "a.txt", 0, "@@ -1,9 +1,9 @@", None).unwrap_err();
@@ -959,7 +1038,7 @@ index 1111111..2222222 100644
             path: req.path.clone(),
             hunk_index: req.hunk_index,
             hunk_header: req.hunk_header.clone(),
-            fingerprint: hex::encode(Sha256::digest(raw.as_bytes())),
+            fingerprint: hex::encode(Sha256::digest(raw.as_slice())),
             lines: req.lines.clone(),
             op: req.op,
             confirm: req.confirm,
@@ -1153,7 +1232,7 @@ index 1111111..2222222 100644
         let (_tmp, dir, git) = two_hunk_repo();
         let raw = git.diff_raw(DiffTarget::Worktree, "two.txt").await.unwrap();
         use sha2::{Digest, Sha256};
-        let fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+        let fingerprint = hex::encode(Sha256::digest(raw.as_slice()));
         let header = header_of(&git, DiffTarget::Worktree, "two.txt", 0).await;
         let changed = std::fs::read_to_string(dir.join("two.txt"))
             .unwrap()
@@ -1229,6 +1308,64 @@ index 1111111..2222222 100644
             .unwrap();
         let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
         assert!(staged.contains("+N2"), "{staged}");
+    }
+
+    /// G-2: a Latin-1 line staged through a hunk op lands in the index byte
+    /// for byte — the lossy String round-trip staged `\xEF\xBF\xBD` instead.
+    #[tokio::test]
+    async fn non_utf8_hunk_stage_keeps_bytes() {
+        let (_tmp, dir, git) = repo();
+        std::fs::write(dir.join("latin.txt"), b"l1\nl2\nl3\n").unwrap();
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        std::fs::write(dir.join("latin.txt"), b"l1\ncaf\xe9\nl3\n").unwrap();
+
+        let h0 = header_of(&git, DiffTarget::Worktree, "latin.txt", 0).await;
+        run_test_hunk_op(&git, &req("latin.txt", 0, &h0, HunkOp::Stage))
+            .await
+            .unwrap();
+        assert_eq!(git_bytes(&dir, &["show", ":latin.txt"]), b"l1\ncaf\xe9\nl3\n");
+
+        // …and discarding it back writes the ORIGINAL bytes, not U+FFFD.
+        let sh0 = header_of(&git, DiffTarget::Staged, "latin.txt", 0).await;
+        run_test_hunk_op(&git, &req("latin.txt", 0, &sh0, HunkOp::Unstage))
+            .await
+            .unwrap();
+        let h0 = header_of(&git, DiffTarget::Worktree, "latin.txt", 0).await;
+        run_test_hunk_op(&git, &req("latin.txt", 0, &h0, HunkOp::Discard))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.join("latin.txt")).unwrap(), b"l1\nl2\nl3\n");
+    }
+
+    /// G-1: the path is a LITERAL name — a route folder like `app/[id]` must
+    /// not glob-match `app/d` into the diff (whose two blocks made every hunk
+    /// op on it a 409).
+    #[tokio::test]
+    async fn bracketed_route_path_is_literal() {
+        let (_tmp, dir, git) = repo();
+        std::fs::create_dir_all(dir.join("app/[id]")).unwrap();
+        std::fs::create_dir_all(dir.join("app/d")).unwrap();
+        write(&dir, "app/[id]/page.tsx", "a1\na2\n");
+        write(&dir, "app/d/page.tsx", "d1\nd2\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        write(&dir, "app/[id]/page.tsx", "a1\nA2\n");
+        write(&dir, "app/d/page.tsx", "d1\nD2\n");
+
+        let raw = git
+            .diff_raw(DiffTarget::Worktree, "app/[id]/page.tsx")
+            .await
+            .unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        assert!(!text.contains("app/d/page.tsx"), "{text}");
+
+        let h0 = header_of(&git, DiffTarget::Worktree, "app/[id]/page.tsx", 0).await;
+        run_test_hunk_op(&git, &req("app/[id]/page.tsx", 0, &h0, HunkOp::Stage))
+            .await
+            .unwrap();
+        let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached", "--name-only"])).unwrap();
+        assert_eq!(staged.trim(), "app/[id]/page.tsx");
     }
 
     #[tokio::test]
