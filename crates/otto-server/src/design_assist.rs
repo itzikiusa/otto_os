@@ -1193,12 +1193,26 @@ async fn ref_excerpt(svc: &DesignService, a: &DesignArtifact, v: &DesignVersion)
     )
 }
 
+/// The artifact's thumbnail blob, when it is a PNG: agents get it as
+/// `render/current.png` / `refs/R<n>.png`, so a WebP one (`PUT …/thumbnail`
+/// accepts both) is not offered rather than mislabelled.
 fn thumb_path(svc: &DesignService, a: &DesignArtifact) -> Option<PathBuf> {
     a.thumb_blob
         .as_deref()
         .filter(|s| otto_design::blobs::is_sha(s))
         .map(|s| svc.blobs().root().join(s))
-        .filter(|p| p.is_file())
+        .filter(|p| is_png_file(p))
+}
+
+/// Does `p` exist as a regular file starting with the PNG signature?
+fn is_png_file(p: &FsPath) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    p.is_file()
+        && std::fs::File::open(p)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok()
+        && head == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
 }
 
 /// Build the whole context for a turn on `a` (deterministic for a given graph
@@ -3024,6 +3038,18 @@ mod tests {
             "p"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn only_png_thumbnails_are_handed_to_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a");
+        let webp = dir.path().join("b");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1]).unwrap();
+        std::fs::write(&webp, b"RIFF\x10\0\0\0WEBPVP8 x").unwrap();
+        assert!(is_png_file(&png));
+        assert!(!is_png_file(&webp));
+        assert!(!is_png_file(&dir.path().join("missing")));
     }
 
     #[test]

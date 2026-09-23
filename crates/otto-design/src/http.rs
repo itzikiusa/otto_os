@@ -35,6 +35,8 @@ use crate::types::*;
 const CONTENT_BODY_LIMIT: usize = 40 * 1024 * 1024;
 /// PATCH bodies may carry a ≤ 2 MB PNG thumbnail as base64.
 const PATCH_BODY_LIMIT: usize = 4 * 1024 * 1024;
+/// `PUT …/thumbnail` takes the raw image (≤ 2 MB; the service says why).
+const THUMB_BODY_LIMIT: usize = crate::service::MAX_THUMB_BYTES + 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Context trait
@@ -249,7 +251,12 @@ pub fn router<S: DesignCtx>() -> Router<S> {
                 .put(put_content::<S>)
                 .layer(DefaultBodyLimit::max(CONTENT_BODY_LIMIT)),
         )
-        .route("/design/artifacts/{id}/thumbnail", get(get_thumbnail::<S>))
+        .route(
+            "/design/artifacts/{id}/thumbnail",
+            get(get_thumbnail::<S>)
+                .put(put_thumbnail::<S>)
+                .layer(DefaultBodyLimit::max(THUMB_BODY_LIMIT)),
+        )
         .route(
             "/design/artifacts/{id}/versions",
             get(list_versions::<S>)
@@ -737,13 +744,29 @@ async fn get_thumbnail<S: DesignCtx>(
         .as_deref()
         .ok_or_else(|| Error::NotFound(format!("design artifact {} has no thumbnail", a.id)))?;
     let bytes = svc.blobs().get(sha).await?;
+    let mime = crate::service::thumb_mime(&bytes).unwrap_or("image/png");
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CONTENT_TYPE, mime)
         .header("x-content-type-options", "nosniff")
         .header(header::ETAG, format!("\"{sha}\""))
         .body(Body::from(bytes))
         .map_err(|e| ApiErr(Error::Internal(format!("build response: {e}"))))
+}
+
+/// Store the thumbnail the UI rendered: the raw PNG / WebP bytes as the body
+/// (any `Content-Type`; the bytes are sniffed). Editor-gated; never bumps
+/// `updated_at` (see `DesignService::set_thumbnail`).
+async fn put_thumbnail<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(IdPath { id }): Path<IdPath>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let svc = ctx.design();
+    let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let updated = svc.set_thumbnail(&a, &body).await?;
+    Ok(Json(updated).into_response())
 }
 
 async fn list_versions<S: DesignCtx>(
@@ -1643,5 +1666,75 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    async fn put_raw(app: &Router, uri: &str, bytes: Vec<u8>) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn rendered_thumbnails_are_sniffed_capped_and_never_bump_updated_at() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "T" })),
+        )
+        .await;
+        let created = json_of(&b);
+        let aid = created["artifact"]["id"].as_str().unwrap().to_string();
+        let updated_at = created["artifact"]["updated_at"].clone();
+        let uri = format!("/design/artifacts/{aid}/thumbnail");
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(b"rest-of-a-png");
+        let (st, body) = put_raw(&app, &uri, png.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let a = json_of(&body);
+        assert_eq!(
+            a["thumb_blob"].as_str().unwrap(),
+            crate::blobs::sha256_hex(&png)
+        );
+        assert_eq!(a["updated_at"], updated_at, "a thumbnail is not an edit");
+        let (st, got, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(got, png);
+        assert_eq!(h.get("content-type").unwrap(), "image/png");
+
+        let mut webp = b"RIFF\x10\0\0\0WEBPVP8 ".to_vec();
+        webp.extend_from_slice(b"payload");
+        let (st, _) = put_raw(&app, &uri, webp.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, got, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(got, webp);
+        assert_eq!(h.get("content-type").unwrap(), "image/webp");
+
+        let (st, _) = put_raw(&app, &uri, b"<svg/>".to_vec()).await;
+        assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let (st, _) = put_raw(&app, &uri, Vec::new()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let mut big = png.clone();
+        big.resize(crate::service::MAX_THUMB_BYTES + 1, 0);
+        let (st, _) = put_raw(&app, &uri, big).await;
+        assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+        // The failed puts left the WebP in place.
+        let (_, got, _) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(got, webp);
     }
 }

@@ -1472,6 +1472,59 @@ impl DesignService {
     }
 }
 
+/// Magic-byte type of a thumbnail image — PNG or WebP (what the UI renderer
+/// produces), else `None`.
+pub fn thumb_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+impl DesignService {
+    /// Store a thumbnail the UI rendered (`PUT …/thumbnail`): a PNG or WebP
+    /// (sniffed, ≤ [`MAX_THUMB_BYTES`]) becomes a blob and the artifact's
+    /// `thumb_blob`. A thumbnail is a cache, not an edit: `updated_at` is NOT
+    /// bumped (the Lobby's "recent" order stays put) and no version is made.
+    /// The same image again is a no-op; a new one emits
+    /// `design_artifact_updated {change:"thumbnail"}`. The previous blob is
+    /// left for the opt-in prune's GC.
+    pub async fn set_thumbnail(&self, a: &DesignArtifact, bytes: &[u8]) -> Result<DesignArtifact> {
+        if bytes.is_empty() {
+            return Err(Error::Invalid("the thumbnail is empty".into()));
+        }
+        if bytes.len() > MAX_THUMB_BYTES {
+            return Err(Error::PayloadTooLarge(format!(
+                "thumbnail is {} bytes (cap {MAX_THUMB_BYTES})",
+                bytes.len()
+            )));
+        }
+        if thumb_mime(bytes).is_none() {
+            return Err(Error::UnsupportedMedia(
+                "a thumbnail must be a PNG or WebP image".into(),
+            ));
+        }
+        let sha = self.blobs.put(bytes).await?;
+        if a.thumb_blob.as_deref() == Some(sha.as_str()) {
+            return Ok(a.clone());
+        }
+        self.store.set_thumb_blob(&a.id, &sha).await?;
+        let updated = self.store.require_artifact(&a.id).await?;
+        self.emit(Event::DesignArtifactUpdated {
+            workspace_id: updated.workspace_id.clone(),
+            artifact_id: updated.id.clone(),
+            format: updated.format.clone(),
+            change: "thumbnail".into(),
+            version_id: None,
+            content: None,
+        });
+        Ok(updated)
+    }
+}
+
 /// An explicit link row made by the server itself (create-time story / fork).
 fn explicit_link(
     src: &str,

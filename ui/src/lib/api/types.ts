@@ -8931,7 +8931,10 @@ export type DesignArtifactChange =
   | 'deleted'
   /** An UNCOMMITTED, validated mid-turn edit by a design-assist agent
    *  (`version_id: null`); the turn's commit follows as `content`. */
-  | 'live';
+  | 'live'
+  /** A new rendered thumbnail was stored (`PUT …/thumbnail`) — refresh the
+   *  image only (not an edit; never re-render in response). */
+  | 'thumbnail';
 export type DesignLinkUpdateReason =
   | 'created'
   | 'deleted'
@@ -8973,7 +8976,8 @@ export interface DesignArtifact {
   head_seq: number | null;
   approved_version_id: Id | null;
   tags: string[];
-  /** sha256 of the PNG thumbnail (`GET /design/artifacts/{id}/thumbnail`). */
+  /** sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail` serves
+   *  it; `PUT …/thumbnail` stores a UI-rendered one). */
   thumb_blob: string | null;
   /** Imported rows carry `meta.imported_from = {kind, id, story_id?, …}`. */
   meta: Record<string, unknown>;

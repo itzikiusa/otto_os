@@ -840,6 +840,21 @@ impl Store {
         self.require_artifact(&a.id).await
     }
 
+    /// Point `thumb_blob` at `sha` WITHOUT touching `updated_at` (a rendered
+    /// thumbnail is a cache refresh, not an edit).
+    pub async fn set_thumb_blob(&self, id: &str, sha: &str) -> Result<()> {
+        let res = sqlx::query("UPDATE design_artifacts SET thumb_blob = ? WHERE id = ?")
+            .bind(sha)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("design.artifact.thumb"))?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("design artifact {id}")));
+        }
+        Ok(())
+    }
+
     /// Move `approved_version_id` (+ status). The version must belong to the
     /// artifact (checked by the caller).
     pub async fn set_approved(&self, id: &str, version_id: &str, status: &str) -> Result<()> {

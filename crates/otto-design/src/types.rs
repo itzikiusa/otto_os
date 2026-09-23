@@ -154,7 +154,7 @@ pub struct DesignArtifact {
     pub head_seq: Option<i64>,
     pub approved_version_id: Option<Id>,
     pub tags: Vec<String>,
-    /// sha256 of the PNG thumbnail blob (`GET …/thumbnail`), if any.
+    /// sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail`), if any.
     pub thumb_blob: Option<String>,
     pub meta: Value,
     /// `product_attachment` | `canvas_scene` for imported legacy rows.

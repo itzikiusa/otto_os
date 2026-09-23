@@ -348,6 +348,10 @@ with people.
 - Brand-token references (`token:color.primary`) are not resolved yet.
 - The `edit_after_draft` summary is a bounded heuristic (changed JSON paths /
   line counts); the per-format structural diff arrives with Compare.
+- Thumbnails: the UI stores what it rendered with `PUT
+  …/thumbnail` (PNG or WebP, ≤ 2 MB; never bumps `updated_at`). Agents only
+  get PNG thumbnails (`render/current.png`, `refs/R<n>.png`) — a WebP one is
+  not offered to them.
 - Design blobs are not part of the saved-state archive's file roots yet (the
   DB rows are); back up `<data>/design/` with the data dir.
 - Content caps: 25 MB raw per version, 4 MB inline in live events, 256 KiB
