@@ -2,11 +2,11 @@
   // One design, open (canvas/studio archetype):
   //
   //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Compare  ⋯  [Save]
-  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Links | References ┐
-  //   │  existing viewers/editors per format                      │                    │
-  //   └───────────────────────────────────────────────────────────┴───────────────────┘
+  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Otto | Links | References ┐
+  //   │  existing viewers/editors per format                      │                          │
+  //   └───────────────────────────────────────────────────────────┴──────────────────────────┘
   //   (a `scene3d` design opens the 3D Studio layout instead — studio3d/Studio3D.svelte —
-  //    over the same working copy, save path and Links/References panels)
+  //    over the same working copy, save path and Otto/Links/References panels)
   //   version strip: v1 · v2 (Otto) · v3 (you, current) …                  Compare
   //
   // This view owns the working copy of the source, the base version it was
@@ -50,6 +50,8 @@
   import CompareModal, { type CompareSide } from './CompareModal.svelte';
   import LinksPanel from './LinksPanel.svelte';
   import ReferencesPanel from './ReferencesPanel.svelte';
+  import OttoPanel from './assist/OttoPanel.svelte';
+  import type { AssistSelection } from './assist/model';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
@@ -83,7 +85,7 @@
 
   let selected = $state<string[]>([]);
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
-  let rightTab = $state<'links' | 'references'>('links');
+  let rightTab = $state<'otto' | 'links' | 'references'>('links');
   let showSource = $state(false);
   let device = $state<DeviceKind>('none');
 
@@ -238,7 +240,8 @@
       versions = [];
       selected = [];
       compare = null;
-      rightTab = 'links';
+      // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
+      rightTab = router.parts[3] === 'otto' ? 'otto' : 'links';
       phase = 'loading';
       void load(target);
       void loadVersions();
@@ -423,9 +426,9 @@
       }
       api.captureSignal({
         artifact_id: id,
-        kind: 'variant_chosen',
-        version_id: versionId,
-        payload: { source: 'restore', chosen_version_id: versionId, chosen_seq: seq, over_version_id: head.id, over_seq: head.seq, new_seq: res.version.seq },
+        kind: 'restored',
+        version_id: res.version.id,
+        payload: { from_version_id: versionId, from_seq: seq, over_version_id: head.id, over_seq: head.seq, new_seq: res.version.seq },
       });
       compare = null;
       selected = [];
@@ -532,6 +535,12 @@
         derived_from: { artifact_id: artifact.id, version_id: head?.id },
         message: `Copied from ${artifact.title}`,
       });
+      api.captureSignal({
+        artifact_id: res.artifact.id,
+        kind: 'forked',
+        version_id: res.version.id,
+        payload: { source_artifact_id: artifact.id, source_version_id: head?.id, source: 'copy' },
+      });
       router.go(`design/a/${encodeURIComponent(res.artifact.id)}`);
     } catch (e) {
       toasts.error('Couldn’t make a copy', e instanceof Error ? e.message : String(e));
@@ -602,6 +611,19 @@
     compare = { left: { artifact: target, versionId: pinned }, right: { artifact: target, versionId: target.head_version_id } };
   }
 
+  // What the Otto tab focuses a turn on: the 3D Studio passes its selected
+  // object (the `ottoPanel` snippet's argument); Site Studio's section
+  // selection plugs in the same way when it lands.
+  const assistBlocked = $derived(
+    !canEdit
+      ? 'You can view this design, but asking Otto to change it needs edit access.'
+      : imported
+        ? 'Mirrored from Product/Canvas — make an editable copy to work on it with Otto.'
+        : !textual
+          ? 'Otto edits text and JSON designs. Images, PDFs and 3D models can’t be changed by an agent.'
+          : null,
+  );
+
   // ── ⌘K commands (only while a design is open) ─────────────────────────────
   $effect(() => {
     if (!artifact) return registry.register('design-artifact', []);
@@ -610,6 +632,7 @@
       { id: 'design.named', title: 'Save named version…', group: 'Design Hall', keywords: 'commit message', run: () => void saveNamed() },
       { id: 'design.compare', title: 'Compare versions', group: 'Design Hall', keywords: 'diff history restore', run: openCompare },
       { id: 'design.references', title: 'Find references', group: 'Design Hall', keywords: 'inspiration library search', run: () => (rightTab = 'references') },
+      { id: 'design.otto', title: 'Ask Otto about this design', group: 'Design Hall', keywords: 'agent assist variants accessibility refine', run: () => (rightTab = 'otto') },
     ]);
   });
 
@@ -721,6 +744,10 @@
           <span class="notice"><Icon name="lock" size={12} /> Read-only</span>
         {/if}
       {/snippet}
+      {#snippet ottoPanel(selection: AssistSelection | null)}
+        <OttoPanel {artifact} {versions} {head} uses={split.uses} {dirty} {selection}
+          readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
+      {/snippet}
       {#snippet linksPanel()}
         <LinksPanel {artifact} uses={split.uses} usedIn={split.usedIn} loading={linksLoading} error={linksError}
           readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} />
@@ -740,14 +767,16 @@
             usedIn={split.usedIn}
             linkCount={split.uses.length + split.usedIn.length}
             {seqOf}
+            openOtto={rightTab === 'otto'}
             onchange={(s) => (source = s)}
+            otto={ottoPanel}
             links={linksPanel}
             references={referencesPanel}
             {notices}
           />
         {/key}
       {:else}
-      <div class="studio">
+      <div class="studio" class:wide-right={rightTab === 'otto'}>
         <section class="center" aria-label="Design">
           <div class="toolbar">
             {#if kind === 'html'}
@@ -782,6 +811,9 @@
         </section>
         <aside class="right" aria-label="Design details">
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
+            <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+              Otto
+            </button>
             <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
@@ -790,13 +822,15 @@
             </button>
           </div>
           <div class="panel" role="tabpanel">
-            {#if brief}
+            {#if brief && rightTab !== 'otto'}
               <div class="brief">
                 <span class="k"><Icon name="sparkle" size={12} /> Brief</span>
                 <p>{brief}</p>
               </div>
             {/if}
-            {#if rightTab === 'links'}
+            {#if rightTab === 'otto'}
+              {@render ottoPanel(null)}
+            {:else if rightTab === 'links'}
               {@render linksPanel()}
             {:else}
               {@render referencesPanel()}
@@ -877,6 +911,10 @@
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) 320px;
+  }
+  /* The Otto tab holds a conversation and a variants tray: a little wider. */
+  .studio.wide-right {
+    grid-template-columns: minmax(0, 1fr) 360px;
   }
   .center {
     min-width: 0;
@@ -982,7 +1020,8 @@
     white-space: pre-wrap;
   }
   @container (max-width: 900px) {
-    .studio {
+    .studio,
+    .studio.wide-right {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(360px, 1fr) auto;
       overflow-y: auto;

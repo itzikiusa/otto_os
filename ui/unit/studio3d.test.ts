@@ -1,15 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  brandSwatches,
   colorLabel,
   isTokenRef,
   normalizeHex,
   resolveColor,
-  resolveToken,
   tokenName,
-  tokenRef,
 } from '../src/modules/product/design/scene3d/tokens.ts';
+import { resolveToken } from '../src/modules/design-hall/brand/tokens.ts';
 import {
   applyMaterialPreset,
   budgetStatus,
@@ -32,28 +30,28 @@ import {
 } from '../src/modules/product/design/scene3d/states.ts';
 import type { Scene3dDoc } from '../src/modules/product/design/scene3d/types.ts';
 
+// A Brand Kit v1 (`otto-brand/1`) document — Brand Kit owns resolution.
 const brand = {
-  type: 'otto-brand',
-  version: 1,
+  schema: 'otto-brand/1',
+  name: 'Acme',
   color: {
-    violet: { $type: 'color', $value: '#5B3DF5' },
-    amber: { $type: 'color', $value: '#fa3' },
-    primary: { $type: 'color', $value: '{color.violet}' },
-    loop: { $type: 'color', $value: '{color.loop}' },
-    brand: { ink: { $type: 'color', $value: '#111827ff' } },
-    font: { $type: 'typography', $value: { fontFamily: 'Inter' } },
+    violet: { $value: '#5B3DF5' },
+    amber: { $value: '#fa3' },
   },
 };
+const kit = (ref: string) => resolveToken(brand, ref);
 
 // ── tokens ───────────────────────────────────────────────────────────────────
 
-test('token references parse, format and label', () => {
+test('token references parse and label (Brand Kit name grammar)', () => {
   assert.equal(isTokenRef('token:color.violet'), true);
+  assert.equal(isTokenRef('token:color.brand-violet_2'), true);
   assert.equal(isTokenRef('token:violet'), false);
   assert.equal(isTokenRef('token:color.vio let'), false);
+  assert.equal(isTokenRef('token:color.brand.violet'), false, 'no dotted names');
+  assert.equal(isTokenRef('token:color.-x'), false, 'must start alphanumeric');
   assert.equal(isTokenRef('#5b3df5'), false);
-  assert.equal(tokenName('token:color.brand.ink'), 'brand.ink');
-  assert.equal(tokenRef('violet'), 'token:color.violet');
+  assert.equal(tokenName('token:color.violet'), 'violet');
   assert.equal(colorLabel('token:color.brand-violet'), 'Brand brand violet');
   assert.equal(colorLabel('#5b3df5'), '#5b3df5');
   assert.equal(colorLabel(undefined), 'Default');
@@ -62,41 +60,18 @@ test('token references parse, format and label', () => {
   assert.equal(normalizeHex('red'), null);
 });
 
-test('resolveToken reads DTCG values, nested groups and aliases, and refuses loops', () => {
-  assert.equal(resolveToken(brand, 'token:color.violet'), '#5b3df5');
-  assert.equal(resolveToken(brand, 'color.amber'), '#ffaa33');
-  assert.equal(resolveToken(brand, 'token:color.primary'), '#5b3df5', 'alias followed');
-  assert.equal(resolveToken(brand, 'token:color.brand.ink'), '#111827', 'nested group, alpha dropped');
-  assert.equal(resolveToken(brand, 'token:color.loop'), null, 'self-alias terminates');
-  assert.equal(resolveToken(brand, 'token:color.font'), null, 'not a colour');
-  assert.equal(resolveToken(brand, 'token:color.missing'), null);
-  assert.equal(resolveToken(null, 'token:color.violet'), null);
-});
-
-test('resolveColor falls back instead of breaking the render', () => {
-  assert.equal(resolveColor('token:color.violet', brand, '#000000'), '#5b3df5');
+test('resolveColor goes through the kit resolver and falls back instead of breaking the render', () => {
+  assert.equal(resolveColor('token:color.violet', kit, '#000000'), '#5b3df5');
+  assert.equal(resolveColor('token:color.amber', kit, '#000000'), '#ffaa33');
+  assert.equal(resolveColor('token:color.missing', kit, '#123456'), '#123456', 'unknown token → fallback');
   assert.equal(resolveColor('token:color.violet', null, '#94a3b8'), '#94a3b8', 'no kit → fallback');
   assert.equal(resolveColor('#ABCDEF', null, '#000000'), '#abcdef');
-  assert.equal(resolveColor(undefined, brand, '#123456'), '#123456');
-});
-
-test('brandSwatches flattens colour tokens in document order', () => {
-  const sw = brandSwatches(brand);
-  assert.deepEqual(
-    sw.map((s) => [s.name, s.value, s.ref]),
-    [
-      ['violet', '#5b3df5', 'token:color.violet'],
-      ['amber', '#ffaa33', 'token:color.amber'],
-      ['primary', '#5b3df5', 'token:color.primary'],
-      ['brand.ink', '#111827', 'token:color.brand.ink'],
-    ],
-  );
-  assert.deepEqual(brandSwatches({}), []);
+  assert.equal(resolveColor(undefined, kit, '#123456'), '#123456');
 });
 
 // ── material presets ─────────────────────────────────────────────────────────
 
-const hexOnly = (ref: string | undefined, fallback: string) => resolveColor(ref, brand, fallback);
+const hexOnly = (ref: string | undefined, fallback: string) => resolveColor(ref, kit, fallback);
 
 test('resolveMaterial: explicit field > preset default > renderer default', () => {
   const plain = resolveMaterial(undefined, hexOnly);
@@ -201,7 +176,7 @@ test('statePoses = base document + that state’s overrides', () => {
   const idle = statePoses(doc, 'idle');
   assert.deepEqual(idle.get('card')!.rotation, [0, 0, 0]);
   assert.equal(idle.get('chip')!.visible, false);
-  const flipped = statePoses(doc, 'flipped', (c) => resolveColor(c, brand, '#000000'));
+  const flipped = statePoses(doc, 'flipped', (c) => resolveColor(c, kit, '#000000'));
   assert.deepEqual(flipped.get('card')!.rotation, [0, 180, 0]);
   assert.deepEqual(flipped.get('card')!.position, [0, 1, 0], 'untouched fields stay base');
   assert.equal(flipped.get('card')!.color, '#ffaa33', 'override token resolved');
@@ -211,7 +186,7 @@ test('statePoses = base document + that state’s overrides', () => {
 
 test('lerpPose tweens transforms, colours, opacity and visibility', () => {
   const a = statePoses(doc, 'idle');
-  const b = statePoses(doc, 'flipped', (c) => resolveColor(c, brand, '#000000'));
+  const b = statePoses(doc, 'flipped', (c) => resolveColor(c, kit, '#000000'));
   const mid = lerpPoses(a, b, 0.5);
   assert.deepEqual(mid.get('card')!.rotation, [0, 90, 0], 'Flipped tweens Y 0 → 180 through 90');
   assert.equal(mid.get('chip')!.visible, true, 'appearing shows immediately');

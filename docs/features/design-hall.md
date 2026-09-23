@@ -4,11 +4,11 @@
 > surface, the legacy import, the Design Hall UI (§8), the unified
 > `design_assist` agent turn (every studio / format), variants, verified
 > reference citations, the suggest-only Learning v1 and the design MCP tools
-> (reads + approval-gated writes) ship now, and so does **3D Studio 1.5**
-> (§9: scene3d v2, the studio layout, Generate, exports and the embed
-> runtime). Export/publish and the other dedicated studio editors (Site
-> Studio, Brand Kit) are the next phases (see the proposal's roadmap). The
-> existing Product → Design arena and Canvas keep working unchanged meanwhile.
+> (reads + approval-gated writes), the Brand Kit v1 editor (§9) and **3D
+> Studio 1.5** (§10: scene3d v2, the studio layout, Generate, exports and the
+> embed runtime) ship now. Export/publish and Site Studio are the next phases
+> (see the proposal's roadmap). The existing Product → Design arena and Canvas
+> keep working unchanged meanwhile.
 
 Design Hall is the home for everything visual a product team makes — UI
 frames, marketing graphics, sites, 3D scenes, whiteboards and brand kits —
@@ -349,15 +349,17 @@ with people.
   or `POST /design/admin/import`), not live — so Design Hall opens imported
   artifacts read-only, with "Open in Product/Canvas" and "Make an editable
   copy" (a `derived_from` fork).
-- `otto-site`, `otto-layout`, `otto-brand`, `otto-exhibit` are stored and
-  link-indexed as generic JSON; their own validators land with their studios.
+- `otto-site`, `otto-layout`, `otto-exhibit` are stored and link-indexed as
+  generic JSON; their own validators land with their studios. `otto-brand`
+  has its own validator and indexer (§9).
 - `#node` validation covers JSON formats (any `"id"`; `scene3d` also
   `view:<camera id>` and `state:<state id>`) and HTML/SVG (`id="…"`);
   Mermaid/D2 nodes are accepted as-is.
-- Brand-token references (`token:color.primary`) are resolved by the 3D
-  Studio and the 3D embed runtime (against the scene's `brand` kit); other
-  studios resolve them when Brand Kit v1 lands. The daemon only validates
-  their syntax and indexes the token names for search.
+- Brand-token references (`token:color.primary`, `var(--brand-color-primary)`)
+  are read by the Brand Kit impact preview (§9) and resolved in the UI with
+  `resolveToken` / `brandCssVars` (`brand/tokens.ts`) — the 3D Studio and the
+  3D embed runtime included (§10); the server doesn't rewrite them into
+  consumer documents (it validates scene3d token syntax and indexes the names).
 - The `edit_after_draft` summary is a bounded heuristic (changed JSON paths /
   line counts); the per-format structural diff arrives with Compare.
 - Thumbnails: the UI stores what it rendered with `PUT
@@ -405,21 +407,31 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 | Route | View |
 |---|---|
 | `#/design` · `#/design/spatial` | Lobby — Grid (prompt hero, the seven studios, Continue, Projects, Linked to Product, the learning + agent-activity rail) or the Spatial (beta) CSS gallery of project bays |
-| `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); a `scene3d` design opens the 3D Studio (§9) |
+| `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); a `scene3d` design opens the 3D Studio (§10) |
 | `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with its classic-or-planned note) / the designs implementing a story |
-| `#/design/brand` · `#/design/learned[/rules\|/memory]` | Brand Kit scaffold (`otto-brand` kits) · the signals log (Rules and Memory are Phase 1 empty states) |
+| `#/design/brand[/<id>]` · `#/design/learned[/rules\|/memory]` | The Brand Kit editor (§9; without an id it opens the most recent kit) · What Otto learned: Pending, Rules, Memory, Signals and Settings (approve / reject / roll back are human-only, via the self-improvement edit flow) |
 
-- **Phase 0 honesty.** The lobby prompt creates a *draft* in the chosen studio
-  (the brief is kept in `meta.brief`); generation is Phase 1. Frames/Graphics
+- **Generate.** The lobby prompt creates a draft in the chosen studio (the
+  brief is kept in `meta.brief`) and starts an agent turn — or a variants run
+  when Variants is 2–4 — opening the design on its Otto tab
+  (`#/design/a/<id>/otto`); "Draft only" skips generation. "Use references"
+  sends the team's closest past designs first as R1–R3. Frames/Graphics
   edit HTML (and SVG) as source with a live preview, 3D opens 3D Studio 1.5
-  (§9), Whiteboard edits Mermaid/D2/Excalidraw; Site Studio and Spatial Hall
+  (§10), Whiteboard edits Mermaid/D2/Excalidraw; Site Studio and Spatial Hall
   show their planned release instead of an editor.
 - **Saving** is explicit (Save / ⌘S): `PUT …/content` with `base_version`; a
   409 asks "Save mine on top" or "Load vN (discard my edits)".
-- **Signals the UI posts:** `variant_chosen` on Restore and when a conflicting
-  agent version is taken, `variant_rejected` when a person keeps their edits
-  over an agent version. Approve / status / shipped / edit-after-draft signals
-  are recorded by the daemon, not posted twice.
+- **Otto tab** (every studio): agent + model picker, live status from
+  `design_assist_updated`, an attributed thread with verified citation chips
+  (unverified ones flagged), quick actions (more engaging, accessibility,
+  on-brand, mobile, real copy from story, 3 variants), and a variants tray
+  (Apply / Compare / reject with a reason). A finished turn is a new version;
+  Restore undoes it.
+- **Signals the UI posts:** `restored`, `forked`, `reference_added`,
+  `variant_rejected` (with a reason, or when a person keeps their edits over an
+  agent draft), `a11y_fix` and `critique_finding`. Approve / status / shipped /
+  agent drafts / accepts / edit-after-draft are recorded by the daemon, not
+  posted twice.
 - **Live:** the `design_*` events refresh the lobby, the open artifact (a new
   head while you have unsaved edits shows a "newer version" notice instead of
   replacing your copy), its Links panel and the learning log.
@@ -429,7 +441,94 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 - **Approve** says what moves: "Rewards+ landing page follows Approved → now
   shows v8 · Launch social kit pins an older version (update available)".
 
-## 9. 3D Studio 1.5 (`ui/src/modules/design-hall/studio3d/`)
+## 9. Brand Kit (`#/design/brand/<id>`, `otto-brand/1`)
+
+A brand kit is one versioned artifact (studio `brand`, format `otto-brand`)
+that every studio reads by token name. Code: `crates/otto-design/src/brand/`
+(validator, indexer, exporters, contrast, impact) and
+`ui/src/modules/design-hall/brand/` (editor + the shared `tokens.ts`).
+Contract: [`api.md` § Brand Kit](../contracts/api.md).
+
+### The document
+
+```json
+{ "$schema": "otto-brand/1", "name": "Acme Brand Kit",
+  "color":  { "primary": { "$value": "#5B3DF5", "$description": "Buttons and links" } },
+  "font":   { "display": { "$value": "-apple-system, system-ui, sans-serif", "weights": [700, 800] } },
+  "type":   { "display": { "size": 64, "line": 72, "weight": 800 } },
+  "radius": { "md": { "$value": 14 } },
+  "space":  { "md": { "$value": 16 } },
+  "logos":  [ { "name": "Full logo", "kind": "full", "asset": "otto://design/<image id>" } ],
+  "imagery": { "summary": "…", "do": ["…"], "dont": ["…"] },
+  "voice":   { "summary": "Warm, confident, never salesy.", "do": ["…"], "dont": ["…"] } }
+```
+
+Every save (a person, the editor, an agent turn) is validated — hex colours,
+token names `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` (≤ 64 per group), font roles
+`display` / `body` / `mono` with CSS-safe stacks, positive type sizes, px
+radius/space, ≤ 16 logos whose asset is an `otto://design/…` image or
+`blob:<sha256>` (empty = a placeholder slot), ≤ 20 do/don't lines — and a bad
+document is a 400 naming the paths (`color.primary.$value: …`). Fonts are
+local family stacks only: nothing is downloaded from a web-font CDN.
+
+### How studios use a kit
+
+- **Link it**: a document's `brand` / `brand_kit` / `tokens` / `theme` key set
+  to `otto://design/<kit>` (or an explicit **Uses tokens** link) makes a
+  `uses_tokens` edge. Consumers follow the kit's **approved** version by
+  default; `@latest` follows every save, `@vN` pins.
+- **Name tokens**: `token:color.primary`, `token:type.display.size`, or the
+  CSS property `var(--brand-color-primary)`. The CSS names are
+  `--brand-<group>-<name>` (kebab-cased: `surfaceAlt` → `surface-alt`); type
+  styles expand to `--brand-type-<name>-size|-line|-weight`.
+- **Resolve** in the UI with `brandCssVars(doc)` (all properties, e.g. set on a
+  preview root) and `resolveToken(doc, "token:color.primary")` → `#5B3DF5`
+  (a type style without a sub-property resolves to a `font` shorthand).
+
+### The editor
+
+- **Left column:** Colors (colour input + hex, the CSS variable, live WCAG
+  badges vs white and the kit's ink, "Try a primary" presets), Typography
+  (font roles + the type scale as live specimens), Spacing & radius, Logos
+  (uploading a file imports it as a Graphics design and links it), Imagery and
+  Voice (summary + do/don't), and **Used in** (every consumer, its studio,
+  status, policy and the tokens it names).
+- **Right column — Applied to:** a landing hero, a social tile and a 3D card
+  swatch re-tint as you type (CSS custom properties; nothing is saved).
+- **Rule from team** chips: approved learned rules (`GET /design/learned`)
+  that mention brand words, a token name or a colour's hue ("amber is never
+  text" for a `#FFB547` accent) link to What Otto learned.
+- **Impact before save.** While token changes are unsaved, a banner says how
+  many designs in how many studios they reach (`POST …/brand/impact`,
+  debounced). **Save as vN** shows the impact preview first whenever designs
+  use the kit (the token diff with before → after, the affected designs and
+  when each moves: *follows approved* → on approve, *follows latest* → on
+  save, *pinned* → never until updated, plus contrast warnings), then commits
+  a named version with `base_version` (409 → "Save mine on top" / "Load vN").
+  A `brand_correction` signal records which tokens changed.
+- **Approve vN** is a separate, confirmed step; it moves the approved version
+  and the daemon's `design_link_updated {reason: "target_approved"}` tells
+  every following consumer.
+- **Export ▾** copies or downloads the saved kit as CSS variables, a Tailwind
+  v4 `@theme` block or W3C DTCG JSON (`GET …/brand/export`) — local only.
+- **New brand kit** starts from one of three starter kits (Vivid, Editorial,
+  Minimal), each contrast-checked.
+
+### Troubleshooting
+
+- **"invalid otto-brand document: …" on save** — the message names the path;
+  the editor shows the first problem in a red banner and keeps Save disabled.
+- **A design is missing from Used in** — it has no `uses_tokens` link to the
+  kit (set its `brand` field or add a Uses tokens link), it is archived, or it
+  lives in a workspace you can't view (counted as "more in workspaces you
+  can't see").
+- **Used in says "the whole kit"** — the design links the kit but names no
+  single token (a theme), or its head isn't readable text; every token change
+  counts as reaching it.
+- **Saved but designs didn't change** — they follow the approved kit; approve
+  the new version.
+
+## 10. 3D Studio 1.5 (`ui/src/modules/design-hall/studio3d/`)
 
 A `scene3d` design opens the studio layout (mockup S4). It edits the same
 working copy as every other design — Save / ⌘S, `base_version` conflicts,
@@ -437,7 +536,7 @@ versions, Compare and Restore are the artifact view's — so everything below
 is either an edit of the scene document, an agent turn, or a local export.
 
 ```
-┌ HIERARCHY ─────┬ ✨ Generate ▾ · Turntable · Play · Export ▾ · Source ─┬ Inspector · Links · References ┐
+┌ HIERARCHY ─────┬ ✨ Generate ▾ · Turntable · Play · Export ▾ · Source ─┬ Inspector · Otto · Links · Refs ┐
 │ tree (+ add)   │ VIEWPORT (three.js)                    view cube ⌝  │ transform · corner radius      │
 │ Environment    │                                                     │ material preset grid           │
 │ Views          │                                                     │ brand swatches · sliders       │
@@ -445,7 +544,7 @@ is either an edit of the scene document, an agent turn, or a local export.
 └────────────────┴─────────────────────────────────────────────────────┴────────────────────────────────┘
 ```
 
-### 9.1 scene3d v2 (v1 still read)
+### 10.1 scene3d v2 (v1 still read)
 
 Every v2 field is optional; a v1 document renders unchanged and is written
 back as `version: 2` on its next save. The Rust validator
@@ -468,7 +567,7 @@ present, and refuses a token colour in a v1 document.
 The Blender script export keeps its v1 output: token colours fall back to the
 neutral default and model references never reach the script.
 
-### 9.2 Editing
+### 10.2 Editing
 
 - **Hierarchy** (add primitives, lights, groups, Import → a project GLB or an
   upload that becomes a GLB design), **Environment** (preset + backdrop),
@@ -489,7 +588,7 @@ neutral default and model references never reach the script.
 - After every save the studio renders a thumbnail and stores it with `PUT
   …/thumbnail` (a cache, not a version), so 3D cards stop showing a placeholder.
 
-### 9.3 ✨ Generate — agents ask first, providers are opt-in
+### 10.3 ✨ Generate — agents ask first, providers are opt-in
 
 Every item runs ONE design-assist turn (§5.1) and lands as a reviewable
 `agent` version (the toolbar shows "Otto · …" while it runs, then a toast; a
@@ -507,7 +606,7 @@ The provider interface is `studio3d/providers.ts` (availability rules are
 unit-tested). A cloud provider needs, before it can be enabled: a Keychain
 key, its host on the netguard allow-list, and a daemon route — none exist yet.
 
-### 9.4 Export and Optimize for web
+### 10.4 Export and Optimize for web
 
 Export ▾: **GLB** (three `GLTFExporter` from the live scene), **USDZ** (three
 `USDZExporter`, for iOS AR Quick Look), **PNG snapshot**, **PNG turntable** (8
@@ -523,7 +622,7 @@ GLB design** (a `derived_from` fork you can embed). Draco is not offered: its
 encoder isn't bundled and the app stays offline. Every Otto viewer decodes
 meshopt.
 
-### 9.5 The embed runtime (`studio3d/embed.ts`)
+### 10.5 The embed runtime (`studio3d/embed.ts`)
 
 For the Site Studio's 3D block (and any card or preview):
 
@@ -544,10 +643,10 @@ changes instant; off-screen embeds stop rendering. `embedSrc(id, {selector,
 view})` builds the reference a block stores. Exported static sites inject
 their own loaders via `resolve` (the default uses the authed client).
 
-### 9.6 Limits
+### 10.6 Limits
 
 - Text/image → 3D produce primitive models through the agent; mesh
-  generation from cloud providers is not wired yet (disabled, see §9.3).
+  generation from cloud providers is not wired yet (disabled, see §10.3).
 - States override objects, not lights or the camera; groups carry no
   transform, so a state moves each child it overrides.
 - The PNG turntable is one sprite sheet (no GIF/video); USDZ carries meshes

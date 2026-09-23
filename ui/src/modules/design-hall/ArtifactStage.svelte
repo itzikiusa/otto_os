@@ -274,7 +274,7 @@
           {:else}
             <p class="msg">No colour tokens yet — add them under <span class="mono">color</span> in the source.</p>
           {/if}
-          <p class="note"><Icon name="info" size={12} /> Token editing with an impact preview (which designs change) lands with Brand Kit in Phase 1. Today you edit the token document as source.</p>
+          <p class="note"><Icon name="info" size={12} /> Edit colours, type, spacing, logos and voice — with live contrast and an impact preview — in the <a href="#/design/brand/{encodeURIComponent(artifact.id)}" data-testid="design-open-brand-kit">Brand Kit editor</a>.</p>
         </div>
       {:else}
         <p class="msg err">The brand kit document isn’t valid JSON.</p>

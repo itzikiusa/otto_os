@@ -211,6 +211,9 @@ pub fn validate(spec: &FormatSpec, bytes: &[u8]) -> Result<()> {
                     spec.name
                 )));
             }
+            if spec.name == "otto-brand" {
+                crate::brand::validate(&v)?;
+            }
         }
         Encoding::Binary => {
             if bytes.is_empty() {
@@ -260,6 +263,7 @@ pub fn default_content(spec: &FormatSpec) -> Option<Vec<u8>> {
             "type": "otto-canvas", "version": 1, "format": "mermaid", "source": ""
         })
         .to_string(),
+        "otto-brand" => crate::brand::default_doc("Brand kit").to_string(),
         "gltf" => return None,
         other if spec.encoding == Encoding::Json => {
             serde_json::json!({ "type": other, "version": 1 }).to_string()

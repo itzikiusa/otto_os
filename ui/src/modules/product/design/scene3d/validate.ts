@@ -62,7 +62,8 @@ const MAX_COORD = 1e5;
 const MAX_CAMERAS = 32;
 const MAX_STATES = 32;
 const MAX_DURATION_MS = 10_000;
-const TOKEN_COLOR = /^token:color\.[A-Za-z0-9_.-]{1,96}$/;
+/** Brand Kit's token-name grammar (`design-hall/brand/tokens.ts::isValidTokenName`). */
+const TOKEN_COLOR = /^token:color\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 /** `otto://design/<id>[@approved|@latest|@vN][#node]` — the grammar of `uri.rs`. */
 const DESIGN_URI = /^otto:\/\/design\/[A-Za-z0-9_-]{1,64}(?:@(?:approved|latest|v[1-9][0-9]{0,17}))?(?:#[A-Za-z0-9_:.-]{1,128})?$/;
 

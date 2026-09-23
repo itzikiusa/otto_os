@@ -635,7 +635,8 @@ fn check_design_uri(at: &str, s: &str) -> Result<(), Error> {
 }
 
 /// A hex colour, or (v2 only) `token:color.<name>` — a brand-kit token the UI
-/// resolves; the name is `[A-Za-z0-9_.-]{1,96}` after `color.`.
+/// resolves; the name follows Brand Kit's token grammar
+/// (`otto_design::brand::doc::valid_token_name`: `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`).
 fn check_color_or_token(at: &str, c: &str, v2: bool) -> Result<(), Error> {
     let Some(rest) = c.strip_prefix(TOKEN_PREFIX) else {
         return check_color(at, c);
@@ -646,12 +647,7 @@ fn check_color_or_token(at: &str, c: &str, v2: bool) -> Result<(), Error> {
         )));
     }
     let name = rest.strip_prefix("color.").unwrap_or("");
-    let ok = !name.is_empty()
-        && name.len() <= 96
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
-    if !ok {
+    if !otto_design::brand::doc::valid_token_name(name) {
         return Err(bad(format!(
             "{at} must be a #rrggbb colour or token:color.<name>, got {c:?}"
         )));
@@ -1309,6 +1305,9 @@ add_group(\"g\", \"g\", [\"b\", \"t\"])
     fn v2_rejects_bad_tokens_uris_states_and_ranges() {
         rejects("token without color. prefix", |d| {
             d["objects"][0]["material"]["color"] = json!("token:violet")
+        });
+        rejects("token with a dotted name", |d| {
+            d["objects"][0]["material"]["color"] = json!("token:color.brand.violet")
         });
         rejects("token with a space", |d| {
             d["objects"][0]["material"]["color"] = json!("token:color.vio let")

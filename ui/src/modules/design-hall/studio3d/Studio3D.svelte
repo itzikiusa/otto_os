@@ -34,7 +34,6 @@
     Scene3DViewport,
     addCameraPreset,
     addGltfSrc,
-    brandSwatches,
     budgetStatus,
     editTargetState,
     exportObjectToGlb,
@@ -43,14 +42,18 @@
     glbFileName,
     initialState,
     parseScene,
+    resolveColor,
     removeCameraPreset,
     serializeScene,
     setBrand,
     setEnvironment,
     updateCameraPreset,
+    type BrandSwatch,
     type EnvPresetId,
     type Scene3dDoc,
   } from '../../product/design/scene3d';
+  import type { ColorResolver } from '../../product/design/scene3d/build';
+  import { colorTokens, resolveToken, tokenRef } from '../brand/tokens';
   import type { OptimizeResult } from '../../product/design/scene3d/optimize';
   import ArtifactStage from '../ArtifactStage.svelte';
   import StatesBar from './StatesBar.svelte';
@@ -60,6 +63,7 @@
   import { openArtifact } from '../nav';
   import { library } from '../library.svelte';
   import { policyLabel, type LinkRow } from '../model';
+  import type { AssistSelection } from '../assist/model';
 
   interface Props {
     artifact: DesignArtifact;
@@ -72,13 +76,17 @@
     linkCount: number;
     seqOf: (versionId: string) => number | null;
     onchange: (source: string) => void;
-    /** The view's Links / References panels (it owns their data). */
+    /** The view's Otto / Links / References panels (it owns their data); Otto
+     *  gets the selected object so a turn can focus on it. */
+    otto: Snippet<[AssistSelection | null]>;
     links: Snippet;
     references: Snippet;
+    /** Open on the Otto tab (the lobby's Generate hand-off, `#/design/a/<id>/otto`). */
+    openOtto?: boolean;
     /** The view's toolbar notices (imported / read-only / newer version). */
     notices?: Snippet;
   }
-  let { artifact, source, readonly, dirty, head, usedIn, linkCount, seqOf, onchange, links, references, notices }: Props = $props();
+  let { artifact, source, readonly, dirty, head, usedIn, linkCount, seqOf, onchange, otto, links, references, notices, openOtto = false }: Props = $props();
 
   // ── Document ──────────────────────────────────────────────────────────────
   const parsed = $derived(source ? parseScene(source) : null);
@@ -90,7 +98,10 @@
   /** Show the scene JSON beside a plain viewport (hand edits, agent diffs). */
   let showSource = $state(false);
   let turntable = $state(false);
-  let rightTab = $state<'inspector' | 'links' | 'references'>('inspector');
+  let rightTab = $state<'inspector' | 'otto' | 'links' | 'references'>(untrack(() => (openOtto ? 'otto' : 'inspector')));
+  $effect(() => {
+    if (openOtto) untrack(() => (rightTab = 'otto'));
+  });
   let vp = $state<ReturnType<typeof Scene3DViewport> | null>(null);
 
   // Keep the state picker on a real state (the doc may gain/lose states).
@@ -128,7 +139,14 @@
       },
     );
   });
-  const swatches = $derived(brandSwatches(kit?.doc));
+  // Brand Kit owns token resolution: `token:color.<name>` → the kit's hex.
+  const swatches = $derived<BrandSwatch[]>(
+    colorTokens(kit?.doc).map((c) => ({ name: c.name, value: c.hex.toLowerCase(), ref: tokenRef('color', c.name) })),
+  );
+  const colors = $derived.by<ColorResolver>(() => {
+    const kd = kit?.doc;
+    return (ref, fallback) => resolveColor(ref, kd ? (r) => resolveToken(kd, r) : null, fallback);
+  });
 
   // ── Agent turns (Blockout / Text→3D / Image→3D / Refine in Blender) ───────
   let agent = $state<{ turnId: string; label: string } | null>(null);
@@ -450,6 +468,12 @@
   const statusNote = $derived(dirty ? 'edited' : agentDraft && head ? `draft v${head.seq}` : head ? 'saved' : '');
   const editState = $derived(doc && selectedId ? editTargetState(doc, stateId, selectedId) : null);
   const hoverState = $derived(doc?.states?.find((s) => s.id === 'hover')?.id ?? null);
+  /** What an Otto turn focuses on: the selected object (or light / group). */
+  const assistSelection = $derived.by<AssistSelection | null>(() => {
+    if (!doc || !selectedId) return null;
+    const n = doc.objects.find((o) => o.id === selectedId) ?? doc.groups.find((g) => g.id === selectedId) ?? doc.lights.find((l) => l.id === selectedId);
+    return { node_id: selectedId, label: n?.name || selectedId };
+  });
   const env = $derived(doc?.environment);
 
   function onPlayHover(inside: boolean): void {
@@ -491,7 +515,7 @@
     </div>
   </div>
 {:else}
-  <div class="studio3d" data-testid="studio3d">
+  <div class="studio3d" class:wide-right={rightTab === 'otto'} data-testid="studio3d">
     <aside class="left" aria-label="Scene" data-testid="s3d-left">
       <div class="hier">
         <Hierarchy {doc} bind:selectedId onchange={edit} {readonly} onimportGlb={() => void importModel()} />
@@ -594,7 +618,7 @@
           {play}
           {turntable}
           stateId={stateId}
-          brand={kit?.doc ?? null}
+          {colors}
           viewCube
           compact
           {statusNote}
@@ -611,6 +635,7 @@
     <aside class="right" aria-label="Details">
       <div class="tabs" role="tablist" aria-label="Details panel">
         <button role="tab" aria-selected={rightTab === 'inspector'} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')} data-testid="s3d-tab-inspector">Inspector</button>
+        <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">Otto</button>
         <button role="tab" aria-selected={rightTab === 'links'} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
           Links <span class="count">{linkCount}</span>
         </button>
@@ -618,7 +643,7 @@
       </div>
       <div class="panel" role="tabpanel">
         {#if rightTab === 'inspector'}
-          <Inspector {doc} bind:selectedId onchange={edit} {readonly} {swatches} brandName={kit?.label ?? null} brand={kit?.doc ?? null} {editState} />
+          <Inspector {doc} bind:selectedId onchange={edit} {readonly} {swatches} brandName={kit?.label ?? null} {colors} {editState} />
           {#if usedIn.length}
             <section class="usedin" aria-label="Used in" data-testid="s3d-usedin">
               <div class="block-head">
@@ -637,6 +662,8 @@
               </ul>
             </section>
           {/if}
+        {:else if rightTab === 'otto'}
+          {@render otto(assistSelection)}
         {:else if rightTab === 'links'}
           {@render links()}
         {:else}
@@ -695,6 +722,10 @@
     display: grid;
     grid-template-columns: 248px minmax(0, 1fr) 320px;
     container-type: inline-size;
+  }
+  /* The Otto tab holds a conversation and a variants tray: a little wider. */
+  .studio3d.wide-right {
+    grid-template-columns: 248px minmax(0, 1fr) 360px;
   }
   .left,
   .right {
@@ -1077,7 +1108,8 @@
     font-size: var(--fs-s);
   }
   @container (max-width: 980px) {
-    .studio3d {
+    .studio3d,
+    .studio3d.wide-right {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
     .left {
@@ -1085,7 +1117,8 @@
     }
   }
   @container (max-width: 720px) {
-    .studio3d {
+    .studio3d,
+    .studio3d.wide-right {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(360px, 1fr) auto;
       overflow-y: auto;

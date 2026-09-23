@@ -61,7 +61,7 @@ test.beforeAll(async () => {
     format: 'otto-brand',
     studio: 'brand',
     title: `Acme Brand Kit ${stamp}`,
-    content: JSON.stringify({ type: 'otto-brand', version: 1, color: { violet: { $type: 'color', $value: '#5B3DF5' }, amber: { $type: 'color', $value: '#F5A524' } } }),
+    content: JSON.stringify({ $schema: 'otto-brand/1', name: 'Acme', color: { violet: { $value: '#5B3DF5' }, amber: { $value: '#F5A524' } } }),
   });
   kitId = kit.artifact.id;
   const scene = await postJson(ctx, `${base}${V1}/design/artifacts`, {

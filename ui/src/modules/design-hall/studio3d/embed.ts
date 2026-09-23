@@ -40,6 +40,7 @@ import { buildEnvironment, type BuiltEnvironment } from '../../product/design/sc
 import { parseScene } from '../../product/design/scene3d/validate';
 import { emptyScene, type Easing, type Scene3dDoc } from '../../product/design/scene3d/types';
 import { resolveColor } from '../../product/design/scene3d/tokens';
+import { resolveToken } from '../brand/tokens';
 import { resolveMaterial, type ResolvedMaterial } from '../../product/design/scene3d/presets';
 import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from '../../product/design/scene3d/states';
 import { loadBrandKit, resolveModelRef, versionFor } from './sources';
@@ -254,7 +255,7 @@ export async function mountScene3dEmbed(el: HTMLElement, opts: Scene3dEmbedOptio
     if (!loaded || destroyed) throw new Error('Nothing to embed');
     doc = loaded.doc;
     title = opts.label ?? loaded.title;
-    color = (r, fb) => resolveColor(r, loaded.brand, fb);
+    color = (r, fb) => resolveColor(r, (ref) => resolveToken(loaded.brand, ref), fb);
     const T = THREE;
 
     renderer = new T.WebGLRenderer({ antialias: true, alpha: opts.background === 'transparent' });

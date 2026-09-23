@@ -31,7 +31,8 @@
     summarize,
   } from './ops';
   import { MATERIAL_PRESETS, resolveMaterial } from './presets';
-  import { colorLabel, isTokenRef, resolveColor, type BrandSwatch } from './tokens';
+  import { colorLabel, isTokenRef, type BrandSwatch } from './tokens';
+  import { plainColors, type ColorResolver } from './build';
   import { findState } from './states';
 
   interface Props {
@@ -43,8 +44,8 @@
     swatches?: BrandSwatch[];
     /** v2: the kit's display name for the Material panel ("Acme Brand Kit v4"). */
     brandName?: string | null;
-    /** v2: the brand document tokens resolve against (for the resolved hex readout). */
-    brand?: unknown;
+    /** v2: resolves `token:` colours for the hex readout (the host's brand kit). */
+    colors?: ColorResolver;
     /** v2: transform edits of the selected object go to this state's overrides. */
     editState?: string | null;
   }
@@ -55,7 +56,7 @@
     readonly = false,
     swatches = [],
     brandName = null,
-    brand = null,
+    colors = plainColors,
     editState = null,
   }: Props = $props();
 
@@ -66,7 +67,7 @@
   const parent = $derived(selectedId ? parentGroup(doc, selectedId) : null);
   const mat = $derived<Scene3dMaterial>(obj?.material ?? {});
   /** Preset defaults folded in — what the sliders show when a field isn't set. */
-  const resolved = $derived(resolveMaterial(obj?.material, (r, fb) => resolveColor(r, brand, fb)));
+  const resolved = $derived(resolveMaterial(obj?.material, colors));
   const stateEdit = $derived(obj && editState ? findState(doc, editState) : null);
   /** The transform the rows show: the state's override over the base. */
   const shownTransform = $derived.by(() => {

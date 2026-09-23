@@ -175,7 +175,7 @@ the inspector round-trips it. Version 1:
 > by `src: otto://design/<id>[@…]`. Both validators read v1 and v2; the TS one
 > always writes v2, so an arena scene upgrades on its next save. The Blender
 > export ignores the v2 extras (token colours fall back to the neutral
-> default). Full reference: `docs/features/design-hall.md` §9.
+> default). Full reference: `docs/features/design-hall.md` §10.
 
 ---
 

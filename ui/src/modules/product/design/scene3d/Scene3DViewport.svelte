@@ -9,7 +9,7 @@
   // owns the 600 ms autosave + dirty/conflict state). We never mutate `doc`.
   //
   // scene3d v2 (3D Studio 1.5): physical materials (presets + brand `token:`
-  // colours resolved against `brand`), procedural environments (IBL + gradient
+  // colours resolved through `colors`), procedural environments (IBL + gradient
   // backdrop), named STATES — `stateId` picks one and the viewer tweens every
   // object's pose to it (gizmo edits made in a non-default state are written to
   // that state's overrides) — a turntable orbit, a view cube, and camera moves
@@ -38,11 +38,11 @@
     updateMeshMaterial,
     USERDATA_ID,
     USERDATA_KIND,
+    plainColors,
     type ColorResolver,
     type Three,
   } from './build';
   import { duplicate, findNode, gizmoModeForKey, remove, setCamera, setStateOverride, setTransform, summarize } from './ops';
-  import { resolveColor } from './tokens';
   import { resolveMaterial, type ResolvedMaterial } from './presets';
   import { editTargetState, findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from './states';
   import { buildEnvironment, environmentKey, type BuiltEnvironment } from './environment';
@@ -55,8 +55,9 @@
     play?: boolean;
     onchange: (doc: Scene3dDoc) => void;
     resolveAttachment: (ref: string) => Promise<string>;
-    /** v2: the brand kit document `token:color.<name>` resolves against. */
-    brand?: unknown;
+    /** v2: colour resolver binding `token:color.<name>` to the host's brand kit
+     *  (Design Hall passes Brand Kit's `resolveToken`); default: hex only. */
+    colors?: ColorResolver;
     /** v2: the active state (null / unknown = the document's initial state). */
     stateId?: string | null;
     /** v2: orbit the camera slowly around its target (speed from `doc.turntable`). */
@@ -75,7 +76,7 @@
     play = false,
     onchange,
     resolveAttachment,
-    brand = null,
+    colors = plainColors,
     stateId = null,
     turntable = false,
     viewCube = false,
@@ -92,7 +93,7 @@
   let gltfErrors = $state<Record<string, string>>({});
   const status = $derived(summarize(doc));
   const canEdit = $derived(!readonly && !play);
-  const colorFn: ColorResolver = (ref, fallback) => resolveColor(ref, brand, fallback);
+  const colorFn: ColorResolver = (ref, fallback) => colors(ref, fallback);
 
   // ── three state (plain lets, never reactive — these are heavy mutable objects) ──
   let THREE: Three | null = null;
@@ -845,13 +846,13 @@
   $effect(() => {
     if (host && !renderer && !destroyed) void boot(host);
   });
-  // Reconcile the three scene whenever the document (or the brand kit / state)
+  // Reconcile the three scene whenever the document (or the colour resolver / state)
   // changes (agent edit, inspector, hierarchy, or our own gizmo write-back —
   // idempotent for the latter).
   $effect(() => {
     // Deep read: also re-runs if the host hands us a `$state` proxy and mutates it in place.
     const d = $state.snapshot(doc) as Scene3dDoc;
-    void brand;
+    void colors;
     void stateId;
     if (!renderer) return;
     reconcile(d);

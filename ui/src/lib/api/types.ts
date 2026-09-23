@@ -9422,3 +9422,155 @@ export interface DesignLearnExtractResp {
   skipped: number;
   candidates: DesignRuleCandidate[];
 }
+
+// ---------------------------------------------------------------------------
+// Design Hall — Brand Kit (`otto-brand/1`; mirrors crates/otto-design/src/brand;
+// contract: docs/contracts/api.md § Brand Kit). Other studios reference tokens
+// as `token:<group>.<name>` (or `var(--brand-<group>-<name>)`) and link to the
+// kit with rel `uses_tokens`; helpers: ui/src/modules/design-hall/brand/tokens.ts.
+// ---------------------------------------------------------------------------
+
+export type BrandTokenGroup = 'color' | 'font' | 'type' | 'radius' | 'space';
+export type BrandFontRole = 'display' | 'body' | 'mono';
+export type BrandLogoKind = 'full' | 'mark' | 'mono';
+
+export interface BrandColorToken {
+  /** `#RGB` / `#RRGGBB` / `#RRGGBBAA`. */
+  $value: string;
+  $description?: string;
+}
+
+export interface BrandFontToken {
+  /** A CSS family stack (`"Inter", system-ui, sans-serif`); no `; { } < > \`. */
+  $value: string;
+  /** 1–1000, at most 9. */
+  weights?: number[];
+}
+
+/** A text style: size and line height in px, weight 1–1000. */
+export interface BrandTypeStyle {
+  size: number;
+  line: number;
+  weight: number;
+}
+
+/** A radius / space token in px (0–10 000). */
+export interface BrandPxToken {
+  $value: number;
+  $description?: string;
+}
+
+export interface BrandLogo {
+  name: string;
+  kind: BrandLogoKind;
+  /** `otto://design/<id>` (an image artifact) or `blob:<sha256>`; empty = a
+   *  placeholder slot, not uploaded yet. */
+  asset?: string;
+}
+
+/** `voice` / `imagery`: a summary and do / don't examples (≤ 20 each). */
+export interface BrandProse {
+  summary?: string;
+  do?: string[];
+  dont?: string[];
+}
+
+/** The `otto-brand/1` document (DTCG-flavoured). Every group is optional on
+ *  the wire; token names are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`, ≤ 64 per group. */
+export interface BrandDoc {
+  $schema: 'otto-brand/1';
+  name: string;
+  color: Record<string, BrandColorToken>;
+  font: Partial<Record<BrandFontRole, BrandFontToken>>;
+  type?: Record<string, BrandTypeStyle>;
+  radius: Record<string, BrandPxToken>;
+  space: Record<string, BrandPxToken>;
+  logos: BrandLogo[];
+  imagery?: BrandProse;
+  voice?: BrandProse;
+}
+
+export type BrandExportFormat = 'css' | 'tailwind' | 'dtcg';
+
+export interface BrandImpactReq {
+  /** The proposed kit (object or JSON text); omitted = the head (a plain
+   *  "used in" listing with no changes). */
+  content?: BrandDoc | string;
+}
+
+export interface BrandTokenChange {
+  /** `group.name`, e.g. `color.primary`. */
+  token: string;
+  change: 'changed' | 'added' | 'removed';
+  /** Canonical values: `#5B3DF5`, `14px`, `64/72/800` (size/line/weight) … */
+  before: string | null;
+  after: string | null;
+}
+
+export interface BrandStudioCount {
+  studio: DesignStudio;
+  count: number;
+}
+
+export interface BrandConsumer {
+  artifact: DesignArtifact;
+  /** `follow_approved` moves when a kit version is approved; `follow_latest`
+   *  on every save; `pinned` stays until updated. */
+  policy: DesignLinkPolicy;
+  pinned_version_id: Id | null;
+  /** Tokens the consumer's head names (sorted). */
+  tokens: string[];
+  /** Names no single token → the whole kit applies (a site theme). */
+  whole_kit: boolean;
+  /** The changed tokens it would see. */
+  affected: string[];
+  /** false = the head isn't readable text (counted as whole-kit). */
+  scanned: boolean;
+}
+
+export type BrandContrastLevel = 'AAA' | 'AA' | 'AA-large' | 'fail';
+
+export interface BrandContrastColor {
+  name: string;
+  hex: string;
+  on_white: number;
+  on_ink: number;
+  white_level: BrandContrastLevel;
+  ink_level: BrandContrastLevel;
+}
+
+export interface BrandContrastPair {
+  a: string;
+  b: string;
+  ratio: number;
+  level: BrandContrastLevel;
+}
+
+export interface BrandContrastReport {
+  /** The `ink` token, else `text`, else the darkest colour (null name = black). */
+  ink: { name: string | null; hex: string };
+  colors: BrandContrastColor[];
+  /** Every unordered pair of colour tokens. */
+  pairs: BrandContrastPair[];
+}
+
+export interface BrandImpactResp {
+  kit_id: Id;
+  /** What the proposal is compared with. */
+  base: 'approved' | 'head' | 'none';
+  base_version_id: Id | null;
+  base_seq: number | null;
+  changes: BrandTokenChange[];
+  artifact_count: number;
+  studio_count: number;
+  by_studio: BrandStudioCount[];
+  affected_count: number;
+  affected_studio_count: number;
+  affected_by_studio: BrandStudioCount[];
+  /** Affected first, then newest. */
+  consumers: BrandConsumer[];
+  /** Consumers in workspaces the caller can't view. */
+  hidden_count: number;
+  contrast: BrandContrastReport;
+  warnings: string[];
+}
