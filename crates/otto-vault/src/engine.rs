@@ -1198,6 +1198,14 @@ impl VaultEngine {
         }
         let moved_new_to_old: HashMap<&String, &String> =
             moved.iter().map(|(o, n)| (n, o)).collect();
+        // …and AFTER it: every rewritten raw is checked against this so a
+        // shortened form can never land on a different note (a same-folder
+        // or now-ambiguous basename wins over the moved target).
+        let mut ix_after = ix_before.clone();
+        for (old, new) in &moved {
+            ix_after.remove(old);
+            ix_after.insert(new.clone());
+        }
 
         let mut links_updated = 0i64;
         for src in &affected {
@@ -1216,26 +1224,27 @@ impl VaultEngine {
             let new_content = parse::rewrite_links(&content, |kind, raw| {
                 let dst_old = ix_before.resolve(&src_before, raw)?;
                 let moved_to = moved.get(&dst_old);
-                let src_dir_now = src_now.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
                 let src_moved = src_before != src_now;
-                match (moved_to, src_moved, kind) {
-                    // Target moved → point at its new home, preserving style.
-                    (Some(new_dst), _, k) => {
-                        count_here += 1;
-                        Some(new_raw_for(raw, k, src_dir_now, new_dst))
-                    }
-                    // Target stayed, but THIS note moved and uses a relative md
-                    // link → recompute the relative path from the new folder.
-                    (None, true, "md") => {
-                        if raw.starts_with('/') {
-                            None
-                        } else {
-                            count_here += 1;
-                            Some(relative_path(src_dir_now, &dst_old))
-                        }
-                    }
-                    _ => None,
+                if moved_to.is_none() && !src_moved {
+                    return None;
                 }
+                let desired = moved_to.unwrap_or(&dst_old);
+                // Still lands on the same note from where the source now
+                // lives (unchanged basename, `/`-absolute to a stayed note…).
+                if ix_after.resolve(&src_now, raw).as_ref() == Some(desired) {
+                    return None;
+                }
+                let src_dir_now = src_now.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                // Target moved → its new home in the link's own style; target
+                // stayed but THIS note moved → recompute relative forms (md,
+                // wiki and embeds alike) from the new folder.
+                let styled = new_raw_for(raw, kind, src_dir_now, desired);
+                let fixed = resolving_raw(&ix_after, &src_now, kind, styled, desired);
+                if fixed == raw {
+                    return None;
+                }
+                count_here += 1;
+                Some(fixed)
             });
             if new_content != content && count_here > 0 {
                 let revision = Self::prepare_revision(
@@ -1854,6 +1863,29 @@ fn new_raw_for(old_raw: &str, kind: &str, src_dir_now: &str, new_dst: &str) -> S
                 base.to_string()
             }
         }
+    }
+}
+
+/// `styled` if it resolves (from `src`) to `dst`; otherwise the full vault
+/// path, then the `/`-absolute form — so a rewrite never retargets a link to a
+/// different note that happens to share the shortened name.
+fn resolving_raw(ix: &ResolveIndex, src: &str, kind: &str, styled: String, dst: &str) -> String {
+    let lands = |cand: &str| ix.resolve(src, cand).as_deref() == Some(dst);
+    if lands(&styled) {
+        return styled;
+    }
+    let full = if kind == "md" || styled.to_ascii_lowercase().ends_with(".md") {
+        dst.to_string()
+    } else {
+        dst.strip_suffix(".md").unwrap_or(dst).to_string()
+    };
+    let absolute = format!("/{full}");
+    if lands(&full) {
+        full
+    } else if lands(&absolute) {
+        absolute
+    } else {
+        styled
     }
 }
 

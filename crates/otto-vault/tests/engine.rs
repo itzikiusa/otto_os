@@ -1109,6 +1109,55 @@ async fn regression_asset_symlink_cannot_escape_the_vault() {
     ));
 }
 
+/// Rename rewrites kept a shortened basename even when it now resolves to a
+/// different note, missed dotted note names, and edited links inside code.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_rename_rewrite_never_retargets_links() {
+    let eng = engine().await;
+    let td = tempfile::tempdir().unwrap();
+    let r = td.path();
+    for d in ["a", "c", "rel"] {
+        std::fs::create_dir_all(r.join(d)).unwrap();
+    }
+    std::fs::write(r.join("a/Old.md"), "# Old").unwrap();
+    std::fs::write(r.join("c/Spec.md"), "# Other spec").unwrap();
+    std::fs::write(
+        r.join("c/x.md"),
+        "See [[Old]] and [[Release 1.2]].\n````\n```\n[[Old]]\n```\n````\n`` [[Old]] ``\n",
+    )
+    .unwrap();
+    std::fs::write(r.join("rel/Release 1.2.md"), "# Release").unwrap();
+    let v = eng
+        .register(WS, "Rewrite", Some(r.to_string_lossy().to_string()), false)
+        .await
+        .unwrap();
+    eng.scan(v.id).await.unwrap();
+
+    eng.rename(WS, v.id, "a/Old.md", "b/Spec.md").await.unwrap();
+    let x = std::fs::read_to_string(r.join("c/x.md")).unwrap();
+    assert!(x.starts_with("See [[b/Spec]] and"), "{x}");
+    assert!(x.contains("```\n[[Old]]\n```"), "fenced code edited: {x}");
+    assert!(x.contains("`` [[Old]] ``"), "code span edited: {x}");
+    let spec = eng.note(WS, v.id, "c/x.md").await.unwrap();
+    let dst = |raw: &str| {
+        spec.outgoing
+            .iter()
+            .find(|l| l.raw_target == raw)
+            .and_then(|l| l.dst_path.clone())
+    };
+    assert_eq!(dst("b/Spec").as_deref(), Some("b/Spec.md"));
+
+    // A dotted note name resolves, so its rename is followed too.
+    assert_eq!(dst("Release 1.2").as_deref(), Some("rel/Release 1.2.md"));
+    let res = eng
+        .rename(WS, v.id, "rel/Release 1.2.md", "rel/Release 1.3.md")
+        .await
+        .unwrap();
+    assert_eq!(res.links_updated, 1, "{res:?}");
+    let x = std::fs::read_to_string(r.join("c/x.md")).unwrap();
+    assert!(x.contains("[[Release 1.3]]"), "{x}");
+}
+
 /// A case-only rename left the old-case row "present" on case-insensitive
 /// APFS (`stat note.md` still succeeds), so every later scan was incomplete.
 #[tokio::test(flavor = "multi_thread")]
