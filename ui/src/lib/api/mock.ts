@@ -1067,6 +1067,14 @@ const routes: Route[] = [
     },
   },
   {
+    method: 'GET',
+    re: /^\/workspaces\/([^/]+)$/,
+    handle: (m) => {
+      const w = workspaces.find((x) => x.id === m[1]);
+      return w ? { json: w } : problem(404, 'not_found', 'workspace');
+    },
+  },
+  {
     method: 'PATCH',
     re: /^\/workspaces\/([^/]+)$/,
     handle: (m, body) => {

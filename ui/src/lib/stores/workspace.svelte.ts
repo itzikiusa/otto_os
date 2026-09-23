@@ -1259,10 +1259,14 @@ class WorkspaceStore {
     this.statusMap[sessionId] = restarted.status;
   }
 
-  async saveNotes(notes: string): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    const settings = { ...this.current.settings, notes };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+  /** Save `notes` into workspace `wsId` (default: current). The PATCH replaces
+   *  the whole settings object, so merge into a FRESH read — a cached copy
+   *  could revert keys changed since (e.g. api_client.allow_local). */
+  async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
+    if (!wsId) return;
+    const fresh = await api.get<Workspace>(`/workspaces/${wsId}`);
+    const settings = { ...fresh.settings, notes };
+    const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,
     );
