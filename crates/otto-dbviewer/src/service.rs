@@ -85,6 +85,12 @@ fn mask_result(res: &mut QueryResult) {
 /// - `Err(Forbidden)` when the statement is classified as a write/DDL (reusing the
 ///   conservative [`statement_is_write`] classifier — unknown counts as a write),
 /// - `Ok(())` for a recognised read.
+///
+/// This classification is the FIRST of two barriers, never the only one: it
+/// splits with the engine's own lexer and (MySQL/PostgreSQL) requires a
+/// parser-proven read, and [`DbViewerService::run_read_only`] then executes
+/// whatever passes in the engine's native read-only mode, so a statement the
+/// classifier misjudges still cannot change data.
 pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
     if statement.trim().is_empty() {
         return Err(Error::Invalid("empty statement".into()));
@@ -1447,6 +1453,20 @@ impl DbViewerService {
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
     pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+        self.run_inner(conn_id, user_id, req, false).await
+    }
+
+    /// [`Self::run`], optionally forcing the engine's NATIVE read-only mode
+    /// (`read_only`, the MCP path): the driver then runs the statement inside a
+    /// read-only transaction (MySQL / PostgreSQL) or with the `readonly`
+    /// setting (ClickHouse HTTP), regardless of access mode.
+    async fn run_inner(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        read_only: bool,
+    ) -> Result<QueryResult> {
         // Normalize the scope ONCE: drivers get the canonical node (`kdb:<n>`
         // for a Redis keyspace, the plain name otherwise); authorization and
         // resolution use the bare access child derived from it below.
@@ -1472,6 +1492,18 @@ impl DbViewerService {
                 .as_object_mut()
                 .unwrap()
                 .remove("__read_only_execution");
+        }
+        if read_only {
+            // Set AFTER the enforced-mode removal above: the MCP path is
+            // read-only whatever the statement classified as. The flag is
+            // server-derived (config parsing strips `__` keys from stored
+            // params) and excluded from the pool cache key.
+            if !r.config.params.is_object() {
+                r.config.params = Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = r.config.params.as_object_mut() {
+                map.insert("__read_only_execution".into(), Value::Bool(true));
+            }
         }
         self.verify_native(conn_id, user_id, &r).await?;
         let token = CancelToken::new();
@@ -1746,7 +1778,13 @@ impl DbViewerService {
             offset: None,
             cursor: None,
         };
-        self.run(conn_id, user_id, &safe).await
+        // Second barrier: execute in the engine's native read-only mode —
+        // MySQL `START TRANSACTION READ ONLY` / PostgreSQL `BEGIN READ ONLY`
+        // (rolled back afterwards), ClickHouse `readonly` over HTTP. MongoDB
+        // and Redis have no such mode; their gate is a positive allow-list of
+        // read operations (Mongo: find/count/getIndexes and aggregations
+        // without `$out`/`$merge`; Redis: known read commands only).
+        self.run_inner(conn_id, user_id, &safe, true).await
     }
 
     /// Export a (potentially huge) **uncapped** read result to a local file, in

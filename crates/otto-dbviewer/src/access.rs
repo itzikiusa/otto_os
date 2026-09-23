@@ -276,6 +276,59 @@ impl Visitor for SafeExpressions {
     }
 }
 
+/// True when `sql` provably only READS: it parses with the engine's sqlparser
+/// dialect into queries whose body and CTEs are all reads (no `SELECT … INTO`,
+/// no data-changing CTE), `EXPLAIN`s without an executing `ANALYZE` of such a
+/// query, or `DESCRIBE <table>`. Used by the legacy write-guard and the MCP
+/// read-only gate in addition to their keyword checks: a first keyword cannot
+/// reveal a write nested inside a read-looking statement.
+///
+/// Unlike [`operations`] this does NOT restrict functions or catalogs — that
+/// is the enforced-mode boundary; the legacy paths rely on native privileges
+/// and, for MCP, a native read-only transaction behind this check. A parse
+/// failure is unproven and returns `false` (the callers treat it as a write).
+/// Engines other than MySQL / PostgreSQL are not parsed and return `true`.
+pub(crate) fn read_is_provable(engine: Engine, sql: &str) -> bool {
+    let parsed = match engine {
+        Engine::Mysql => Parser::parse_sql(&MySqlDialect {}, sql),
+        Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        _ => return true,
+    };
+    let Ok(statements) = parsed else {
+        return false;
+    };
+    !statements.is_empty() && statements.iter().all(statement_is_pure_read)
+}
+
+fn statement_is_pure_read(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(query) => query_is_read(query),
+        Statement::ExplainTable { .. } => true,
+        Statement::Explain {
+            analyze,
+            statement,
+            options,
+            ..
+        } => {
+            let executes = *analyze
+                || options.as_ref().is_some_and(|opts| {
+                    opts.iter()
+                        .any(|o| o.name.value.eq_ignore_ascii_case("analyze"))
+                });
+            !executes && matches!(statement.as_ref(), Statement::Query(q) if query_is_read(q))
+        }
+        _ => false,
+    }
+}
+
+fn query_is_read(query: &sqlparser::ast::Query) -> bool {
+    query_body_is_read(&query.body)
+        && query
+            .with
+            .as_ref()
+            .is_none_or(|w| w.cte_tables.iter().all(|cte| query_is_read(&cte.query)))
+}
+
 fn query_body_is_read(body: &sqlparser::ast::SetExpr) -> bool {
     use sqlparser::ast::SetExpr;
     match body {

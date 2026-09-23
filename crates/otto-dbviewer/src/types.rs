@@ -1296,7 +1296,9 @@ fn has_word_then_digit(haystack: &str, word: &str) -> bool {
 /// input is a write if *any* part is a write (or unrecognised).
 pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
     match engine {
-        Engine::Mysql | Engine::Clickhouse | Engine::Postgres => sql_is_write(statement),
+        Engine::Mysql | Engine::Clickhouse | Engine::Postgres => {
+            sql_is_write_for(engine, statement)
+        }
         Engine::Redis => redis_is_write(statement),
         // Mongo's `run` accepts JSON commands / `db.coll.op(...)` shorthand whose
         // surface is large and easy to mis-parse; treat everything except a
@@ -1376,6 +1378,55 @@ fn sql_is_write(statement: &str) -> bool {
         if !sql_first_keyword_is_read(&span.text) {
             return true;
         }
+    }
+    false
+}
+
+/// The engine-aware SQL write classifier behind [`statement_is_write`]. A
+/// statement is a write when ANY of three independent checks says so:
+///
+/// 1. the Generic split ([`sql_is_write`]) — the historical guard;
+/// 2. the ENGINE's own split (the one its driver executes with). Lexers
+///    disagree about string / comment / identifier boundaries between
+///    dialects; where they do, the guard must never see fewer statements than
+///    the executor runs, so each dialect's statements are classified too;
+/// 3. for MySQL / PostgreSQL, every statement led by a keyword that has a
+///    write form (`SELECT` / `WITH` / `EXPLAIN`) must PARSE, with that
+///    engine's sqlparser dialect, into a provable read
+///    ([`crate::access::read_is_provable`]; `DESC`/`DESCRIBE` included, being
+///    MySQL synonyms of `EXPLAIN`). A first-keyword allowlist cannot
+///    see a write nested in a read-looking statement; the parser can, and a
+///    statement it cannot parse is unproven — so it counts as a write.
+///
+/// ClickHouse has no read-looking statement that writes (no `SELECT … INTO`,
+/// no data-changing CTE), and sqlparser does not cover its dialect well enough
+/// to make a parse failure meaningful, so it stops after step 2.
+fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
+    if sql_is_write(statement) {
+        return true;
+    }
+    let dialect = match engine {
+        Engine::Mysql => SqlDialect::Mysql,
+        Engine::Postgres => SqlDialect::Postgres,
+        Engine::Clickhouse => SqlDialect::Clickhouse,
+        Engine::Redis | Engine::Mongodb => SqlDialect::Generic,
+    };
+    let spans = split_statements(statement, dialect);
+    if spans
+        .iter()
+        .any(|span| !sql_first_keyword_is_read(&span.text))
+    {
+        return true;
+    }
+    if matches!(engine, Engine::Mysql | Engine::Postgres) {
+        return spans.iter().any(|span| {
+            // DESC / DESCRIBE are MySQL synonyms of EXPLAIN (including its
+            // executing ANALYZE form), so they are proven too.
+            matches!(
+                sql_first_keyword(&span.text).as_str(),
+                "SELECT" | "WITH" | "EXPLAIN" | "DESC" | "DESCRIBE"
+            ) && !crate::access::read_is_provable(engine, &span.text)
+        });
     }
     false
 }
@@ -2190,6 +2241,62 @@ mod tests {
                 statement_is_write(Engine::Mysql, sql),
                 "write missed: {sql}"
             );
+        }
+    }
+
+    /// Read-looking statements that write (or execute) are writes: the parser
+    /// check sees what the first keyword cannot. Plain reads stay reads.
+    #[test]
+    fn read_looking_writes_are_writes_for_mysql_and_postgres() {
+        for (engine, sql) in [
+            (
+                Engine::Postgres,
+                "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            ),
+            (Engine::Postgres, "SELECT 1 INTO new_table"),
+            (Engine::Postgres, "EXPLAIN ANALYZE DELETE FROM t"),
+            (Engine::Postgres, "EXPLAIN (ANALYZE) SELECT * FROM t"),
+            (Engine::Mysql, "EXPLAIN ANALYZE DELETE FROM t"),
+        ] {
+            assert!(statement_is_write(engine, sql), "{engine:?}: {sql}");
+        }
+        for (engine, sql) in [
+            (Engine::Postgres, "SELECT * FROM t WHERE a = 1"),
+            (Engine::Postgres, "WITH c AS (SELECT 1) SELECT * FROM c"),
+            (Engine::Postgres, "EXPLAIN SELECT * FROM t"),
+            (Engine::Mysql, "SELECT a, b FROM shop.orders WHERE id = 3"),
+            (Engine::Mysql, "EXPLAIN SELECT 1"),
+            (Engine::Mysql, "DESCRIBE t"),
+            (Engine::Mysql, "SHOW TABLES"),
+        ] {
+            assert!(!statement_is_write(engine, sql), "{engine:?}: {sql}");
+        }
+    }
+
+    /// The guard never classifies fewer writes than the engine's own split —
+    /// the statements the driver will actually execute.
+    #[test]
+    fn write_guard_covers_every_engine_split() {
+        let corpus = [
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1 # note\n; UPDATE t SET a = 1",
+            "SELECT `a;b` FROM t; DROP TABLE t",
+            "SELECT 1; SELECT 2",
+            "SELECT 'x'",
+        ];
+        for (engine, dialect) in [
+            (Engine::Mysql, SqlDialect::Mysql),
+            (Engine::Postgres, SqlDialect::Postgres),
+            (Engine::Clickhouse, SqlDialect::Clickhouse),
+        ] {
+            for sql in corpus {
+                let executor_sees_write = split_statements(sql, dialect)
+                    .iter()
+                    .any(|s| !sql_first_keyword_is_read(&s.text));
+                if executor_sees_write {
+                    assert!(statement_is_write(engine, sql), "{engine:?}: {sql}");
+                }
+            }
         }
     }
 
