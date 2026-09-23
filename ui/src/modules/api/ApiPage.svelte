@@ -1,6 +1,7 @@
 <script lang="ts">
   // Full API-client module page: a left sidebar (Collections / History / Env
   // tabs) and a center column with the RequestBuilder over the ResponseViewer.
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
@@ -65,10 +66,15 @@
 
   // Load everything when the workspace changes (collections/requests/envs/history
   // plus automations, which the runner chains together).
+  // Keyed on the workspace ONLY: loadAll's synchronous prologue reads (and
+  // rewrites) the open tabs / requests, which must not become dependencies of
+  // this effect, or every load would schedule another one.
   $effect(() => {
     if (ws.currentId) {
-      void apiClient.loadAll();
-      void apiClient.loadAutomations();
+      untrack(() => {
+        void apiClient.loadAll();
+        void apiClient.loadAutomations();
+      });
     }
   });
 

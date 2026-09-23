@@ -30,6 +30,7 @@ import type {
   UpsertApiRequestReq,
 } from '../api/types';
 import { isSecretRef } from '../api/types';
+import { stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
 import { ws } from './workspace.svelte';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
@@ -344,8 +345,13 @@ class ApiClientStore {
     }
     if (this.tabsWid === null || typeof localStorage === 'undefined') return;
     const key = tabsKey(this.tabsWid);
+    // Never at rest outside the Keychain: plaintext credentials typed into a
+    // tab (or imported from curl / fetched via OAuth) are stripped from the
+    // persisted copy (see stripSecretsForStorage).
     const blob: PersistedTabs = {
-      tabs: $state.snapshot(this.tabs) as ApiDraft[],
+      tabs: ($state.snapshot(this.tabs) as ApiDraft[]).map((t) =>
+        stripSecretsForStorage(t, t.requestId ? this.requests.find((r) => r.id === t.requestId) : undefined),
+      ),
       active: this.activeTab,
     };
     try {
@@ -1074,9 +1080,12 @@ class ApiClientStore {
     const req: ImportCurlReq = { curl };
     try {
       const p = await api.post<ParsedCurl>('/api-client/import-curl', req);
-      this.draft = {
+      // Fills the current tab only while it holds nothing unsaved; otherwise
+      // the import opens in a new tab (placeDraft).
+      this.placeDraft({
+        tabId: crypto.randomUUID(),
         requestId: null,
-        name: this.draft.name,
+        name: this.isDirty(this.draft) ? '' : this.draft.name,
         kind: 'http',
         method: p.method,
         url: p.url,
@@ -1087,7 +1096,7 @@ class ApiClientStore {
         auth: p.auth,
         proto: '',
         grpc_method: '',
-      };
+      });
       toasts.success('Imported curl', `${p.method} ${p.url}`);
       return true;
     } catch (e) {
@@ -1265,9 +1274,29 @@ class ApiClientStore {
     this.openTab(blankDraft());
   }
 
+  /** Put a loaded draft in front WITHOUT losing anyone's edits: a tab that
+   *  already shows the same saved request is focused as-is; the active tab is
+   *  reused only while it holds nothing unsaved (a pristine blank draft or an
+   *  unmodified saved request); otherwise the draft opens in a new tab. */
+  private placeDraft(d: ApiDraft): void {
+    if (d.requestId) {
+      const open = this.tabs.findIndex((t) => t.requestId === d.requestId);
+      if (open >= 0) {
+        this.switchTab(open);
+        return;
+      }
+    }
+    if (this.isDirty(this.draft)) {
+      this.openTab(d);
+      return;
+    }
+    this.draft = d;
+    this.lastResponse = null;
+  }
+
   /** Load a saved request into the builder (persisted extras included). */
   loadRequestIntoDraft(r: ApiRequest): void {
-    this.draft = extrasToDraft(
+    this.placeDraft(extrasToDraft(
       {
         tabId: crypto.randomUUID(),
         requestId: r.id,
@@ -1285,8 +1314,7 @@ class ApiClientStore {
         grpc_method: '',
       },
       r.extras,
-    );
-    this.lastResponse = null;
+    ));
   }
 
   /** True when a tab's draft differs from its saved request (or is a
@@ -1316,25 +1344,43 @@ class ApiClientStore {
     );
   }
 
-  /** Load a history entry's request snapshot into the builder (best-effort). */
+  /** Load a history entry's request snapshot into the builder (best-effort).
+   *  History stores credentials MASKED (`***`); those are refilled from the
+   *  saved request the entry ran (by `request_id`, else the one saved request
+   *  with the same method + URL), otherwise blanked with a re-enter hint —
+   *  the mask itself is never sent as a credential. */
   loadHistoryIntoDraft(h: ApiHistoryEntry): void {
-    const snap = (h.request ?? {}) as Partial<ExecuteApiReq>;
-    this.draft = {
+    const snap = (h.request ?? {}) as Partial<ExecuteApiReq> & { request_id?: Id | null };
+    const method = snap.method ?? h.method;
+    const url = snap.url ?? h.url;
+    let saved = snap.request_id ? this.requests.find((r) => r.id === snap.request_id) : undefined;
+    if (!saved) {
+      const same = this.requests.filter((r) => r.method === method && r.url === url);
+      if (same.length === 1) saved = same[0];
+    }
+    const un = unmaskHistory(
+      { auth: snap.auth ?? { type: 'none' }, headers: snap.headers ?? [], query: snap.query ?? [] },
+      saved,
+    );
+    this.placeDraft({
+      tabId: crypto.randomUUID(),
       requestId: null,
       name: '',
       kind: 'http',
-      method: snap.method ?? h.method,
-      url: snap.url ?? h.url,
-      headers: (snap.headers ?? []).map((x) => ({ ...x })),
-      query: (snap.query ?? []).map((x) => ({ ...x })),
+      method,
+      url,
+      headers: un.headers,
+      query: un.query,
       body_mode: snap.body_mode ?? 'none',
       body: snap.body ?? '',
-      auth: snap.auth ?? { type: 'none' },
+      auth: un.auth,
       ssh_connection_id: snap.ssh_connection_id ?? null,
       proto: '',
       grpc_method: '',
-    };
-    this.lastResponse = null;
+    });
+    if (un.blanked) {
+      toasts.info('Re-enter credentials', 'History stores secrets masked — fill the blanked credential fields before sending.');
+    }
   }
 }
 

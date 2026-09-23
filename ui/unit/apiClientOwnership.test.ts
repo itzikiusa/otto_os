@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
+import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
   const ws = {currentId: 'A'};
@@ -15,8 +16,9 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
     localStorage: {getItem() {return null;},setItem() {}},
     require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
       : p.includes('workspace.svelte') ? {ws}
-      : p.includes('toast') ? {toasts: {error() {},success() {}}}
+      : p.includes('toast') ? {toasts: {error() {},success() {},info() {}}}
       : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
+      : p.endsWith('/apiSecretShapes') ? secretShapes
       : p.endsWith('/scriptRunner') ? {runScript}
       : p.endsWith('/scripts') ? {runPreRequest: () => ({logs:[],tests:[]})}
       : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
@@ -115,4 +117,44 @@ test('environment stays with the execution snapshot while pre-script is pending'
   release({run:{logs:[],tests:[]},request:{method:'GET',url:'https://example.test',headers:[],body:''},vars:{}});
   await pending;
   assert.equal(dispatched.environment_id, 'env-a');
+});
+
+const savedReq = (id: string, url: string, auth: unknown = {type:'none'}) =>
+  ({id,name:id,method:'GET',url,headers:[],query:[],body_mode:'none',body:'',auth,extras:null});
+
+test('opening a saved request never replaces unsaved edits in the active tab', () => {
+  const {v} = setup();
+  v.draft = {...v.draft, url: 'https://edit.test/x', body: 'typed'};
+  v.loadRequestIntoDraft(savedReq('r1','https://r1.test'));
+  assert.equal(v.tabs.length, 2, 'opened in a new tab');
+  assert.equal(v.tabs[0].body, 'typed', 'unsaved edits kept');
+  assert.equal(v.draft.requestId, 'r1');
+  // Opening it again focuses the existing tab instead of duplicating it.
+  v.switchTab(0);
+  v.loadRequestIntoDraft(savedReq('r1','https://r1.test'));
+  assert.equal(v.tabs.length, 2);
+  assert.equal(v.activeTab, 1);
+});
+
+test('a pristine blank tab is reused when opening a saved request', () => {
+  const {v} = setup();
+  v.loadRequestIntoDraft(savedReq('r1','https://r1.test'));
+  assert.equal(v.tabs.length, 1);
+  assert.equal(v.draft.requestId, 'r1');
+});
+
+test('history replay rehydrates masked credentials from the saved request, never sends ***', () => {
+  const {v} = setup();
+  const marker = {$secret:'otto.api.request.r1'};
+  v.requests = [savedReq('r1','https://r1.test/x',{type:'bearer',token:marker})];
+  v.loadHistoryIntoDraft({id:'h1',method:'GET',url:'https://r1.test/x',
+    request:{request_id:'r1',method:'GET',url:'https://r1.test/x',headers:[],query:[],auth:{type:'bearer',token:'***'}}});
+  assert.deepEqual(v.draft.auth, {type:'bearer',token:marker});
+  // Unknown origin: blanked instead of replaying the mask.
+  v.newDraft();
+  v.loadHistoryIntoDraft({id:'h2',method:'GET',url:'https://other.test/',
+    request:{method:'GET',url:'https://other.test/',headers:[{key:'Authorization',value:'***',enabled:true}],query:[],auth:{type:'bearer',token:'***'}}});
+  assert.deepEqual(v.draft.auth, {type:'bearer',token:''});
+  assert.equal(v.draft.headers[0].value, '');
+  assert.equal(v.draft.headers[0].enabled, false);
 });

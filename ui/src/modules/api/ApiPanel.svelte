@@ -1,15 +1,17 @@
 <script lang="ts">
   // Compact API client for the right-side panel. Reuses RequestBuilder +
   // ResponseViewer; a slim collection/history dropdown replaces the big tree.
+  import { untrack } from 'svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
   import EnvSelector from './EnvSelector.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
 
-  // Load on first mount / workspace change.
+  // Load on first mount / workspace change — keyed on the workspace only
+  // (loadAll's synchronous prologue reads the tabs, which must not re-trigger).
   $effect(() => {
-    if (ws.currentId) void apiClient.loadAll();
+    if (ws.currentId) untrack(() => void apiClient.loadAll());
   });
 
   // A flat picker: pick a saved request or a history entry to load into the builder.
