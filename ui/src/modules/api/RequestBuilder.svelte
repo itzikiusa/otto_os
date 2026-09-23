@@ -11,6 +11,7 @@
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { marked } from 'marked';
+  import { sanitizeHtml } from '../../lib/sanitize';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
   import { isSecretRef } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -353,8 +354,11 @@
   function setField<K extends keyof ApiDraft>(k: K, v: ApiDraft[K]): void {
     apiClient.draft = { ...draft, [k]: v };
   }
+  // Request docs arrive from Postman imports, git-pulled collections and agent
+  // upserts — untrusted markdown. marked passes raw HTML through, so the output
+  // MUST go through the allowlist sanitizer before the `{@html}` sink.
   const docsHtml = $derived.by(() => {
-    try { return marked.parse(draft.docs ?? '', { async: false, gfm: true, breaks: true }) as string; }
+    try { return sanitizeHtml(marked.parse(draft.docs ?? '', { async: false, gfm: true, breaks: true }) as string); }
     catch { return ''; }
   });
   const settings = $derived(draft.settings ?? defaultSettings());
