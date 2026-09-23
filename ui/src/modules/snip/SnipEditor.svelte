@@ -97,8 +97,15 @@
       }
     })();
     return () => {
+      if (copyTimer) {
+        // Closed inside the 800 ms debounce: still copy/save the last
+        // annotation instead of silently dropping it. (The loaded image stays
+        // drawable after its object URL is revoked.)
+        clearTimeout(copyTimer);
+        copyTimer = null;
+        void copyNow();
+      }
       if (url) URL.revokeObjectURL(url);
-      if (copyTimer) clearTimeout(copyTimer);
     };
   });
 
