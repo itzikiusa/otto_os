@@ -12,7 +12,12 @@ use otto_core::{Error, Result};
 // Porcelain v2 status
 // ---------------------------------------------------------------------------
 
-/// Parse `git status --porcelain=v2 --branch` output.
+/// Parse `git status --porcelain=v2 --branch [-z]` output.
+///
+/// With `-z` (what [`crate::local::LocalGit::status`] runs) every record is
+/// NUL-terminated, names are NEVER quoted, and a rename/copy (`2`) entry is
+/// followed by its origPath as the NEXT record. Newline-separated output (a
+/// `\t` between path and origPath, quoted names) is still accepted.
 pub fn parse_status(out: &str) -> RepoStatusResp {
     let mut branch = String::new();
     let mut upstream = None;
@@ -20,7 +25,21 @@ pub fn parse_status(out: &str) -> RepoStatusResp {
     let mut behind = 0u32;
     let mut changes = Vec::new();
 
-    for line in out.lines() {
+    let nul = out.contains('\0');
+    let mut records: Box<dyn Iterator<Item = &str> + '_> = if nul {
+        Box::new(out.split('\0').filter(|r| !r.is_empty()))
+    } else {
+        Box::new(out.lines())
+    };
+    while let Some(line) = records.next() {
+        if nul && line.starts_with("2 ") {
+            // `2 … <path>\0<origPath>\0`: the origPath is its own record.
+            let orig = records.next();
+            if let Some(fc) = parse_rename_entry(line, orig) {
+                changes.push(fc);
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("# ") {
             if let Some(v) = rest.strip_prefix("branch.head ") {
                 branch = v.to_string();
@@ -68,16 +87,7 @@ fn parse_status_entry(line: &str) -> Option<FileChange> {
         }
         '2' => {
             // 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\t<origPath>
-            let parts: Vec<&str> = line.splitn(10, ' ').collect();
-            if parts.len() < 10 {
-                return None;
-            }
-            let xy = parts[1];
-            let (path, orig) = match parts[9].split_once('\t') {
-                Some((p, o)) => (p.to_string(), Some(o.to_string())),
-                None => (parts[9].to_string(), None),
-            };
-            Some(change_from_xy(xy, path, orig))
+            parse_rename_entry(line, None)
         }
         'u' => {
             // u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
@@ -107,13 +117,37 @@ fn parse_status_entry(line: &str) -> Option<FileChange> {
     }
 }
 
+/// A `2` (rename/copy) entry. `orig` is the origPath record that follows it
+/// under `-z`; `None` means the newline format, where it rides after a `\t`.
+fn parse_rename_entry(line: &str, orig: Option<&str>) -> Option<FileChange> {
+    // 2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>
+    let parts: Vec<&str> = line.splitn(10, ' ').collect();
+    if parts.len() < 10 {
+        return None;
+    }
+    let xy = parts[1];
+    let (path, orig) = match orig {
+        Some(o) => (parts[9].to_string(), Some(o.to_string())),
+        None => match parts[9].split_once('\t') {
+            Some((p, o)) => (p.to_string(), Some(o.to_string())),
+            None => (parts[9].to_string(), None),
+        },
+    };
+    Some(change_from_xy(xy, path, orig))
+}
+
 fn change_from_xy(xy: &str, path: String, orig_path: Option<String>) -> FileChange {
     let mut it = xy.chars();
     let x = it.next().unwrap_or('.');
     let y = it.next().unwrap_or('.');
-    let kind = if x == 'R' || y == 'R' || x == 'C' || y == 'C' {
+    // Only a RENAME is "renamed": discard/unstage expand a renamed entry to
+    // its origPath too. A COPY (`C`, with `status.renames=copies`) leaves its
+    // source in place — expanding it reverted the user's uncommitted edits
+    // in the source file. A copy is a new file: "added" (origPath kept as a
+    // hint), which discard removes and unstage un-adds, source untouched.
+    let kind = if x == 'R' || y == 'R' {
         "renamed"
-    } else if x == 'A' || y == 'A' {
+    } else if x == 'A' || y == 'A' || x == 'C' || y == 'C' {
         "added"
     } else if x == 'D' || y == 'D' {
         "deleted"
@@ -539,31 +573,41 @@ fn parse_stash_branch(msg: &str) -> Option<String> {
 /// Parse the output of `git diff --no-color -U3 -M` (or any unified diff with
 /// `diff --git` file headers) into structured per-file hunks.
 pub fn parse_diff(text: &str) -> DiffResp {
+    parse_diff_bytes(text.as_bytes())
+}
+
+/// [`parse_diff`] over git's RAW output. Each file's `fingerprint` hashes the
+/// exact BYTES git printed — the same bytes `patch::run_hunk_op` re-reads,
+/// hashes and patches — while the rendered text is decoded lossily line by
+/// line (`\n` is never part of a multi-byte sequence, so lines map 1:1). A
+/// non-UTF-8 line therefore displays with U+FFFD but is never STAGED that way.
+pub fn parse_diff_bytes(bytes: &[u8]) -> DiffResp {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileState> = None;
 
     use sha2::{Digest, Sha256};
-    let mut raw = String::new();
-    for raw_line in text.split_inclusive('\n') {
-        let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
+    let mut raw: Vec<u8> = Vec::new();
+    for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
+        let text = String::from_utf8_lossy(raw_line);
+        let line = text.trim_end_matches('\n').trim_end_matches('\r');
         if line.starts_with("diff --git ") {
             if let Some(f) = cur.take() {
                 let mut file = f.finish();
-                file.fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+                file.fingerprint = hex::encode(Sha256::digest(raw.as_slice()));
                 files.push(file);
             }
             raw.clear();
-            raw.push_str(raw_line);
+            raw.extend_from_slice(raw_line);
             cur = Some(FileState::new(line));
             continue;
         }
         let Some(state) = cur.as_mut() else { continue };
-        raw.push_str(raw_line);
+        raw.extend_from_slice(raw_line);
         state.feed(line);
     }
     if let Some(f) = cur.take() {
         let mut file = f.finish();
-        file.fingerprint = hex::encode(Sha256::digest(raw.as_bytes()));
+        file.fingerprint = hex::encode(Sha256::digest(raw.as_slice()));
         files.push(file);
     }
     DiffResp { files }
@@ -903,6 +947,46 @@ u UU N... 100644 100644 100644 100644 h1 h2 h3 conflict.rs
             (u.path.as_str(), u.kind.as_str()),
             ("untracked.txt", "untracked")
         );
+    }
+
+    /// `-z` records: names are raw (never C-quoted) and a rename's origPath is
+    /// the NEXT record, not a `\t`-suffix.
+    #[test]
+    fn status_z_raw_names_and_rename_records() {
+        let out = "# branch.oid 1234\0# branch.head main\0\
+1 .M N... 100644 100644 100644 aaa bbb app/[id]/page.tsx\0\
+2 R. N... 100644 100644 100644 fff ggg R100 app/d/p\u{e2}ge.tsx\0app/d/page.tsx\0\
+? caf\u{e9}.txt\0\
+? q\"uote.txt\0\
+u UU N... 100644 100644 100644 100644 h1 h2 h3 with space.rs\0";
+        let st = parse_status(out);
+        assert_eq!(st.branch, "main");
+        let paths: Vec<&str> = st.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "app/[id]/page.tsx",
+                "app/d/p\u{e2}ge.tsx",
+                "caf\u{e9}.txt",
+                "q\"uote.txt",
+                "with space.rs"
+            ]
+        );
+        let r = &st.changes[1];
+        assert_eq!(r.kind, "renamed");
+        assert_eq!(r.orig_path.as_deref(), Some("app/d/page.tsx"));
+        assert_eq!(st.changes[4].kind, "conflicted");
+    }
+
+    /// A copy is a NEW file: discard/unstage must not expand to its source.
+    #[test]
+    fn status_copy_is_added_not_renamed() {
+        let out = "2 C. N... 100644 100644 100644 fff ggg C100 copy.txt\0orig.txt\0";
+        let st = parse_status(out);
+        assert_eq!(st.changes.len(), 1);
+        assert_eq!(st.changes[0].path, "copy.txt");
+        assert_eq!(st.changes[0].kind, "added");
+        assert_eq!(st.changes[0].orig_path.as_deref(), Some("orig.txt"));
     }
 
     #[test]

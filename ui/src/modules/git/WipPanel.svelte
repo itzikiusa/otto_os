@@ -194,7 +194,17 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/discard`, { paths });
       onstatus(s);
-      toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+      // Trust the fresh status, not the 200: a discard that left a file
+      // changed must never toast "Discarded".
+      const left = paths.filter((p) => s.changes.some((c) => c.path === p));
+      if (left.length > 0) {
+        toasts.error(
+          'Discard incomplete',
+          `${left.length} file${left.length === 1 ? ' still has' : 's still have'} changes: ${left.slice(0, 3).join(', ')}${left.length > 3 ? '…' : ''}`,
+        );
+      } else {
+        toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+      }
     } catch (e) {
       toasts.error('Discard failed', e instanceof Error ? e.message : String(e));
     }
