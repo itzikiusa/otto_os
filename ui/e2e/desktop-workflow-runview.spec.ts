@@ -167,14 +167,30 @@ test('run detail: un-clipped timeline, maximize toggle, and step zoom modal (R6/
 });
 
 test('cancel a running run from the run view (R7)', async ({ page }) => {
+  // The engine caps ONE delay node at 10s, so a single `ms: 15000` node kept
+  // the run active for only 10s — less than a cold page load under a full
+  // parallel e2e run, after which the run had already finished and the
+  // Running list was (correctly) gone. Three capped delays keep it active for
+  // ~30s; the cancel below ends it long before.
   const wfId = await createWorkflow(
     'E2E RunView Cancel',
-    [node('trigger', 'manual_trigger'), node('wait', 'delay', { ms: 15000 }), node('done', 'log')],
-    [edge('trigger', 'wait'), edge('wait', 'done')],
+    [
+      node('trigger', 'manual_trigger'),
+      node('wait1', 'delay', { ms: 10000 }),
+      node('wait2', 'delay', { ms: 10000 }),
+      node('wait3', 'delay', { ms: 10000 }),
+      node('done', 'log'),
+    ],
+    [edge('trigger', 'wait1'), edge('wait1', 'wait2'), edge('wait2', 'wait3'), edge('wait3', 'done')],
   );
+
+  // Load the page first, THEN start the run: the Running list must pick a
+  // run up live (WS `workflow_run_updated`), and the run's clock no longer
+  // races the page load.
+  await page.goto('/#/workflows');
+  await expect(page.getByTestId(`wf-row-${wfId}`)).toBeVisible({ timeout: 30_000 });
   const runId = await startRun(wfId);
 
-  await page.goto('/#/workflows');
   // Open from the Running list (it's an active run).
   const running = page.getByTestId('running-workflows');
   await expect(running).toBeVisible({ timeout: 15_000 });
@@ -185,13 +201,16 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
   await expect(cancel).toBeVisible({ timeout: 10_000 });
   await cancel.click();
 
-  // …and the run reaches the canceled terminal state (poll before the delay ends).
+  // …and the run reaches the canceled terminal state (poll well before the
+  // ~30s of delays could finish it on their own).
   await expect
     .poll(
       async () => (await (await ctx.get(`${base}${V1}/workflow-runs/${runId}`)).json()).status,
       { timeout: 12_000 },
     )
     .toBe('canceled');
+  // The Running list lets go of it.
+  await expect(running.getByText('E2E RunView Cancel')).toHaveCount(0, { timeout: 10_000 });
 });
 
 // R5.5 (workflows batch): `NodeRunState.activity` is a LIVE field — the engine
