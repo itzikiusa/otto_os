@@ -951,6 +951,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         ctx.clone(),
     ));
 
+    // --- Design Hall: FTS index + idempotent legacy import (background) ---
+    // Mirrors Product-arena design attachments and Canvas scenes into the
+    // design graph (graph rows only; the legacy rows/files are never touched)
+    // and re-syncs a `sync` version when a legacy source changed.
+    otto_server::design_hall::spawn_startup_import(&ctx);
+
     // --- Vault docs-runs recovery: this restart killed any in-flight run ---
     // Flip still-non-terminal persisted runs to 'interrupted' and soft-trash
     // their orphaned `_drafts/docs-run-*` dirs (multi-writer runs only).

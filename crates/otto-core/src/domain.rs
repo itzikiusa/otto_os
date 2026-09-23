@@ -2584,6 +2584,9 @@ pub enum Feature {
     Settings,
     Users,
     Canvas,
+    /// Design Hall — the artifact graph (projects, artifacts, versions, links,
+    /// search, signals). Granted wherever `Canvas` was (the Hall absorbs it).
+    Design,
     ProofPack,
     Mcp,
     /// Mission Control — the unified work graph across every activity.
@@ -2638,6 +2641,7 @@ impl Feature {
             "settings" => Some(Self::Settings),
             "users" => Some(Self::Users),
             "canvas" => Some(Self::Canvas),
+            "design" => Some(Self::Design),
             "proof_pack" => Some(Self::ProofPack),
             "mcp" => Some(Self::Mcp),
             "mission_control" => Some(Self::MissionControl),
@@ -2678,6 +2682,7 @@ impl Feature {
             Self::Settings => "settings",
             Self::Users => "users",
             Self::Canvas => "canvas",
+            Self::Design => "design",
             Self::ProofPack => "proof_pack",
             Self::Mcp => "mcp",
             Self::MissionControl => "mission_control",
@@ -2724,6 +2729,8 @@ mod tests {
         assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
         assert_eq!(Feature::parse("browser"), Some(Feature::Browser));
         assert_eq!(Feature::Browser.as_str(), "browser");
+        assert_eq!(Feature::parse("design"), Some(Feature::Design));
+        assert_eq!(Feature::Design.as_str(), "design");
         for (k, f) in [
             ("aws", Feature::Aws),
             ("aws_s3", Feature::AwsS3),

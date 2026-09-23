@@ -57,6 +57,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
+| `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |

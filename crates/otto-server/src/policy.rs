@@ -648,6 +648,20 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Product, if get { View } else { Edit });
     }
 
+    // ---- Design Hall (the artifact graph: projects / artifacts / versions /
+    // links / search / signals; otto-design) ----------------------------------
+    // Feature::Design (granted wherever Canvas was). Reads = View, every write
+    // (create / content save / named commit / approve / link / signal) = Edit;
+    // the legacy-import + opt-in retention-prune actions under `/design/admin/`
+    // = Admin. All routes are flat `/design/…` (workspace in the body / row);
+    // the handlers add the workspace-role gate. Root bypasses.
+    if p.starts_with("/design/admin/") {
+        return Require(Design, Admin);
+    }
+    if p.starts_with("/design/") {
+        return Require(Design, if get { View } else { Edit });
+    }
+
     // ---- Canvas (visual scenes: CRUD + agent assist) --------------------------
     // §3.2 analogue: read scenes=View; create/edit/delete/assist=Edit. Item
     // routes (`/canvas/scenes/{id}`, `/canvas/scenes/{id}/assist`, `/canvas/assist/
@@ -1213,6 +1227,50 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    // ---- Design Hall ---------------------------------------------------------
+
+    #[test]
+    fn design_hall_routes_ride_the_design_feature() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/design/artifacts"),
+            Require(Design, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/design/search"),
+            Require(Design, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/design/artifacts/{id}/versions/{v}/content"),
+            Require(Design, View)
+        );
+        for (m, path) in [
+            (Method::POST, "/api/v1/design/projects"),
+            (Method::PATCH, "/api/v1/design/projects/{id}"),
+            (Method::PUT, "/api/v1/design/artifacts/{id}/content"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/versions"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/links"),
+            (Method::DELETE, "/api/v1/design/artifacts/{id}/links/{link_id}"),
+            (Method::POST, "/api/v1/design/signals"),
+        ] {
+            assert_eq!(pol(m.clone(), path), Require(Design, Edit), "{m} {path}");
+        }
+        // Import / prune are admin actions on the whole library.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/design/admin/import"),
+            Require(Design, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/design/admin/prune"),
+            Require(Design, Admin)
+        );
+        // Canvas stays on its own feature (the legacy routes keep working).
+        assert_eq!(
+            pol(Method::GET, "/api/v1/canvas/scenes"),
+            Require(Canvas, View)
+        );
     }
 
     // ---- Vault docs-agents ---------------------------------------------------

@@ -603,6 +603,21 @@ impl otto_canvas::CanvasCtx for ServerCtx {
     }
 }
 
+impl otto_design::DesignCtx for ServerCtx {
+    /// A per-request handle over the shared pool, `<data>/design` and the
+    /// event bus — no ServerCtx field, so the test harnesses that build a
+    /// literal ServerCtx are unaffected.
+    fn design(&self) -> otto_design::DesignService {
+        crate::design_hall::service(self)
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn validate_content(&self, format: &str, bytes: &[u8]) -> otto_core::Result<()> {
+        crate::design_hall::validate_content(format, bytes)
+    }
+}
+
 impl otto_swarm::SwarmCtx for ServerCtx {
     fn swarm(&self) -> &Arc<otto_swarm::SwarmService> {
         &self.swarm
@@ -7875,6 +7890,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_mcp::api_router::<ServerCtx>(),
         otto_product::router::<ServerCtx>(),
         otto_canvas::router::<ServerCtx>(),
+        // Design Hall — the artifact graph (`/design/*`, Feature::Design).
+        otto_design::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         otto_vault::router::<ServerCtx>(),
         crate::vault_docs_agent::routes(),

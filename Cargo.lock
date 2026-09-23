@@ -3564,6 +3564,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-design"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "base64",
+ "chrono",
+ "hex",
+ "http-body-util",
+ "otto-core",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "otto-git"
 version = "0.1.0"
 dependencies = [
@@ -3811,6 +3832,7 @@ dependencies = [
  "otto-context",
  "otto-core",
  "otto-dbviewer",
+ "otto-design",
  "otto-git",
  "otto-improve",
  "otto-issues",
