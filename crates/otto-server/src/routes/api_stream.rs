@@ -84,9 +84,12 @@ async fn stream_ws(
             .into_response();
     }
     let actor = user.id.clone();
+    // A managed agent credential may open streams but can never confirm a
+    // new-host secret send (see `prepare_stream`).
+    let confirm_allowed = auth.managed_session_id.is_none();
     ws.max_message_size(1024 * 1024)
         .max_frame_size(1024 * 1024)
-        .on_upgrade(move |socket| serve(socket, ctx, q.workspace_id, actor))
+        .on_upgrade(move |socket| serve(socket, ctx, q.workspace_id, actor, confirm_allowed))
 }
 
 async fn send_json(socket: &mut WebSocket, v: Value) -> Result<(), axum::Error> {
@@ -104,7 +107,7 @@ fn is_close_action(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
+async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id, confirm_allowed: bool) {
     // First UI frame carries the open spec.
     let first = loop {
         match socket.recv().await {
@@ -134,8 +137,10 @@ async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
         return;
     }
     match spec.kind.as_str() {
-        "sse" => serve_sse(socket, spec, &ctx, &wid, &actor).await,
-        "websocket" | "ws" => serve_websocket(socket, spec, &ctx, &wid, &actor).await,
+        "sse" => serve_sse(socket, spec, &ctx, &wid, &actor, confirm_allowed).await,
+        "websocket" | "ws" => {
+            serve_websocket(socket, spec, &ctx, &wid, &actor, confirm_allowed).await
+        }
         other => {
             let _ = send_json(
                 &mut socket,
@@ -148,9 +153,18 @@ async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
 
 // ── SSE upstream ────────────────────────────────────────────────────────────
 
-async fn serve_sse(mut socket: WebSocket, spec: OpenSpec, ctx: &ServerCtx, wid: &Id, actor: &Id) {
+async fn serve_sse(
+    mut socket: WebSocket,
+    spec: OpenSpec,
+    ctx: &ServerCtx,
+    wid: &Id,
+    actor: &Id,
+    confirm_allowed: bool,
+) {
     let connecting = async {
-        let req = super::api_client::prepare_stream(ctx, wid, &spec.request, actor).await?;
+        let req =
+            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
+                .await?;
         req.header("Accept", "text/event-stream")
             .send()
             .await
@@ -258,6 +272,7 @@ async fn serve_websocket(
     ctx: &ServerCtx,
     wid: &Id,
     actor: &Id,
+    confirm_allowed: bool,
 ) {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
@@ -273,7 +288,8 @@ async fn serve_websocket(
         {
             return Err("WebSocket supports GET headers, query and auth; TLS verification must be enabled, SSH and request bodies are unavailable".to_string());
         }
-        let prepared = super::api_client::prepare_stream(ctx, wid, &spec.request, actor)
+        let prepared =
+            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
             .await?
             .build()
             .map_err(|e| e.without_url().to_string())?;

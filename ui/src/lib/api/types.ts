@@ -4332,6 +4332,12 @@ export interface ExecuteApiReq {
   vars?: Record<string, string> | null;
   /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH). */
   ssh_connection_id?: Id | null;
+  /**
+   * Confirms sending a stored secret (a `$secret` marker or Keychain env
+   * variable) to a host it isn't bound to. Without it the daemon answers
+   * `409 needs_confirm=new_host`. Honoured for a person's credential only.
+   */
+  confirm_new_host?: boolean;
 }
 
 export interface ApiResponse {

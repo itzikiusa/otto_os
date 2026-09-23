@@ -3,7 +3,8 @@ import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 // environments, history, plus a live "draft" request the builder edits and
 // executes through the daemon. Reads `ws.currentId` only (never mutates it).
 
-import { api, isAbortError } from '../api/client';
+import { api, isAbortError, newHostConfirmHost } from '../api/client';
+import { confirmer } from '../confirm.svelte';
 import type {
   ApiAuth,
   ApiAutomation,
@@ -122,6 +123,16 @@ function blankDraft(): ApiDraft {
 }
 
 /** Drop empty/disabled key-vals before sending; keep enabled (default true). */
+/** Ask the person whether a stored secret may go to `host` (the daemon's
+ *  `409 needs_confirm=new_host`). Only a person can confirm — agents can't. */
+export function confirmNewHost(host: string): Promise<boolean> {
+  const where = host ? `“${host}”` : 'this host';
+  return confirmer.ask(
+    `This request would send a stored secret (Keychain credential or environment secret) to ${where}, which it isn't bound to. Send it anyway?`,
+    { title: 'Send secret to a new host?', confirmLabel: 'Send', danger: true },
+  );
+}
+
 function liveKv(rows: ApiKeyVal[]): ApiKeyVal[] {
   return rows.filter((r) => r.enabled !== false && r.key.trim() !== '');
 }
@@ -980,7 +991,21 @@ class ApiClientStore {
         vars:Object.keys(runtimeVars).length ? runtimeVars : undefined,
         ssh_connection_id:draft.ssh_connection_id ?? null,
       };
-      const resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
+      let resp: ApiResponse;
+      try {
+        resp = await api.post<ApiResponse>(`${base}/execute`, body, signal);
+      } catch (e) {
+        // A stored secret would leave the host it is bound to (e.g. the URL of
+        // a saved request was edited before saving): the daemon refuses until
+        // a person confirms — ask, then re-send once with the confirmation.
+        const host = newHostConfirmHost(e);
+        if (host === null) throw e;
+        checkCurrent();
+        const ok = await confirmNewHost(host);
+        checkCurrent();
+        if (!ok) throw new DOMException('Request canceled', 'AbortError');
+        resp = await api.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
+      }
       checkCurrent();
       if (ownsView()) this.lastResponse = resp;
       void this.loadHistory();

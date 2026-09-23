@@ -24,6 +24,7 @@ use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiHistorySummary, ApiRequest,
     Connection, ConnectionKind, WorkspaceRole,
 };
+use otto_core::auth::AuthContext;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_ssh::{SshTunnel, SshTunnelConfig};
@@ -40,7 +41,7 @@ use crate::api_helpers::{
 };
 use crate::api_scripts::{self, ScriptRequest, ScriptResponse};
 use crate::api_secrets;
-use crate::auth::{require_ws_role, CurrentUser};
+use crate::auth::{require_ws_role, CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -1240,6 +1241,10 @@ pub struct OAuth2TokenReq {
     password: Value,
     #[serde(default)]
     refresh_token: Value,
+    /// Confirms sending a `$secret`-marker value to a token endpoint other
+    /// than the one saved on the owning request (person's credential only).
+    #[serde(default)]
+    confirm_new_host: bool,
 }
 
 /// `POST /workspaces/{wid}/api-client/oauth2/token` — perform an OAuth 2.0
@@ -1250,9 +1255,29 @@ pub async fn oauth2_token(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    headers: HeaderMap,
     Json(req): Json<OAuth2TokenReq>,
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+
+    // Secret ↔ host binding: a stored client_secret / password /
+    // refresh_token belongs to the token endpoint saved on its request — the
+    // caller picks `token_url` here, so any other host needs a person's
+    // confirmation before the marker is resolved.
+    if let Some(host) = unbound_oauth_secret_host(
+        &repo(&ctx),
+        &wid,
+        &req.token_url,
+        [&req.client_secret, &req.password, &req.refresh_token],
+    )
+    .await
+    {
+        let agent = is_agent_caller(&headers, &auth);
+        if agent || !req.confirm_new_host {
+            return Err(new_host_conflict(&host, agent));
+        }
+    }
 
     // Secret-shaped fields may arrive as `$secret` markers (stored request
     // auth replayed by the UI) — resolve them from the Keychain, workspace-
@@ -1805,6 +1830,7 @@ pub async fn execute(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     headers: HeaderMap,
     Json(req): Json<ExecuteApiReq>,
 ) -> ApiResult<Json<ApiResponse>> {
@@ -1818,6 +1844,29 @@ pub async fn execute(
     if let Some(Value::Object(overrides)) = &req.vars {
         for (k, v) in overrides {
             vars.insert(k.clone(), v.clone());
+        }
+    }
+
+    // Secret ↔ host binding: the caller chooses the URL here, so a stored
+    // secret (a `$secret` marker or a Keychain env variable) must not be
+    // resolved for a host it isn't bound to without a PERSON's confirmation —
+    // before anything is resolved or sent.
+    if let Some(host) = unbound_secret_host(
+        &repo,
+        &wid,
+        &req,
+        &vars,
+        &env_blob,
+        environment
+            .as_ref()
+            .map(|env| env.secret_keys.as_slice())
+            .unwrap_or(&[]),
+    )
+    .await?
+    {
+        let agent = is_agent_caller(&headers, &auth);
+        if agent || !req.confirm_new_host {
+            return Err(new_host_conflict(&host, agent));
         }
     }
 
@@ -1940,21 +1989,11 @@ pub async fn execute(
     }
 }
 
-/// Resolve the variable map: explicit `environment_id`, else the workspace's
-/// active environment, else empty. Keychain-backed secret variables are
-/// resolved in-memory here (execute/automation time only — no read path
-/// returns them).
-async fn resolve_variables(
-    ctx: &ServerCtx,
-    repo: &ApiClientRepo,
-    wid: &Id,
-    environment_id: Option<&Id>,
-) -> ApiResult<serde_json::Map<String, Value>> {
-    Ok(resolve_environment(ctx, repo, wid, environment_id).await?.0)
-}
-
-/// Resolve variables together with the selected environment row and its
-/// Keychain blob. The latter two never leave the route layer.
+/// Resolve the variable map — explicit `environment_id`, else the workspace's
+/// active environment, else empty — together with the selected environment
+/// row and its Keychain blob. Keychain-backed secret variables are resolved
+/// in-memory here (execute/automation time only — no read path returns them);
+/// the row and blob never leave the route layer.
 pub(crate) async fn resolve_environment(
     ctx: &ServerCtx,
     repo: &ApiClientRepo,
@@ -2031,6 +2070,183 @@ async fn resolve_exec_auth(
     }
     api_secrets::resolve_auth_markers(secrets, &mut out.auth, &allowed)?;
     Ok(out)
+}
+
+// ===========================================================================
+// Secret ↔ host binding for caller-built requests (ad-hoc execute, streams,
+// OAuth token). A stored secret may only travel to the host it belongs to:
+//   - a `{"$secret": "otto.api.request.<id>"}` marker → the host of that saved
+//     request's URL (after variable substitution);
+//   - a Keychain-backed ENVIRONMENT variable → the hosts of the workspace's
+//     human-authored saved requests (the environment's established targets).
+// Anything else needs an explicit `confirm_new_host`, which only a person's
+// credential can give — an agent can never self-confirm.
+// ===========================================================================
+
+/// `true` when the caller is an agent: the bridge/MCP-executor headers
+/// (`caller_source`), an Otto-minted managed-session credential, or a
+/// restricted MCP token. Such callers can't confirm a new-host secret send.
+pub(crate) fn is_agent_caller(headers: &HeaderMap, auth: &AuthContext) -> bool {
+    let (source, _) = caller_source(headers);
+    source.get("kind").and_then(Value::as_str) == Some("agent")
+        || auth.managed_session_id.is_some()
+        || auth.mcp_only
+}
+
+/// Probe value substituted for every environment secret by [`uses_env_secret`];
+/// control characters keep it from ever colliding with real request text.
+const SECRET_PROBE: &str = "\u{1}otto-secret-probe\u{1}";
+
+/// Whether sending `req` would expand any Keychain-backed environment variable
+/// — directly (`{{API_TOKEN}}`), nested through another variable, or via a
+/// runtime override that references one — anywhere in the URL, query,
+/// headers, body or auth. Only keys whose resolved value is still the
+/// Keychain value count (a runtime override that REPLACED a secret key
+/// carries no secret).
+pub(crate) fn uses_env_secret(
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    env_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+) -> bool {
+    let mut probe = vars.clone();
+    let mut any = false;
+    for key in secret_keys {
+        let Some(secret) = env_blob.get(key) else {
+            continue;
+        };
+        if vars.get(key).and_then(Value::as_str) == Some(secret.as_str()) {
+            probe.insert(key.clone(), Value::String(SECRET_PROBE.into()));
+            any = true;
+        }
+    }
+    if !any {
+        return false;
+    }
+    let text = serde_json::to_string(&json!([req.url, req.query, req.headers, req.body, req.auth]))
+        .unwrap_or_default();
+    substitute(&text, &probe).contains(SECRET_PROBE)
+}
+
+/// Hosts an environment's secrets are bound to: the hosts of the workspace's
+/// human-authored saved requests (substituted with the same variables).
+pub(crate) fn env_secret_hosts(
+    requests: &[ApiRequest],
+    vars: &serde_json::Map<String, Value>,
+) -> BTreeSet<String> {
+    requests
+        .iter()
+        .filter(|request| !is_agent_authored(request))
+        .filter_map(|request| host_of(&substitute(&request.url, vars)))
+        .collect()
+}
+
+/// The host a stored secret in `req` would be sent to OUTSIDE its binding
+/// (see the section comment), or `None` when every secret stays home (or none
+/// is used). Marker refs that are malformed / foreign are skipped here —
+/// [`resolve_exec_auth`] rejects those outright.
+async fn unbound_secret_host(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    req: &ExecuteApiReq,
+    vars: &serde_json::Map<String, Value>,
+    env_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+) -> ApiResult<Option<String>> {
+    let Some(target) = host_of(&substitute(&req.url, vars)) else {
+        return Ok(None);
+    };
+    let refs: Vec<String> = req
+        .auth
+        .as_object()
+        .map(|o| {
+            o.values()
+                .filter_map(api_secrets::marker_ref)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for r in &refs {
+        let Some(rid) = api_secrets::parse_request_ref(r) else {
+            continue;
+        };
+        let Ok(owner) = repo.get_request(&rid.to_string()).await else {
+            continue;
+        };
+        if &owner.workspace_id != wid {
+            continue;
+        }
+        if host_of(&substitute(&owner.url, vars)).as_deref() != Some(target.as_str()) {
+            return Ok(Some(target));
+        }
+    }
+    if uses_env_secret(req, vars, env_blob, secret_keys) {
+        let requests = repo.list_requests(wid, None).await?;
+        if !env_secret_hosts(&requests, vars).contains(&target) {
+            return Ok(Some(target));
+        }
+    }
+    Ok(None)
+}
+
+/// The 409 for a secret leaving its bound host. `agent` callers are told a
+/// person has to send it; people are told how to confirm.
+fn new_host_conflict(host: &str, agent: bool) -> ApiError {
+    let how = if agent {
+        "a person must send it from the Otto UI (agent credentials cannot confirm)"
+    } else {
+        "re-send with confirm_new_host:true"
+    };
+    ApiError(Error::Conflict(format!(
+        "needs_confirm=new_host: a stored secret would be sent to host '{host}', which it is not bound to; {how}"
+    )))
+}
+
+/// OAuth flavour of [`unbound_secret_host`]: each `$secret` marker among
+/// `values` is bound to the `token_url` saved on its owning request (same
+/// string, or same host). Returns the offending target host. Malformed /
+/// foreign refs are skipped here — `resolve_marker_or_string` rejects them.
+async fn unbound_oauth_secret_host(
+    repo: &ApiClientRepo,
+    wid: &Id,
+    token_url: &str,
+    values: [&Value; 3],
+) -> Option<String> {
+    for value in values {
+        let Some(r) = api_secrets::marker_ref(value) else {
+            continue;
+        };
+        let Some(rid) = api_secrets::parse_request_ref(r) else {
+            continue;
+        };
+        let Ok(owner) = repo.get_request(&rid.to_string()).await else {
+            continue;
+        };
+        if &owner.workspace_id != wid {
+            continue;
+        }
+        let saved = owner
+            .auth
+            .get("token_url")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !oauth_token_url_bound(saved, token_url) {
+            return Some(host_of(token_url).unwrap_or_else(|| token_url.to_string()));
+        }
+    }
+    None
+}
+
+/// Whether `requested` is the token endpoint `saved` on the secret's request:
+/// the same string, or the same (parseable) host.
+pub(crate) fn oauth_token_url_bound(saved: &str, requested: &str) -> bool {
+    if saved == requested {
+        return true;
+    }
+    match (host_of(saved), host_of(requested)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Build the outbound request and send it, returning an `ApiResponse` or an
@@ -2121,18 +2337,44 @@ fn guess_mime(filename: &str) -> Option<&'static str> {
 
 /// Shared HTTP request preparation for long-lived transports. Secrets and
 /// environment selection stay workspace-checked exactly as in execute.
+///
+/// `confirm_allowed` is `false` for a managed agent credential, which can
+/// never confirm a new-host secret send (`request.confirm_new_host`).
 pub(crate) async fn prepare_stream(
     ctx: &ServerCtx,
     wid: &Id,
     request: &ExecuteApiReq,
     actor: &Id,
+    confirm_allowed: bool,
 ) -> Result<reqwest::RequestBuilder, String> {
     let repo = repo(ctx);
-    let mut vars = resolve_variables(ctx, &repo, wid, request.environment_id.as_ref())
-        .await
-        .map_err(|e| e.0.to_string())?;
+    let (mut vars, environment, env_blob) =
+        resolve_environment(ctx, &repo, wid, request.environment_id.as_ref())
+            .await
+            .map_err(|e| e.0.to_string())?;
     if let Some(Value::Object(overrides)) = &request.vars {
         vars.extend(overrides.clone());
+    }
+    // Same secret ↔ host binding as ad-hoc execute. The stream socket only
+    // admits Editor credentials that are not MCP-restricted; a managed agent
+    // still can't self-confirm (checked by the caller's token at upgrade).
+    if let Some(host) = unbound_secret_host(
+        &repo,
+        wid,
+        request,
+        &vars,
+        &env_blob,
+        environment
+            .as_ref()
+            .map(|env| env.secret_keys.as_slice())
+            .unwrap_or(&[]),
+    )
+    .await
+    .map_err(|e| e.0.to_string())?
+    {
+        if !request.confirm_new_host || !confirm_allowed {
+            return Err(new_host_conflict(&host, !confirm_allowed).0.to_string());
+        }
     }
     let req = resolve_exec_auth(&repo, ctx.secrets.as_ref(), wid, request).await?;
     let proxy = resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), actor).await?;
@@ -2945,6 +3187,7 @@ fn request_to_execute(request: &ApiRequest) -> ExecuteApiReq {
         verify_ssl: None,
         vars: None,
         ssh_connection_id: request.ssh_connection_id.clone(),
+        confirm_new_host: false,
     }
 }
 
@@ -3460,6 +3703,7 @@ mod tests {
             verify_ssl: None,
             vars: None,
             ssh_connection_id: None,
+            confirm_new_host: false,
         };
         // Same-workspace marker resolves in-memory only.
         let resolved = resolve_exec_auth(&repo, &store, &ws, &exec).await.unwrap();
@@ -3586,6 +3830,7 @@ mod tests {
             verify_ssl: None,
             vars: None,
             ssh_connection_id: None,
+            confirm_new_host: false,
         };
         apply_extras_settings(
             &json!({"settings": {"timeout_ms": 1500, "follow_redirects": false, "tls_verify": false}}),
@@ -3886,5 +4131,162 @@ mod tests {
             assert_eq!(query.request_id.as_deref(), Some("req"));
             assert_eq!(query.source.as_deref(), Some("agent"));
         }
+    }
+
+    fn exec_req(url: &str) -> ExecuteApiReq {
+        ExecuteApiReq {
+            method: "GET".into(),
+            url: url.into(),
+            headers: json!([]),
+            query: json!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: json!({"type":"none"}),
+            environment_id: None,
+            timeout_ms: None,
+            follow_redirects: None,
+            verify_ssl: None,
+            vars: None,
+            ssh_connection_id: None,
+            confirm_new_host: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn secrets_stay_bound_to_their_hosts() {
+        let (_pool, repo, ws) = mk_repo().await;
+        // Human-authored saved request on api.test owns the marker.
+        let owner = repo
+            .create_request(legacy_request(
+                &ws,
+                "owner",
+                json!({"type":"bearer","token":"tk"}),
+            ))
+            .await
+            .unwrap();
+        let marker = json!({"$secret": api_secrets::request_ref(&owner.id)});
+        let none_vars = serde_json::Map::new();
+        let no_blob = BTreeMap::new();
+
+        // Marker → bound to the owning request's host only.
+        let mut exec = exec_req("https://api.test/other");
+        exec.auth = json!({"type":"bearer","token": marker});
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &none_vars, &no_blob, &[])
+                .await
+                .unwrap(),
+            None
+        );
+        exec.url = "https://attacker.example/x".into();
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &none_vars, &no_blob, &[])
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("attacker.example")
+        );
+
+        // Env secret → bound to the hosts of human-authored saved requests.
+        let mut vars = serde_json::Map::new();
+        vars.insert("TOKEN".into(), json!("s3cret"));
+        let mut blob = BTreeMap::new();
+        blob.insert("TOKEN".to_string(), "s3cret".to_string());
+        let keys = vec!["TOKEN".to_string()];
+        let mut exec = exec_req("https://attacker.example/x");
+        exec.headers = json!([{"key":"Authorization","value":"Bearer {{TOKEN}}","enabled":true}]);
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("attacker.example")
+        );
+        exec.url = "https://api.test/y".into();
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+                .await
+                .unwrap(),
+            None
+        );
+        // No secret referenced → any host is fine.
+        let exec = exec_req("https://elsewhere.example/");
+        assert_eq!(
+            unbound_secret_host(&repo, &ws, &exec, &vars, &blob, &keys)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn env_secret_probe_sees_nested_and_ignores_replaced_keys() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("TOKEN".into(), json!("s3cret"));
+        vars.insert("ALIAS".into(), json!("{{TOKEN}}"));
+        let mut blob = BTreeMap::new();
+        blob.insert("TOKEN".to_string(), "s3cret".to_string());
+        let keys = vec!["TOKEN".to_string()];
+
+        let mut exec = exec_req("https://x.example/");
+        exec.body = "{\"t\":\"{{ALIAS}}\"}".into();
+        assert!(uses_env_secret(&exec, &vars, &blob, &keys), "nested reference");
+        exec.body = "{{OTHER}}".into();
+        assert!(!uses_env_secret(&exec, &vars, &blob, &keys));
+        exec.url = "https://x.example/?k={{ TOKEN }}".into();
+        assert!(uses_env_secret(&exec, &vars, &blob, &keys), "spaced placeholder");
+        // A runtime override that REPLACED the secret carries no secret.
+        vars.insert("TOKEN".into(), json!("public"));
+        assert!(!uses_env_secret(&exec, &vars, &blob, &keys));
+    }
+
+    #[test]
+    fn oauth_secrets_bind_to_the_saved_token_endpoint() {
+        assert!(oauth_token_url_bound(
+            "https://auth.test/oauth/token",
+            "https://auth.test/oauth/token"
+        ));
+        assert!(oauth_token_url_bound(
+            "https://auth.test/oauth/token",
+            "https://AUTH.test/v2/token"
+        ));
+        assert!(!oauth_token_url_bound(
+            "https://auth.test/oauth/token",
+            "https://attacker.example/token"
+        ));
+        assert!(!oauth_token_url_bound("", "https://attacker.example/token"));
+        assert!(oauth_token_url_bound("{{AUTH}}/token", "{{AUTH}}/token"));
+    }
+
+    #[test]
+    fn agent_callers_are_recognised_for_new_host_confirmation() {
+        let user = otto_core::domain::User {
+            id: "fixture".into(),
+            username: "fixture".into(),
+            display_name: "Fixture".into(),
+            is_root: false,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let person = AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        };
+        let empty = HeaderMap::new();
+        assert!(!is_agent_caller(&empty, &person));
+        let mut bridged = HeaderMap::new();
+        bridged.insert("x-otto-agent", "mcp".parse().unwrap());
+        assert!(is_agent_caller(&bridged, &person));
+        let mut managed = person.clone();
+        managed.managed_session_id = Some("s1".into());
+        assert!(is_agent_caller(&empty, &managed));
+        let mut mcp = person;
+        mcp.mcp_only = true;
+        assert!(is_agent_caller(&empty, &mcp));
     }
 }

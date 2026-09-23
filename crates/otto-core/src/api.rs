@@ -2812,6 +2812,14 @@ pub struct ExecuteApiReq {
     /// send directly.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
+    /// Confirms sending a stored secret to a host it isn't bound to (a
+    /// `$secret` marker is bound to its owning saved request's host; an
+    /// environment secret to the hosts of the workspace's human-authored saved
+    /// requests). Without it such a send is refused with `409
+    /// needs_confirm=new_host`. Honoured only for a person's credential —
+    /// agent callers can never self-confirm.
+    #[serde(default)]
+    pub confirm_new_host: bool,
 }
 
 /// Response of `POST .../api-client/execute`.
