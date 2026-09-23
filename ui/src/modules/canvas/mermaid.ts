@@ -18,9 +18,11 @@ async function load(): Promise<MermaidApi> {
   if (_mermaid) return _mermaid;
   _loading ??= import('mermaid').then((m) => {
     const api = m.default as unknown as MermaidApi;
-    // `neutral` reads well on both light/dark surfaces; `loose` lets us render
-    // the wider diagram set (sequence/flow/class/state/er) without HTML escaping
-    // tripping over labels. startOnLoad:false — we drive render() manually.
+    // `neutral` reads well on both light/dark surfaces. `strict` (not `loose`):
+    // the SVG is injected with {@html} and its source can be agent-written or
+    // come from a vault note, so labels are sanitized and `click` directives /
+    // javascript: links are refused. startOnLoad:false — we drive render()
+    // manually.
     //
     // The per-diagram knobs below de-clutter the output (the chief complaint on
     // dense sequence diagrams): a UI sans font, generous spacing, NO mirrored
@@ -29,7 +31,7 @@ async function load(): Promise<MermaidApi> {
     api.initialize({
       startOnLoad: false,
       theme: 'neutral',
-      securityLevel: 'loose',
+      securityLevel: 'strict',
       fontFamily: 'ui-sans-serif, -apple-system, system-ui, sans-serif',
       flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 16 },
       sequence: {
