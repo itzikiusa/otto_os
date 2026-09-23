@@ -39,6 +39,12 @@ async function getJson(ctx: APIRequestContext, url: string): Promise<any> {
   expect(r.ok(), `${url} → ${r.status()} ${await r.text()}`).toBeTruthy();
   return r.json();
 }
+/** The workspace's `design_learning` setting. The daemon has no
+ *  `GET /workspaces/{id}` (405 — PATCH/DELETE only), so read the list. */
+async function learningSetting(ctx: APIRequestContext, base: string): Promise<unknown> {
+  const rows: Array<{ id: string; settings?: Record<string, unknown> }> = await getJson(ctx, `${base}${V1}/workspaces`);
+  return rows.find((w) => w.id === wsId)?.settings?.design_learning;
+}
 async function html(ctx: APIRequestContext, base: string, title: string): Promise<string> {
   const res = await postJson(ctx, `${base}${V1}/design/artifacts`, {
     workspace_id: wsId,
@@ -179,11 +185,11 @@ test('What Otto learned: a proposal is approved and rolled back only after askin
   const settings = page.getByTestId('design-learned-settings');
   await settings.getByRole('button', { name: 'Off' }).click();
   await expect
-    .poll(async () => (await getJson(ctx, `${base}${V1}/workspaces/${wsId}`)).settings?.design_learning)
+    .poll(() => learningSetting(ctx, base))
     .toBe('off');
   await settings.getByRole('button', { name: 'Suggest only' }).click();
   await expect
-    .poll(async () => (await getJson(ctx, `${base}${V1}/workspaces/${wsId}`)).settings?.design_learning)
+    .poll(() => learningSetting(ctx, base))
     .toBe('suggest');
   await ctx.dispose();
 });
