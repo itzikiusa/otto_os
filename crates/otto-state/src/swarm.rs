@@ -1619,6 +1619,13 @@ impl SwarmRepo {
     /// Mark non-terminal runs as `stopped` (NOT `error`) on a daemon restart —
     /// they were interrupted by the restart, not a real agent failure, and the
     /// coordinator re-runs the task. The note is kept in `error` for context.
+    ///
+    /// The turn's `route_result` died with the process too, so its task would
+    /// sit `in_progress` forever (`ready_tasks` only selects `todo`) — the
+    /// promised re-run never happened and its dependants stayed blocked. Tasks
+    /// left `in_progress` with no active run go back to `todo`; a delegated
+    /// parent with children still open is legitimately `in_progress` and
+    /// stays.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
         let now = fmt(Utc::now());
         let res = sqlx::query(
@@ -1630,6 +1637,26 @@ impl SwarmRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("fail running swarm runs"))?;
+        let reset = sqlx::query(
+            "UPDATE swarm_tasks SET status = 'todo', updated_at = ?
+             WHERE status = 'in_progress'
+               AND NOT EXISTS (SELECT 1 FROM swarm_runs r
+                               WHERE r.task_id = swarm_tasks.id
+                                 AND r.status IN ('queued','running','waiting'))
+               AND NOT EXISTS (SELECT 1 FROM swarm_tasks c
+                               WHERE c.parent_task_id = swarm_tasks.id
+                                 AND c.status NOT IN ('done','cancelled'))",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("reset stranded swarm tasks"))?;
+        if reset.rows_affected() > 0 {
+            tracing::info!(
+                "swarm recovery: {} task(s) left in_progress by the restart are back in todo",
+                reset.rows_affected()
+            );
+        }
         Ok(res.rows_affected())
     }
 
@@ -2511,5 +2538,35 @@ mod tests {
             ("stopped", Some("paused"))
         );
         assert_eq!(repo.get_run(&done.id).await.unwrap().status, "done");
+    }
+
+    /// S4: a restart re-queues tasks its dead turns left `in_progress`, but a
+    /// delegated parent whose children are still open stays in progress.
+    #[tokio::test]
+    async fn fail_running_requeues_stranded_in_progress_tasks() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let stranded = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let parent = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let mut child = new_task(&swarm, "todo");
+        child.parent_task_id = Some(parent.id.clone());
+        repo.create_task(child).await.unwrap();
+        let mut nr = new_run(&swarm);
+        nr.task_id = Some(stranded.id.clone());
+        repo.create_run(nr).await.unwrap(); // queued — killed by the restart
+
+        repo.fail_running("interrupted").await.unwrap();
+        assert_eq!(repo.get_task(&stranded.id).await.unwrap().status, "todo");
+        assert_eq!(
+            repo.get_task(&parent.id).await.unwrap().status,
+            "in_progress"
+        );
     }
 }
