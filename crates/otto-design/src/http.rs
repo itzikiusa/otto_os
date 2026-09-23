@@ -185,6 +185,20 @@ struct LinksQuery {
     dir: Option<String>,
 }
 
+/// `GET /design/links` — links of many artifacts at once.
+#[derive(Deserialize, Default)]
+struct BulkLinksQuery {
+    /// Comma-separated artifact ids (1..=[`MAX_BULK_LINK_IDS`]).
+    #[serde(default)]
+    artifact_ids: Option<String>,
+    /// `out` | `in` | `both` (default).
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+/// Id cap of one `GET /design/links` call.
+const MAX_BULK_LINK_IDS: usize = 100;
+
 #[derive(Deserialize, Default)]
 struct SignalListQuery {
     #[serde(default)]
@@ -255,6 +269,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
             "/design/artifacts/{id}/links/{link_id}",
             delete(delete_link::<S>),
         )
+        .route("/design/links", get(bulk_links::<S>))
         .route("/design/search", get(search::<S>))
         .route(
             "/design/signals",
@@ -867,6 +882,95 @@ async fn list_links<S: DesignCtx>(
     Ok(Json(LinksResp { links, artifacts }).into_response())
 }
 
+/// Links of up to [`MAX_BULK_LINK_IDS`] artifacts in one call (Product's
+/// design strip). Ids the caller can't view — or that don't exist — are
+/// skipped, never an error; `artifacts` holds the other ends the caller may
+/// view (not the requested ones).
+async fn bulk_links<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<BulkLinksQuery>,
+) -> ApiResult<Response> {
+    let dir = q.dir.unwrap_or_else(|| "both".into());
+    if !matches!(dir.as_str(), "out" | "in" | "both") {
+        return Err(ApiErr(Error::Invalid(format!(
+            "dir must be out|in|both, not {dir:?}"
+        ))));
+    }
+    let mut ids: Vec<String> = q
+        .artifact_ids
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(ApiErr(Error::Invalid(
+            "artifact_ids (comma-separated) is required".into(),
+        )));
+    }
+    if ids.len() > MAX_BULK_LINK_IDS {
+        return Err(ApiErr(Error::Invalid(format!(
+            "at most {MAX_BULK_LINK_IDS} artifact_ids per call"
+        ))));
+    }
+    let svc = ctx.design();
+    let mut cache: HashMap<Id, bool> = HashMap::new();
+    let mut mine: Vec<String> = Vec::new();
+    for a in svc.store().artifacts_by_ids(&ids).await? {
+        if can_view(&ctx, &user, &a.workspace_id, &mut cache).await {
+            mine.push(a.id);
+        }
+    }
+    let links = svc
+        .store()
+        .links_touching(&mine, dir != "in", dir != "out")
+        .await?;
+    let mut other: Vec<String> = Vec::new();
+    for l in &links {
+        for o in [
+            Some(l.src_artifact_id.clone()),
+            (l.dst_kind == "artifact").then(|| l.dst_id.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !mine.contains(&o) && !other.contains(&o) {
+                other.push(o);
+            }
+        }
+    }
+    let mut artifacts = Vec::new();
+    for x in svc.store().artifacts_by_ids(&other).await? {
+        if can_view(&ctx, &user, &x.workspace_id, &mut cache).await {
+            artifacts.push(x);
+        }
+    }
+    Ok(Json(LinksResp { links, artifacts }).into_response())
+}
+
+/// Workspace-viewer check memoized per call.
+async fn can_view<S: DesignCtx>(
+    ctx: &S,
+    user: &User,
+    workspace_id: &Id,
+    cache: &mut HashMap<Id, bool>,
+) -> bool {
+    if let Some(ok) = cache.get(workspace_id) {
+        return *ok;
+    }
+    let ok = ctx
+        .roles()
+        .check(user, workspace_id, WorkspaceRole::Viewer)
+        .await
+        .is_ok();
+    cache.insert(workspace_id.clone(), ok);
+    ok
+}
+
 async fn create_link<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -1447,6 +1551,97 @@ mod tests {
         assert_eq!(rows[0]["story_ids"], serde_json::json!(["S1"]));
         assert_eq!(rows[0]["id"], ids[0].as_str());
         let (st, _, _) = call(&app, Method::GET, "/design/artifacts?cursor=bogus", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bulk_links_read_many_artifacts_in_one_call() {
+        let (app, ctx) = app().await;
+        let mk =
+            |t: &str| serde_json::json!({ "workspace_id": "w1", "format": "html", "title": t });
+        let mut ids = Vec::new();
+        for t in ["A", "B", "C"] {
+            let (_, b, _) = call(&app, Method::POST, "/design/artifacts", Some(mk(t))).await;
+            ids.push(json_of(&b)["artifact"]["id"].as_str().unwrap().to_string());
+        }
+        let (a, b, c) = (&ids[0], &ids[1], &ids[2]);
+        for (src, rel) in [(b, "embeds"), (c, "references")] {
+            let (st, body, _) = call(
+                &app,
+                Method::POST,
+                &format!("/design/artifacts/{src}/links"),
+                Some(serde_json::json!({ "rel": rel, "dst_kind": "artifact", "dst_id": a })),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::CREATED,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        // An artifact in a workspace the caller can't view is skipped.
+        sqlx::query(
+            "INSERT INTO design_artifacts (id, workspace_id, studio, format, mime, title, status,
+                                           created_by, created_by_kind, created_at, updated_at)
+             VALUES ('HID', 'w-denied', 'frames', 'html', 'text/html', 'Hidden', 'draft',
+                     'u9', 'user', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let (st, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a},{b},HID,nope&dir=both"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v = json_of(&body);
+        // B→A is counted once although both ends were requested; C→A too.
+        assert_eq!(v["links"].as_array().unwrap().len(), 2, "{v}");
+        let others: Vec<&str> = v["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(others, vec![c.as_str()], "only the other ends");
+
+        let (_, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a},{b}&dir=out"),
+            None,
+        )
+        .await;
+        let v = json_of(&body);
+        assert_eq!(v["links"].as_array().unwrap().len(), 1);
+        assert_eq!(v["links"][0]["src_artifact_id"], b.as_str());
+
+        let (st, _, _) = call(&app, Method::GET, "/design/links?artifact_ids=", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let many = (0..101)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (st, _, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={many}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a}&dir=sideways"),
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 }

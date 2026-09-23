@@ -267,6 +267,9 @@ const PROJECT_SELECT: &str = "SELECT p.*, (SELECT COUNT(*) FROM design_artifacts
      WHERE a.project_id = p.id AND a.status != 'archived') AS artifact_count \
      FROM design_projects p";
 
+/// Row cap of one bulk links read (`GET /design/links`).
+pub const MAX_BULK_LINKS: usize = 10_000;
+
 /// Status order for "shipped first" listings.
 const STATUS_ORDER: &str = "CASE a.status WHEN 'shipped' THEN 0 WHEN 'approved' THEN 1 \
      WHEN 'review' THEN 2 WHEN 'draft' THEN 3 ELSE 4 END";
@@ -1423,6 +1426,43 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("design.links.in"))?;
+        rows.iter().map(row_link).collect()
+    }
+
+    /// Links touching any of `ids` — FROM them (`out`) and/or TO them
+    /// (`inn`) — each row once (a link between two of them is not doubled),
+    /// grouped by source. Capped at [`MAX_BULK_LINKS`] rows.
+    pub async fn links_touching(
+        &self,
+        ids: &[String],
+        out: bool,
+        inn: bool,
+    ) -> Result<Vec<DesignLink>> {
+        if ids.is_empty() || !(out || inn) {
+            return Ok(vec![]);
+        }
+        let ph = placeholders(ids.len());
+        let mut conds = Vec::new();
+        if out {
+            conds.push(format!("src_artifact_id IN ({ph})"));
+        }
+        if inn {
+            conds.push(format!("(dst_kind = 'artifact' AND dst_id IN ({ph}))"));
+        }
+        let sql = format!(
+            "SELECT * FROM design_links WHERE {} ORDER BY src_artifact_id, rel, created_at LIMIT {MAX_BULK_LINKS}",
+            conds.join(" OR ")
+        );
+        let mut q = sqlx::query(&sql);
+        for _ in 0..conds.len() {
+            for id in ids {
+                q = q.bind(id.as_str());
+            }
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("design.links.bulk"))?;
         rows.iter().map(row_link).collect()
     }
 

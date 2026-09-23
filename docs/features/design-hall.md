@@ -154,7 +154,9 @@ that would close a cycle is a 409. Extracted links can't be deleted over the
 API (409) — edit the document.
 
 `GET …/links?dir=out|in|both` returns the links plus the artifacts on the
-other end that you can view.
+other end that you can view. `GET /design/links?artifact_ids=a,b,c&dir=…`
+does the same for up to 100 artifacts in one call (each link once; ids you
+can't view are skipped) — what Product's design strip uses.
 
 ### Search (the References drawer)
 
