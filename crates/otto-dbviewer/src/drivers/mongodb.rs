@@ -658,19 +658,7 @@ impl Driver for MongoDriver {
         if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
             return Err(types::invalid("export supports find / aggregate only"));
         }
-        let db_name = cfg
-            .database
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
-                    NodePath::parse(n)
-                        .get("db")
-                        .map(str::to_string)
-                        .unwrap_or_else(|| n.to_string())
-                })
-            })
-            .ok_or_else(|| types::invalid("no database selected for this connection"))?;
+        let db_name = resolve_db(cfg, node)?;
 
         let client = self.connect(cfg).await?;
         let db = client.database(&db_name);
@@ -812,25 +800,9 @@ impl MongoDriver {
         let parsed = parse_command(translated.as_deref().unwrap_or(&req.statement))?;
         // The active database arrives in `req.node` as a plain name (the UI's
         // active-DB selector, e.g. "promotions"), matching how SQL engines treat
-        // `node`. Tolerate a structured NodePath (`db:<name>/…`) too. Fall back to
-        // the connection's configured default database.
-        let db_name = cfg
-            .database
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                req.node
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|n| {
-                        NodePath::parse(n)
-                            .get("db")
-                            .map(str::to_string)
-                            .unwrap_or_else(|| n.to_string())
-                    })
-            })
-            .ok_or_else(|| types::invalid("no database selected for this connection"))?;
+        // `node`, or as a `db:<name>/…` path. It wins over the connection's
+        // configured default database (see `resolve_db`).
+        let db_name = resolve_db(cfg, req.node.as_deref())?;
 
         let client = self.connect(cfg).await?;
         let db = client.database(&db_name);
@@ -2959,20 +2931,20 @@ async fn mongo_explain_value(db: &mongodb::Database, parsed: &Parsed) -> Result<
     Ok(bson_to_json(&Bson::Document(plan)))
 }
 
-/// The database a Mongo op runs against: the connection's configured database,
-/// else the active-db `node` (a plain name or a `db:<name>` path).
+/// The database a Mongo op runs against: the database SELECTED in the tree
+/// (`node` — a plain name or a `db:<name>` path, see [`crate::types::Scope`]),
+/// else the connection's configured default.
+///
+/// Selection first: a profile `db`/`database` param is only a default, exactly
+/// like the SQL engines' `USE`. The old order let the profile database win, so
+/// a find/update/export/import/script with `games_management` selected ran
+/// against the profile's `frb` while completion (already selection-first)
+/// showed `games_management`'s collections. Every Mongo entry point resolves
+/// through here — native run, script prelude, export, explain, import.
 fn resolve_db(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
-    cfg.database
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
-                NodePath::parse(n)
-                    .get("db")
-                    .map(str::to_string)
-                    .unwrap_or_else(|| n.to_string())
-            })
-        })
+    crate::types::Scope::parse(node)
+        .and_then(|scope| scope.database().map(str::to_string))
+        .or_else(|| cfg.database.clone().filter(|s| !s.trim().is_empty()))
         .ok_or_else(|| types::invalid("no database selected for this connection"))
 }
 
@@ -3215,6 +3187,29 @@ mod tests {
             tls: Default::default(),
             params,
         }
+    }
+
+    /// The database selected in the tree wins over a profile `db` param for
+    /// every entry point (they all resolve through `resolve_db`); the profile
+    /// database is only the fallback.
+    #[test]
+    fn selected_database_wins_over_the_profile_default() {
+        let mut cfg = script_cfg(serde_json::json!({}));
+        cfg.database = Some("frb".into());
+        assert_eq!(
+            resolve_db(&cfg, Some("games_management")).unwrap(),
+            "games_management"
+        );
+        assert_eq!(
+            resolve_db(&cfg, Some("db:games_management/coll:users")).unwrap(),
+            "games_management"
+        );
+        assert_eq!(resolve_db(&cfg, None).unwrap(), "frb");
+        assert_eq!(resolve_db(&cfg, Some("  ")).unwrap(), "frb");
+        // A database literally named `db` keeps its scope.
+        assert_eq!(resolve_db(&cfg, Some("db")).unwrap(), "db");
+        cfg.database = None;
+        assert!(resolve_db(&cfg, None).is_err());
     }
 
     /// The script runner must dial EXACTLY what the native client dials:
