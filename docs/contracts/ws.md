@@ -811,6 +811,45 @@ story's design artifact.
 - TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string | null }`
   and `{ type: 'mockup_session_started'; workspace_id: Id; story_id: Id; attachment_id: Id; session_id: Id }`.
 
+### `design_artifact_updated` / `design_link_updated` / `design_learning_update`
+
+Workspace-scoped Design Hall graph events, emitted by `crates/otto-design`
+(`service.rs`) for every change to the artifact graph (`/design/*` REST, the
+startup/admin legacy import). They supersede `mockup_updated` /
+`canvas_updated` for graph-aware clients; both legacy events keep firing for
+their own routes.
+
+```json
+{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted", "version_id": "<Id>" | null, "content": "..." | null }
+{ "type": "design_link_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "link_id": "<Id>" | null, "target_artifact_id": "<Id>" | null, "target_version_id": "<Id>" | null, "reason": "created|deleted|extracted|target_approved|target_updated|target_deleted" }
+{ "type": "design_learning_update", "workspace_id": "<Id>", "kind": "variant_chosen|…|shipped", "signal_id": "<Id>" | null, "artifact_id": "<Id>" | null }
+```
+
+- `design_artifact_updated` — one per committed version (`created`, `content`:
+  PUT content, named commit, import `sync`) with `version_id` set, and one per
+  metadata change (`meta`, `approved`, `archived`, `deleted`) with
+  `version_id: null` except `approved` (the approved version). `content` is the
+  UTF-8 source for text/JSON formats ≤ 4 MB; an explicit `null` (never omitted)
+  for binaries, oversized payloads and metadata changes → clients re-fetch
+  `GET /design/artifacts/{id}/content`.
+- `design_link_updated` — `artifact_id` is always the CONSUMER (link source).
+  `created` / `deleted`: an explicit link changed. `extracted`: the document's
+  `otto://design/…` references were re-indexed on save and the extracted set
+  changed. `target_approved`: the target got a new approved version (sent to
+  every `follow_approved` consumer — teal pulse + "now vN"). `target_updated`:
+  the target got a new head (sent to `follow_latest` consumers).
+  `target_deleted`: the target was hard-deleted (the link is now `broken`).
+- `design_learning_update` — a design signal was captured (`POST
+  /design/signals`, or automatically: `edit_after_draft`, `status_change`,
+  `shipped`). Phase 0 only captures; later phases also emit it when a learned
+  rule is proposed.
+- Scope: `Workspace` (members with viewer+ on `workspace_id`), like the canvas /
+  mockup events.
+- TypeScript types: the `design_artifact_updated` / `design_link_updated` /
+  `design_learning_update` members of `OttoEvent` in `ui/src/lib/api/types.ts`
+  (`DesignArtifactChange`, `DesignLinkUpdateReason`, `DesignSignalKind`). No UI
+  routing yet (the Design Hall lobby lands separately).
+
 ### `canvas_refs_changed`
 
 Workspace-scoped. Emitted by `crates/otto-server/src/canvas_refs.rs` whenever a

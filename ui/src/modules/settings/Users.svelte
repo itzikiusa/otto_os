@@ -144,7 +144,7 @@
   const ALL_FEATURES: Feature[] = [
     'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
+    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas', 'design',
     'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto', 'browser',
     'aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds', 'kubernetes',
   ];
@@ -154,7 +154,7 @@
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
-    settings: 'Settings', users: 'Users', canvas: 'Canvas',
+    settings: 'Settings', users: 'Users', canvas: 'Canvas', design: 'Design Hall',
     proof_pack: 'Proof Packs', mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
     run_with_otto: 'Run with Otto', browser: 'Browser',
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
