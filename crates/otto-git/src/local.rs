@@ -728,7 +728,7 @@ impl LocalGit {
     }
 
     /// True when a `merge --squash` left its staged result pending (the state
-    /// `merge_abort` may discard with `reset --hard`). SQUASH_MSG is the only
+    /// `merge_abort` may discard with `reset --merge`). SQUASH_MSG is the only
     /// marker git leaves for it.
     async fn squash_pending(&self) -> bool {
         match self.git_dir().await {
@@ -3085,7 +3085,7 @@ impl LocalGit {
     }
 
     /// Abort the in-progress operation with its own abort verb (merge / rebase
-    /// / cherry-pick / revert), or discard a staged squash (`reset --hard`,
+    /// / cherry-pick / revert), or discard a staged squash (`reset --merge`,
     /// only when SQUASH_MSG proves a squash is actually pending). With NOTHING
     /// in progress this is a 409 — the old fallback hard-reset the working
     /// tree, so a stale "Abort" click could destroy all uncommitted work.
@@ -3105,7 +3105,10 @@ impl LocalGit {
             }
             _ => {
                 if self.squash_pending().await {
-                    self.run(&["reset", "--hard", "HEAD"]).await?;
+                    // `--merge`, not `--hard`: it drops the squash's staged
+                    // result (and any conflict markers) but KEEPS unrelated
+                    // uncommitted edits, which `--hard` silently wiped.
+                    self.run(&["reset", "--merge"]).await?;
                     // git leaves SQUASH_MSG behind; clear it so a SECOND abort
                     // can't take this destructive branch again.
                     if let Some(gd) = self.git_dir().await {
@@ -5803,4 +5806,26 @@ mod tests {
         assert!(git.stash_list().await.unwrap().is_empty(), "{err:?}");
     }
 
+    /// `merge --squash` abort drops the squash but KEEPS unrelated edits
+    /// (`reset --merge`); `reset --hard` wiped them.
+    #[tokio::test]
+    async fn squash_abort_keeps_unrelated_uncommitted_edits() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+        write(&dir, "s.txt", "side\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "side"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        let git = LocalGit::new(&dir);
+        git.merge_branch("side", "main", LocalMergeStrategy::Squash, false)
+            .await
+            .unwrap();
+        write(&dir, "a.txt", "hello\nUNRELATED\n");
+        git.merge_abort().await.unwrap();
+        assert!(!dir.join("s.txt").exists(), "the squash is gone");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\nUNRELATED\n"
+        );
+    }
 }
