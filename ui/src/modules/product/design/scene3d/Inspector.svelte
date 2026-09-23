@@ -4,6 +4,12 @@
   // Material (+ Text / Model) + Notes; a light gets its light panel; a group gets
   // its members. Every field patches the JSON doc through `ops.ts` and emits
   // `onchange(newDoc)` live (no debounce here — the arena owns the autosave).
+  //
+  // v2: a physical-material preset grid, the brand kit's colour swatches (a
+  // click stores `token:color.<name>`, so the scene follows the kit), the
+  // physical sliders (clearcoat / transmission / sheen), a box corner radius,
+  // and — when a non-default STATE is showing — transform edits go to that
+  // state's overrides (`editState`), exactly like the viewport gizmo.
   import NumberDrag from './NumberDrag.svelte';
   import { LIGHT_TYPES, type Scene3dDoc, type Scene3dMaterial, type Vec3 } from './types';
   import {
@@ -14,21 +20,44 @@
     rename,
     setCamera,
     setMaterial,
+    setMaterialPreset,
     setNotes,
+    setRadius,
     setScene,
+    setStateOverride,
     setText,
     setTransform,
     setVisible,
     summarize,
   } from './ops';
+  import { MATERIAL_PRESETS, resolveMaterial } from './presets';
+  import { colorLabel, isTokenRef, resolveColor, type BrandSwatch } from './tokens';
+  import { findState } from './states';
 
   interface Props {
     doc: Scene3dDoc;
     selectedId?: string | null;
     onchange: (doc: Scene3dDoc) => void;
     readonly?: boolean;
+    /** v2: the brand kit's colours (Design Hall passes the scene's kit). */
+    swatches?: BrandSwatch[];
+    /** v2: the kit's display name for the Material panel ("Acme Brand Kit v4"). */
+    brandName?: string | null;
+    /** v2: the brand document tokens resolve against (for the resolved hex readout). */
+    brand?: unknown;
+    /** v2: transform edits of the selected object go to this state's overrides. */
+    editState?: string | null;
   }
-  let { doc, selectedId = $bindable<string | null>(null), onchange, readonly = false }: Props = $props();
+  let {
+    doc,
+    selectedId = $bindable<string | null>(null),
+    onchange,
+    readonly = false,
+    swatches = [],
+    brandName = null,
+    brand = null,
+    editState = null,
+  }: Props = $props();
 
   const sel = $derived(findNode(doc, selectedId));
   const obj = $derived(sel?.kind === 'object' ? sel.node : null);
@@ -36,6 +65,19 @@
   const group = $derived(sel?.kind === 'group' ? sel.node : null);
   const parent = $derived(selectedId ? parentGroup(doc, selectedId) : null);
   const mat = $derived<Scene3dMaterial>(obj?.material ?? {});
+  /** Preset defaults folded in — what the sliders show when a field isn't set. */
+  const resolved = $derived(resolveMaterial(obj?.material, (r, fb) => resolveColor(r, brand, fb)));
+  const stateEdit = $derived(obj && editState ? findState(doc, editState) : null);
+  /** The transform the rows show: the state's override over the base. */
+  const shownTransform = $derived.by(() => {
+    if (!obj) return null;
+    const ov = stateEdit?.overrides?.[obj.id];
+    return { position: ov?.position ?? obj.position, rotation: ov?.rotation ?? obj.rotation, scale: ov?.scale ?? obj.scale };
+  });
+  function emitTransform(patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }): void {
+    if (!obj) return;
+    emit(stateEdit ? setStateOverride(doc, stateEdit.id, obj.id, patch) : setTransform(doc, obj.id, patch));
+  }
 
   // Collapsible panels remember their state for the session.
   let open = $state<Record<string, boolean>>({ transform: true, material: true, light: true, scene: true, camera: true, notes: false, model: true, text: true, group: true });
@@ -174,9 +216,15 @@
         {@render panelHead('transform', 'Transform')}
         {#if open.transform !== false}
           <div class="s3d-panel-body">
-            {@render vec3Row('Position', obj.position, 0.01, 3, (v) => emit(setTransform(doc, obj.id, { position: v })), 'm')}
-            {@render vec3Row('Rotation', obj.rotation, 0.5, 1, (v) => emit(setTransform(doc, obj.id, { rotation: v })), '°')}
-            {@render vec3Row('Scale', obj.scale, 0.01, 3, (v) => emit(setTransform(doc, obj.id, { scale: v })))}
+            {#if stateEdit}
+              <div class="s3d-hint s3d-state-hint" data-testid="s3d-state-edit">Editing the <strong>{stateEdit.name ?? stateEdit.id}</strong> state — changes here tween from the base pose.</div>
+            {/if}
+            {@render vec3Row('Position', shownTransform!.position, 0.01, 3, (v) => emitTransform({ position: v }), 'm')}
+            {@render vec3Row('Rotation', shownTransform!.rotation, 0.5, 1, (v) => emitTransform({ rotation: v }), '°')}
+            {@render vec3Row('Scale', shownTransform!.scale, 0.01, 3, (v) => emitTransform({ scale: v }))}
+            {#if obj.type === 'box'}
+              {@render rangeRow('Corners', obj.radius ?? 0, 0, 0.5, 0.005, (n) => emit(setRadius(doc, obj.id, n ?? 0)))}
+            {/if}
             <div class="s3d-row-btns">
               <button class="s3d-mini" disabled={readonly} onclick={() => emit(setTransform(doc, obj.id, { position: [0, obj.type === 'plane' ? 0 : 0.5, 0] }))}>Reset position</button>
               <button class="s3d-mini" disabled={readonly} onclick={() => emit(setTransform(doc, obj.id, { rotation: obj.type === 'plane' ? [-90, 0, 0] : [0, 0, 0] }))}>Reset rotation</button>
@@ -213,12 +261,63 @@
           </section>
         {/if}
         <section class="s3d-panel">
-          {@render panelHead('material', 'Material')}
+          {@render panelHead('material', 'Material', brandName ?? undefined)}
           {#if open.material !== false}
             <div class="s3d-panel-body">
-              {@render colorRow('Color', mat.color, '#94a3b8', (c) => onMat('color', c))}
-              {@render rangeRow('Metalness', mat.metalness ?? 0.1, 0, 1, 0.01, (n) => onMat('metalness', n))}
-              {@render rangeRow('Roughness', mat.roughness ?? 0.7, 0, 1, 0.01, (n) => onMat('roughness', n))}
+              <div class="s3d-presets" role="radiogroup" aria-label="Material preset">
+                {#each MATERIAL_PRESETS as p (p.id)}
+                  {@const tint = p.id === 'brushed-metal' || p.id === 'frosted-glass' ? p.swatch : resolved.color}
+                  <button
+                    role="radio"
+                    aria-checked={mat.preset === p.id}
+                    class="s3d-preset {p.id}"
+                    class:on={mat.preset === p.id}
+                    title={p.hint}
+                    disabled={readonly}
+                    data-testid="s3d-preset-{p.id}"
+                    onclick={() => emit(setMaterialPreset(doc, obj.id, mat.preset === p.id ? null : p.id))}
+                  >
+                    <span class="s3d-ball" style:--ball={tint}></span>
+                    <span class="s3d-plabel">{p.label}</span>
+                  </button>
+                {/each}
+              </div>
+              {#if swatches.length}
+                <div class="s3d-field s3d-swatch-row">
+                  <span class="s3d-flabel">Brand</span>
+                  <div class="s3d-swatches" role="radiogroup" aria-label="Brand colours">
+                    {#each swatches.slice(0, 12) as sw (sw.ref)}
+                      <button
+                        role="radio"
+                        aria-checked={mat.color === sw.ref}
+                        class="s3d-swatch"
+                        class:on={mat.color === sw.ref}
+                        style:--sw={sw.value}
+                        title="{colorLabel(sw.ref)} · {sw.value}"
+                        aria-label="{colorLabel(sw.ref)} {sw.value}"
+                        disabled={readonly}
+                        onclick={() => onMat('color', sw.ref)}
+                      ></button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if isTokenRef(mat.color)}
+                <div class="s3d-field">
+                  <span class="s3d-flabel">Color</span>
+                  <span class="s3d-token" title="Follows the brand kit: changing the kit recolours this object">
+                    <span class="s3d-dot" style:--sw={resolved.color}></span>{colorLabel(mat.color)} <code>{resolved.color}</code>
+                  </span>
+                  <button class="s3d-reset" title="Detach from the brand kit (keep {resolved.color})" aria-label="Detach colour from the brand kit" disabled={readonly} onclick={() => onMat('color', resolved.color)}>×</button>
+                </div>
+              {:else}
+                {@render colorRow('Color', mat.color, resolved.color, (c) => onMat('color', c))}
+              {/if}
+              {@render rangeRow('Roughness', mat.roughness ?? resolved.roughness, 0, 1, 0.01, (n) => onMat('roughness', n))}
+              {@render rangeRow('Metalness', mat.metalness ?? resolved.metalness, 0, 1, 0.01, (n) => onMat('metalness', n))}
+              {@render rangeRow('Clearcoat', mat.clearcoat ?? resolved.clearcoat, 0, 1, 0.01, (n) => onMat('clearcoat', n))}
+              {@render rangeRow('Glass', mat.transmission ?? resolved.transmission, 0, 1, 0.01, (n) => onMat('transmission', n))}
+              {@render rangeRow('Sheen', mat.sheen ?? resolved.sheen, 0, 1, 0.01, (n) => onMat('sheen', n))}
               {@render rangeRow('Opacity', mat.opacity ?? 1, 0, 1, 0.01, (n) => onMat('opacity', n))}
               {@render colorRow('Emissive', mat.emissive, '#000000', (c) => onMat('emissive', c))}
               <label class="s3d-field s3d-check">
@@ -321,7 +420,7 @@
     min-height: 0;
     height: 100%;
     overflow-y: auto;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
   }
   .s3d-head {
@@ -332,11 +431,11 @@
   }
   .s3d-head-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .s3d-head-name-input {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 3px 6px;
     border: 1px solid transparent;
     border-radius: var(--radius-s, 5px);
@@ -351,7 +450,7 @@
     outline: none;
   }
   .s3d-head-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     display: flex;
     gap: 6px;
@@ -363,7 +462,7 @@
   }
   .s3d-id {
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     border-radius: 4px;
     background: var(--surface-2);
@@ -393,7 +492,7 @@
     border: 0;
     background: transparent;
     color: var(--text-dim);
-    font: 600 10.5px var(--font-ui);
+    font: 600 var(--fs-xs) var(--font-ui);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     cursor: pointer;
@@ -433,7 +532,7 @@
   }
   .s3d-flabel {
     flex: 0 0 62px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .s3d-vec {
@@ -473,7 +572,7 @@
     border-radius: var(--radius-s, 5px);
     background: var(--bg);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
   }
   .s3d-hex {
     font-family: var(--font-mono);
@@ -488,7 +587,7 @@
     height: 22px;
     cursor: pointer;
     border-radius: 4px;
-    font-size: 13px;
+    font-size: var(--fs-m);
     line-height: 1;
     flex-shrink: 0;
   }
@@ -504,7 +603,7 @@
     margin: 0;
   }
   .s3d-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
   }
@@ -519,7 +618,7 @@
     background: var(--surface);
     color: var(--text);
     border-radius: var(--radius-s, 5px);
-    font: 10.5px var(--font-ui);
+    font: var(--fs-xs) var(--font-ui);
     padding: 3px 7px;
     cursor: pointer;
   }
@@ -538,7 +637,7 @@
     border-radius: var(--radius-s, 5px);
     background: var(--bg);
     color: var(--text);
-    font: 11.5px/1.45 var(--font-ui);
+    font: var(--fs-s)/1.45 var(--font-ui);
     box-sizing: border-box;
   }
   .s3d-members {
@@ -552,12 +651,114 @@
     appearance: none;
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0;
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .s3d-link:hover {
     text-decoration: underline;
+  }
+  /* v2 material presets: a 5-up grid of lit "balls" (the swatch colour in a radial highlight). */
+  .s3d-presets {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .s3d-preset {
+    appearance: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 8px 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    color: var(--text-dim);
+    cursor: pointer;
+    min-width: 0;
+  }
+  .s3d-preset:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .s3d-preset.on {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .s3d-preset:focus-visible,
+  .s3d-swatch:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .s3d-ball {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, white 85%, var(--ball)) 0%, var(--ball) 45%, color-mix(in srgb, black 55%, var(--ball)) 100%);
+    box-shadow: 0 1px 2px color-mix(in srgb, black 25%, transparent);
+  }
+  .s3d-preset.brushed-metal .s3d-ball {
+    background: radial-gradient(circle at 35% 30%, white 0%, var(--ball) 40%, color-mix(in srgb, black 50%, var(--ball)) 100%);
+  }
+  .s3d-preset.frosted-glass .s3d-ball {
+    background: radial-gradient(circle at 35% 30%, white 0%, color-mix(in srgb, var(--ball) 70%, transparent) 55%, color-mix(in srgb, var(--ball) 40%, transparent) 100%);
+    border: 1px solid var(--border);
+  }
+  .s3d-preset.matte-paper .s3d-ball {
+    background: radial-gradient(circle at 40% 35%, color-mix(in srgb, white 40%, var(--ball)) 0%, var(--ball) 70%, color-mix(in srgb, black 25%, var(--ball)) 100%);
+  }
+  .s3d-plabel {
+    font-size: var(--fs-xs);
+    line-height: 1.15;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+  .s3d-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .s3d-swatch {
+    appearance: none;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border-strong);
+    background: var(--sw);
+    cursor: pointer;
+  }
+  .s3d-swatch.on {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  }
+  .s3d-token {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+  }
+  .s3d-token code {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .s3d-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--sw);
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .s3d-state-hint {
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--info-soft);
+    color: var(--text);
   }
 </style>

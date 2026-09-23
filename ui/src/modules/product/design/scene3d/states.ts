@@ -84,6 +84,18 @@ export function initialState(doc: Scene3dDoc): string | null {
   return doc.states?.[0]?.id ?? null;
 }
 
+/**
+ * Where an edit of `objectId` goes while `shownStateId` is showing: the base
+ * document (null), or — when a non-default state is showing, or the showing
+ * state already overrides this object — that state's overrides (Spline-style).
+ */
+export function editTargetState(doc: Scene3dDoc, shownStateId: string | null | undefined, objectId: string): string | null {
+  const st = findState(doc, shownStateId);
+  if (!st) return null;
+  if (st.id !== initialState(doc) || st.overrides?.[objectId]) return st.id;
+  return null;
+}
+
 function applyOverride(p: Pose, ov: Scene3dStateOverride, color: (ref: string) => string): Pose {
   return {
     position: ov.position ? ([...ov.position] as Vec3) : p.position,

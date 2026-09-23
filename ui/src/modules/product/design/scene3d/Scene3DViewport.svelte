@@ -44,7 +44,7 @@
   import { duplicate, findNode, gizmoModeForKey, remove, setCamera, setStateOverride, setTransform, summarize } from './ops';
   import { resolveColor } from './tokens';
   import { resolveMaterial, type ResolvedMaterial } from './presets';
-  import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from './states';
+  import { editTargetState, findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from './states';
   import { buildEnvironment, environmentKey, type BuiltEnvironment } from './environment';
 
   interface Props {
@@ -618,18 +618,6 @@
     invalidate();
   }
 
-  /**
-   * Where a gizmo edit goes: the base document, or — when a non-default state
-   * is showing (or the showing state already overrides this object) — that
-   * state's overrides, Spline-style.
-   */
-  function editsState(objectId: string): string | null {
-    const st = findState(doc, shownState);
-    if (!st) return null;
-    if (st.id !== initialState(doc) || st.overrides?.[objectId]) return st.id;
-    return null;
-  }
-
   /** Gizmo moved the selected node → write the transform back through ops. */
   function commitGizmo(): void {
     if (!gizmo || !gizmo.object || !canEdit || !selectedId) return;
@@ -648,7 +636,7 @@
       rotation: [obj.rotation.x * RAD, obj.rotation.y * RAD, obj.rotation.z * RAD] as Vec3,
       scale: [obj.scale.x, obj.scale.y, obj.scale.z] as Vec3,
     };
-    const st = editsState(selectedId);
+    const st = editTargetState(doc, shownState, selectedId);
     onchange(st ? setStateOverride(doc, st, selectedId, t) : setTransform(doc, selectedId, t));
   }
 
