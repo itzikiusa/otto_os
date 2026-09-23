@@ -487,8 +487,9 @@ export function versionAuthor(v: DesignVersion, meId: string | null | undefined)
   if (v.author_kind === 'agent') return 'Otto';
   if (v.author_kind === 'system') return v.kind === 'sync' ? 'sync' : 'import';
   if (meId && v.author_id === meId) return 'you';
-  // Other people: user ids are opaque ULIDs — never show them as a name.
-  return 'teammate';
+  // Other people: the daemon resolves `author_name`; user ids are opaque
+  // ULIDs — never show them as a name.
+  return v.author_name?.trim() || 'teammate';
 }
 
 /** Version strip order: oldest → newest (the strip reads left to right). */

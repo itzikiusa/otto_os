@@ -427,9 +427,9 @@
       }
       api.captureSignal({
         artifact_id: id,
-        kind: 'variant_chosen',
-        version_id: versionId,
-        payload: { source: 'restore', chosen_version_id: versionId, chosen_seq: seq, over_version_id: head.id, over_seq: head.seq, new_seq: res.version.seq },
+        kind: 'restored',
+        version_id: res.version.id,
+        payload: { from_version_id: versionId, from_seq: seq, over_version_id: head.id, over_seq: head.seq, new_seq: res.version.seq },
       });
       compare = null;
       selected = [];
@@ -529,6 +529,12 @@
         project_id: artifact.project_id ?? undefined,
         derived_from: { artifact_id: artifact.id, version_id: head?.id },
         message: `Copied from ${artifact.title}`,
+      });
+      api.captureSignal({
+        artifact_id: res.artifact.id,
+        kind: 'forked',
+        version_id: res.version.id,
+        payload: { source_artifact_id: artifact.id, source_version_id: head?.id, source: 'copy' },
       });
       router.go(`design/a/${encodeURIComponent(res.artifact.id)}`);
     } catch (e) {

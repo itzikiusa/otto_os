@@ -221,6 +221,7 @@ test('small helpers: titles, authors, brand colours and contrast', () => {
   assert.equal(versionAuthor(v('user', 'me'), 'me'), 'you');
   assert.equal(versionAuthor(v('system', 'system:import', 'sync'), 'me'), 'sync');
   assert.equal(versionAuthor(v('user', '01J9ZZZZ'), 'me'), 'teammate');
+  assert.equal(versionAuthor({ ...v('user', '01J9ZZZZ'), author_name: 'Noah' }, 'me'), 'Noah');
   assert.deepEqual(brandColors({ color: { primary: { $value: '#5B3DF5' }, bad: { $value: 'red' }, ink: '#14122B' } }), [
     { name: 'primary', value: '#5B3DF5' },
     { name: 'ink', value: '#14122B' },

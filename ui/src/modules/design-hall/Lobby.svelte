@@ -484,7 +484,7 @@
               <li>
                 <div class="act-line">
                   {#if w.session}<StatusDot status={w.session.status} />{/if}
-                  <span><span class="who">{w.session?.title ?? 'An agent'}</span> drafted
+                  <span><span class="who">{w.session?.title ?? w.a.created_session_title ?? 'An agent'}</span> drafted
                     <a href={`#/design/a/${encodeURIComponent(w.a.id)}`}>{w.a.title}</a></span>
                 </div>
                 <div class="act-meta">

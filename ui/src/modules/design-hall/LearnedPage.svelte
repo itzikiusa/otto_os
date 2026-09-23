@@ -102,6 +102,9 @@
     'rule_feedback',
     'status_change',
     'shipped',
+    'restored',
+    'reference_added',
+    'forked',
   ] as const;
   let kind = $state<'' | (typeof KINDS)[number]>('');
   let signals = $state<DesignSignal[]>([]);

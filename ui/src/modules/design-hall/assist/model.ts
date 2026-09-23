@@ -603,6 +603,9 @@ export function signalKindLabel(kind: string): string {
     rule_feedback: 'Rule decision',
     status_change: 'Status change',
     shipped: 'Shipped',
+    restored: 'Restored',
+    reference_added: 'Reference added',
+    forked: 'Started from',
   };
   return m[kind] ?? kind;
 }
@@ -641,6 +644,15 @@ export function assistSignalSummary(kind: string, payload: Record<string, unknow
       const rule = str('rule');
       return `Dismissed a finding${rule ? `: ${rule}` : ''}`;
     }
+    case 'restored': {
+      const from = typeof p.from_seq === 'number' ? p.from_seq : null;
+      const to = typeof p.new_seq === 'number' ? p.new_seq : null;
+      return from != null ? `Restored v${from}${to != null ? ` as v${to}` : ''}` : 'Restored an older version';
+    }
+    case 'reference_added':
+      return 'Added a design as a reference';
+    case 'forked':
+      return p.source === 'copy' ? 'Made an editable copy' : 'Started a new design from a reference';
     default:
       return null;
   }
