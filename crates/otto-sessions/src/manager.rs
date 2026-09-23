@@ -1226,6 +1226,11 @@ pub trait OutputScanner: Send + Sync {
     /// Called for each PTY output chunk. `provider` is the session's CLI
     /// provider ("claude", "codex", "shell", …) used as the re-auth target.
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]);
+
+    /// The PTY behind `session_id`'s output stream closed (its process is gone
+    /// and the reader drained): drop any per-session state kept for it. A
+    /// respawn starts a new stream. Default: nothing to drop.
+    fn on_session_end(&self, _session_id: &Id) {}
 }
 
 /// Await the child exit code without holding the (non-Send) watch guard
@@ -4239,6 +4244,7 @@ impl SessionManager {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
+                scanner.on_session_end(&scan_id);
             });
         }
 
