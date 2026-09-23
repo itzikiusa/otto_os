@@ -165,6 +165,15 @@ the project name. Terms are AND-ed, the last one prefix-matched; results come
 shipped → approved → review → draft, then by relevance, each with a snippet,
 `reference_count` and the `story_ids` it implements.
 
+### Listing (the Lobby)
+
+`GET /design/artifacts?story_id=S&limit=100` lists newest-updated first. Every
+row carries `story_ids` (so the Lobby can group by story without a search
+call), `created_by_name` and the head's `last_editor_id` / `_kind` / `_name`
+(versions carry `author_name`) — all resolved from the users table on read. A
+full page answers `X-Next-Cursor: <updated_at>|<id>`; send it back as
+`cursor=` for the next page (clients can also build it from the last row).
+
 ### Signals
 
 `POST /design/signals {artifact_id, kind, version_id?, payload}` records a

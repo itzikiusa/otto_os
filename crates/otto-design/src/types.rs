@@ -179,6 +179,10 @@ pub struct DesignArtifact {
     /// Display name of `last_editor_id` (`null` when it is not a user).
     #[serde(default)]
     pub last_editor_name: Option<String>,
+    /// Product stories this artifact is linked to (`dst_kind: story` links —
+    /// `implements`), sorted.
+    #[serde(default)]
+    pub story_ids: Vec<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

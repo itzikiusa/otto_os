@@ -122,7 +122,21 @@ fn row_artifact(r: &sqlx::sqlite::SqliteRow) -> Result<DesignArtifact> {
         last_editor_id: opt_col(r, "last_editor_id"),
         last_editor_kind: opt_col(r, "last_editor_kind"),
         last_editor_name: opt_col(r, "last_editor_name"),
+        story_ids: split_ids(opt_col(r, "story_ids_joined")),
     })
+}
+
+/// A `group_concat(…, char(10))` id list → sorted, de-duplicated ids.
+fn split_ids(joined: Option<String>) -> Vec<Id> {
+    let mut ids: Vec<Id> = joined
+        .unwrap_or_default()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// A nullable TEXT column that only some selects join in (absent → `None`).
@@ -220,8 +234,8 @@ macro_rules! user_name_of {
 }
 
 /// Read-time enrichment of an artifact row (`a` + its head version `v`):
-/// people and the head's author. Every artifact select carries these columns;
-/// `row_artifact` reads them leniently.
+/// people, the head's author and the linked story ids. Every artifact
+/// select carries these columns; `row_artifact` reads them leniently.
 macro_rules! art_enrich_cols {
     () => {
         concat!(
@@ -229,7 +243,9 @@ macro_rules! art_enrich_cols {
             " AS created_by_name, v.author_id AS last_editor_id, \
              v.author_kind AS last_editor_kind, ",
             user_name_of!("v.author_id"),
-            " AS last_editor_name"
+            " AS last_editor_name, \
+             (SELECT group_concat(l.dst_id, char(10)) FROM design_links l \
+              WHERE l.src_artifact_id = a.id AND l.dst_kind = 'story') AS story_ids_joined"
         )
     };
 }
@@ -361,6 +377,9 @@ pub struct ArtifactFilter {
     pub include_archived: bool,
     pub limit: i64,
     pub offset: i64,
+    /// Keyset page (`list_artifacts` only): rows strictly after this
+    /// `(updated_at stamp, id)` in newest-first order; `offset` is ignored.
+    pub cursor: Option<(String, Id)>,
 }
 
 impl ArtifactFilter {
@@ -424,6 +443,11 @@ impl ArtifactFilter {
         }
     }
 
+    /// The page size a listing actually uses (default 100, cap 500).
+    pub fn effective_limit(&self) -> i64 {
+        self.page().0
+    }
+
     fn page(&self) -> (i64, i64) {
         let limit = if self.limit > 0 {
             self.limit.min(500)
@@ -458,6 +482,24 @@ pub fn fts_match(query: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// The keyset cursor of a listed artifact — `<updated_at>|<id>`. Clients may
+/// build the same string from a row's JSON (`updated_at` + `|` + `id`).
+pub fn artifact_cursor(a: &DesignArtifact) -> String {
+    format!("{}|{}", stamp(a.updated_at), a.id)
+}
+
+/// Parse an `artifact_cursor` (any RFC 3339 spelling of the time) into the
+/// storage stamp + id the listing compares against.
+pub fn parse_cursor(s: &str) -> Result<(String, Id)> {
+    let bad = || Error::Invalid(format!("bad cursor {s:?} (expected <updated_at>|<id>)"));
+    let (at, id) = s.trim().rsplit_once('|').ok_or_else(bad)?;
+    if id.is_empty() || id.len() > 128 {
+        return Err(bad());
+    }
+    let at = DateTime::parse_from_rfc3339(at).map_err(|_| bad())?;
+    Ok((stamp(at.with_timezone(&Utc)), id.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -716,8 +758,15 @@ impl Store {
         let mut sql = format!("{ART_SELECT} WHERE 1 = 1");
         let mut args = Vec::new();
         f.push_where(&mut sql, &mut args);
-        let (limit, offset) = f.page();
-        sql.push_str(" ORDER BY a.updated_at DESC LIMIT ? OFFSET ?");
+        let (limit, mut offset) = f.page();
+        if let Some((at, id)) = &f.cursor {
+            sql.push_str(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))");
+            args.push(Arg::S(at.clone()));
+            args.push(Arg::S(at.clone()));
+            args.push(Arg::S(id.clone()));
+            offset = 0;
+        }
+        sql.push_str(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ? OFFSET ?");
         args.push(Arg::I(limit));
         args.push(Arg::I(offset));
         let mut q = sqlx::query(&sql);
@@ -2057,5 +2106,59 @@ mod tests {
             Some("Ada Lovelace")
         );
         assert_eq!(s.user_display_name("nobody").await, None);
+    }
+
+    #[tokio::test]
+    async fn rows_carry_story_ids_and_page_by_cursor() {
+        let s = store().await;
+        for id in ["A", "B", "C", "D", "E"] {
+            s.insert_artifact(&art(id, "w1")).await.unwrap();
+        }
+        let mut story = link("A", "S2", "implements", "explicit");
+        story.dst_kind = "story".into();
+        s.insert_link(&story).await.unwrap();
+        story.dst_id = "S1".into();
+        s.insert_link(&story).await.unwrap();
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.story_ids, vec!["S1".to_string(), "S2".to_string()]);
+        assert!(s.require_artifact("B").await.unwrap().story_ids.is_empty());
+        // The story filter and the per-row ids agree.
+        let f = ArtifactFilter {
+            story_id: Some("S1".into()),
+            ..Default::default()
+        };
+        let by_story = s.list_artifacts(&f).await.unwrap();
+        assert_eq!(by_story.len(), 1);
+        assert_eq!(by_story[0].story_ids.len(), 2);
+
+        // Keyset paging walks every row exactly once, newest first.
+        let mut seen = Vec::new();
+        let mut f = ArtifactFilter {
+            limit: 2,
+            ..Default::default()
+        };
+        loop {
+            let page = s.list_artifacts(&f).await.unwrap();
+            seen.extend(page.iter().map(|a| a.id.clone()));
+            if (page.len() as i64) < f.effective_limit() {
+                break;
+            }
+            // A client-built cursor (JSON spelling of updated_at) works too.
+            let last = page.last().unwrap();
+            let json_time = serde_json::to_value(last.updated_at).unwrap();
+            let cursor = format!("{}|{}", json_time.as_str().unwrap(), last.id);
+            assert_eq!(
+                parse_cursor(&cursor).unwrap(),
+                parse_cursor(&artifact_cursor(last)).unwrap()
+            );
+            f.cursor = Some(parse_cursor(&cursor).unwrap());
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, vec!["A", "B", "C", "D", "E"], "{seen:?}");
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        assert!(parse_cursor("nope").is_err());
+        assert!(parse_cursor("2026-01-01T00:00:00Z|").is_err());
     }
 }

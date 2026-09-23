@@ -3065,6 +3065,7 @@ mod tests {
             last_editor_id: None,
             last_editor_kind: None,
             last_editor_name: None,
+            story_ids: vec![],
         };
         for i in 0..(TURN_HISTORY + 5) {
             put_turn(new_turn(

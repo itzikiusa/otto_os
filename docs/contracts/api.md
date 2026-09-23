@@ -3076,6 +3076,8 @@ version's `author_id` / `author_kind` / its user's name — `null` before the
 first version or for a system author) and `DesignVersion.author_name` (same
 rule for `author_id`). An agent version's `author_id` is the user who
 launched the agent, so its name is that user's with `author_kind: "agent"`.
+`DesignArtifact.story_ids` lists the product stories the artifact is linked
+to (`dst_kind: "story"` — `implements` — links), sorted.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -3084,7 +3086,7 @@ launched the agent, so its name is that user's with `author_kind: "agent"`.
 | GET /api/v1/design/projects/{id} | ws viewer | — | `DesignProject` |
 | PATCH /api/v1/design/projects/{id} | ws editor | `UpdateDesignProjectReq` (omitted = unchanged, `""` clears an id, `meta` shallow-merged, `null` values delete keys) | `DesignProject` |
 | DELETE /api/v1/design/projects/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives; `?hard=true` deletes an EMPTY project (409 while it files artifacts). Artifacts are never deleted with a project |
-| GET /api/v1/design/artifacts | design view | `?workspace_id=&project_id=&studio=&format=&status=&story_id=&include_children=&author_kind=&since=&until=&include_archived=&limit=&offset=` | `DesignArtifact[]` (newest-updated first; archived hidden unless `include_archived`/`status=archived`; `story_id` matches `implements` links, `include_children=true` also the story's direct children — an epic's Design tab) |
+| GET /api/v1/design/artifacts | design view | `?workspace_id=&project_id=&studio=&format=&status=&story_id=&include_children=&author_kind=&since=&until=&include_archived=&limit=&offset=&cursor=` | `DesignArtifact[]` (newest-updated first, ties by id; archived hidden unless `include_archived`/`status=archived`; `story_id` matches `implements` links, `include_children=true` also the story's direct children — an epic's Design tab; every row carries its `story_ids`). `limit` default 100, cap 500. **Keyset paging:** a full page answers `X-Next-Cursor: <updated_at>\|<id>` (the last row's); pass it back as `cursor=` for the next page (`offset` is then ignored). Clients may build the same cursor from the last row's JSON (`updated_at + "\|" + id`, URL-encoded); a malformed cursor is 400 |
 | POST /api/v1/design/artifacts | design edit + ws editor | `CreateDesignArtifactReq {workspace_id, format, title, project_id?, studio?, tags?, meta?, content? \| content_b64?, story_id?, derived_from?: {artifact_id, version_id?}, author_kind?, session_id?, message?}` | 201 `DesignSaveResult` — v1 (`kind:"named"`); no content → the format's empty document (binary formats need content); `derived_from` forks the source's version (default approved, else head; caller needs viewer on the source) + a pinned `derived_from` link; `story_id` adds an `implements` link (404 unknown story). 40 MB body cap |
 | GET /api/v1/design/artifacts/{id} | ws viewer | `?content=true&version=v3` (optional) | `DesignArtifactDetail {artifact, head, approved, links_out, links_in, work_path, thumbnail_path, content, content_version_id, content_truncated}` — `content` (text formats, ≤ 256 KiB) only with `content=true` or `version=` |
 | PATCH /api/v1/design/artifacts/{id} | ws editor | `UpdateDesignArtifactReq {title?, project_id? ("" unfiles), studio?, status?, tags?, meta?, thumb_b64? (PNG ≤ 2 MB)}` | `DesignArtifact`. `status:"approved"` needs an approved version (use approve). A status change records a `status_change` signal (`shipped` → `shipped` signal) |

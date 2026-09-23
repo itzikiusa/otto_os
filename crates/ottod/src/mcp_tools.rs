@@ -713,7 +713,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "design_list",
-                "description": "Read-only: list Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) — id, title, studio, format, status, head version. The library is global; filter by project_id / studio / format / status / story_id. Use design_search to find references by content.",
+                "description": "Read-only: list Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) — id, title, studio, format, status, head version, who created / last edited it (created_by_name, last_editor_name) and the product stories it implements (story_ids). The library is global; filter by project_id / studio / format / status / story_id. Newest first; for the next page pass cursor = the last row's `updated_at|id`. Use design_search to find references by content.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -723,7 +723,8 @@ fn tool_catalog() -> Value {
                         "format": { "type": "string", "description": "html | mermaid | d2 | excalidraw | scene3d | otto-canvas | otto-site | png | glb | …" },
                         "status": { "type": "string", "description": "draft | review | approved | shipped | archived" },
                         "story_id": { "type": "string", "description": "Only artifacts that implement this product story." },
-                        "limit": { "type": "integer", "description": "Max rows (default 100, cap 500)." }
+                        "limit": { "type": "integer", "description": "Max rows (default 100, cap 500)." },
+                        "cursor": { "type": "string", "description": "Next page: `<updated_at>|<id>` of the previous page's last row." }
                     }
                 }
             },
@@ -1945,6 +1946,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
                     ("status", "status"),
                     ("story_id", "story_id"),
                     ("limit", "limit"),
+                    ("cursor", "cursor"),
                 ],
             );
             let q = q.trim_start_matches('&');
@@ -4094,6 +4096,16 @@ mod tests {
                 .unwrap()
                 .path,
             "/design/artifacts?studio=3d"
+        );
+        assert_eq!(
+            read_route(
+                "design_list",
+                &json!({"limit": 2, "cursor": "2026-09-23T10:00:00Z|A9"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/design/artifacts?limit=2&cursor=2026-09-23T10%3A00%3A00Z%7CA9"
         );
         let c = read_route(
             "design_get",

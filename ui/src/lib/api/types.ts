@@ -8993,6 +8993,8 @@ export interface DesignArtifact {
   last_editor_kind: DesignAuthorKind | null;
   /** Display name of `last_editor_id` (`null` when it is not a user). */
   last_editor_name: string | null;
+  /** Product stories this artifact is linked to (`implements`), sorted. */
+  story_ids: Id[];
 }
 
 export interface DesignVersion {

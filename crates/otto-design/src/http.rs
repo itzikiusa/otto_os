@@ -162,6 +162,10 @@ struct ArtifactQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    /// Keyset page of `GET /design/artifacts`: `<updated_at>|<id>` of the
+    /// previous page's last row (also sent back as `X-Next-Cursor`).
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -356,6 +360,10 @@ fn filter_from(
         include_archived: q.include_archived.unwrap_or(false),
         limit: q.limit.unwrap_or(default_limit),
         offset: q.offset.unwrap_or(0),
+        cursor: match q.cursor.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => Some(crate::store::parse_cursor(c)?),
+            _ => None,
+        },
     })
 }
 
@@ -534,7 +542,16 @@ async fn list_artifacts<S: DesignCtx>(
     let svc = ctx.design();
     let ws = visible(&ctx, &svc, &user, q.workspace_id.as_ref()).await?;
     let f = filter_from(q, ws, 100)?;
-    Ok(Json(svc.store().list_artifacts(&f).await?).into_response())
+    let rows = svc.store().list_artifacts(&f).await?;
+    // A full page may have more behind it: hand back the keyset cursor.
+    let next = (rows.len() as i64 >= f.effective_limit())
+        .then(|| rows.last().map(crate::store::artifact_cursor))
+        .flatten();
+    let mut resp = Json(rows).into_response();
+    if let Some(v) = next.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+        resp.headers_mut().insert("x-next-cursor", v);
+    }
+    Ok(resp)
 }
 
 async fn create_artifact<S: DesignCtx>(
@@ -1361,5 +1378,75 @@ mod tests {
             assert_eq!(st, StatusCode::CREATED, "{}", String::from_utf8_lossy(&s));
             assert_eq!(json_of(&s)["kind"], kind);
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_list_pages_by_cursor_and_carries_story_ids() {
+        let (app, ctx) = app().await;
+        let mut ids = Vec::new();
+        for t in ["One", "Two", "Three"] {
+            let (_, b, _) = call(
+                &app,
+                Method::POST,
+                "/design/artifacts",
+                Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": t })),
+            )
+            .await;
+            ids.push(json_of(&b)["artifact"]["id"].as_str().unwrap().to_string());
+        }
+        // An `implements` link shows up as `story_ids` on the row.
+        sqlx::query(
+            "INSERT INTO design_links (id, src_artifact_id, dst_kind, dst_id, rel, policy,
+                                       origin, created_by, created_at)
+             VALUES ('l1', ?, 'story', 'S1', 'implements', 'follow_latest', 'explicit', 'u1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .bind(&ids[0])
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let (st, b, h) = call(&app, Method::GET, "/design/artifacts?limit=2", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let page1 = json_of(&b);
+        assert_eq!(page1.as_array().unwrap().len(), 2);
+        let cursor = h
+            .get("x-next-cursor")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let (st, b, h) = call(
+            &app,
+            Method::GET,
+            &format!(
+                "/design/artifacts?limit=2&cursor={}",
+                cursor.replace('+', "%2B").replace('|', "%7C")
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let page2 = json_of(&b);
+        assert_eq!(page2.as_array().unwrap().len(), 1);
+        assert!(h.get("x-next-cursor").is_none(), "a short page is the last");
+        let mut all: Vec<String> = page1
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(page2.as_array().unwrap())
+            .map(|a| a["id"].as_str().unwrap().to_string())
+            .collect();
+        all.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(all, want);
+        let (_, b, _) = call(&app, Method::GET, "/design/artifacts?story_id=S1", None).await;
+        let rows = json_of(&b);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["story_ids"], serde_json::json!(["S1"]));
+        assert_eq!(rows[0]["id"], ids[0].as_str());
+        let (st, _, _) = call(&app, Method::GET, "/design/artifacts?cursor=bogus", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 }
