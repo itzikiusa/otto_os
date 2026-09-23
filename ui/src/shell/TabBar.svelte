@@ -397,7 +397,7 @@
   /* "Needs you" — blocked on operator input. Amber accents stand out from the
      calmer active/idle styling without being alarming. */
   .tab.needs-you:not(.active) {
-    border-color: color-mix(in srgb, #febc2e 45%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
     color: var(--text);
   }
   .tab-needs-you {
@@ -407,8 +407,8 @@
     width: 14px;
     height: 14px;
     border-radius: 99px;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 18%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
   .susp-dot {
     display: grid;
@@ -416,7 +416,7 @@
     width: 8px;
     height: 8px;
     flex-shrink: 0;
-    color: #febc2e;
+    color: var(--warning);
   }
   .tab-title {
     overflow: hidden;

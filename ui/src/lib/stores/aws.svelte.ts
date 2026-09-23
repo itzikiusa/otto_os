@@ -7,6 +7,7 @@
 // / `perms()` never mutate `$state` (templates read them inside `$derived`);
 // creation/mutation lives in loaders called from effects/handlers.
 
+import type { IconName } from '../components/Icon.svelte';
 import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { awsApi } from '../api/aws';
 import { ApiError } from '../api/client';
@@ -37,7 +38,7 @@ export interface AthenaCatalog {
   tables: Record<string, AthenaTable[]>;
 }
 
-export const AWS_SERVICES: { id: AwsService; label: string; icon: string }[] = [
+export const AWS_SERVICES: { id: AwsService; label: string; icon: IconName }[] = [
   { id: 's3', label: 'S3', icon: 'archive' },
   { id: 'sqs', label: 'SQS', icon: 'send' },
   { id: 'ec2', label: 'EC2', icon: 'box' },

@@ -27,7 +27,7 @@
   import { applyTileOrder } from '../lib/stores/splitLayout';
   import { layout } from '../lib/stores/splitLayout.svelte';
   import { toasts } from '../lib/toast.svelte';
-  import Icon from '../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../lib/components/Icon.svelte';
 
   // ---- frecency tracking ----
   // Persist command-usage counts + last-used timestamps in localStorage so
@@ -129,16 +129,16 @@
   }
 
   /** Icon name for a search hit kind. */
-  function hitIcon(kind: string): string {
+  function hitIcon(kind: string): IconName {
     switch (kind) {
-      case 'story': return 'book-open';
-      case 'workflow': return 'git-merge';
+      case 'story': return 'ticket';
+      case 'workflow': return 'merge';
       case 'api_request': return 'zap';
-      case 'swarm_task': return 'check-square';
+      case 'swarm_task': return 'check';
       case 'swarm_project': return 'layers';
-      case 'memory': return 'database';
-      case 'repo': return 'git-branch';
-      case 'broker_cluster': return 'server';
+      case 'memory': return 'db';
+      case 'repo': return 'branch';
+      case 'broker_cluster': return 'box';
       default: return 'file';
     }
   }

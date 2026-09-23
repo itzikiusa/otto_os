@@ -4,7 +4,7 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
   import { marked } from 'marked';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
@@ -1279,7 +1279,7 @@
                   }}
                   title={t.description}
                 >
-                  <span class="tpl-ic"><Icon name={t.icon} size={14} /></span>
+                  <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
                   <span class="tpl-body">
                     <span class="tpl-name">{t.name}</span>
                     <span class="tpl-sub">agent design + engine</span>
@@ -1402,7 +1402,7 @@
             <div class="palette">
               {#each types as t (t.kind)}
                 <button class="pal-item" onclick={() => addNode(t)}>
-                  <span class="pal-ic" style="--c:{t.color}"><Icon name={t.icon} size={12} /></span>
+                  <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
                   <span class="pal-body">
                     <span class="pal-name">{t.label}</span>
                     <span class="pal-cat">{t.category}</span>
@@ -1564,7 +1564,7 @@
 
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
-          <Icon name="user-check" size={14} />
+          <Icon name="userCheck" size={14} />
           <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
           <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
             Approve
@@ -3521,7 +3521,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
   }
   .ctx-files > summary {
     display: flex;
@@ -3555,7 +3555,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
     flex-shrink: 0;
   }
   .final-output > summary {
@@ -3574,7 +3574,7 @@
     height: 320px;
     border: none;
     border-top: 1px solid var(--border);
-    background: var(--surface-1, #1a1a1a);
+    background: #1a1a1a; /* FINAL_OUTPUT_CSS in the srcdoc is dark-only */
   }
   .tl-label {
     display: inline-flex;
@@ -3905,7 +3905,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }
   .ri-head {
@@ -3960,7 +3960,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-dim);
@@ -3970,7 +3970,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: var(--warn-bg, rgba(240, 192, 64, 0.12));
+    background: var(--warning-soft);
     border-bottom: 1px solid var(--border);
     font-size: 12.5px;
     color: var(--text);

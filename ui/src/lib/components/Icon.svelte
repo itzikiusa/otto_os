@@ -1,13 +1,9 @@
-<script lang="ts">
+<script lang="ts" module>
   // Minimal inline icon set (1.5px stroke, 16px viewBox) so we ship zero
-  // icon dependencies. Add names as needed.
-  interface Props {
-    name: string;
-    size?: number;
-  }
-  let { name, size = 16 }: Props = $props();
-
-  const paths: Record<string, string> = {
+  // icon dependencies. Add names as needed — `IconName` is derived from this
+  // map, so svelte-check rejects a name that isn't here (an unknown name used
+  // to render silently as a dot).
+  const paths = {
     // modules
     home: 'M2.5 8.2 8 3l5.5 5.2M4 7.2V13h8V7.2M6.5 13V9.5h3V13',
     terminal: 'M2.5 3.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2 3 2 1.7-2 1.8M8.5 10.5h3',
@@ -40,6 +36,7 @@
     dot: 'M8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z',
     check: 'M3 8.5l3.2 3L13 4.5',
     user: 'M8 2.5a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm-5.5 11a5.5 5.5 0 0 1 11 0',
+    userCheck: 'M6.5 2.5a2.8 2.8 0 1 1 0 5.6 2.8 2.8 0 0 1 0-5.6ZM1.5 13.5a5 5 0 0 1 9.2-2.7M10.5 11.6l1.5 1.5 2.7-3',
     folder: 'M2 4.5a1 1 0 0 1 1-1h3.3l1.4 1.5H13a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7Z',
     file: 'M4 2.5h5l3 3v8H4v-11Zm5 0v3h3',
     note: 'M3.5 2.5h9v9l-2 2h-7v-11Zm7 11v-2h2',
@@ -66,7 +63,9 @@
     // ship's wheel (Kubernetes console)
     helm: 'M8 5a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm0-3v3m0 6v3M2 8h3m6 0h3M3.8 3.8l2.1 2.1m4.2 4.2 2.1 2.1m0-8.4-2.1 2.1m-4.2 4.2-2.1 2.1',
     clock: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM8 5v3.2l2.2 1.3',
-    command: 'M5 5h6v6H5V5Zm0 0a1.5 1.5 0 1 1-1.5 1.5M11 5a1.5 1.5 0 1 0 1.5 1.5M5 11a1.5 1.5 0 1 0-1.5-1.5M11 11a1.5 1.5 0 1 1 1.5-1.5',
+    // ⌘ — four corner loops around a centre square
+    command:
+      'M6 6V4.5A1.5 1.5 0 1 0 4.5 6H6Zm0 0h4M6 6v4m4-4V4.5A1.5 1.5 0 1 1 11.5 6H10Zm0 0v4m0 0h1.5a1.5 1.5 0 1 1-1.5 1.5V10Zm0 0H6m0 0v1.5A1.5 1.5 0 1 1 4.5 10H6Z',
     pr: 'M4.5 3.5a1.5 1.5 0 1 0 0 .01M4.5 12.5a1.5 1.5 0 1 0 0 .01M11.5 12.5a1.5 1.5 0 1 0 0 .01M4.5 5v6M11.5 11V6.5L9 4m2.5 0H9m2.5 0v2.5',
     grid: 'M2.5 2.5h4v4h-4v-4Zm7 0h4v4h-4v-4Zm-7 7h4v4h-4v-4Zm7 0h4v4h-4v-4Z',
     square: 'M3 3h10a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5v-9A.5.5 0 0 1 3 3Z',
@@ -74,17 +73,22 @@
     maximize: 'M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10',
     minimize: 'M2.5 6H6V2.5M13.5 6H10V2.5M2.5 10H6v3.5M13.5 10H10v3.5',
     info: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM8 7.5v4M8 5.5v.5',
+    // triangle + "!" — warnings, cautions, failed-but-recoverable states
+    warning: 'M8 2.3 14.2 13.2H1.8L8 2.3ZM8 6.6v3M8 11.3v.1',
     link: 'M6.5 9.5a3.5 3.5 0 0 0 4.95 0l1.5-1.5a3.5 3.5 0 0 0-4.95-4.95l-.88.88M9.5 6.5a3.5 3.5 0 0 0-4.95 0l-1.5 1.5a3.5 3.5 0 0 0 4.95 4.95l.88-.88',
     external: 'M10.5 3.5h2v2M12.5 3.5 7 9M8 4H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V8',
     ticket: 'M2 5.5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1.6a1.5 1.5 0 0 0 0 2.8V11.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9.9a1.5 1.5 0 0 0 0-2.8V5.5ZM9.5 5.5v5',
     slack: 'M5.5 9.5a1.5 1.5 0 0 1-1.5 1.5 1.5 1.5 0 0 1-1.5-1.5V8H5.5v1.5ZM6.5 9.5V5a1.5 1.5 0 0 1 3 0v4.5a1.5 1.5 0 0 1-3 0ZM6.5 6.5a1.5 1.5 0 0 1 1.5-1.5 1.5 1.5 0 0 1 1.5 1.5H8V6.5ZM6.5 7.5H11a1.5 1.5 0 0 1 0 3h-4.5V7.5ZM9.5 6.5a1.5 1.5 0 0 1 1.5-1.5 1.5 1.5 0 0 1 1.5 1.5 1.5 1.5 0 0 1-1.5 1.5H9.5V6.5ZM8 10.5v4.5a1.5 1.5 0 0 1-3 0 1.5 1.5 0 0 1 1.5-1.5H8ZM9.5 11H11a1.5 1.5 0 0 1 1.5 1.5 1.5 1.5 0 0 1-1.5 1.5 1.5 1.5 0 0 1-1.5-1.5v-1.5Z',
     bell: 'M8 2a4.5 4.5 0 0 1 4.5 4.5c0 2.5.8 3.5 1.5 4.5H2c.7-1 1.5-2 1.5-4.5A4.5 4.5 0 0 1 8 2ZM6.5 11a1.5 1.5 0 0 0 3 0',
     send: 'M2.5 8l11-5-5 11-1.5-4.5L2.5 8Zm4 1.5 5.5-6.5',
+    mail: 'M2.5 4h11a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-7a.5.5 0 0 1 .5-.5Zm-.3.6L8 9l5.8-4.4',
     tag: 'M2.5 2.5h5.3l5.7 5.7-5.5 5.5L2.5 8V2.5Zm2.8 2.5a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z',
     // Folder with a mini branch fork — a branch checked out in a linked worktree.
     worktree: 'M2 4.5a1 1 0 0 1 1-1h3.3l1.4 1.5H13a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7ZM6.2 7.3v3.4M6.2 8.6c0 1 .9 1.6 1.9 1.6h1.7',
     stash: 'M2.5 4.5h11v3h-11v-3Zm1 3v4h9v-4M5 4.5V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5',
     fetch: 'M8 2.5v8M5 8l3 3 3-3M13 11.5v1.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-1.5',
+    // save/export to a file (CSV, JSON…)
+    download: 'M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13h10',
     share: 'M11.5 2.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM4.5 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm7 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-7-1.5 7-3M4.5 8l7 3',
     pin: 'M9 2.5 13.5 7l-2 .5-3.5-3.5L9 2.5ZM6 4l6 6M4 8l4 4-3.5 1.5L3 12l1.5-3.5ZM8 12l-6 2',
     radar: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm0 2.6a2.9 2.9 0 1 0 2.9 2.9M8 8l3.4-2.1M8 8h.01',
@@ -95,7 +99,29 @@
     unlock: 'M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Zm1 0V5a2.5 2.5 0 0 1 4.9-.7M8 10v1.5',
     // Live-tab element picker toggle (browser module).
     target: 'M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15M8 4.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4ZM8 7.3a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4Z',
-  };
+    // Live-tab "click to interact" pointer (browser panel).
+    cursor: 'M3.5 2.5 12.5 7.3 8.5 8.5 6.7 12.5 3.5 2.5ZM8.5 8.5l3.6 3.6',
+  } satisfies Record<string, string>;
+
+  export type IconName = keyof typeof paths;
+  /** Every defined icon name (pickers, tests). */
+  export const ICON_NAMES = Object.keys(paths) as IconName[];
+  /** Narrow an untyped string (persisted data, API payloads) to an IconName. */
+  export function isIconName(v: string): v is IconName {
+    return Object.hasOwn(paths, v);
+  }
+  /** An icon name from untyped data, or `fallback` when it isn't one of ours. */
+  export function asIcon(v: string | null | undefined, fallback: IconName = 'dot'): IconName {
+    return v && isIconName(v) ? v : fallback;
+  }
+</script>
+
+<script lang="ts">
+  interface Props {
+    name: IconName;
+    size?: number;
+  }
+  let { name, size = 16 }: Props = $props();
 </script>
 
 <svg
@@ -111,3 +137,10 @@
 >
   <path d={paths[name] ?? paths.dot} />
 </svg>
+
+<style>
+  /* An icon is never squashed by a flex parent (e.g. a padded icon button). */
+  svg {
+    flex-shrink: 0;
+  }
+</style>

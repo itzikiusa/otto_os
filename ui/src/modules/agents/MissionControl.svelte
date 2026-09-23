@@ -7,7 +7,7 @@
 
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { reviewBus, workflowRunBus, budgetBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -260,7 +260,7 @@
   };
 
   // Icon-component names (the rest of the app uses Icon, not emoji).
-  const BUCKET_ICONS: Record<BucketKey, string> = {
+  const BUCKET_ICONS: Record<BucketKey, IconName> = {
     needs_you: 'bell',
     working: 'zap',
     review_ready: 'eye',
@@ -771,7 +771,7 @@
     padding: 1px 5px;
   }
   .meta-tag.cost {
-    color: #f59e0b;
+    color: var(--warning);
   }
   .meta-tag.age {
     color: var(--text-dim);

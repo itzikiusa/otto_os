@@ -336,7 +336,7 @@
     position: relative;
     height: 6px;
     border-radius: 999px;
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-3);
     overflow: hidden;
   }
   .exp-bar-fill {

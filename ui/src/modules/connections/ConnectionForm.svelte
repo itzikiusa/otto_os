@@ -872,8 +872,8 @@
     line-height: 1.5;
     padding: 8px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, #febc2e 12%, transparent);
-    border: 1px solid color-mix(in srgb, #febc2e 40%, transparent);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
     margin-bottom: 12px;
   }
   .field-row {
@@ -962,9 +962,9 @@
     margin-right: auto;
   }
   .test-result.ok {
-    color: var(--ok, #34c759);
+    color: var(--success);
   }
   .test-result.err {
-    color: var(--danger, #ff453a);
+    color: var(--danger);
   }
 </style>

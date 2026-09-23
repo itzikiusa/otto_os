@@ -485,9 +485,9 @@
     flex-shrink: 0;
   }
   .mockup-badge {
-    background: color-mix(in srgb, #f59e0b 14%, transparent);
-    color: #d97706;
-    border-color: color-mix(in srgb, #f59e0b 28%, transparent);
+    background: color-mix(in srgb, var(--warning) 14%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 28%, transparent);
   }
 
   /* Preview containers */
@@ -582,7 +582,7 @@
     color: var(--accent);
   }
   .att-delete-btn:hover {
-    border-color: #ef4444;
-    color: #ef4444;
+    border-color: var(--danger);
+    color: var(--danger);
   }
 </style>

@@ -205,6 +205,6 @@
   .entry > div { flex: 1; min-width: 0; }
   code { font-size: 11px; overflow-wrap: anywhere; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25vh; overflow: auto; }
-  .error { color: var(--status-error, #d44); }
+  .error { color: var(--danger); }
   @media (max-width: 600px) { .entry { flex-wrap: wrap; } .entry > div { flex-basis: 55%; } }
 </style>

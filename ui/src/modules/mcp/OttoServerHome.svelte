@@ -471,8 +471,8 @@
     margin-inline-start: 8px;
     font-size: 9px;
     text-transform: uppercase;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -532,9 +532,9 @@
   .warn {
     margin: 0;
     font-size: 12.5px;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 12%, transparent);
-    border: 1px solid color-mix(in srgb, #e0a000 35%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-s, 6px);
     padding: 10px 12px;
   }

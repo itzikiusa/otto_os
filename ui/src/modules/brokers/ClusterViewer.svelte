@@ -163,7 +163,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
-    color: var(--muted);
+    color: var(--text-dim);
   }
   .env.prod {
     color: #ff9800;
@@ -171,7 +171,7 @@
   }
   .ro {
     font-size: 10px;
-    color: var(--muted);
+    color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 6px;
@@ -181,18 +181,18 @@
     align-items: center;
     gap: 3px;
     font-size: 10px;
-    color: var(--muted);
+    color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 6px;
   }
   .tunnel-pill.ready {
-    color: #7ee787;
+    color: var(--success);
     border-color: #7ee78755;
   }
   .boot {
     font-size: 11px;
-    color: var(--muted);
+    color: var(--text-dim);
     max-width: 380px;
   }
   .cv-actions {
@@ -212,7 +212,7 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    color: var(--muted);
+    color: var(--text-dim);
     font: inherit;
     font-size: 12px;
     padding: 6px 10px;
@@ -220,10 +220,10 @@
     white-space: nowrap;
   }
   .cv-tabs button:hover {
-    color: var(--fg);
+    color: var(--text);
   }
   .cv-tabs button.on {
-    color: var(--fg);
+    color: var(--text);
     border-bottom-color: var(--accent);
   }
   .cv-body {
@@ -238,7 +238,7 @@
   }
   .btn {
     background: var(--surface-2, var(--surface));
-    color: var(--fg);
+    color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px;
     font: inherit;
@@ -256,7 +256,7 @@
     cursor: default;
   }
   .btn.danger:hover {
-    border-color: #ff6b6b;
-    color: #ff6b6b;
+    border-color: var(--danger);
+    color: var(--danger);
   }
 </style>

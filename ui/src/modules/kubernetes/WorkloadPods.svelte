@@ -210,10 +210,10 @@
     flex-shrink: 0;
   }
   .health-ok {
-    color: var(--status-ready, #3fb950);
+    color: var(--success);
   }
   .health-ok .hdot {
-    background: var(--status-ready, #3fb950);
+    background: var(--success);
   }
   .health-bad {
     color: var(--status-exited, #f85149);

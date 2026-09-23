@@ -8,6 +8,7 @@
     ProviderSkillInfo,
     SkillFileEntry,
   } from '../../lib/api/types';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
 
@@ -150,7 +151,7 @@
 
   async function addFile(): Promise<void> {
     if (!selected || selected.source !== 'library') return;
-    const path = prompt('New file path (relative, e.g. references/notes.md)');
+    const path = await confirmer.promptText('New file path (relative, e.g. references/notes.md)', { title: 'New file', confirmLabel: 'Create', placeholder: 'references/notes.md' });
     if (!path) return;
     try {
       files = await skillLabApi.putFile(selected.name, { path, content: '' });
@@ -163,7 +164,7 @@
 
   async function deleteFile(path: string): Promise<void> {
     if (!selected || selected.source !== 'library' || path === 'SKILL.md') return;
-    if (!confirm(`Delete ${path}?`)) return;
+    if (!(await confirmer.ask(`Delete ${path}?`, { title: 'Delete file' }))) return;
     try {
       await skillLabApi.deleteFile(selected.name, path);
       files = await skillLabApi.listFiles(selected.name);
@@ -220,7 +221,7 @@
 
   async function deleteSkill(): Promise<void> {
     if (!selected || selected.source !== 'library') return;
-    if (!confirm(`Delete skill "${selected.name}" from the library?`)) return;
+    if (!(await confirmer.ask(`Delete skill "${selected.name}" from the library?`, { title: 'Delete skill' })) || !selected) return;
     try {
       await skillLabApi.remove(selected.name);
       selected = null;

@@ -54,7 +54,7 @@
     background: var(--status-working);
   }
   .toast.warn .toast-stripe {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .toast.error .toast-stripe {
     background: var(--status-exited);

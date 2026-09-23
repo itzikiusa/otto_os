@@ -488,8 +488,8 @@
     max-width: 80%;
     padding: 7px 12px;
     border-radius: 8px;
-    background: color-mix(in srgb, #dc2626 16%, var(--surface));
-    border: 1px solid #dc2626;
+    background: color-mix(in srgb, var(--danger) 16%, var(--surface));
+    border: 1px solid var(--danger);
     color: var(--text);
     font-size: 12px;
   }

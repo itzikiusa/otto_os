@@ -5,7 +5,7 @@
   //   • Team skills    — library skills every agent inherits (config.skills)
   //   • Triggers       — channel rules that auto-launch swarm work
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
@@ -157,7 +157,7 @@
     }
   }
 
-  const TABS: { id: Tab; label: string; icon: string }[] = [
+  const TABS: { id: Tab; label: string; icon: IconName }[] = [
     { id: 'goals', label: 'Standing goals', icon: 'check' },
     { id: 'skills', label: 'Team skills', icon: 'zap' },
     { id: 'triggers', label: 'Triggers', icon: 'comment' },
@@ -374,7 +374,7 @@
   .toggle.on {
     background: #7ee787;
     color: #0a0a0a;
-    border-color: #7ee787;
+    border-color: var(--success);
     font-weight: 600;
   }
   .form {

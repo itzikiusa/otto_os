@@ -241,14 +241,14 @@
     margin-left: 4px;
   }
   .json-str {
-    color: var(--ok, #3fb950);
+    color: var(--success);
   }
   .json-num {
-    color: var(--info, #58a6ff);
+    color: var(--info);
   }
   .json-bool,
   .json-null {
-    color: var(--warn, #d29922);
+    color: var(--warning);
   }
   .json-bson {
     color: var(--accent);

@@ -360,7 +360,7 @@
     padding: 12px 14px;
   }
   .error-msg {
-    color: #ef4444;
+    color: var(--danger);
     font-size: 13px;
     padding: 8px 0;
   }
@@ -432,12 +432,12 @@
     color: var(--accent);
   }
   .status-running {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .status-error {
-    background: color-mix(in srgb, #ef4444 18%, transparent);
-    color: #dc2626;
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   .status-other {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -549,10 +549,10 @@
     background: var(--accent);
   }
   .task-status-dot.status-running {
-    background: #f59e0b;
+    background: var(--status-warn);
   }
   .task-status-dot.status-error {
-    background: #ef4444;
+    background: var(--status-exited);
   }
   .task-status-dot.status-other {
     background: var(--text-dim);

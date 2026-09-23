@@ -3,7 +3,7 @@
   // (wheel), drag nodes, drag output→input ports to connect, live run-status
   // coloring. Pure SVG + absolutely-positioned cards inside one transformed
   // viewport, so everything works in graph coordinates.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -294,7 +294,7 @@
       >
         <span class="stripe"></span>
         <div class="head">
-          <span class="ic"><Icon name={spec(n.kind)?.icon ?? 'box'} size={14} /></span>
+          <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
           <span class="body">
             <span class="title">{n.name || spec(n.kind)?.label || n.kind}</span>
             <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>

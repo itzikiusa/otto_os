@@ -316,7 +316,7 @@
         class:active={activeTab === 'commits'}
         onclick={() => selectTab('commits')}
       >
-        <Icon name="git-commit" size={12} /> Commits
+        <Icon name="commit" size={12} /> Commits
       </button>
       <button
         class="tab-btn"
@@ -395,7 +395,7 @@
             disabled={busy !== ''}
             onclick={() => (showRequestChanges = !showRequestChanges)}
           >
-            <Icon name="alert-triangle" size={12} />
+            <Icon name="warning" size={12} />
             Request changes
           </button>
           <div class="row merge-group">
@@ -636,7 +636,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, var(--dim));
+    color: var(--text-dim);
     margin-bottom: 8px;
   }
   .reviewer-row {

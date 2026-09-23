@@ -1189,7 +1189,7 @@
     line-height: 1.5;
   }
   .list-empty.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .group-head {
     display: flex;
@@ -1461,7 +1461,7 @@
     flex: none;
   }
   .stage-msg.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .stage-msg p {
     margin: 0 0 8px;
@@ -1487,7 +1487,7 @@
     flex-shrink: 0;
   }
   .stage-status .save.warn {
-    color: #f59e0b;
+    color: var(--warning);
     font-weight: 600;
   }
   .stage-status .link {

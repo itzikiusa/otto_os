@@ -306,10 +306,10 @@
     transition: width 180ms ease-out, background 180ms ease-out;
   }
   .strength-fill.s2 {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .strength-fill.s3 {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .strength-fill.s4,
   .strength-fill.s5 {

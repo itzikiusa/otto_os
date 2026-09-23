@@ -316,7 +316,7 @@
     display: none;
   }
   .op summary:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.08));
+    background: var(--hover);
   }
   .method {
     font-size: 10.5px;
@@ -391,7 +391,7 @@
     font-size: 12px;
   }
   .pname {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .pname.req::after {
     content: '*';

@@ -486,10 +486,10 @@
     color: #d6a800;
   }
   .ap-approved {
-    color: #2ea043;
+    color: var(--success);
   }
   .ap-rejected {
-    color: #ff5f57;
+    color: var(--danger);
   }
   .ap-actions {
     display: flex;
@@ -596,7 +596,7 @@
     font-size: 11.5px;
   }
   .err {
-    color: #ff5f57;
+    color: var(--danger);
   }
   .grow {
     flex: 1 1 auto;

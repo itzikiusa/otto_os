@@ -1,6 +1,7 @@
 <script lang="ts">
   // One personal agent: Overview / Schedules / Runs / Chat / Memory tabs.
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -113,7 +114,7 @@
   }
 
   async function deleteSchedule(s: PersonalAgentSchedule): Promise<void> {
-    if (!confirm('Delete this schedule?')) return;
+    if (!(await confirmer.ask('Delete this schedule?', { title: 'Delete schedule' }))) return;
     try {
       await personalAgents.deleteSchedule(agentId, s.id);
     } catch (e) {

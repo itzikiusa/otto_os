@@ -5,6 +5,7 @@
 // they can be reasoned about (and tested via e2e) without Svelte/auth state —
 // the caller supplies the RBAC predicate and the already-permitted plugin list.
 
+import type { IconName } from './components/Icon.svelte';
 import type { Feature } from './api/types';
 
 /**
@@ -36,7 +37,7 @@ export interface SidebarModuleDef {
   id: string;
   /** Icon name (see Icon.svelte). Unique across modules — the collapsed Rail
    *  shows icons only, so a shared glyph makes two entries indistinguishable. */
-  icon: string;
+  icon: IconName;
   /** Display label. */
   label: string;
   /** Sidebar section (see {@link SIDEBAR_GROUPS}). */
@@ -57,7 +58,7 @@ export interface SidebarModuleDef {
 /** A resolved, currently-available module (a built-in or a runtime plugin). */
 export interface SidebarModule {
   id: string;
-  icon: string;
+  icon: IconName;
   label: string;
   group: SidebarGroupId;
   keywords?: string;

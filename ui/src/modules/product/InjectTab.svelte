@@ -219,7 +219,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* Action bar */
@@ -344,7 +344,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .sec-trigger {
     display: flex;
@@ -444,7 +444,7 @@
     border-radius: 3px;
   }
   .md-body :global(pre) {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;

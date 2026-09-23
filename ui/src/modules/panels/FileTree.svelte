@@ -442,7 +442,7 @@
   }
   .ft-close-btn:hover {
     opacity: 1;
-    color: var(--danger, #e05252);
+    color: var(--danger);
   }
 
   /* ── tree ─────────────────────────────── */
@@ -597,7 +597,7 @@
     min-height: 0;
     width: 100%;
     border: none;
-    background: var(--surface-1, #1a1a1a);
+    background: #1a1a1a; /* PREVIEW_CSS in the srcdoc is dark-only */
   }
 
   /* ── misc ─────────────────────────────── */
@@ -608,7 +608,7 @@
   .error-msg {
     padding: 12px;
     font-size: 12px;
-    color: var(--danger, #e05252);
+    color: var(--danger);
     word-break: break-all;
   }
 </style>

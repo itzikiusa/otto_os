@@ -799,7 +799,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* ── Run panel ─────────────────────────────────────────────────── */
@@ -982,7 +982,7 @@
     gap: 8px;
   }
   .hist-select {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -1085,14 +1085,14 @@
     line-height: 1.4;
   }
   .rp-agent-note.error-note {
-    color: #b91c1c;
+    color: var(--danger);
     font-family: var(--font-mono, monospace);
   }
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: #b07d00;
+    color: var(--warning);
   }
 
   /* ── Shared small button — mirror PR review's .btn.small.ghost ── */
@@ -1158,8 +1158,8 @@
     color: var(--accent);
   }
   .rp-status-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
   .rp-status-done {
     background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
@@ -1170,8 +1170,8 @@
     color: var(--status-exited, #b91c1c);
   }
   .rp-status-partial {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
 
   /* ── Findings card ────────────────────────────────────────────── */
@@ -1181,7 +1181,7 @@
     gap: 0;
   }
   .error-card {
-    border-color: color-mix(in srgb, #ef4444 35%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
   }
   .findings-header {
     display: flex;
@@ -1256,7 +1256,7 @@
     color: var(--text);
   }
   .risk-list li {
-    color: #b45309;
+    color: var(--warning);
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
@@ -1324,7 +1324,7 @@
   /* ── Error message ────────────────────────────────────────────── */
   .error-msg {
     font-size: 12.5px;
-    color: #b91c1c;
+    color: var(--danger);
     line-height: 1.5;
     margin: 4px 0 0;
     font-family: var(--font-mono, monospace);

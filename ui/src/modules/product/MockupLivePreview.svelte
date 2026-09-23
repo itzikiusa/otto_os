@@ -113,7 +113,7 @@
     text-align: center;
   }
   .live-msg.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .live-src {
     margin: 0;

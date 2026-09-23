@@ -1336,12 +1336,12 @@
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
   }
   .ib-row.custom .ib-ord {
-    color: var(--ok, #3fb950);
+    color: var(--success);
   }
   .ib-custom-tag {
     flex-shrink: 0;
     font-size: 10px;
-    color: var(--ok, #3fb950);
+    color: var(--success);
   }
   .ib-sep {
     height: 1px;
@@ -1406,7 +1406,7 @@
     font-size: 11px;
     line-height: 1.5;
     color: var(--text-dim);
-    border-inline-start: 2px solid var(--danger, #e5534b);
+    border-inline-start: 2px solid var(--danger);
     padding-inline-start: 8px;
   }
   .ib-warn code {
@@ -1648,8 +1648,8 @@
     color: var(--accent);
   }
   .idx-act.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--danger, #e5534b) 18%, transparent);
-    color: var(--danger, #e5534b);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   .idx-act:disabled {
     opacity: 0.35;
