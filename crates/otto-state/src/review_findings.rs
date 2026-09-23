@@ -78,8 +78,9 @@ pub struct NewFinding<'a> {
     pub review_id: &'a str,
     pub workspace_id: &'a str,
     pub repo_id: &'a str,
-    /// `None` for a local (non-PR) review — those dedup within the review_id,
-    /// not across runs of a PR. Stored as the `0` sentinel in the NOT NULL column.
+    /// `None` for a local (non-PR) review — those dedup across the repo's local
+    /// runs (fingerprint scope `pr_number = 0`), not across runs of a PR.
+    /// Stored as the `0` sentinel in the NOT NULL column.
     pub pr_number: Option<u64>,
     pub path: Option<&'a str>,
     pub line: Option<i64>,
@@ -145,6 +146,87 @@ pub fn compute_fingerprint(
     hasher.update(b"|");
     hasher.update(normalized_body_cap(body).as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Stable (v2) finding fingerprint: repo + PR scope + normalized path +
+/// category + an `anchor` chosen by [`finding_anchor`].
+///
+/// The legacy [`compute_fingerprint`] hashed the summarizer-written BODY, which
+/// the summarizer re-words on every run — so the same defect got a new key each
+/// time, never deduped (`occurrence_count` stayed 1) and never regressed. The
+/// anchor is instead the text of the code line the finding points at (which
+/// survives the line moving), falling back to the normalized title. The `v2|`
+/// domain tag keeps the two schemes from ever colliding.
+pub fn compute_finding_fingerprint(
+    repo_id: &str,
+    pr_number: u64,
+    path: Option<&str>,
+    category: Option<&str>,
+    anchor: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"v2|");
+    hasher.update(repo_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(pr_number.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(
+        normalize_finding_path(path.unwrap_or(""))
+            .to_lowercase()
+            .as_bytes(),
+    );
+    hasher.update(b"|");
+    hasher.update(category.unwrap_or("").trim().to_lowercase().as_bytes());
+    hasher.update(b"|");
+    hasher.update(anchor.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Repo-relative path normalization shared by the fingerprint and the
+/// diff-scope match: trim, drop a leading `./`.
+pub fn normalize_finding_path(path: &str) -> &str {
+    let p = path.trim();
+    p.strip_prefix("./").unwrap_or(p)
+}
+
+/// Normalize free text for anchoring: lowercase, keep only alphanumerics,
+/// collapse every run of anything else into one space. Re-indentation,
+/// punctuation tweaks and case changes therefore don't move the key.
+pub fn normalize_anchor_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
+/// Choose the fingerprint anchor for a finding. Preference order:
+/// 1. the anchored code line's text, when it is distinctive (a bare `}` or
+///    `return` would merge unrelated findings, so under 8 normalized chars is
+///    ignored) — stable across re-wording AND across the line moving;
+/// 2. the normalized title;
+/// 3. the capped, normalized body (the legacy material) as a last resort.
+pub fn finding_anchor(line_text: Option<&str>, title: &str, body: &str) -> String {
+    if let Some(t) = line_text {
+        let n = normalize_anchor_text(t);
+        if n.chars().count() >= 8 {
+            return format!("line:{n}");
+        }
+    }
+    let t = normalize_anchor_text(title);
+    if !t.is_empty() {
+        return format!("title:{t}");
+    }
+    format!("body:{}", normalized_body_cap(body))
 }
 
 /// Body normalization shared by [`compute_fingerprint`] and
@@ -233,35 +315,50 @@ impl ReviewFindingsRepo {
     /// re-review; §15.1). Returns the full [`Finding`] and whether it was newly
     /// created (so the caller can append a `created` audit event).
     ///
-    /// Dedup key: PR reviews dedup across runs by `(workspace, repo, pr, fingerprint)`;
-    /// local reviews (`pr_number=None`) dedup within `(review_id, fingerprint)`.
+    /// Dedup key: `(workspace, repo, pr, fingerprint)` — PR reviews across runs
+    /// of that PR, local reviews (`pr_number=None`, the `0` sentinel) across the
+    /// repo's local runs. Local findings used to dedup only within their own
+    /// `review_id`, so no local finding could ever re-occur or regress; with a
+    /// content-anchored fingerprint ([`compute_finding_fingerprint`]) the same
+    /// defect on the same code is recognized run over run.
     pub async fn upsert(&self, f: &NewFinding<'_>) -> Result<(Finding, bool)> {
+        self.upsert_tracked(f, None).await
+    }
+
+    /// [`upsert`](Self::upsert) that also matches an existing row stored under
+    /// `legacy_fingerprint` (the pre-v2 body hash), so findings recorded before
+    /// the fingerprint change are recognized — and re-keyed to `f.fingerprint`
+    /// — instead of being resolved as "absent" and duplicated. A re-occurrence
+    /// also refreshes the anchor (`path`/`line`/`line_end`) and
+    /// `last_seen_review_id`, which used to stay frozen at the first sighting.
+    pub async fn upsert_tracked(
+        &self,
+        f: &NewFinding<'_>,
+        legacy_fingerprint: Option<&str>,
+    ) -> Result<(Finding, bool)> {
         let now = fmt(Utc::now());
         let severity = FindingSeverity::normalize(f.severity); // normalize on write
+        let pr_col = f.pr_number.unwrap_or(0) as i64;
+        let legacy = legacy_fingerprint.unwrap_or(f.fingerprint);
 
-        // Locate any existing row for this fingerprint within its dedup scope.
-        let existing: Option<sqlx::sqlite::SqliteRow> = match f.pr_number {
-            Some(pr) => sqlx::query(
-                "SELECT id, state FROM review_findings \
-                 WHERE workspace_id = ? AND repo_id = ? AND pr_number = ? AND fingerprint = ? \
-                 LIMIT 1",
-            )
-            .bind(f.workspace_id)
-            .bind(f.repo_id)
-            .bind(pr as i64)
-            .bind(f.fingerprint),
-            None => sqlx::query(
-                "SELECT id, state FROM review_findings \
-                 WHERE review_id = ? AND fingerprint = ? LIMIT 1",
-            )
-            .bind(f.review_id)
-            .bind(f.fingerprint),
-        }
+        // Locate any existing row for this fingerprint within its dedup scope,
+        // preferring an exact (v2) match over a legacy one, then the newest.
+        let existing: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+            "SELECT id, state FROM review_findings \
+             WHERE workspace_id = ? AND repo_id = ? AND pr_number = ? \
+               AND fingerprint IN (?, ?) \
+             ORDER BY (fingerprint = ?) DESC, updated_at DESC \
+             LIMIT 1",
+        )
+        .bind(f.workspace_id)
+        .bind(f.repo_id)
+        .bind(pr_col)
+        .bind(f.fingerprint)
+        .bind(legacy)
+        .bind(f.fingerprint)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("upsert finding lookup"))?;
-
-        let pr_col = f.pr_number.unwrap_or(0) as i64;
 
         if let Some(row) = existing {
             let existing_id: String = row.get("id");
@@ -273,13 +370,19 @@ impl ReviewFindingsRepo {
             };
             sqlx::query(
                 "UPDATE review_findings \
-                 SET state = ?, review_id = ?, last_seen_run = ?, \
+                 SET state = ?, review_id = ?, last_seen_run = ?, last_seen_review_id = ?, \
+                     fingerprint = ?, path = COALESCE(?, path), line = ?, line_end = ?, \
                      occurrence_count = occurrence_count + 1, updated_at = ? \
                  WHERE id = ?",
             )
             .bind(next_state)
             .bind(f.review_id)
             .bind(f.run_id)
+            .bind(f.review_id)
+            .bind(f.fingerprint)
+            .bind(f.path)
+            .bind(f.line)
+            .bind(f.line_end)
             .bind(&now)
             .bind(&existing_id)
             .execute(&self.pool)
@@ -341,40 +444,54 @@ impl ReviewFindingsRepo {
         seen_fingerprints: &[&str],
         run_id: &str,
     ) -> Result<u64> {
-        if seen_fingerprints.is_empty() {
-            // Nothing was seen → resolve all open findings.
-            let now = fmt(Utc::now());
-            let res = sqlx::query(
-                "UPDATE review_findings \
-                 SET state = 'resolved', last_seen_run = ?, updated_at = ? \
-                 WHERE workspace_id = ? AND repo_id = ? AND pr_number = ? \
-                   AND state IN ('open', 'fixing')",
-            )
-            .bind(run_id)
-            .bind(&now)
-            .bind(workspace_id)
-            .bind(repo_id)
-            .bind(pr_number as i64)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("resolve absent findings"))?;
-            return Ok(res.rows_affected());
-        }
+        self.resolve_absent_scoped(
+            workspace_id,
+            repo_id,
+            pr_number,
+            seen_fingerprints,
+            run_id,
+            None,
+        )
+        .await
+    }
 
-        // SQLite doesn't support `NOT IN (?)` with a slice directly; build the
-        // placeholder list. This is safe (fp values are hex strings).
-        let placeholders = seen_fingerprints
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
+    /// [`resolve_absent`](Self::resolve_absent) limited to the files the run
+    /// actually re-evaluated. With `Some(paths)` only findings whose `path` is
+    /// in `paths` can resolve (path-less findings never do); an empty slice
+    /// resolves nothing. `None` = the whole (repo, pr) scope — right for a PR,
+    /// whose every run reviews the same change, and WRONG for local reviews:
+    /// those all share the `pr_number = 0` sentinel, so an unscoped call from
+    /// one branch's review resolved every open local finding in the repo.
+    pub async fn resolve_absent_scoped(
+        &self,
+        workspace_id: &str,
+        repo_id: &str,
+        pr_number: u64,
+        seen_fingerprints: &[&str],
+        run_id: &str,
+        paths: Option<&[&str]>,
+    ) -> Result<u64> {
+        if paths.is_some_and(|p| p.is_empty()) {
+            return Ok(0);
+        }
+        // SQLite doesn't support `IN (?)` with a slice directly; build the
+        // placeholder lists. Safe: only `?` markers are interpolated.
+        let marks = |n: usize| vec!["?"; n].join(", ");
+        let mut sql = String::from(
             "UPDATE review_findings \
              SET state = 'resolved', last_seen_run = ?, updated_at = ? \
              WHERE workspace_id = ? AND repo_id = ? AND pr_number = ? \
-               AND state IN ('open', 'fixing') \
-               AND fingerprint NOT IN ({placeholders})"
+               AND state IN ('open', 'fixing')",
         );
+        if !seen_fingerprints.is_empty() {
+            sql.push_str(&format!(
+                " AND fingerprint NOT IN ({})",
+                marks(seen_fingerprints.len())
+            ));
+        }
+        if let Some(p) = paths {
+            sql.push_str(&format!(" AND path IN ({})", marks(p.len())));
+        }
         let now = fmt(Utc::now());
         let mut q = sqlx::query(&sql)
             .bind(run_id)
@@ -384,6 +501,9 @@ impl ReviewFindingsRepo {
             .bind(pr_number as i64);
         for fp in seen_fingerprints {
             q = q.bind(*fp);
+        }
+        for p in paths.unwrap_or(&[]) {
+            q = q.bind(*p);
         }
         let res = q
             .execute(&self.pool)
@@ -801,19 +921,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_review_findings_dedup_within_review() {
+    async fn local_review_findings_dedup_across_local_runs() {
         let repo = ReviewFindingsRepo::new(mem_pool().await);
         let mut nf = sample("fp-ddd", "info");
         nf.pr_number = None;
         nf.review_id = "local-rev-A";
         let (a, created_a) = repo.upsert(&nf).await.unwrap();
         assert!(created_a);
-        // same fingerprint, DIFFERENT local review → a distinct finding (no cross-review dedup)
+        // Same fingerprint in a LATER local review → the same finding re-occurs
+        // (it used to be a fresh row per review, so nothing ever deduped).
         let mut nf2 = sample("fp-ddd", "info");
         nf2.pr_number = None;
         nf2.review_id = "local-rev-B";
+        nf2.line = Some(50);
+        nf2.line_end = None;
         let (b, created_b) = repo.upsert(&nf2).await.unwrap();
-        assert!(created_b);
-        assert_ne!(a.id, b.id);
+        assert!(!created_b);
+        assert_eq!(a.id, b.id);
+        assert_eq!(b.occurrence_count, 2);
+        // The anchor follows the latest sighting.
+        assert_eq!(b.line, Some(50));
+        assert_eq!(b.line_end, None);
+        assert_eq!(b.review_id, "local-rev-B");
+    }
+
+    #[tokio::test]
+    async fn legacy_fingerprint_is_matched_and_rekeyed() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let (old, _) = repo.upsert(&sample("fp-legacy", "high")).await.unwrap();
+        let (again, created) = repo
+            .upsert_tracked(&sample("fp-v2", "high"), Some("fp-legacy"))
+            .await
+            .unwrap();
+        assert!(
+            !created,
+            "a legacy-keyed row must be recognized, not duplicated"
+        );
+        assert_eq!(again.id, old.id);
+        assert_eq!(again.fingerprint, "fp-v2", "the row is re-keyed to v2");
+    }
+
+    #[tokio::test]
+    async fn scoped_resolution_only_touches_reviewed_paths() {
+        let repo = ReviewFindingsRepo::new(mem_pool().await);
+        let mut in_scope = sample("fp-in", "high");
+        in_scope.pr_number = None;
+        in_scope.path = Some("src/a.rs");
+        let mut out_of_scope = sample("fp-out", "high");
+        out_of_scope.pr_number = None;
+        out_of_scope.path = Some("src/other.rs");
+        let mut pathless = sample("fp-none", "high");
+        pathless.pr_number = None;
+        pathless.path = None;
+        let (a, _) = repo.upsert(&in_scope).await.unwrap();
+        let (b, _) = repo.upsert(&out_of_scope).await.unwrap();
+        let (c, _) = repo.upsert(&pathless).await.unwrap();
+
+        // A later local run reviewed only src/a.rs and saw nothing there.
+        let scope: &[&str] = &["src/a.rs"];
+        let empty: &[&str] = &[];
+        let n = repo
+            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run2", Some(scope))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(repo.get_full(&a.id).await.unwrap().state, "resolved");
+        assert_eq!(repo.get_full(&b.id).await.unwrap().state, "open");
+        assert_eq!(repo.get_full(&c.id).await.unwrap().state, "open");
+
+        // An empty scope resolves nothing.
+        let n = repo
+            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run3", Some(empty))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn anchor_prefers_distinctive_line_text_then_title() {
+        // Re-indentation / punctuation don't move a line anchor.
+        assert_eq!(
+            finding_anchor(Some("    let q = format!(\"{}\", name);"), "t", "b"),
+            finding_anchor(Some("let q = format!( \"{}\" , name )"), "other", "x"),
+        );
+        // A trivial line falls back to the title.
+        assert_eq!(
+            finding_anchor(Some("  }"), "SQL Injection!", "b"),
+            "title:sql injection"
+        );
+        // Nothing usable → the capped body.
+        assert!(finding_anchor(None, "  ", "Body text").starts_with("body:"));
+        // v2 and legacy keys never collide.
+        assert_ne!(
+            compute_finding_fingerprint("r", 0, Some("a.rs"), None, "body:x"),
+            compute_fingerprint("r", 0, Some("a.rs"), None, "x"),
+        );
+        assert_eq!(
+            compute_finding_fingerprint("r", 0, Some("./a.rs"), None, "k"),
+            compute_finding_fingerprint("r", 0, Some("a.rs"), None, "k"),
+        );
     }
 }

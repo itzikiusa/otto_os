@@ -3234,6 +3234,9 @@ async fn summarize_and_persist(
         Some(pr_number)
     };
     let mut seen_fingerprints: Vec<String> = Vec::new();
+    // File contents read for fingerprint anchoring, one read per path.
+    let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
     for c in parsed {
         if is_cancelled().await { return Ok(()); }
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
@@ -3255,13 +3258,44 @@ async fn summarize_and_persist(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| c.body.clone());
         let reasoning = c.reasoning.clone().unwrap_or_default();
-        let fp = otto_state::review_findings::compute_fingerprint(
+        // Stable (v2) fingerprint anchored on the flagged code line's text (or
+        // the title), NOT the summarizer's re-worded body — see
+        // `compute_finding_fingerprint`. The legacy body hash rides along so
+        // rows stored before v2 are recognized and re-keyed, not duplicated.
+        let legacy_fp = otto_state::review_findings::compute_fingerprint(
             repo_id,
             pr_number,
             c.path.as_deref(),
             c.category.as_deref(),
             &c.body,
         );
+        let line_text = match (c.path.as_deref(), c.line) {
+            (Some(p), Some(l)) => anchored_line_text(repo_path, p, l, &mut anchor_files).await,
+            _ => None,
+        };
+        let anchor = otto_state::review_findings::finding_anchor(line_text.as_deref(), &title, &c.body);
+        let mut fp = otto_state::review_findings::compute_finding_fingerprint(
+            repo_id,
+            pr_number,
+            c.path.as_deref(),
+            c.category.as_deref(),
+            &anchor,
+        );
+        if seen_fingerprints.contains(&fp) {
+            // A second, distinct finding on the same line/category in this run:
+            // disambiguate by title so it is not folded into the first one.
+            let titled = format!(
+                "{anchor}|{}",
+                otto_state::review_findings::normalize_anchor_text(&title)
+            );
+            fp = otto_state::review_findings::compute_finding_fingerprint(
+                repo_id,
+                pr_number,
+                c.path.as_deref(),
+                c.category.as_deref(),
+                &titled,
+            );
+        }
         // Anchor the finding to a sane (line, line_end) span — an end without a
         // start, or an inverted/degenerate range, collapses appropriately.
         let (line, line_end) = otto_core::finding::normalize_line_range(c.line, c.line_end);
@@ -3285,7 +3319,7 @@ async fn summarize_and_persist(
             fingerprint: &fp,
             run_id: review_id,
         };
-        match ctx.findings_store.upsert(&nf).await {
+        match ctx.findings_store.upsert_tracked(&nf, Some(&legacy_fp)).await {
             Ok((f, created)) => {
                 if created {
                     // Anchor the audit trail + link the originating comment id.
@@ -3311,20 +3345,145 @@ async fn summarize_and_persist(
 
     // Findings present in a prior run but absent now flip open→resolved (the
     // "verification" leg: a re-run that no longer surfaces a finding resolves it).
+    //
+    // Only a run that really re-evaluated the code may resolve anything:
+    // - a PARTIAL run (a reviewer errored / was cut off, or the deterministic
+    //   fallback stood in for the summarizer) resolves nothing — a missing lens
+    //   is not evidence its findings were fixed;
+    // - a LOCAL run (the shared `pr_number = 0` sentinel) resolves only findings
+    //   in files its diff touched — one branch's review used to resolve every
+    //   open local finding in the repo (3128/3804 rows);
+    // - a PR run keeps the whole-PR scope (every run reviews the same change).
     if is_cancelled().await { return Ok(()); }
     let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
-    if let Err(e) = ctx
-        .findings_store
-        .resolve_absent(&workspace.id, repo_id, pr_number, &seen_refs, review_id)
-        .await
-    {
-        tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+    let complete = review_run_complete(&agent_states[..summarizer_idx], summary_fallback);
+    let local_scope: Option<Vec<String>> = if pr_number == 0 {
+        match ctx.reviews_store.get_diff(review_id).await {
+            Ok(Some(diff)) => Some(diff_file_paths(&diff)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if !complete {
+        tracing::info!(review = %review_id, "partial review run — not resolving absent findings");
+    } else if pr_number == 0 && local_scope.is_none() {
+        tracing::info!(review = %review_id, "local review without a stored diff — not resolving absent findings");
+    } else {
+        let scope_refs: Option<Vec<&str>> = local_scope
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        if let Err(e) = ctx
+            .findings_store
+            .resolve_absent_scoped(
+                &workspace.id,
+                repo_id,
+                pr_number,
+                &seen_refs,
+                review_id,
+                scope_refs.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+        }
     }
 
     // 7. Assemble the proof pack for this review from the now-persisted findings.
     assemble_review_proof(ctx, review_id, &workspace.id).await;
 
     Ok(())
+}
+
+/// Whether every reviewer row finished cleanly and the real summarizer ran —
+/// the precondition for treating "absent this run" as "resolved". `skipped`
+/// counts as finished (a sibling row covered that lens); a row whose note
+/// starts with `partial` (an orchestrator adopted at its cap with lenses still
+/// running) does not.
+fn review_run_complete(
+    reviewers: &[otto_core::domain::ReviewAgentState],
+    summary_fallback: bool,
+) -> bool {
+    !summary_fallback
+        && reviewers.iter().all(|a| {
+            matches!(a.status.as_str(), "done" | "skipped") && !a.note.starts_with("partial")
+        })
+}
+
+/// Repo-relative paths a unified diff touches (both sides, so a deleted or
+/// renamed file's findings are in scope too). Reads the `--- a/…` + `+++ b/…`
+/// header PAIR (a lone `--- ` is a removed `-- …` content line, not a header)
+/// and git's `rename from/to` lines; `/dev/null` is skipped and a quoted
+/// header is unquoted.
+fn diff_file_paths(diff: &str) -> Vec<String> {
+    fn push(out: &mut Vec<String>, raw: &str, strip_side: bool) {
+        // Drop a trailing tab-separated timestamp (plain `diff -u` output).
+        let raw = raw.split('\t').next().unwrap_or(raw).trim();
+        let raw = raw
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(raw);
+        if raw == "/dev/null" || raw.is_empty() {
+            return;
+        }
+        let path = if strip_side {
+            raw.strip_prefix("a/")
+                .or_else(|| raw.strip_prefix("b/"))
+                .unwrap_or(raw)
+        } else {
+            raw
+        };
+        let path = otto_state::review_findings::normalize_finding_path(path);
+        if !path.is_empty() && !out.iter().any(|p| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    let lines: Vec<&str> = diff.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(old) = line.strip_prefix("--- ") {
+            if let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("+++ ")) {
+                push(&mut out, old, true);
+                push(&mut out, new, true);
+            }
+        } else if let Some(p) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+        {
+            push(&mut out, p, false);
+        }
+    }
+    out
+}
+
+/// Text of 1-based `line` in the repo-relative `path` under `repo_path`, for
+/// fingerprint anchoring. Absolute or `..` paths are refused (the path comes
+/// from agent output). Each file is read at most once per run via `cache`.
+async fn anchored_line_text(
+    repo_path: &str,
+    path: &str,
+    line: u32,
+    cache: &mut std::collections::HashMap<String, Option<Vec<String>>>,
+) -> Option<String> {
+    let rel = otto_state::review_findings::normalize_finding_path(path);
+    let rel_path = std::path::Path::new(rel);
+    if rel.is_empty()
+        || rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    if !cache.contains_key(rel) {
+        let lines = tokio::fs::read_to_string(std::path::Path::new(repo_path).join(rel_path))
+            .await
+            .ok()
+            .map(|s| s.lines().map(str::to_string).collect::<Vec<String>>());
+        cache.insert(rel.to_string(), lines);
+    }
+    let idx = (line as usize).checked_sub(1)?;
+    cache.get(rel)?.as_ref()?.get(idx).cloned()
 }
 
 /// Open/blocker/total finding counts for a review, from the persistent store.
@@ -3374,6 +3533,54 @@ fn severity_rank(severity: &str) -> u8 {
         FindingSeverity::Medium => 2,
         FindingSeverity::Low => 3,
         FindingSeverity::Info => 4,
+    }
+}
+
+#[cfg(test)]
+mod review_scope_tests {
+    use super::{diff_file_paths, review_run_complete};
+
+    fn agent(status: &str, note: &str) -> otto_core::domain::ReviewAgentState {
+        serde_json::from_value(serde_json::json!({
+            "name": "lens", "provider": "claude", "model": "",
+            "status": status, "note": note, "comment_count": 0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn diff_paths_cover_both_sides_and_skip_content_lines() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n\
+                    index 1..2 100644\n\
+                    --- a/src/a.rs\n\
+                    +++ b/src/a.rs\n\
+                    @@ -1,2 +1,2 @@\n\
+                    --- a removed SQL comment line\n\
+                    +new\n\
+                    diff --git a/gone.rs b/gone.rs\n\
+                    deleted file mode 100644\n\
+                    --- a/gone.rs\n\
+                    +++ /dev/null\n\
+                    diff --git a/old name.rs b/new name.rs\n\
+                    similarity index 100%\n\
+                    rename from old name.rs\n\
+                    rename to new name.rs\n";
+        assert_eq!(
+            diff_file_paths(diff),
+            vec!["src/a.rs", "gone.rs", "old name.rs", "new name.rs"]
+        );
+    }
+
+    #[test]
+    fn only_clean_runs_are_complete() {
+        let ok = [agent("done", "3 findings"), agent("skipped", "skipped — x")];
+        assert!(review_run_complete(&ok, false));
+        assert!(!review_run_complete(&ok, true), "fallback summarizer = partial");
+        assert!(!review_run_complete(&[agent("error", "timed out")], false));
+        assert!(!review_run_complete(
+            &[agent("done", "partial — 1 lens still running")],
+            false
+        ));
     }
 }
 

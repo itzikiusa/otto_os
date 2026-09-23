@@ -130,21 +130,32 @@ re-verify be idempotent.
 When a review completes, the summarizer iterates its comments and **upserts** each
 into `review_findings`:
 
-- **Fingerprint** = `SHA-256` over
-  `repo_id | pr_number | path | category | body[:512]` (path/category/body
-  lower-cased and trimmed, body capped at 512 chars on a char boundary). The
-  fingerprint is the *same-finding-across-runs* identity.
-- **Dedup scope.** PR reviews dedup by `(workspace_id, repo_id, pr_number,
-  fingerprint)`; local reviews dedup by `(review_id, fingerprint)`.
+- **Fingerprint (v2)** = `SHA-256` over
+  `v2 | repo_id | pr_number | path | category | anchor`. The anchor is the
+  flagged code line's text (lower-cased, alphanumerics only — survives
+  re-indentation and the line moving) when it is distinctive, else the
+  normalized title, else the capped body. It deliberately ignores the
+  summarizer's wording, which changes every run. A second finding on the same
+  line/category in one run is disambiguated by its title. The legacy body hash
+  (`repo_id | pr_number | path | category | body[:512]`) is still matched on
+  lookup, so pre-v2 rows are recognized and re-keyed rather than duplicated.
+- **Dedup scope.** `(workspace_id, repo_id, pr_number, fingerprint)` — PR
+  reviews across runs of that PR; local reviews (the `pr_number = 0` sentinel)
+  across the repo's local runs.
 - **New finding** → `status = open`, `state = open`, `occurrence_count = 1`.
-- **Re-detected** (same fingerprint reappears) → `occurrence_count += 1`, and the
-  human `status` is **NOT reset** — your triage survives a re-review.
+- **Re-detected** (same fingerprint reappears) → `occurrence_count += 1`, the
+  anchor (`path`/`line`/`line_end`) and `last_seen_review_id` move to the new
+  run, and the human `status` is **NOT reset** — your triage survives a re-review.
 - **Regression** — a finding that reappears after it was `resolved`/`declined` is
   flipped to `state = regressed` by the engine; the UI shows a `regressed` chip and
   tints the card.
-- **Resolution leg** — `resolve_absent(...)` marks every `open`/`fixing` finding
-  that is **not** seen in the new run as `resolved` (if it's gone, it was fixed).
+- **Resolution leg** — `resolve_absent(...)` marks `open`/`fixing` findings that
+  are **not** seen in the new run as `resolved` (if it's gone, it was fixed).
   This is the verification leg: re-running the review is what verifies a fix.
+  Only a **complete** run resolves anything (every reviewer `done`/`skipped`, no
+  `partial` orchestrator, no deterministic-fallback summary). A PR run covers the
+  whole PR; a **local** run resolves only findings in files its diff touched
+  (path-less local findings are never auto-resolved).
 
 ### Merge readiness
 
