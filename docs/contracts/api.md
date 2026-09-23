@@ -1382,6 +1382,15 @@ optional allowed caller ids (matched against the request's `user`).
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
 
+PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
+workspace) when the integration's inbound listener token — the Slack **app** token, or
+the Telegram bot token (the request's value, else the stored one) — is already used by
+another workspace's **enabled** integration of the same channel. One Slack app / Telegram
+bot can feed only one workspace: Slack delivers each event to just one Socket Mode
+connection, and two Telegram pollers fight over `getUpdates`. The refusal happens before
+any token is stored. (The daemon also skips a duplicate listener at runtime if such
+state already exists, logging a warning.)
+
 ### Inbound webhook trigger
 
 Public-by-key endpoint that turns an external HTTP `POST` into an agent session
@@ -1398,13 +1407,19 @@ the CRUD endpoints above first.
 | POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
 
 `SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
-start?: bool (default true) }`. An external trigger that starts a swarm fully
+goals?: [{ title, description?, metric?, comparator?, target_value?, block_value?,
+max_retries?, blocking? }], callback_url?: string, start?: bool (default true) }`.
+`repo_path` must name a repo **registered in the workspace** (its path, name or id;
+it is resolved to the registered path) — any other directory is refused with 400. A
+goal's `verify_cmd` is **not accepted** over the webhook (400): it is a shell command
+the verifying agent runs, so it may only be configured on the swarm's goals through the
+authenticated API/UI. An external trigger that starts a swarm fully
 automatically: it creates a project (goal = `goal`), runs the planner to seed tasks, sets
 the swarm active, and starts the coordinator (agents run in git **worktrees** for parallel
 isolation). `start=false` plans only. Auth reuses the **same per-workspace webhook key** as
 the channel webhook above (keychain `chan-bot-{ws}-webhook`), via `X-Otto-Webhook-Key` or
 `Authorization: Bearer <key>`. Errors: 401 (bad/missing key), 404 (swarm not in workspace),
-400 (empty `goal`).
+400 (empty `goal`, unregistered `repo_path`, or any `goals[].verify_cmd`).
 
 `WebhookInboundReq`: `{ text: string (required), conversation?: string, thread?: string,
 user?: string, callback_url?: string }`. The **conversation key** drives session reuse:
