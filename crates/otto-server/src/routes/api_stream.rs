@@ -323,10 +323,12 @@ async fn serve_websocket(
                     .trim_start_matches('[')
                     .trim_end_matches(']')
                     .to_string();
-                tokio::net::lookup_host((host.as_str(), port))
-                    .await
-                    .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
-                    .collect()
+                let resolved: Vec<std::net::SocketAddr> =
+                    tokio::net::lookup_host((host.as_str(), port))
+                        .await
+                        .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
+                        .collect();
+                resolved
             } else {
                 otto_netguard::resolve_checked(target.as_str()).await?.1
             };
