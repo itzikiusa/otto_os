@@ -84,10 +84,16 @@
   let rootEl: HTMLElement | undefined = $state();
   let wrapEl: HTMLDivElement | undefined = $state();
   let actionsEl: HTMLDivElement | undefined = $state();
+  let titleEl: HTMLElement | undefined = $state();
+  let iconEl: HTMLElement | undefined = $state();
+  let badgeEl: HTMLElement | undefined = $state();
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
   const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded);
+  // A phone row has no room for title + tabs + actions: tabs drop to the
+  // second row there regardless of the requested placement.
+  const tabsBelow = $derived(!!tabs && (tabsPlacement === 'below' || viewport.isPhone));
 
   const FIELD = 'select, input, textarea';
   const GAP = 6; // keep in sync with .ph-actions gap
@@ -110,6 +116,31 @@
       for (const k of kids) k.removeAttribute('data-ph-hidden');
       const visible = kids.filter((k) => k.offsetWidth > 0 || k.getClientRects().length > 0);
       const widthOf = new Map(visible.map((k) => [k, k.getBoundingClientRect().width]));
+      // What can never collapse (selects, primaries, data-keep) must always
+      // fit: reserve it (+ the ⋯ button) as the wrap's min width, so the
+      // title block and inline tabs yield — the subtitle ellipsizes — rather
+      // than the kept controls being clipped off the start of the row.
+      const keep = visible.filter((k) => !canCollapse(k));
+      let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
+      if (keep.length < visible.length) keepW += MORE_W + (keep.length ? GAP : 0);
+      // …but the title block never gives up its title line (h1 + badges).
+      let titleMin = 0;
+      if (rootEl && titleEl) {
+        const iconW = iconEl ? iconEl.offsetWidth + 8 : 0;
+        const badgeW = badgeEl ? badgeEl.offsetWidth + 8 : 0;
+        titleMin = Math.ceil(titleEl.scrollWidth + iconW + badgeW);
+        rootEl.style.setProperty('--ph-title-min', `${titleMin}px`);
+      }
+      // When even the kept controls can't fit next to the title (a phone), the
+      // reservation is capped and the actions scroll horizontally instead —
+      // every control stays reachable, none is clipped away.
+      const row = wrapEl.parentElement;
+      const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
+      const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
+      const room = row
+        ? row.clientWidth - 48 - titleMin - (lead ? lead.offsetWidth + 12 : 0) - (inlineTabs ? inlineTabs.offsetWidth + 12 : 0)
+        : Infinity;
+      wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + 4, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
       // clientWidth includes the wrap's 2px focus-ring padding on each side.
       let avail = wrapEl.clientWidth - 4;
@@ -154,6 +185,9 @@
     // this observer ignores, so it can't loop).
     const mo = new MutationObserver(schedule);
     if (actionsEl) mo.observe(actionsEl, { childList: true, subtree: true, characterData: true });
+    // A retitled page (another item selected) changes the title's minimum.
+    const line = titleEl?.parentElement;
+    if (line) mo.observe(line, { childList: true, subtree: true, characterData: true });
     return () => {
       ro.disconnect();
       mo.disconnect();
@@ -208,7 +242,7 @@
   bind:this={rootEl}
   class="page-header-bar {klass}"
   class:tauri-pad={padTraffic}
-  class:has-below={!!tabs && tabsPlacement === 'below'}
+  class:has-below={tabsBelow}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
   data-testid="page-header"
@@ -216,21 +250,21 @@
   <div class="ph-row">
     {#if leading}<div class="ph-leading">{@render leading()}</div>{/if}
     <div class="ph-title-block">
-      {#if icon}<span class="ph-icon"><Icon name={icon} size={16} /></span>{/if}
+      {#if icon}<span class="ph-icon" bind:this={iconEl}><Icon name={icon} size={16} /></span>{/if}
       <div class="ph-titles">
         <div class="ph-title-line">
-          <h1 class="ph-title" title={title}>
+          <h1 class="ph-title" title={title} bind:this={titleEl}>
             {#each crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
             {#if titleContent}{@render titleContent()}{:else}{title}{/if}
           </h1>
-          {#if badge}<span class="ph-badge">{@render badge()}</span>{/if}
+          {#if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
         </div>
         {#if subtitle}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
       </div>
     </div>
-    {#if tabs && tabsPlacement === 'inline'}
+    {#if tabs && !tabsBelow}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-actions-wrap" bind:this={wrapEl}>
@@ -251,7 +285,7 @@
       {/if}
     </div>
   </div>
-  {#if tabs && tabsPlacement === 'below'}
+  {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
 </header>
@@ -290,10 +324,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    /* Keeps its natural width (no reserved minimum, so short titles don't
-       leave a gap before inline tabs); long titles ellipsize at the cap. */
-    flex: 0 0 auto;
-    min-width: 0;
+    /* Natural width (no reserved minimum, so short titles don't leave a gap
+       before inline tabs), capped at 45%. When the actions need the room it
+       shrinks — the subtitle ellipsizes — but never below its title line
+       (--ph-title-min, measured in JS). */
+    flex: 0 1 auto;
+    min-width: min(var(--ph-title-min, 0px), 45%);
     max-width: 45%;
   }
   /* A snippet whose content is conditional can render nothing; the empty slot
@@ -369,7 +405,11 @@
   .ph-tabs-inline {
     display: flex;
     align-items: center;
-    flex: 0 1 auto;
+    /* Tabs keep their width (the subtitle yields first, then the actions
+       scroll); only an absurdly wide tab set is capped and scrolls. On a
+       phone the tabs move to the row below instead. */
+    flex: 0 0 auto;
+    max-width: 50%;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
@@ -382,14 +422,23 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     gap: 6px;
-    overflow: hidden;
+    /* Normally everything fits (lower-priority controls collapse into ⋯);
+       if the never-collapse ones still don't, scroll rather than clip. */
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     /* Room for focus rings on the edge buttons. */
     padding: 3px 2px;
     margin: -3px -2px;
   }
+  .ph-actions-wrap::-webkit-scrollbar {
+    display: none;
+  }
   .ph-actions {
+    /* Right-aligned via auto margin (not justify-content: flex-end), so an
+       overflowing row scrolls from its start instead of spilling off it. */
+    margin-inline-start: auto;
     display: flex;
     align-items: center;
     gap: 6px;
