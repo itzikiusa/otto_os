@@ -774,13 +774,15 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // matching `</table>` and returns (gfm_string, bytes_consumed).
     fn convert_table(input: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
-        // Locate </table>
-        let end_offset = src
-            .to_ascii_lowercase()
-            .find("</table>")
-            .unwrap_or(src.len());
-        let table_src = &src[..end_offset + "</table>".len()];
-        let consumed = end_offset + "</table>".len();
+        // Locate </table>. A truncated table (no closing tag) runs to the end of
+        // the input — `end_offset + "</table>".len()` used to slice past it and panic.
+        let (table_src, consumed) = match src.to_ascii_lowercase().find("</table>") {
+            Some(end_offset) => {
+                let consumed = end_offset + "</table>".len();
+                (&src[..consumed], consumed)
+            }
+            None => (src, src.len()),
+        };
 
         // Extract rows: split on <tr / </tr> boundaries.
         // Very lightweight: find each <tr...>...</tr> segment.
@@ -807,17 +809,17 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             let mut cells: Vec<String> = Vec::new();
             let mut cell_pos = 0usize;
             while cell_pos < row_src.len() {
-                if let Some(cell_start_rel) = row_src_lc[cell_pos..].find("<td").or_else(|| {
-                    row_src_lc[cell_pos..].find("<th").map(|i| {
-                        // Use whichever is earlier if both present.
-                        let td = row_src_lc[cell_pos..].find("<td").unwrap_or(usize::MAX);
-                        if i <= td {
-                            i
-                        } else {
-                            td
-                        }
-                    })
-                }) {
+                // The EARLIER of the next `<td` / `<th`. The old
+                // `find("<td").or_else(find("<th"))` only looked for `<th` once no
+                // `<td` remained, so a row-header cell (`<th>Status</th><td>Done</td>`)
+                // was skipped and the row lost a column.
+                let td = row_src_lc[cell_pos..].find("<td");
+                let th = row_src_lc[cell_pos..].find("<th");
+                let next_cell = match (td, th) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                if let Some(cell_start_rel) = next_cell {
                     let cell_start = cell_pos + cell_start_rel;
                     let tag_end = row_src_lc[cell_start..]
                         .find('>')
@@ -848,7 +850,9 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             if !cells.is_empty() {
                 rows.push(cells);
             }
-            search_from = tr_end + "</tr>".len();
+            // An unclosed last row (`tr_end == len`) would push this past the
+            // end and panic on the next `src_lc[search_from..]`.
+            search_from = (tr_end + "</tr>".len()).min(src_lc.len());
         }
 
         if rows.is_empty() {
@@ -993,14 +997,17 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         let src = &input[start_pos..];
         let src_lc = src.to_ascii_lowercase();
 
-        // Find the end: either `/>` (self-closing) or `</ac:image>`.
-        let self_close = src_lc.find("/>").unwrap_or(usize::MAX);
-        let close_tag = src_lc.find("</ac:image>").unwrap_or(usize::MAX);
-        let (end_offset, consumed) = if self_close <= close_tag {
-            (self_close + 2, self_close + 2)
-        } else {
-            let ct_len = "</ac:image>".len();
-            (close_tag + ct_len, close_tag + ct_len)
+        // Find the end: either `/>` (self-closing) or `</ac:image>`. With
+        // neither (truncated input) consume the rest — `usize::MAX + len`
+        // overflowed and the slice below panicked.
+        let self_close = src_lc.find("/>");
+        let close_tag = src_lc.find("</ac:image>");
+        let ct_len = "</ac:image>".len();
+        let (end_offset, consumed) = match (self_close, close_tag) {
+            (Some(s), Some(c)) if c < s => (c + ct_len, c + ct_len),
+            (Some(s), _) => (s + 2, s + 2),
+            (None, Some(c)) => (c + ct_len, c + ct_len),
+            (None, None) => (src.len(), src.len()),
         };
 
         let macro_src = &src[..end_offset];
@@ -1013,7 +1020,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                     .find('>')
                     .map(|i| att_start + i + 1)
                     .unwrap_or(att_start + 1);
-                let tag_inner = &macro_src[att_start + 1..tag_end.saturating_sub(1)];
+                // `.max(att_start + 1)`: with no `>` the end fell BEFORE the
+                // start and the range panicked.
+                let tag_inner =
+                    &macro_src[att_start + 1..tag_end.saturating_sub(1).max(att_start + 1)];
                 extract_attr(tag_inner, "ri:filename")
             } else {
                 None
@@ -1033,11 +1043,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // before doing the standard single-tag parse.
 
             // ── Table look-ahead ──────────────────────────────────────────
-            if input[pos..].len() >= 6
-                && input[pos..pos + 6]
-                    .to_ascii_lowercase()
-                    .starts_with("<table")
-            {
+            // Byte-level, case-insensitive prefix tests: slicing `input[pos..pos + 6]`
+            // panicked whenever a multibyte char straddled byte 6 (`<li>✅`,
+            // `<p>👍`, `<em>—`), taking down page reads and the story watcher.
+            if starts_with_ci(input, pos, "<table") {
                 push_block_sep!();
                 let (gfm, consumed) = convert_table(input, pos);
                 out.push_str(&gfm);
@@ -1047,10 +1056,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             }
 
             // ── ac:structured-macro look-ahead ────────────────────────────
-            if input[pos..]
-                .to_ascii_lowercase()
-                .starts_with("<ac:structured-macro")
-            {
+            if starts_with_ci(input, pos, "<ac:structured-macro") {
                 push_block_sep!();
                 let (md, consumed) = convert_ac_macro(input, pos);
                 out.push_str(&md);
@@ -1060,7 +1066,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             }
 
             // ── ac:image look-ahead ────────────────────────────────────────
-            if input[pos..].to_ascii_lowercase().starts_with("<ac:image") {
+            if starts_with_ci(input, pos, "<ac:image") {
                 let (md, consumed) = convert_ac_image(input, pos);
                 out.push_str(&md);
                 pos += consumed;
@@ -1258,6 +1264,16 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     let result = out.trim_end_matches('\n').to_string();
     // Collapse more-than-2 consecutive newlines to exactly 2.
     collapse_excess_newlines(&result)
+}
+
+/// Case-insensitive ASCII prefix test at byte offset `pos`. Compares BYTES and
+/// never slices the `&str`, so it cannot panic on a char boundary, and it does
+/// not lowercase the whole rest of the document at every `<` (quadratic).
+fn starts_with_ci(input: &str, pos: usize, needle: &str) -> bool {
+    input
+        .as_bytes()
+        .get(pos..pos.saturating_add(needle.len()))
+        .is_some_and(|b| b.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Strip all `<tag>` / `</tag>` sequences from a string (keep text content).
@@ -2061,6 +2077,43 @@ mod tests {
         assert!(md.contains("| Bob |"), "Bob row; got: {md:?}");
         assert!(md.contains("| 30 |"), "30 cell; got: {md:?}");
         assert!(md.contains("| 25 |"), "25 cell; got: {md:?}");
+    }
+
+    #[test]
+    fn storage_to_markdown_survives_multibyte_text_after_a_short_tag() {
+        // Each of these used to panic: `input[pos..pos + 6]` ended inside the
+        // multibyte char that follows a 3–5 byte tag.
+        for (storage, text) in [
+            ("<ul><li>✅ Done</li></ul>", "✅ Done"),
+            ("<p>👍</p>", "👍"),
+            ("<p><em>—</em></p>", "—"),
+            ("<ul><li>“quoted”</li></ul>", "“quoted”"),
+            ("<p>éé</p>", "éé"),
+        ] {
+            let md = storage_to_markdown(storage);
+            assert!(md.contains(text), "{storage:?} → {md:?}");
+        }
+    }
+
+    #[test]
+    fn storage_to_markdown_survives_truncated_markup() {
+        // No `</table>`, no `</tr>`, an unterminated image — never a panic.
+        let md = storage_to_markdown("<p>a</p><table><tr><td>x</td>");
+        assert!(md.contains("| x |"), "got: {md:?}");
+        let _ = storage_to_markdown("<table><tr><td>x</td></tr><tr><td>y");
+        let _ = storage_to_markdown(
+            "<p>b</p><ac:image ac:alt=\"z\"><ri:attachment ri:filename=\"f.png\"",
+        );
+        let _ = storage_to_markdown("<ac:image");
+    }
+
+    #[test]
+    fn storage_to_markdown_keeps_row_header_cells() {
+        let md = storage_to_markdown(
+            "<table><tr><th>Field</th><th>Value</th></tr>\
+             <tr><th>Status</th><td>Done</td></tr></table>",
+        );
+        assert!(md.contains("| Status | Done |"), "got: {md:?}");
     }
 
     #[test]
