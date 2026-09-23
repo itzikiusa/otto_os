@@ -137,6 +137,24 @@ async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandl
                 return;
             }
             if let Err(e) = tick(&ctx, &swarm_id).await {
+                // The swarm was deleted (the delete route only drops rows): stop
+                // this loop — it used to tick and warn every 5s until restart.
+                if matches!(e, Error::NotFound(_))
+                    && matches!(
+                        ctx.swarm_repo.get_swarm(&swarm_id).await,
+                        Err(Error::NotFound(_))
+                    )
+                {
+                    tracing::info!(swarm = %swarm_id, "swarm deleted — stopping its coordinator");
+                    let mut reg = ctx.swarm_coords.lock().unwrap();
+                    if reg
+                        .get(&swarm_id)
+                        .is_some_and(|h| Arc::ptr_eq(&h.cancel, &handle.cancel))
+                    {
+                        reg.remove(&swarm_id);
+                    }
+                    return;
+                }
                 tracing::warn!(swarm = %swarm_id, "swarm coordinator tick: {e}");
             }
         }
