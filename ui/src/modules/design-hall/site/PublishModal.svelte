@@ -89,7 +89,9 @@
     busy = true;
     try {
       const served: Record<string, string> = {};
-      for (const p of local.pages) served[p.id] = await previewHtml(artifact.id, { page: p.slug || undefined, publish: local.publish.id });
+      for (const [i, p] of local.pages.entries()) {
+        served[p.id] = await previewHtml(artifact.id, { page: i === 0 ? undefined : p.slug || p.id, publish: local.publish.id });
+      }
       onpreview(served, local.url);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -150,10 +152,12 @@
         <span class="k">Recent publishes</span>
         <ul>
           {#each history as h (h.id)}
+            {@const set = Array.isArray(h.pinned_set) ? h.pinned_set : []}
+            {@const pinnedRefs = set.filter((r) => r.role !== 'site').length}
             <li>
               <span class="chip">{h.target === 'zip' ? '.zip' : 'local'}</span>
-              v{h.pinned_set?.site?.seq ?? '?'} · {rel(h.created_at)}
-              {#if h.pinned_set?.refs?.length}<span class="dim"> · {h.pinned_set.refs.length} pinned</span>{/if}
+              v{set.find((r) => r.role === 'site')?.seq ?? '?'} · {rel(h.created_at)}
+              {#if pinnedRefs}<span class="dim"> · {pinnedRefs} pinned</span>{/if}
             </li>
           {/each}
         </ul>

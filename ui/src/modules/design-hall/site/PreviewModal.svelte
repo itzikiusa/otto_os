@@ -72,7 +72,12 @@
       if (href.startsWith('#')) return;
       e.preventDefault();
       const file = href.split(/[?#]/)[0];
-      const target = doc.pages.find((p) => pageFileName(doc, p) === file || (served && p.slug && href.includes(`/preview/${p.slug}`)));
+      let target = doc.pages.find((p) => pageFileName(doc, p) === file);
+      if (!target && served) {
+        // Daemon-rendered pages link to …/preview[/<slug or id>]?publish=…
+        const m = /\/preview(?:\/([^/]+))?$/.exec(file);
+        if (m) target = m[1] ? doc.pages.find((p, i) => i > 0 && (p.slug === m[1] || p.id === m[1])) : doc.pages[0];
+      }
       if (target) pageId = target.id;
     });
   }

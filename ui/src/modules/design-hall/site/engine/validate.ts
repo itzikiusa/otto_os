@@ -51,7 +51,8 @@ export function urlProblem(kind: 'href' | 'src' | 'video', v: string): string | 
   const s = v.trim();
   if (!s) return null;
   if (kind === 'href' && s.startsWith('page:')) return ID_RE.test(s.slice(5)) ? null : 'page links look like page:<page id>';
-  if (s.startsWith('otto://')) return kind !== 'href' && URI_RE.test(s) ? null : 'not a valid otto://design/<id>[@approved|@latest|@vN] reference here';
+  // A design reference (extracted as a link; in an href it renders as `#`).
+  if (s.startsWith('otto://')) return URI_RE.test(s) ? null : 'not a valid otto://design/<id>[@approved|@latest|@vN] reference';
   const sc = scheme(s);
   if (sc === null) return null; // relative / #anchor
   if (kind === 'href' && (sc === 'http' || sc === 'https' || sc === 'mailto' || sc === 'tel')) return null;
@@ -76,7 +77,8 @@ export function validateSite(doc: unknown): SiteIssue[] {
     return issues;
   }
   if (doc.type !== 'otto-site') add('type', 'must be "otto-site"');
-  if (doc.version !== 1) add('version', 'must be 1');
+  // `version` may be omitted (read as 1); anything else is a future format.
+  if (doc.version !== undefined && doc.version !== 1) add('version', 'must be 1');
   if (doc.title !== undefined && (typeof doc.title !== 'string' || doc.title.length > 300)) add('title', 'must be a string of at most 300 characters');
   if (doc.brand !== undefined && doc.brand !== '' && (typeof doc.brand !== 'string' || !URI_RE.test(doc.brand))) {
     add('brand', 'must be an otto://design/<brand kit id>[@approved|@latest|@vN] reference');
@@ -122,7 +124,8 @@ export function validateSite(doc: unknown): SiteIssue[] {
       if (!isObj(sec)) return add(sp, 'must be an object');
       nodes++;
       checkId(sec.id, `${sp}.id`, nodeIds, add);
-      if (typeof sec.block !== 'string' || !SECTION_BLOCKS.includes(sec.block)) {
+      // A section without a block is kept (and renders nothing); a named block must be known.
+      if (sec.block !== undefined && (typeof sec.block !== 'string' || !SECTION_BLOCKS.includes(sec.block))) {
         add(`${sp}.block`, `unknown section block ${JSON.stringify(sec.block)} (known: ${SECTION_BLOCKS.join(', ')})`);
       }
       if (sec.name !== undefined && (typeof sec.name !== 'string' || sec.name.length > 120)) add(`${sp}.name`, 'must be a string of at most 120 characters');
@@ -141,7 +144,7 @@ export function validateSite(doc: unknown): SiteIssue[] {
         if (!isObj(b)) return add(bp, 'must be an object');
         nodes++;
         checkId(b.id, `${bp}.id`, nodeIds, add);
-        if (typeof b.block !== 'string' || !ITEM_BLOCKS.includes(b.block)) {
+        if (b.block !== undefined && (typeof b.block !== 'string' || !ITEM_BLOCKS.includes(b.block))) {
           add(`${bp}.block`, `unknown block ${JSON.stringify(b.block)} (known: ${ITEM_BLOCKS.join(', ')})`);
         }
         checkProps(b.props, `${bp}.props`, add, b.block === 'embed/3d' || b.block === 'embed/image');

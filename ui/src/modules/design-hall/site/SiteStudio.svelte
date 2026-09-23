@@ -327,12 +327,15 @@
   function pickTemplate(id: string | null): void {
     if (!doc) return;
     const base = starterSite(id ?? undefined, doc.title || artifact.title);
+    // Name the project's kit in the document too: the save then carries a
+    // `uses_tokens` link, so the Brand Kit's impact preview counts this site.
+    const brand = doc.brand ?? (projectKit ? `otto://design/${projectKit}` : undefined);
+    const withBrand = (d: SiteDoc): SiteDoc => (brand ? { ...d, brand } : d);
     if (!id) {
-      const r = ops.addPage(base, 'Home');
-      commit({ ...r.doc, brand: doc.brand });
+      commit(withBrand(ops.addPage(base, 'Home').doc));
       return;
     }
-    commit({ ...base, brand: doc.brand });
+    commit(withBrand(base));
     toasts.success('Template applied', 'Save (⌘S) to keep it as a new version.');
   }
 

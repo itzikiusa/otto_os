@@ -36,7 +36,14 @@ export function parseSite(source: string | null): ParsedSite {
     p.title ??= '';
     p.slug ??= '';
     p.sections ??= [];
-    for (const s of p.sections) s.props ??= {};
+    for (const s of p.sections) {
+      s.block ??= '';
+      s.props ??= {};
+      for (const b of s.blocks ?? []) {
+        b.block ??= '';
+        b.props ??= {};
+      }
+    }
   }
   return { doc, issues: [] };
 }

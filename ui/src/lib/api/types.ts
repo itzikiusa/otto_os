@@ -9437,16 +9437,18 @@ export interface DesignPublish {
   /** `zip` | `local` today; `artifact` / `gh_pages` / `netlify` / `cloudflare` are reserved. */
   target: string;
   url: string | null;
-  pinned_set: DesignSitePinnedSet;
+  /** The pinned set: the site version first (`role: "site"`), then its brand
+   *  kit, then every rendered 3D embed / image. */
+  pinned_set: DesignPinnedRef[];
   created_by: Id;
   created_at: string;
 }
 
-/** A reference a publish resolved to a concrete version. */
+/** One entry of a publish's pinned set (a reference resolved to one version). */
 export interface DesignPinnedRef {
-  /** `brand` | `embed` | `image`. */
+  /** `site` | `brand` | `embed` | `image`. */
   role: string;
-  /** The reference as the document wrote it (`otto://design/<id>@approved`). */
+  /** The reference as the document wrote it (`otto://design/<id>@approved`; the site: `…@v<seq>`). */
   uri: string;
   artifact_id: Id;
   version_id: Id | null;
@@ -9456,13 +9458,6 @@ export interface DesignPinnedRef {
   policy: string;
   /** Unresolvable (missing artifact/version, no access) — rendered as a stand-in. */
   missing: boolean;
-}
-
-export interface DesignSitePinnedSet {
-  format: 'otto-site';
-  site: { artifact_id: Id; version_id: Id; seq: number };
-  brand_kit: DesignPinnedRef | null;
-  refs: DesignPinnedRef[];
 }
 
 /** `POST /design/artifacts/{id}/export`. */
@@ -9489,7 +9484,7 @@ export interface DesignSiteLocalResp {
   /** `/api/v1/design/artifacts/{id}/preview?publish=<id>`. */
   url: string;
   pages: DesignSitePage[];
-  pinned: DesignSitePinnedSet;
+  pinned: DesignPinnedRef[];
   /** Non-fatal problems (a missing embed rendered as a stand-in, …). */
   warnings: string[];
 }

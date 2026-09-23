@@ -572,7 +572,9 @@ export function sectionClasses(s: SiteSection, t: Theme): { classes: string[]; b
 }
 
 export function renderSection(s: SiteSection, ctx: RenderCtx): string {
-  if (s.hidden && !ctx.editable) return '';
+  // Hidden or unknown sections never reach a published page (the canvas
+  // still shows them, dimmed / as a placeholder).
+  if ((s.hidden || !sectionDef(s.block)) && !ctx.editable) return '';
   const r = mk(ctx);
   const { classes, bgCss } = sectionClasses(s, ctx.theme);
   if (s.hidden) classes.push('os-hidden');
@@ -598,8 +600,10 @@ export function documentCss(t: Theme): string {
   return `html { -webkit-text-size-adjust: 100%; }\nbody { margin: 0; background: ${t.surface}; }\n`;
 }
 
+/** `index.html` for the home page, else `<slug>.html` (no slug: `<id>.html`). */
 export function pageFileName(doc: SiteDoc, page: SitePage): string {
-  return page === doc.pages[0] || !page.slug ? 'index.html' : `${page.slug}.html`;
+  if (page === doc.pages[0]) return 'index.html';
+  return `${page.slug || page.id}.html`;
 }
 
 export function pageTitle(doc: SiteDoc, page: SitePage): string {
