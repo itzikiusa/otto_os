@@ -980,6 +980,29 @@ async fn reacquire_run_permit(released: bool) {
     }
 }
 
+/// Key of a chat `skip` marker in `ServerCtx::wf_skip_current`: ONE step of
+/// one run, so a marker can only ever skip the step it was aimed at.
+pub(crate) fn skip_marker_key(run_id: &str, node_id: &str) -> String {
+    format!("{run_id}/{node_id}")
+}
+
+/// Consume the skip marker for `(run_id, node_id)`; true when one was set.
+fn take_skip_marker(ctx: &ServerCtx, run_id: &str, node_id: &str) -> bool {
+    ctx.wf_skip_current
+        .lock()
+        .map(|mut s| s.remove(&skip_marker_key(run_id, node_id)))
+        .unwrap_or(false)
+}
+
+/// Drop every skip marker of a run at run end — an unconsumed marker must not
+/// fire on a later retry of the same run id.
+fn clear_skip_markers(ctx: &ServerCtx, run_id: &str) {
+    let prefix = format!("{run_id}/");
+    if let Ok(mut s) = ctx.wf_skip_current.lock() {
+        s.retain(|k| !k.starts_with(&prefix));
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -2188,11 +2211,21 @@ pub async fn run_workflow(
                                 break Err(otto_core::Error::Internal("run canceled".into()));
                             }
                         }
-                        // A chat `skip` command (consume-once) → abort this node and
-                        // skip it; the run continues to the next node.
-                        if ctx.wf_skip_current.lock().map(|mut s| s.remove(&run_id.to_string())).unwrap_or(false) {
-                            skip_current = true;
-                            break Err(otto_core::Error::Internal("step skipped".into()));
+                        // A chat `skip` command (consume-once) for THIS step → abort
+                        // it and skip it; the run continues to the next node. The
+                        // marker is keyed by (run, step), so one set for an earlier
+                        // step never fires on this one before it did any work. An
+                        // approval gate is never skippable — that would pass it
+                        // unapproved (the chat user needn't hold approve rights).
+                        if take_skip_marker(&ctx, &run_id, &node_id) {
+                            if node.kind == "human_approval" {
+                                states[idx].logs.push(
+                                    "⚠ skip ignored — an approval step must be approved or rejected".into(),
+                                );
+                            } else {
+                                skip_current = true;
+                                break Err(otto_core::Error::Internal("step skipped".into()));
+                            }
                         }
                     }
                     r = &mut fut => break r,
@@ -2260,7 +2293,18 @@ pub async fn run_workflow(
         // mark it Skipped, and continue to the NEXT node (unlike cancel, the run
         // proceeds). A marker output keeps dependents satisfied — an empty output
         // would make them BranchSkip and cascade the whole tail away.
+        // A marker nobody consumed (the step finished first) dies with the step.
+        take_skip_marker(&ctx, &run_id, &node_id);
         if skip_current {
+            // A skipped review step's fleet is cancelled through the review
+            // engine, like a run cancel does: killing a reviewer's PTY alone
+            // makes its recovery loop respawn it, ownerless.
+            for review_id in states[idx].review_ids.clone() {
+                if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
+                    crate::modules::cancel_running_review(&ctx, &review, &workflow.workspace_id)
+                        .await;
+                }
+            }
             for sid in &states[idx].sessions {
                 if let Err(e) = ctx.manager.kill_session(sid).await {
                     tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
@@ -2268,6 +2312,19 @@ pub async fn run_workflow(
             }
             states[idx].status = NodeStatus::Skipped;
             states[idx].logs.push("⏭ skipped via chat command".into());
+            // A skipped step decided nothing, so none of its CONDITIONAL
+            // out-edges is taken (those branches BranchSkip). Nothing used to be
+            // pruned here — both sides of a branch after a skipped condition /
+            // review ran. Unconditional edges stay live; the marker output below
+            // satisfies those dependents.
+            for e in outgoing_edges(&workflow.graph, &node_id) {
+                if e.condition.is_some() {
+                    inactive_edges.insert(e.id.clone());
+                    states[idx]
+                        .logs
+                        .push(format!("edge → {} not taken (step skipped)", e.target));
+                }
+            }
             cap_node_logs(&mut states[idx].logs, NODE_LOG_CAP);
             states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
             outputs.insert(
@@ -2485,6 +2542,7 @@ pub async fn run_workflow(
             &states,
             false,
         );
+        clear_skip_markers(&ctx, &run_id);
         reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
@@ -2564,6 +2622,7 @@ pub async fn run_workflow(
     );
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
+    clear_skip_markers(&ctx, &run_id);
     reap_run_worktrees(&ctx, &run_id).await;
 }
 
@@ -2641,6 +2700,7 @@ async fn finalize_canceled_run(
         states,
         false,
     );
+    clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
 }
 
@@ -7849,6 +7909,12 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn skip_marker_key_is_per_run_and_step() {
+        assert_eq!(skip_marker_key("r1", "n2"), "r1/n2");
+        assert_ne!(skip_marker_key("r1", "n2"), skip_marker_key("r1", "n3"));
     }
 
     /// A re-queued retry-a-step (pending with progress) resumes its PERSISTED

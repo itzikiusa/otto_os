@@ -1043,8 +1043,44 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 })
             }
             WfControl::Skip => {
+                // Target the step running NOW, by id: a run-wide marker set
+                // between steps (or while queued) used to skip the NEXT step
+                // the instant it started, and one left on a finished run fired
+                // on a later retry. An approval gate is never skippable — that
+                // would pass it unapproved.
+                let Some(current) = run
+                    .nodes
+                    .iter()
+                    .find(|n| n.status == NodeStatus::Running)
+                    .map(|n| n.node_id.clone())
+                else {
+                    return Some(WorkflowChatAck {
+                        reply: format!(
+                            "No step of run `{short}` is running right now — nothing to skip."
+                        ),
+                    });
+                };
+                let is_gate = repo
+                    .definition_for_run(&run)
+                    .await
+                    .ok()
+                    .and_then(|wf| {
+                        wf.graph
+                            .nodes
+                            .iter()
+                            .find(|n| n.id == current)
+                            .map(|n| n.kind == "human_approval")
+                    })
+                    .unwrap_or(false);
+                if is_gate {
+                    return Some(WorkflowChatAck {
+                        reply: format!(
+                            "⏸️ Run `{short}` is waiting for an approval — approve or reject it in Otto; an approval step can't be skipped."
+                        ),
+                    });
+                }
                 if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
-                    s.insert(run.id.clone());
+                    s.insert(crate::workflow_engine::skip_marker_key(&run.id, &current));
                 }
                 Some(WorkflowChatAck {
                     reply: format!("⏭️ Skipping the current step of run `{short}`."),
