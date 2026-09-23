@@ -538,20 +538,7 @@ async fn run_shell_with_retry(
     let mut last: Option<Result<std::process::Output>> = None;
     for i in 0..max_attempts {
         attempts += 1;
-        let res = match tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(cwd)
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(e)) => Err(Error::Internal(format!("spawn shell: {e}"))),
-            Err(_) => Err(Error::Internal("shell command timed out".into())),
-        };
+        let res = run_shell_once(cmd, cwd, timeout).await;
         let success = matches!(&res, Ok(out) if out.status.success());
         last = Some(res);
         if success {
@@ -573,6 +560,53 @@ async fn run_shell_with_retry(
         attempts,
     )
 }
+
+/// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
+/// On timeout the whole group is killed: the old `timeout(…, output())` only
+/// dropped the future, and tokio does not kill a child on drop by default —
+/// every timed-out attempt left its shell (and whatever it started: `ssh`, a
+/// test run stuck on a prompt) running, each retry added another copy, and the
+/// released permit let the next scheduled occurrence stack more on top.
+async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::process::Output> {
+    let mut spec = tokio::process::Command::new("/bin/sh");
+    spec.arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    spec.process_group(0);
+    let child = spec
+        .spawn()
+        .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
+    let pid = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(Error::Internal(format!("shell: {e}"))),
+        Err(_) => {
+            // The shell itself died with the dropped future (kill_on_drop);
+            // take its children with it.
+            kill_process_group(pid);
+            Err(Error::Internal(format!(
+                "shell command timed out after {}s (killed)",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
+/// SIGKILL the process group led by `pid` (see [`run_shell_once`]).
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pg) = pid.and_then(|id| rustix::process::Pid::from_raw(id as i32)) {
+        let _ = rustix::process::kill_process_group(pg, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: Option<u32>) {}
 
 /// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
 /// reach a terminal state, and summarise the node statuses as the report.
@@ -1039,6 +1073,30 @@ mod tests {
         let (_res, attempts) =
             run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
         assert_eq!(attempts, 1);
+    }
+
+    /// F3: a timed-out command is killed WITH its children — the old timeout
+    /// only dropped the future, leaving the shell and everything it started
+    /// running (one more orphan per retry).
+    #[tokio::test]
+    async fn shell_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let started = std::time::Instant::now();
+        let res = run_shell_once(
+            "(sleep 1; touch orphan-ran) & sleep 30",
+            &cwd,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(res.is_err(), "timed out");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Past the point the backgrounded child would have written its marker.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !dir.path().join("orphan-ran").exists(),
+            "the timed-out command's child must not survive"
+        );
     }
 
     #[tokio::test]
