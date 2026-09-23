@@ -482,7 +482,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         // Read-only: find and cite earlier design work (the References drawer's
         // library). The design library is global; `workspace_id` only narrows.
         json!({"name":"otto.design_list","mutating":false,"category":"Design",
-            "description":"List Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) with id, title, studio, format, status and head version. Optional filters: project_id, studio, format, status, story_id (artifacts implementing a product story). Read-only.",
+            "description":"List Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) with id, title, studio, format, status, head version, who created / last edited it (created_by_name, last_editor_name) and the product stories it implements (story_ids). Optional filters: project_id, studio, format, status, story_id (artifacts implementing a product story). Newest first; for the next page pass cursor = the last row's `updated_at|id`. Read-only.",
             "inputSchema":{"type":"object","required":[],"properties":{
                 "workspace_id":{"type":"string","description":"Optional — the design library is global; narrows to one workspace."},
                 "project_id":{"type":"string"},
@@ -490,7 +490,8 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "format":{"type":"string"},
                 "status":{"type":"string","description":"draft | review | approved | shipped | archived"},
                 "story_id":{"type":"string"},
-                "limit":{"type":"integer"}}}}),
+                "limit":{"type":"integer"},
+                "cursor":{"type":"string","description":"Next page: `<updated_at>|<id>` of the previous page's last row."}}}}),
         json!({"name":"otto.design_get","mutating":false,"category":"Design",
             "description":"One design artifact: metadata, head + approved versions, link counts, the working-copy and thumbnail file paths, and (text formats) its source — the head's, or `version` (`v3` or a version id). Cite it as otto://design/<id>@v<seq>. Read-only.",
             "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
@@ -2453,6 +2454,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                     ("status", "status"),
                     ("story_id", "story_id"),
                     ("limit", "limit"),
+                    ("cursor", "cursor"),
                 ],
             );
             SelfCall::get(if q.is_empty() {
@@ -4810,6 +4812,15 @@ mod tests {
                 .unwrap()
                 .path,
             "/api/v1/design/artifacts?studio=3d&limit=5"
+        );
+        assert_eq!(
+            route_for(
+                "design_list",
+                &json!({"limit": 2, "cursor": "2026-09-23T10:00:00Z|A9"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/design/artifacts?limit=2&cursor=2026-09-23T10%3A00%3A00Z%7CA9"
         );
         assert_eq!(
             route_for("design_get", &json!({"artifact_id": "A1", "version": "v3"}))

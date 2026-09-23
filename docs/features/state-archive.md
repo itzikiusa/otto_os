@@ -8,6 +8,8 @@ The exporter enumerates the installed SQLite schema within one read transaction;
 
 Owned files come from `library`, `canvas`, `product`, `snips`, `transcripts`, `workflow-context`, `scheduled`, `personal`, and `insights` under Otto's data directory, plus every registered Vault root. The archive records each root by a trusted label, each relative file path, base64 bytes, and SHA-256. A missing registered Vault root, symlink/special file, changing file, or size-limit violation fails the export instead of returning a silently incomplete archive. Ordinary document bytes are preserved, including Markdown, Canvas source, mockups and attachments.
 
+Design Hall blobs (`<data>/design/blobs/<sha256>`, root `data-design/blobs`) are the one best-effort root: only the blobs the saved `design_versions` / `design_artifacts` rows reference are included (version bytes + thumbnails; never orphans or temp files), AFTER every other root, within what is left of the 256 MiB budget (minus 8 MiB headroom). A blob that doesn't fit, is over 64 MiB, or is missing / unreadable / doesn't hash to its name is skipped with one summary line in `excluded` (and a warning log) instead of failing the export — back up `<data>/design/blobs` with the data directory when the note appears. On restore a design blob must be named by its SHA-256; an existing blob of that name is identical by construction, so it is kept silently (never a conflict).
+
 The manifest explicitly lists exclusions:
 
 - Keychain contents, authentication sessions, password hashes, secret references, configured credential fields, secret environment/header entries, and credentials embedded in structured transport URLs/configuration.

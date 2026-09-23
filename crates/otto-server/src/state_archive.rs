@@ -234,6 +234,20 @@ pub(crate) async fn build_snapshot_parts(
             )?;
             archive.roots.push(root);
         }
+        // Design Hall blobs the saved design rows reference go LAST and
+        // best-effort: what doesn't fit the remaining budget is skipped with a
+        // note (never a failed export, never at another root's expense).
+        let design_blobs = files::design_blob_refs(&archive.records);
+        if files::design_blob_files(
+            data_dir,
+            &design_blobs,
+            &mut archive.files,
+            &mut archive.excluded,
+            &mut total,
+        )? > 0
+        {
+            archive.roots.push(files::design_blobs_root());
+        }
     } else {
         archive
             .excluded
@@ -543,6 +557,10 @@ fn plan_files(
         let exists = files::existing(&ctx.data_dir, &relative)?;
         signature.update(relative.as_bytes());
         signature.update([u8::from(exists), u8::from(owner_skipped)]);
+        if exists && root.id == files::DESIGN_BLOBS_ROOT_ID {
+            // Content-addressed: an existing blob of that name IS this file.
+            continue;
+        }
         if exists || owner_skipped {
             conflicts.push(RestoreConflict {
                 kind: "file".into(),

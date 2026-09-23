@@ -118,7 +118,31 @@ fn row_artifact(r: &sqlx::sqlite::SqliteRow) -> Result<DesignArtifact> {
         created_session_id: r.get("created_session_id"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
+        created_by_name: opt_col(r, "created_by_name"),
+        last_editor_id: opt_col(r, "last_editor_id"),
+        last_editor_kind: opt_col(r, "last_editor_kind"),
+        last_editor_name: opt_col(r, "last_editor_name"),
+        story_ids: split_ids(opt_col(r, "story_ids_joined")),
+        created_session_title: opt_col(r, "created_session_title"),
     })
+}
+
+/// A `group_concat(…, char(10))` id list → sorted, de-duplicated ids.
+fn split_ids(joined: Option<String>) -> Vec<Id> {
+    let mut ids: Vec<Id> = joined
+        .unwrap_or_default()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// A nullable TEXT column that only some selects join in (absent → `None`).
+fn opt_col(r: &sqlx::sqlite::SqliteRow, col: &str) -> Option<String> {
+    r.try_get::<Option<String>, _>(col).ok().flatten()
 }
 
 fn row_version(r: &sqlx::sqlite::SqliteRow) -> Result<DesignVersion> {
@@ -140,6 +164,7 @@ fn row_version(r: &sqlx::sqlite::SqliteRow) -> Result<DesignVersion> {
             Value::Object(Default::default()),
         ),
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        author_name: opt_col(r, "author_name"),
     })
 }
 
@@ -197,12 +222,57 @@ fn row_publish(r: &sqlx::sqlite::SqliteRow) -> Result<DesignPublish> {
     })
 }
 
-const ART_SELECT: &str = "SELECT a.*, v.seq AS head_seq FROM design_artifacts a \
-     LEFT JOIN design_versions v ON v.id = a.head_version_id";
+/// SQL for a user's display name (`display_name`, else `username`); `$col`
+/// is the column holding the user id. Unknown ids (system authors) → NULL.
+macro_rules! user_name_of {
+    ($col:literal) => {
+        concat!(
+            "(SELECT COALESCE(NULLIF(u.display_name, ''), u.username) FROM users u WHERE u.id = ",
+            $col,
+            ")"
+        )
+    };
+}
+
+/// Read-time enrichment of an artifact row (`a` + its head version `v`):
+/// people, the head's author, the linked story ids and the creating
+/// session's title. Every artifact select carries these columns;
+/// `row_artifact` reads them leniently.
+macro_rules! art_enrich_cols {
+    () => {
+        concat!(
+            user_name_of!("a.created_by"),
+            " AS created_by_name, v.author_id AS last_editor_id, \
+             v.author_kind AS last_editor_kind, ",
+            user_name_of!("v.author_id"),
+            " AS last_editor_name, \
+             (SELECT group_concat(l.dst_id, char(10)) FROM design_links l \
+              WHERE l.src_artifact_id = a.id AND l.dst_kind = 'story') AS story_ids_joined, \
+             (SELECT s.title FROM sessions s WHERE s.id = a.created_session_id) \
+              AS created_session_title"
+        )
+    };
+}
+
+const ART_SELECT: &str = concat!(
+    "SELECT a.*, v.seq AS head_seq, ",
+    art_enrich_cols!(),
+    " FROM design_artifacts a LEFT JOIN design_versions v ON v.id = a.head_version_id"
+);
+
+/// Every version select: the row plus its author's display name.
+const VER_SELECT: &str = concat!(
+    "SELECT design_versions.*, ",
+    user_name_of!("design_versions.author_id"),
+    " AS author_name FROM design_versions"
+);
 
 const PROJECT_SELECT: &str = "SELECT p.*, (SELECT COUNT(*) FROM design_artifacts a \
      WHERE a.project_id = p.id AND a.status != 'archived') AS artifact_count \
      FROM design_projects p";
+
+/// Row cap of one bulk links read (`GET /design/links`).
+pub const MAX_BULK_LINKS: usize = 10_000;
 
 /// Status order for "shipped first" listings.
 const STATUS_ORDER: &str = "CASE a.status WHEN 'shipped' THEN 0 WHEN 'approved' THEN 1 \
@@ -314,6 +384,9 @@ pub struct ArtifactFilter {
     pub include_archived: bool,
     pub limit: i64,
     pub offset: i64,
+    /// Keyset page (`list_artifacts` only): rows strictly after this
+    /// `(updated_at stamp, id)` in newest-first order; `offset` is ignored.
+    pub cursor: Option<(String, Id)>,
 }
 
 impl ArtifactFilter {
@@ -377,6 +450,11 @@ impl ArtifactFilter {
         }
     }
 
+    /// The page size a listing actually uses (default 100, cap 500).
+    pub fn effective_limit(&self) -> i64 {
+        self.page().0
+    }
+
     fn page(&self) -> (i64, i64) {
         let limit = if self.limit > 0 {
             self.limit.min(500)
@@ -411,6 +489,24 @@ pub fn fts_match(query: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// The keyset cursor of a listed artifact — `<updated_at>|<id>`. Clients may
+/// build the same string from a row's JSON (`updated_at` + `|` + `id`).
+pub fn artifact_cursor(a: &DesignArtifact) -> String {
+    format!("{}|{}", stamp(a.updated_at), a.id)
+}
+
+/// Parse an `artifact_cursor` (any RFC 3339 spelling of the time) into the
+/// storage stamp + id the listing compares against.
+pub fn parse_cursor(s: &str) -> Result<(String, Id)> {
+    let bad = || Error::Invalid(format!("bad cursor {s:?} (expected <updated_at>|<id>)"));
+    let (at, id) = s.trim().rsplit_once('|').ok_or_else(bad)?;
+    if id.is_empty() || id.len() > 128 {
+        return Err(bad());
+    }
+    let at = DateTime::parse_from_rfc3339(at).map_err(|_| bad())?;
+    Ok((stamp(at.with_timezone(&Utc)), id.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -669,8 +765,15 @@ impl Store {
         let mut sql = format!("{ART_SELECT} WHERE 1 = 1");
         let mut args = Vec::new();
         f.push_where(&mut sql, &mut args);
-        let (limit, offset) = f.page();
-        sql.push_str(" ORDER BY a.updated_at DESC LIMIT ? OFFSET ?");
+        let (limit, mut offset) = f.page();
+        if let Some((at, id)) = &f.cursor {
+            sql.push_str(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))");
+            args.push(Arg::S(at.clone()));
+            args.push(Arg::S(at.clone()));
+            args.push(Arg::S(id.clone()));
+            offset = 0;
+        }
+        sql.push_str(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ? OFFSET ?");
         args.push(Arg::I(limit));
         args.push(Arg::I(offset));
         let mut q = sqlx::query(&sql);
@@ -735,6 +838,21 @@ impl Store {
             return Err(Error::NotFound(format!("design artifact {}", a.id)));
         }
         self.require_artifact(&a.id).await
+    }
+
+    /// Point `thumb_blob` at `sha` WITHOUT touching `updated_at` (a rendered
+    /// thumbnail is a cache refresh, not an edit).
+    pub async fn set_thumb_blob(&self, id: &str, sha: &str) -> Result<()> {
+        let res = sqlx::query("UPDATE design_artifacts SET thumb_blob = ? WHERE id = ?")
+            .bind(sha)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("design.artifact.thumb"))?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("design artifact {id}")));
+        }
+        Ok(())
     }
 
     /// Move `approved_version_id` (+ status). The version must belong to the
@@ -897,6 +1015,7 @@ impl Store {
             }
         })?;
         tx.commit().await.map_err(dberr("design.commit"))?;
+        let author_name = self.user_display_name(&v.author_id).await;
         Ok(DesignVersion {
             id,
             artifact_id: v.artifact_id,
@@ -912,11 +1031,12 @@ impl Store {
             message: v.message,
             provenance: v.provenance,
             created_at: ts(&now_s)?,
+            author_name,
         })
     }
 
     pub async fn get_version(&self, id: &str) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query("SELECT * FROM design_versions WHERE id = ?")
+        let row = sqlx::query(&format!("{VER_SELECT} WHERE id = ?"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -929,7 +1049,7 @@ impl Store {
         artifact_id: &str,
         seq: i64,
     ) -> Result<Option<DesignVersion>> {
-        let row = sqlx::query("SELECT * FROM design_versions WHERE artifact_id = ? AND seq = ?")
+        let row = sqlx::query(&format!("{VER_SELECT} WHERE artifact_id = ? AND seq = ?"))
             .bind(artifact_id)
             .bind(seq)
             .fetch_optional(&self.pool)
@@ -947,10 +1067,10 @@ impl Store {
         offset: i64,
     ) -> Result<Vec<DesignVersion>> {
         let limit = if limit > 0 { limit.min(1_000) } else { 200 };
-        let rows = sqlx::query(
-            "SELECT * FROM design_versions WHERE artifact_id = ? AND (? IS NULL OR kind = ?)
-             ORDER BY seq DESC LIMIT ? OFFSET ?",
-        )
+        let rows = sqlx::query(&format!(
+            "{VER_SELECT} WHERE artifact_id = ? AND (? IS NULL OR kind = ?)
+             ORDER BY seq DESC LIMIT ? OFFSET ?"
+        ))
         .bind(artifact_id)
         .bind(kind)
         .bind(kind)
@@ -1037,6 +1157,7 @@ impl Store {
             }
         })?;
         tx.commit().await.map_err(dberr("design.side"))?;
+        let author_name = self.user_display_name(&v.author_id).await;
         Ok(DesignVersion {
             id,
             artifact_id: v.artifact_id,
@@ -1052,6 +1173,7 @@ impl Store {
             message: v.message,
             provenance: v.provenance,
             created_at: ts(&now_s)?,
+            author_name,
         })
     }
 
@@ -1063,11 +1185,11 @@ impl Store {
         artifact_id: &str,
         prefix: &str,
     ) -> Result<Vec<DesignVersion>> {
-        let rows = sqlx::query(
-            "SELECT * FROM design_versions
+        let rows = sqlx::query(&format!(
+            "{VER_SELECT}
              WHERE artifact_id = ?1 AND substr(branch, 1, length(?2)) = ?2
-             ORDER BY seq LIMIT 1000",
-        )
+             ORDER BY seq LIMIT 1000"
+        ))
         .bind(artifact_id)
         .bind(prefix)
         .fetch_all(&self.pool)
@@ -1326,6 +1448,43 @@ impl Store {
         rows.iter().map(row_link).collect()
     }
 
+    /// Links touching any of `ids` — FROM them (`out`) and/or TO them
+    /// (`inn`) — each row once (a link between two of them is not doubled),
+    /// grouped by source. Capped at [`MAX_BULK_LINKS`] rows.
+    pub async fn links_touching(
+        &self,
+        ids: &[String],
+        out: bool,
+        inn: bool,
+    ) -> Result<Vec<DesignLink>> {
+        if ids.is_empty() || !(out || inn) {
+            return Ok(vec![]);
+        }
+        let ph = placeholders(ids.len());
+        let mut conds = Vec::new();
+        if out {
+            conds.push(format!("src_artifact_id IN ({ph})"));
+        }
+        if inn {
+            conds.push(format!("(dst_kind = 'artifact' AND dst_id IN ({ph}))"));
+        }
+        let sql = format!(
+            "SELECT * FROM design_links WHERE {} ORDER BY src_artifact_id, rel, created_at LIMIT {MAX_BULK_LINKS}",
+            conds.join(" OR ")
+        );
+        let mut q = sqlx::query(&sql);
+        for _ in 0..conds.len() {
+            for id in ids {
+                q = q.bind(id.as_str());
+            }
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("design.links.bulk"))?;
+        rows.iter().map(row_link).collect()
+    }
+
     pub async fn link_counts(&self, artifact_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query(
             "SELECT (SELECT COUNT(*) FROM design_links WHERE src_artifact_id = ?1) AS n_out,
@@ -1415,6 +1574,20 @@ impl Store {
                 r.get::<String, _>("title")
             )
         }))
+    }
+
+    /// A user's display name (`display_name`, else `username`); `None` for
+    /// an unknown id (a system author) or a lookup error — names are cosmetic.
+    pub async fn user_display_name(&self, user_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
     }
 
     pub async fn story_workspace(&self, story_id: &str) -> Result<Option<Id>> {
@@ -1623,15 +1796,17 @@ impl Store {
         let mut args = Vec::new();
         let sql = if self.has_fts().await {
             args.push(Arg::S(mq));
-            let mut sql = String::from(
-                "SELECT a.*, v.seq AS head_seq,
+            let mut sql = String::from(concat!(
+                "SELECT a.*, v.seq AS head_seq, ",
+                art_enrich_cols!(),
+                ",
                         snippet(design_search_fts, -1, '\u{2039}', '\u{203a}', '\u{2026}', 12) AS snip,
                         bm25(design_search_fts) AS rank
                  FROM design_search_fts
                  JOIN design_artifacts a ON a.id = design_search_fts.artifact_id
                  LEFT JOIN design_versions v ON v.id = a.head_version_id
                  WHERE design_search_fts MATCH ?"
-            );
+            ));
             f.push_where(&mut sql, &mut args);
             sql.push_str(&format!(" ORDER BY {STATUS_ORDER}, rank LIMIT ? OFFSET ?"));
             sql
@@ -1927,5 +2102,160 @@ mod tests {
         );
         assert_eq!(fts_match("a: (x) -").as_deref(), None);
         assert_eq!(fts_match("LOY-142").as_deref(), Some("\"loy\" \"142\"*"));
+    }
+
+    /// Seed a `users` row (the enrichment joins resolve names from it).
+    async fn user(s: &Store, id: &str, username: &str, display: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, created_at)
+             VALUES (?, ?, 'x', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(display)
+        .execute(s.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn artifacts_and_versions_carry_resolved_people() {
+        let s = store().await;
+        user(&s, "u1", "ada", "Ada Lovelace").await;
+        user(&s, "u2", "grace", "").await; // no display name → username
+        s.insert_artifact(&art("A", "w1")).await.unwrap();
+        // No version yet: creator resolved, no last editor.
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.created_by_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(a.last_editor_id, None);
+        assert_eq!(a.last_editor_name, None);
+
+        let v1 = s.commit_version(ver("A", "s1"), None).await.unwrap();
+        assert_eq!(v1.author_name.as_deref(), Some("Ada Lovelace"));
+        let mut by_grace = ver("A", "s2");
+        by_grace.author_id = "u2".into();
+        by_grace.author_kind = "agent".into();
+        let v2 = s.commit_version(by_grace, None).await.unwrap();
+        assert_eq!(v2.author_name.as_deref(), Some("grace"));
+
+        // The artifact's last editor is the head's author, on every select.
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.last_editor_id.as_deref(), Some("u2"));
+        assert_eq!(a.last_editor_kind.as_deref(), Some("agent"));
+        assert_eq!(a.last_editor_name.as_deref(), Some("grace"));
+        let listed = s.list_artifacts(&ArtifactFilter::default()).await.unwrap();
+        assert_eq!(listed[0].last_editor_name.as_deref(), Some("grace"));
+        assert_eq!(listed[0].created_by_name.as_deref(), Some("Ada Lovelace"));
+
+        // Versions resolve their author on read; a system author stays null.
+        let mut sys = ver("A", "s3");
+        sys.author_id = "import".into();
+        sys.author_kind = "system".into();
+        s.commit_version(sys, None).await.unwrap();
+        let vs = s.list_versions("A", None, 0, 0).await.unwrap();
+        let names: Vec<Option<&str>> = vs.iter().map(|v| v.author_name.as_deref()).collect();
+        assert_eq!(names, vec![None, Some("grace"), Some("Ada Lovelace")]);
+        assert_eq!(
+            s.get_version(&v1.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .author_name
+                .as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(s.user_display_name("nobody").await, None);
+    }
+
+    #[tokio::test]
+    async fn rows_carry_story_ids_and_page_by_cursor() {
+        let s = store().await;
+        for id in ["A", "B", "C", "D", "E"] {
+            s.insert_artifact(&art(id, "w1")).await.unwrap();
+        }
+        let mut story = link("A", "S2", "implements", "explicit");
+        story.dst_kind = "story".into();
+        s.insert_link(&story).await.unwrap();
+        story.dst_id = "S1".into();
+        s.insert_link(&story).await.unwrap();
+        let a = s.require_artifact("A").await.unwrap();
+        assert_eq!(a.story_ids, vec!["S1".to_string(), "S2".to_string()]);
+        assert!(s.require_artifact("B").await.unwrap().story_ids.is_empty());
+        // The story filter and the per-row ids agree.
+        let f = ArtifactFilter {
+            story_id: Some("S1".into()),
+            ..Default::default()
+        };
+        let by_story = s.list_artifacts(&f).await.unwrap();
+        assert_eq!(by_story.len(), 1);
+        assert_eq!(by_story[0].story_ids.len(), 2);
+
+        // Keyset paging walks every row exactly once, newest first.
+        let mut seen = Vec::new();
+        let mut f = ArtifactFilter {
+            limit: 2,
+            ..Default::default()
+        };
+        loop {
+            let page = s.list_artifacts(&f).await.unwrap();
+            seen.extend(page.iter().map(|a| a.id.clone()));
+            if (page.len() as i64) < f.effective_limit() {
+                break;
+            }
+            // A client-built cursor (JSON spelling of updated_at) works too.
+            let last = page.last().unwrap();
+            let json_time = serde_json::to_value(last.updated_at).unwrap();
+            let cursor = format!("{}|{}", json_time.as_str().unwrap(), last.id);
+            assert_eq!(
+                parse_cursor(&cursor).unwrap(),
+                parse_cursor(&artifact_cursor(last)).unwrap()
+            );
+            f.cursor = Some(parse_cursor(&cursor).unwrap());
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, vec!["A", "B", "C", "D", "E"], "{seen:?}");
+        assert_eq!(seen.len(), 5, "{seen:?}");
+        assert!(parse_cursor("nope").is_err());
+        assert!(parse_cursor("2026-01-01T00:00:00Z|").is_err());
+    }
+
+    #[tokio::test]
+    async fn artifacts_carry_their_creating_session_title() {
+        let s = store().await;
+        for stmt in [
+            "INSERT INTO users (id, username, password_hash, created_at)
+             VALUES ('u1', 'ada', 'x', 'now')",
+            "INSERT INTO workspaces (id, name, root_path, created_at)
+             VALUES ('w1', 'W', '/tmp/w', 'now')",
+            "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd,
+                                   created_by, created_at, last_active_at)
+             VALUES ('sess1', 'w1', 'agent', 'claude', 'Design the hero', 'idle', '/tmp/w',
+                     'u1', 'now', 'now')",
+        ] {
+            sqlx::query(stmt).execute(s.pool()).await.unwrap();
+        }
+        let mut a = art("A", "w1");
+        a.created_session_id = Some("sess1".into());
+        s.insert_artifact(&a).await.unwrap();
+        let mut b = art("B", "w1");
+        b.created_session_id = Some("gone".into());
+        s.insert_artifact(&b).await.unwrap();
+        s.insert_artifact(&art("C", "w1")).await.unwrap();
+        let got = s
+            .artifacts_by_ids(&["A".into(), "B".into(), "C".into()])
+            .await
+            .unwrap();
+        let title = |id: &str| {
+            got.iter()
+                .find(|x| x.id == id)
+                .unwrap()
+                .created_session_title
+                .clone()
+        };
+        assert_eq!(title("A").as_deref(), Some("Design the hero"));
+        assert_eq!(title("B"), None, "a deleted session degrades to null");
+        assert_eq!(title("C"), None);
     }
 }

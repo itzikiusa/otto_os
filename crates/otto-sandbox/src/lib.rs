@@ -122,6 +122,16 @@ pub const AGENT_DATA_SUBDIRS: &[&str] = &[
     "browser_summarize",
 ];
 
+/// Design Hall working copies: `<data>/design/<artifact>/work/**` is where a
+/// design-assist agent edits the artifact in place, so it is re-opened after
+/// the data-dir deny — per artifact, by pattern (`[^/]+` = one path segment).
+/// Nothing else under `design/` is: the content-addressed blob store
+/// (`design/blobs/**`, every version's bytes) stays write-denied even if it
+/// were shaped like a working copy (an explicit deny follows the allow), and
+/// so do the variant scratch dirs (`design/<artifact>/variants/**`).
+const DESIGN_WORK_DIR: &str = "design";
+const DESIGN_BLOBS_DIR: &str = "design/blobs";
+
 /// Files/dirs of Otto's data dir an agent must not even READ: plaintext
 /// secrets, the state DB (sessions, roles, tokens) incl. WAL/SHM/journal and
 /// the `otto.db.*.bak` copies, the daemon's TLS key, and kubeconfigs. `prefix`
@@ -151,7 +161,8 @@ impl SandboxPolicy {
     /// workspace `cwd`, the resolved git dir(s) in `extra_writable` (so commits
     /// in a worktree still work), the agent CLIs' own config/cache dirs under
     /// `home`, the agent work areas of Otto's `data_dir`
-    /// ([`AGENT_DATA_SUBDIRS`]) and the system temp dirs. Reads stay global.
+    /// ([`AGENT_DATA_SUBDIRS`] + the Design Hall working copies
+    /// `design/<artifact>/work/**`) and the system temp dirs. Reads stay global.
     ///
     /// Otto's `data_dir` itself is write-denied (and its secrets / state DB /
     /// TLS key read-denied) even when it lies under a writable root: a
@@ -238,8 +249,14 @@ impl SandboxPolicy {
                 .map(|d| data_dir.join(d))
                 .collect();
             open.extend(reallow);
-            let open: Vec<String> = open.iter().map(|p| filter("subpath", p)).collect();
+            let mut open: Vec<String> = open.iter().map(|p| filter("subpath", p)).collect();
+            open.extend(design_work_filters(&data_dir));
             trailing.push(format!("(allow file-write* {})", open.join(" ")));
+            //    …but never the design blob store, whatever a pattern matched.
+            trailing.push(format!(
+                "(deny file-write* {})",
+                filter("subpath", &data_dir.join(DESIGN_BLOBS_DIR))
+            ));
             // 3. Secrets / state DB / TLS key / kubeconfigs are not even readable.
             let mut hidden: Vec<String> = Vec::new();
             hidden.extend(
@@ -417,6 +434,35 @@ fn escape_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Regex filters matching `<data_dir>/design/<one segment>/work` and
+/// everything below it. Empty (fail closed: no grant) when the path can't be
+/// embedded in an SBPL `#"…"` regex literal (non-UTF-8 or a `"`).
+fn design_work_filters(data_dir: &Path) -> Vec<String> {
+    let Some(d) = data_dir.to_str().filter(|d| !d.contains('"')) else {
+        return Vec::new();
+    };
+    let base = format!("^{}/{DESIGN_WORK_DIR}/[^/]+/work", regex_escape(d));
+    vec![
+        format!("(regex #\"{base}$\")"),
+        format!("(regex #\"{base}/\")"),
+    ]
+}
+
+/// Escape POSIX-regex metacharacters so a literal path matches itself.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// One SBPL path filter, e.g. `(subpath "/x")`. `kind` is `literal`,
 /// `subpath` or `prefix`.
 fn filter(kind: &str, p: &Path) -> String {
@@ -485,6 +531,32 @@ mod tests {
         assert!(sbpl.contains(&format!("(subpath \"{data}/tls\")")));
         // The carve-outs come after every grant, network included.
         assert!(deny > at(&sbpl, "(allow network-outbound)"));
+    }
+
+    /// Design-assist turns edit `<data>/design/<artifact>/work/**` in place:
+    /// that (and only that) is re-opened, by a per-artifact pattern, and the
+    /// blob store is denied again after it.
+    #[test]
+    fn for_agent_reopens_design_working_copies_but_not_blobs() {
+        let data = "/nonexistent-otto-test/Application Support/Otto.v2";
+        let sbpl = agent_policy(data).to_sbpl();
+        let deny = at(&sbpl, &format!("(deny file-write* (subpath \"{data}\"))"));
+        let esc = r"/nonexistent-otto-test/Application Support/Otto\.v2";
+        let work = at(&sbpl, &format!("(regex #\"^{esc}/design/[^/]+/work/\")"));
+        assert!(sbpl.contains(&format!("(regex #\"^{esc}/design/[^/]+/work$\")")));
+        let blobs = at(
+            &sbpl,
+            &format!("(deny file-write* (subpath \"{data}/design/blobs\"))"),
+        );
+        assert!(
+            deny < work && work < blobs,
+            "deny data → allow work → deny blobs"
+        );
+        // No blanket grant of the design tree.
+        assert!(!sbpl.contains(&format!("(subpath \"{data}/design\")")));
+        assert_eq!(regex_escape("a.b(c)*"), r"a\.b\(c\)\*");
+        // A path that can't be embedded in a regex literal gets no grant.
+        assert!(design_work_filters(Path::new("/x\"y")).is_empty());
     }
 
     #[test]
