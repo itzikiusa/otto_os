@@ -35,6 +35,8 @@ use crate::types::*;
 const CONTENT_BODY_LIMIT: usize = 40 * 1024 * 1024;
 /// PATCH bodies may carry a ≤ 2 MB PNG thumbnail as base64.
 const PATCH_BODY_LIMIT: usize = 4 * 1024 * 1024;
+/// `PUT …/thumbnail` takes the raw image (≤ 2 MB; the service says why).
+const THUMB_BODY_LIMIT: usize = crate::service::MAX_THUMB_BYTES + 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Context trait
@@ -162,6 +164,10 @@ struct ArtifactQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    /// Keyset page of `GET /design/artifacts`: `<updated_at>|<id>` of the
+    /// previous page's last row (also sent back as `X-Next-Cursor`).
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -180,6 +186,20 @@ struct LinksQuery {
     #[serde(default)]
     dir: Option<String>,
 }
+
+/// `GET /design/links` — links of many artifacts at once.
+#[derive(Deserialize, Default)]
+struct BulkLinksQuery {
+    /// Comma-separated artifact ids (1..=[`MAX_BULK_LINK_IDS`]).
+    #[serde(default)]
+    artifact_ids: Option<String>,
+    /// `out` | `in` | `both` (default).
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+/// Id cap of one `GET /design/links` call.
+const MAX_BULK_LINK_IDS: usize = 100;
 
 #[derive(Deserialize, Default)]
 struct SignalListQuery {
@@ -231,7 +251,12 @@ pub fn router<S: DesignCtx>() -> Router<S> {
                 .put(put_content::<S>)
                 .layer(DefaultBodyLimit::max(CONTENT_BODY_LIMIT)),
         )
-        .route("/design/artifacts/{id}/thumbnail", get(get_thumbnail::<S>))
+        .route(
+            "/design/artifacts/{id}/thumbnail",
+            get(get_thumbnail::<S>)
+                .put(put_thumbnail::<S>)
+                .layer(DefaultBodyLimit::max(THUMB_BODY_LIMIT)),
+        )
         .route(
             "/design/artifacts/{id}/versions",
             get(list_versions::<S>)
@@ -251,6 +276,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
             "/design/artifacts/{id}/links/{link_id}",
             delete(delete_link::<S>),
         )
+        .route("/design/links", get(bulk_links::<S>))
         .route("/design/search", get(search::<S>))
         .route(
             "/design/signals",
@@ -357,6 +383,10 @@ fn filter_from(
         include_archived: q.include_archived.unwrap_or(false),
         limit: q.limit.unwrap_or(default_limit),
         offset: q.offset.unwrap_or(0),
+        cursor: match q.cursor.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => Some(crate::store::parse_cursor(c)?),
+            _ => None,
+        },
     })
 }
 
@@ -535,7 +565,16 @@ async fn list_artifacts<S: DesignCtx>(
     let svc = ctx.design();
     let ws = visible(&ctx, &svc, &user, q.workspace_id.as_ref()).await?;
     let f = filter_from(q, ws, 100)?;
-    Ok(Json(svc.store().list_artifacts(&f).await?).into_response())
+    let rows = svc.store().list_artifacts(&f).await?;
+    // A full page may have more behind it: hand back the keyset cursor.
+    let next = (rows.len() as i64 >= f.effective_limit())
+        .then(|| rows.last().map(crate::store::artifact_cursor))
+        .flatten();
+    let mut resp = Json(rows).into_response();
+    if let Some(v) = next.and_then(|c| axum::http::HeaderValue::from_str(&c).ok()) {
+        resp.headers_mut().insert("x-next-cursor", v);
+    }
+    Ok(resp)
 }
 
 async fn create_artifact<S: DesignCtx>(
@@ -706,13 +745,29 @@ async fn get_thumbnail<S: DesignCtx>(
         .as_deref()
         .ok_or_else(|| Error::NotFound(format!("design artifact {} has no thumbnail", a.id)))?;
     let bytes = svc.blobs().get(sha).await?;
+    let mime = crate::service::thumb_mime(&bytes).unwrap_or("image/png");
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CONTENT_TYPE, mime)
         .header("x-content-type-options", "nosniff")
         .header(header::ETAG, format!("\"{sha}\""))
         .body(Body::from(bytes))
         .map_err(|e| ApiErr(Error::Internal(format!("build response: {e}"))))
+}
+
+/// Store the thumbnail the UI rendered: the raw PNG / WebP bytes as the body
+/// (any `Content-Type`; the bytes are sniffed). Editor-gated; never bumps
+/// `updated_at` (see `DesignService::set_thumbnail`).
+async fn put_thumbnail<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(IdPath { id }): Path<IdPath>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let svc = ctx.design();
+    let a = load_artifact(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
+    let updated = svc.set_thumbnail(&a, &body).await?;
+    Ok(Json(updated).into_response())
 }
 
 async fn list_versions<S: DesignCtx>(
@@ -849,6 +904,95 @@ async fn list_links<S: DesignCtx>(
         }
     }
     Ok(Json(LinksResp { links, artifacts }).into_response())
+}
+
+/// Links of up to [`MAX_BULK_LINK_IDS`] artifacts in one call (Product's
+/// design strip). Ids the caller can't view — or that don't exist — are
+/// skipped, never an error; `artifacts` holds the other ends the caller may
+/// view (not the requested ones).
+async fn bulk_links<S: DesignCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<BulkLinksQuery>,
+) -> ApiResult<Response> {
+    let dir = q.dir.unwrap_or_else(|| "both".into());
+    if !matches!(dir.as_str(), "out" | "in" | "both") {
+        return Err(ApiErr(Error::Invalid(format!(
+            "dir must be out|in|both, not {dir:?}"
+        ))));
+    }
+    let mut ids: Vec<String> = q
+        .artifact_ids
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(ApiErr(Error::Invalid(
+            "artifact_ids (comma-separated) is required".into(),
+        )));
+    }
+    if ids.len() > MAX_BULK_LINK_IDS {
+        return Err(ApiErr(Error::Invalid(format!(
+            "at most {MAX_BULK_LINK_IDS} artifact_ids per call"
+        ))));
+    }
+    let svc = ctx.design();
+    let mut cache: HashMap<Id, bool> = HashMap::new();
+    let mut mine: Vec<String> = Vec::new();
+    for a in svc.store().artifacts_by_ids(&ids).await? {
+        if can_view(&ctx, &user, &a.workspace_id, &mut cache).await {
+            mine.push(a.id);
+        }
+    }
+    let links = svc
+        .store()
+        .links_touching(&mine, dir != "in", dir != "out")
+        .await?;
+    let mut other: Vec<String> = Vec::new();
+    for l in &links {
+        for o in [
+            Some(l.src_artifact_id.clone()),
+            (l.dst_kind == "artifact").then(|| l.dst_id.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !mine.contains(&o) && !other.contains(&o) {
+                other.push(o);
+            }
+        }
+    }
+    let mut artifacts = Vec::new();
+    for x in svc.store().artifacts_by_ids(&other).await? {
+        if can_view(&ctx, &user, &x.workspace_id, &mut cache).await {
+            artifacts.push(x);
+        }
+    }
+    Ok(Json(LinksResp { links, artifacts }).into_response())
+}
+
+/// Workspace-viewer check memoized per call.
+async fn can_view<S: DesignCtx>(
+    ctx: &S,
+    user: &User,
+    workspace_id: &Id,
+    cache: &mut HashMap<Id, bool>,
+) -> bool {
+    if let Some(ok) = cache.get(workspace_id) {
+        return *ok;
+    }
+    let ok = ctx
+        .roles()
+        .check(user, workspace_id, WorkspaceRole::Viewer)
+        .await
+        .is_ok();
+    cache.insert(workspace_id.clone(), ok);
+    ok
 }
 
 async fn create_link<S: DesignCtx>(
@@ -1321,5 +1465,277 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json_of(&p)["applied"], false);
+    }
+
+    #[tokio::test]
+    async fn restored_reference_added_and_forked_signals_need_their_key() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "A" })),
+        )
+        .await;
+        let created = json_of(&b);
+        let aid = created["artifact"]["id"].as_str().unwrap().to_string();
+        let v1 = created["version"]["id"].as_str().unwrap().to_string();
+        for (kind, key) in [
+            ("restored", "from_version_id"),
+            ("reference_added", "target_artifact_id"),
+            ("forked", "source_artifact_id"),
+        ] {
+            let (st, _, _) = call(
+                &app,
+                Method::POST,
+                "/design/signals",
+                Some(serde_json::json!({ "artifact_id": aid, "kind": kind })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{kind} without {key}");
+            let (st, s, _) = call(
+                &app,
+                Method::POST,
+                "/design/signals",
+                Some(serde_json::json!({
+                    "artifact_id": aid, "kind": kind, "version_id": v1,
+                    "payload": { key: "x1" }
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{}", String::from_utf8_lossy(&s));
+            assert_eq!(json_of(&s)["kind"], kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_list_pages_by_cursor_and_carries_story_ids() {
+        let (app, ctx) = app().await;
+        let mut ids = Vec::new();
+        for t in ["One", "Two", "Three"] {
+            let (_, b, _) = call(
+                &app,
+                Method::POST,
+                "/design/artifacts",
+                Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": t })),
+            )
+            .await;
+            ids.push(json_of(&b)["artifact"]["id"].as_str().unwrap().to_string());
+        }
+        // An `implements` link shows up as `story_ids` on the row.
+        sqlx::query(
+            "INSERT INTO design_links (id, src_artifact_id, dst_kind, dst_id, rel, policy,
+                                       origin, created_by, created_at)
+             VALUES ('l1', ?, 'story', 'S1', 'implements', 'follow_latest', 'explicit', 'u1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .bind(&ids[0])
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let (st, b, h) = call(&app, Method::GET, "/design/artifacts?limit=2", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let page1 = json_of(&b);
+        assert_eq!(page1.as_array().unwrap().len(), 2);
+        let cursor = h
+            .get("x-next-cursor")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let (st, b, h) = call(
+            &app,
+            Method::GET,
+            &format!(
+                "/design/artifacts?limit=2&cursor={}",
+                cursor.replace('+', "%2B").replace('|', "%7C")
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let page2 = json_of(&b);
+        assert_eq!(page2.as_array().unwrap().len(), 1);
+        assert!(h.get("x-next-cursor").is_none(), "a short page is the last");
+        let mut all: Vec<String> = page1
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(page2.as_array().unwrap())
+            .map(|a| a["id"].as_str().unwrap().to_string())
+            .collect();
+        all.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(all, want);
+        let (_, b, _) = call(&app, Method::GET, "/design/artifacts?story_id=S1", None).await;
+        let rows = json_of(&b);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["story_ids"], serde_json::json!(["S1"]));
+        assert_eq!(rows[0]["id"], ids[0].as_str());
+        let (st, _, _) = call(&app, Method::GET, "/design/artifacts?cursor=bogus", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bulk_links_read_many_artifacts_in_one_call() {
+        let (app, ctx) = app().await;
+        let mk =
+            |t: &str| serde_json::json!({ "workspace_id": "w1", "format": "html", "title": t });
+        let mut ids = Vec::new();
+        for t in ["A", "B", "C"] {
+            let (_, b, _) = call(&app, Method::POST, "/design/artifacts", Some(mk(t))).await;
+            ids.push(json_of(&b)["artifact"]["id"].as_str().unwrap().to_string());
+        }
+        let (a, b, c) = (&ids[0], &ids[1], &ids[2]);
+        for (src, rel) in [(b, "embeds"), (c, "references")] {
+            let (st, body, _) = call(
+                &app,
+                Method::POST,
+                &format!("/design/artifacts/{src}/links"),
+                Some(serde_json::json!({ "rel": rel, "dst_kind": "artifact", "dst_id": a })),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::CREATED,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        // An artifact in a workspace the caller can't view is skipped.
+        sqlx::query(
+            "INSERT INTO design_artifacts (id, workspace_id, studio, format, mime, title, status,
+                                           created_by, created_by_kind, created_at, updated_at)
+             VALUES ('HID', 'w-denied', 'frames', 'html', 'text/html', 'Hidden', 'draft',
+                     'u9', 'user', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+        let (st, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a},{b},HID,nope&dir=both"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v = json_of(&body);
+        // B→A is counted once although both ends were requested; C→A too.
+        assert_eq!(v["links"].as_array().unwrap().len(), 2, "{v}");
+        let others: Vec<&str> = v["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(others, vec![c.as_str()], "only the other ends");
+
+        let (_, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a},{b}&dir=out"),
+            None,
+        )
+        .await;
+        let v = json_of(&body);
+        assert_eq!(v["links"].as_array().unwrap().len(), 1);
+        assert_eq!(v["links"][0]["src_artifact_id"], b.as_str());
+
+        let (st, _, _) = call(&app, Method::GET, "/design/links?artifact_ids=", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let many = (0..101)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (st, _, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={many}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/links?artifact_ids={a}&dir=sideways"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    async fn put_raw(app: &Router, uri: &str, bytes: Vec<u8>) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn rendered_thumbnails_are_sniffed_capped_and_never_bump_updated_at() {
+        let (app, _ctx) = app().await;
+        let (_, b, _) = call(
+            &app,
+            Method::POST,
+            "/design/artifacts",
+            Some(serde_json::json!({ "workspace_id": "w1", "format": "html", "title": "T" })),
+        )
+        .await;
+        let created = json_of(&b);
+        let aid = created["artifact"]["id"].as_str().unwrap().to_string();
+        let updated_at = created["artifact"]["updated_at"].clone();
+        let uri = format!("/design/artifacts/{aid}/thumbnail");
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(b"rest-of-a-png");
+        let (st, body) = put_raw(&app, &uri, png.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let a = json_of(&body);
+        assert_eq!(
+            a["thumb_blob"].as_str().unwrap(),
+            crate::blobs::sha256_hex(&png)
+        );
+        assert_eq!(a["updated_at"], updated_at, "a thumbnail is not an edit");
+        let (st, got, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(got, png);
+        assert_eq!(h.get("content-type").unwrap(), "image/png");
+
+        let mut webp = b"RIFF\x10\0\0\0WEBPVP8 ".to_vec();
+        webp.extend_from_slice(b"payload");
+        let (st, _) = put_raw(&app, &uri, webp.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, got, h) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(got, webp);
+        assert_eq!(h.get("content-type").unwrap(), "image/webp");
+
+        let (st, _) = put_raw(&app, &uri, b"<svg/>".to_vec()).await;
+        assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let (st, _) = put_raw(&app, &uri, Vec::new()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let mut big = png.clone();
+        big.resize(crate::service::MAX_THUMB_BYTES + 1, 0);
+        let (st, _) = put_raw(&app, &uri, big).await;
+        assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+        // The failed puts left the WebP in place.
+        let (_, got, _) = call(&app, Method::GET, &uri, None).await;
+        assert_eq!(got, webp);
     }
 }

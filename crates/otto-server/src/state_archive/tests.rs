@@ -316,6 +316,89 @@ fn partial_publication_is_removed_and_manifest_rejects_unsafe_assets() {
 }
 
 #[test]
+fn design_blobs_are_archived_best_effort_and_restore_by_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = dir.path().join(files::DESIGN_BLOBS_DIR);
+    std::fs::create_dir_all(&blobs).unwrap();
+    let (version, thumb) = (b"version-bytes".as_slice(), b"thumb-bytes".as_slice());
+    for bytes in [version, thumb] {
+        std::fs::write(blobs.join(digest(bytes)), bytes).unwrap();
+    }
+    // Not referenced by any row: never archived.
+    std::fs::write(blobs.join(".tmp-partial"), b"partial").unwrap();
+    let mut records = BTreeMap::new();
+    records.insert(
+        "design_versions".to_string(),
+        vec![
+            row(json!({"id": "v1", "blob_sha256": digest(version)})),
+            row(json!({"id": "v2", "blob_sha256": "0".repeat(64)})),
+        ],
+    );
+    records.insert(
+        "design_artifacts".to_string(),
+        vec![
+            row(json!({"id": "A", "thumb_blob": digest(thumb)})),
+            row(json!({"id": "B", "thumb_blob": null})),
+        ],
+    );
+    let refs = files::design_blob_refs(&records);
+    assert_eq!(refs.len(), 3);
+
+    let (mut out, mut excluded, mut total) = (vec![], vec![], 0usize);
+    let n =
+        files::design_blob_files(dir.path(), &refs, &mut out, &mut excluded, &mut total).unwrap();
+    assert_eq!(n, 2);
+    assert!(out
+        .iter()
+        .all(|f| f.root == files::DESIGN_BLOBS_ROOT_ID && f.path == f.sha256));
+    assert!(
+        excluded.iter().any(|e| e.contains("missing")),
+        "{excluded:?}"
+    );
+    assert!(total > 0);
+
+    // Over the budget: skipped with ONE note, never an error.
+    let (mut out2, mut excluded2, mut total2) = (vec![], vec![], MAX_ARCHIVE_BYTES - 1);
+    let n = files::design_blob_files(dir.path(), &refs, &mut out2, &mut excluded2, &mut total2)
+        .unwrap();
+    assert_eq!(n, 0);
+    assert!(out2.is_empty());
+    assert_eq!(total2, MAX_ARCHIVE_BYTES - 1);
+    assert!(
+        excluded2.iter().any(|e| e.contains("archive cap")),
+        "{excluded2:?}"
+    );
+
+    // No blob dir at all: noted, not an error.
+    let empty = tempfile::tempdir().unwrap();
+    let mut excluded3 = vec![];
+    let n =
+        files::design_blob_files(empty.path(), &refs, &mut vec![], &mut excluded3, &mut 0).unwrap();
+    assert_eq!(n, 0);
+    assert!(!excluded3.is_empty());
+
+    // The manifest takes hash-named blobs only; they restore under design/blobs.
+    let mut archive = StateArchive {
+        archive_format: 2,
+        schema_version: 0,
+        daemon_version: "test".into(),
+        snapshot_at: "test".into(),
+        records: BTreeMap::new(),
+        roots: vec![files::design_blobs_root()],
+        files: out,
+        excluded: vec![],
+        reconnect: vec![],
+    };
+    assert!(files::validate_files(&archive).is_ok());
+    assert_eq!(
+        files::root_relative(&archive.roots[0], "r").unwrap(),
+        "design/blobs"
+    );
+    archive.files[0].path = format!("nested/{}", archive.files[0].sha256);
+    assert!(files::validate_files(&archive).is_err());
+}
+
+#[test]
 fn imported_terminal_history_keeps_its_status() {
     for status in [
         "draft",

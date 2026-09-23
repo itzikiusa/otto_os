@@ -162,8 +162,10 @@ Notes:
   agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
   own data dir is write-denied even under those roots (only its agent work areas —
   `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
-  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize` —
-  and the session's own `provider-accounts/<id>` home stay writable), and its
+  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize`,
+  the Design Hall working copies `design/<artifact>/work/**` (never
+  `design/blobs/`) — and the session's own `provider-accounts/<id>` home stay
+  writable), and its
   `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
   that make unsandboxed programs run agent-chosen code are write-denied
   (`~/.claude/settings.json`, `~/.claude/settings.local.json`,
@@ -3067,6 +3069,20 @@ never a blob. Retention is opt-in (`/design/admin/prune`, dry run unless
 Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
 ("Design Hall"). Timestamps are RFC 3339.
 
+**Resolved on read** (joined in by the store on every artifact / version
+read — list, detail, search, links, save results; never written, no schema
+column): `DesignArtifact.created_by_name` (the creator's `display_name`, else
+`username`; `null` for a system author such as the legacy import),
+`last_editor_id` / `last_editor_kind` / `last_editor_name` (the head
+version's `author_id` / `author_kind` / its user's name — `null` before the
+first version or for a system author) and `DesignVersion.author_name` (same
+rule for `author_id`). An agent version's `author_id` is the user who
+launched the agent, so its name is that user's with `author_kind: "agent"`.
+`DesignArtifact.story_ids` lists the product stories the artifact is linked
+to (`dst_kind: "story"` — `implements` — links), sorted;
+`created_session_title` is the title of the `created_session_id` session
+(`null` when unset or the session row is gone).
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /api/v1/design/projects | design view | `?workspace_id=&include_archived=` | `DesignProject[]` (newest-updated first; `artifact_count` = non-archived) |
@@ -3074,14 +3090,15 @@ Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
 | GET /api/v1/design/projects/{id} | ws viewer | — | `DesignProject` |
 | PATCH /api/v1/design/projects/{id} | ws editor | `UpdateDesignProjectReq` (omitted = unchanged, `""` clears an id, `meta` shallow-merged, `null` values delete keys) | `DesignProject` |
 | DELETE /api/v1/design/projects/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives; `?hard=true` deletes an EMPTY project (409 while it files artifacts). Artifacts are never deleted with a project |
-| GET /api/v1/design/artifacts | design view | `?workspace_id=&project_id=&studio=&format=&status=&story_id=&include_children=&author_kind=&since=&until=&include_archived=&limit=&offset=` | `DesignArtifact[]` (newest-updated first; archived hidden unless `include_archived`/`status=archived`; `story_id` matches `implements` links, `include_children=true` also the story's direct children — an epic's Design tab) |
+| GET /api/v1/design/artifacts | design view | `?workspace_id=&project_id=&studio=&format=&status=&story_id=&include_children=&author_kind=&since=&until=&include_archived=&limit=&offset=&cursor=` | `DesignArtifact[]` (newest-updated first, ties by id; archived hidden unless `include_archived`/`status=archived`; `story_id` matches `implements` links, `include_children=true` also the story's direct children — an epic's Design tab; every row carries its `story_ids`). `limit` default 100, cap 500. **Keyset paging:** a full page answers `X-Next-Cursor: <updated_at>\|<id>` (the last row's); pass it back as `cursor=` for the next page (`offset` is then ignored). Clients may build the same cursor from the last row's JSON (`updated_at + "\|" + id`, URL-encoded); a malformed cursor is 400 |
 | POST /api/v1/design/artifacts | design edit + ws editor | `CreateDesignArtifactReq {workspace_id, format, title, project_id?, studio?, tags?, meta?, content? \| content_b64?, story_id?, derived_from?: {artifact_id, version_id?}, author_kind?, session_id?, message?}` | 201 `DesignSaveResult` — v1 (`kind:"named"`); no content → the format's empty document (binary formats need content); `derived_from` forks the source's version (default approved, else head; caller needs viewer on the source) + a pinned `derived_from` link; `story_id` adds an `implements` link (404 unknown story). 40 MB body cap |
 | GET /api/v1/design/artifacts/{id} | ws viewer | `?content=true&version=v3` (optional) | `DesignArtifactDetail {artifact, head, approved, links_out, links_in, work_path, thumbnail_path, content, content_version_id, content_truncated}` — `content` (text formats, ≤ 256 KiB) only with `content=true` or `version=` |
 | PATCH /api/v1/design/artifacts/{id} | ws editor | `UpdateDesignArtifactReq {title?, project_id? ("" unfiles), studio?, status?, tags?, meta?, thumb_b64? (PNG ≤ 2 MB)}` | `DesignArtifact`. `status:"approved"` needs an approved version (use approve). A status change records a `status_change` signal (`shipped` → `shipped` signal) |
 | DELETE /api/v1/design/artifacts/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives (every version kept). `?hard=true` deletes the artifact, its versions, outgoing links and search row; incoming links are kept and flagged `broken`; blobs are never removed here |
 | GET /api/v1/design/artifacts/{id}/content | ws viewer | — | raw bytes of the head, `Content-Type` = artifact mime, `X-Design-Version`, `X-Design-Seq`, `ETag: "<sha256>"`, `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`; 404 when no version |
 | PUT /api/v1/design/artifacts/{id}/content | ws editor | `DesignContentPutReq {content? \| content_b64?, base_version?, message?, author_kind? (user\|agent), session_id?, provenance?}` | `DesignSaveResult`. **`base_version` ≠ current head → 409** (`""` = expects no head; omitted = unconditional). Byte-identical to the head → `created:false`, no version. Validated (UTF-8 / JSON object / magic bytes, 25 MB raw; `scene3d` schema via the server hook) → 400/413. Version kind `autosave` (user) / `agent`. A user save within 2 h of an agent version records `edit_after_draft`. Mirrors the working copy, rebuilds links + search, emits `design_artifact_updated` (+ `design_link_updated` to `follow_latest` consumers). 40 MB body cap |
-| GET /api/v1/design/artifacts/{id}/thumbnail | ws viewer | — | the PNG thumbnail blob (404 when none) |
+| GET /api/v1/design/artifacts/{id}/thumbnail | ws viewer | — | the thumbnail blob (404 when none); `Content-Type` sniffed: `image/png` or `image/webp` |
+| PUT /api/v1/design/artifacts/{id}/thumbnail | ws editor | raw image bytes as the body (any `Content-Type`) — a PNG or WebP the UI renderer produced, ≤ 2 MB | `DesignArtifact` with the new `thumb_blob` (a content-addressed blob). The bytes are magic-byte sniffed: 415 anything else, 400 empty, 413 over 2 MB. A thumbnail is a cache, not an edit: no version, `updated_at` unchanged; the same image again is a no-op, a new one emits `design_artifact_updated {change:"thumbnail"}`. The previous blob stays until the opt-in prune GC. Agents are only handed PNG thumbnails (`render/current.png`, `refs/R<n>.png`) |
 | GET /api/v1/design/artifacts/{id}/versions | ws viewer | `?kind=&limit=&offset=` | `DesignVersion[]` (newest `seq` first; default limit 200) |
 | POST /api/v1/design/artifacts/{id}/versions | ws editor | `DesignCommitReq {message, content? \| content_b64?, base_version?, author_kind?, session_id?, provenance?}` | 201 `DesignSaveResult` — a NAMED commit (`kind:"named"`, `agent` for agents): the given bytes, else the working copy `<data>/design/<id>/work/<file>` (what an agent edited in place), else the head re-labelled; empty message → 400 |
 | GET /api/v1/design/artifacts/{id}/versions/{v}/content | ws viewer | `{v}` = version id, `v12` or `12` | raw bytes of that version (same headers as `/content`) |
@@ -3089,9 +3106,10 @@ Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
 | GET /api/v1/design/artifacts/{id}/links | ws viewer | `?dir=out\|in\|both` (default both) | `DesignLinksResp {links, artifacts}` — `artifacts` = the other ends the caller may view |
 | POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy or non-http(s) url; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
 | DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
+| GET /api/v1/design/links | design view (+ ws viewer per artifact) | `?artifact_ids=a,b,c&dir=out\|in\|both` (default both; 1–100 comma-separated ids) | `DesignLinksResp {links, artifacts}` — the links FROM (`out`) and/or TO (`in`) any of the ids in one call (Product's design strip), each link once even when both ends were requested, ordered by source (≤ 10 000 rows); ids that don't exist or whose workspace the caller can't view are skipped (never an error); `artifacts` = the OTHER ends the caller may view (not the requested ones). 400 no ids / > 100 ids / bad `dir` |
 | GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
 | GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
-| POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist); payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
+| POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`, `restored`, `reference_added`, `forked` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist). The last three are client-recorded and need a payload key (400 otherwise): `restored` — `version_id` = the new head, `payload.from_version_id` = the version restored; `reference_added` — `payload.target_artifact_id` (the artifact added as a reference); `forked` — recorded on the NEW artifact, `payload.source_artifact_id` (+ optional `source_version_id`). Payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
 | POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
 | POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
 
@@ -4479,7 +4497,13 @@ archive carries explicit `excluded` and `reconnect` lists.
   inactive and imported users cannot authenticate until configured explicitly.
 
 Encoded archives are bounded to 256 MiB and individual files to 64 MiB. An
-oversize export/import fails explicitly; it is not silently truncated. A
+oversize export/import fails explicitly; it is not silently truncated — with
+one exception: the Design Hall blob root `data-design/blobs`
+(`owner_id: "design/blobs"`, files named by their sha256) is filled last and
+best-effort with only the blobs the saved `design_*` rows reference; blobs
+that don't fit the remaining budget (or are missing/corrupt) are skipped and
+summarized in `excluded`. On restore an existing blob of the same name is
+identical by construction and is kept without a conflict. A
 format/schema mismatch, invalid path/hash, stale preview, or incompatible
 references prevents restore. Use legacy settings import/restore for format 1
 files; its workspace-name manifest does not contain workspace data.
