@@ -30,23 +30,30 @@
 
   const limit = $derived(zoomed ? 60 : Math.max(5, Number(box.config.limit) || 12));
 
+  // Request token: a workspace/limit change starts a new poller while the old
+  // one's fetch may still be in flight — only the newest load may land.
+  let seq = 0;
+
   async function load(): Promise<boolean> {
     const id = ws.currentId;
     if (!id) return true;
+    const mine = ++seq;
     try {
       const [s, its] = await Promise.all([
         missionControlApi.summary(id),
         missionControlApi.items(id, { limit }),
       ]);
+      if (mine !== seq) return true;
       summary = s;
       items = its;
       error = '';
       return true;
     } catch (e) {
+      if (mine !== seq) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
