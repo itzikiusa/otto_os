@@ -557,11 +557,11 @@ fn tool_catalog() -> Value {
         "tools": [
             {
                 "name": "otto_list_connections",
-                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, redis, mongodb, clickhouse).",
+                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, postgres, redis, mongodb, clickhouse).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | redis | mongodb | clickhouse." }
+                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | postgres | redis | mongodb | clickhouse." }
                     }
                 }
             },
@@ -603,7 +603,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_db_query",
-                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
+                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/postgres/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2204,7 +2204,10 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .iter()
                 .filter_map(|c| {
                     let kind = c.get("kind").and_then(Value::as_str).unwrap_or("");
-                    if !matches!(kind, "mysql" | "redis" | "mongodb" | "clickhouse") {
+                    if !matches!(
+                        kind,
+                        "mysql" | "postgres" | "redis" | "mongodb" | "clickhouse"
+                    ) {
                         return None;
                     }
                     if kind_filter.is_some_and(|kf| kf != kind) {
