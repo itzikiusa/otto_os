@@ -243,9 +243,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "project_id":{"type":"string"},"title":{"type":"string"},
                 "description":{"type":"string"},"priority":{"type":"string"}}}}),
         json!({"name":"otto.query_db_readonly","mutating":false,"category":"Database",
-            "description":"Run a READ-ONLY SQL query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard.",
+            "description":"Run a READ-ONLY query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard, and the query executes in the engine's read-only mode with sensitive cells masked. Optional `node` scopes it (e.g. `db:<name>` / `kdb:<n>`).",
             "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
-                "connection_id":{"type":"string"},"statement":{"type":"string"},"max_rows":{"type":"integer"}}}}),
+                "connection_id":{"type":"string"},"statement":{"type":"string"},"max_rows":{"type":"integer"},
+                "node":{"type":"string"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["base"],"properties":{
@@ -398,10 +399,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "account_id":{"type":"string"},"space_key":{"type":"string"},"title":{"type":"string"},
                 "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string"}}}}),
         json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
-            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). The current version is resolved server-side, so no version is passed. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
                 "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
-                "body_html":{"type":"string"},"title":{"type":"string"}}}}),
+                "body_html":{"type":"string"},"title":{"type":"string"},"base_version":{"type":"integer"}}}}),
         json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
             "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (storage XHTML). DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
@@ -660,7 +661,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{
                 "task_id":{"type":"string"},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.run_scheduled_task","mutating":true,"category":"Scheduled Tasks",
-            "description":"Run a scheduled task once now (does not change its schedule). Returns the run. DANGEROUS — approval-gated.",
+            "description":"Run a scheduled task once now (does not change its schedule). Starts the run in the background and returns it immediately with status `running` — poll otto.list_scheduled_task_runs for the result. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
         json!({"name":"otto.delete_scheduled_task","mutating":true,"category":"Scheduled Tasks",
@@ -1807,12 +1808,20 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                     "otto.query_db_readonly only permits a single read-only statement (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH)".into(),
                 ));
             }
+            // Routed through `/db/mcp-query` (not `/db/query`): that path adds the
+            // engine-specific read-only classifier AND executes inside the
+            // engine's read-only mode (read-only transaction / ClickHouse
+            // `readonly`), with cell masking forced — so "read-only" holds even
+            // if a statement slips past the classifier above.
             let body = json!({
                 "statement": stmt,
                 "max_rows": args.get("max_rows").and_then(Value::as_u64).unwrap_or(200),
-                "confirm_write": false, // forced — never honored from the caller
+                "node": args.get("node").and_then(Value::as_str),
             });
-            SelfCall::post(format!("/api/v1/connections/{}/db/query", seg(&conn)), body)
+            SelfCall::post(
+                format!("/api/v1/connections/{}/db/mcp-query", seg(&conn)),
+                body,
+            )
         }
         "list_connections" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -2244,6 +2253,9 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 .filter(|s| !s.is_empty())
             {
                 body["title"] = json!(t);
+            }
+            if let Some(v) = args.get("base_version").and_then(Value::as_i64) {
+                body["base_version"] = json!(v);
             }
             SelfCall::put(
                 format!(
