@@ -34,7 +34,7 @@ import {
   type RowPatch,
   type TypedValue,
 } from './edit-types';
-import { parseSimpleSelect, qid, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
+import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
 import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
 import { applyPatchAtPath, flattenPaths, valueKind } from './expansion-plan';
 
@@ -49,6 +49,8 @@ export interface EditFlowInputs {
   liveRows: unknown[][];
   statement: string | undefined;
   connectionId: string | null | undefined;
+  /** The scope node the result RAN with (`undefined` = no query tab). */
+  ranNode: string | null | undefined;
   engine: DbEngine | null;
   canModify: boolean;
   uniqueColNames: string[];
@@ -66,6 +68,7 @@ export class EditFlow {
   liveRows: unknown[][] = $state.raw([]);
   statement: string | undefined = $state.raw(undefined);
   connectionId: string | null | undefined = $state.raw(undefined);
+  ranNode: string | null | undefined = $state.raw(undefined);
   engine: DbEngine | null = $state.raw(null);
   canModify: boolean = $state.raw(false);
   uniqueColNames: string[] = $state.raw([]);
@@ -78,6 +81,7 @@ export class EditFlow {
     this.liveRows = i.liveRows;
     this.statement = i.statement;
     this.connectionId = i.connectionId;
+    this.ranNode = i.ranNode;
     this.engine = i.engine;
     this.canModify = i.canModify;
     this.uniqueColNames = i.uniqueColNames;
@@ -118,14 +122,41 @@ export class EditFlow {
     if (result.masked) return null; // INSERTs of redacted placeholders = data loss
     if (this.engine === 'mongodb') {
       const coll = mongoCollectionForEdit(sql);
-      return coll ? { db: database.activeDb, table: coll } : null;
+      return coll ? { db: this.ranDb(), table: coll } : null;
     }
     if (database.capabilities?.sql !== true) return null; // Redis etc.
     const parsed = parseSimpleSelect(sql);
     if (!parsed) return null;
-    const db = parsed.db ?? (database.schemaRoot.find((n) => n.kind === 'database')?.label ?? null);
+    // The database the rows CAME from — never "the first database in the
+    // tree". Unknown → unqualified INSERTs, which run wherever the user runs them.
+    const db = parsed.db ?? this.defaultSqlDb();
     return { db, table: parsed.table };
   });
+
+  /** The node every write and refresh of this result runs with: the scope it
+   *  RAN with (the tab's `ran_node`, `null` included). Only without a query
+   *  tab (`ranNode` undefined) is the selector's current value used. */
+  scopeNode(): string | null {
+    return this.ranNode === undefined ? database.activeDb || null : this.ranNode;
+  }
+  /** The database/schema the result ran against, if it ran scoped. */
+  private ranDb(): string | null {
+    return scopeDatabase(this.scopeNode());
+  }
+  /** The database an UNQUALIFIED SQL table resolved in: the ran scope, else
+   *  the profile's default database — what the server uses when no node is
+   *  sent. Not for Postgres: its node is a schema and its default is the
+   *  search_path, which the UI cannot know. `null` = unknown, so the caller
+   *  refuses to edit rather than guess. */
+  private defaultSqlDb(): string | null {
+    const ran = this.ranDb();
+    if (ran) return ran;
+    if (this.engine === 'postgres') return null;
+    const conn = this.connectionId && this.connectionId === database.selectedConnId ? database.selectedConn : null;
+    const p = conn?.params ?? {};
+    const pick = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    return pick(p.db) ?? pick(p.database);
+  }
 
   /** Resolve the primary key for the current statement/connection/result.
    *  Called from a ResultsGrid `$effect` — the synchronous prefix reads every
@@ -164,7 +195,9 @@ export class EditFlow {
     const r = adapterFor(this.engine).target(
       sql,
       cols.map((c) => c.name),
-      { engine: this.engine, activeDb: database.activeDb },
+      // Mongo edits target the database the find RAN in, not the selector's
+      // current value (switching the selector must not retarget an edit).
+      { engine: this.engine, activeDb: this.ranDb() },
     );
     if (!r.target) {
       this.editReason = r.reason;
@@ -178,12 +211,20 @@ export class EditFlow {
       return;
     }
 
-    // Build a default db from the schema root when the SQL omits it.
-    const dbName =
-      r.target.db ??
-      (database.schemaRoot.find((n) => n.kind === 'database')?.label ?? null);
+    // The database the rows came from: the SQL's own qualifier, else the scope
+    // the query RAN with. Never guess (the old "first database in the tree"
+    // fallback looked the key up — and generated fully qualified UPDATE /
+    // DELETE / INSERT — against a different database).
+    const dbName = r.target.db ?? this.defaultSqlDb();
     const table = r.target.table;
-    const path = dbName ? `db:${dbName}/table:${table}` : `table:${table}`;
+    if (!dbName) {
+      this.editReason =
+        this.engine === 'postgres'
+          ? `Select a schema (or qualify the table as schema.${table}) and re-run the query to enable editing.`
+          : `Select a database (or qualify the table as db.${table}) and re-run the query to enable editing.`;
+      return;
+    }
+    const path = `db:${dbName}/table:${table}`;
 
     const detail = await database.fetchObject(path);
     if (gen !== this.targetGen || !detail) return;
@@ -652,10 +693,14 @@ export class EditFlow {
     if (!sql) return;
     this.runningReview = true;
     try {
-      // Scope to the active database (Mongo needs it to resolve `db.coll.…`).
-      // Routed through the store so the production / read-only write-gate applies
-      // — a guarded connection prompts for a typed confirmation first.
-      const res = await database.runManagedStatement(sql, database.activeDb || null);
+      // Scope to the database the result RAN in (Mongo resolves `db.coll.…`
+      // against it; Redis needs its keyspace) — not the selector's current
+      // value, which may have moved since the rows were fetched. `null` is
+      // passed through as "no scope", exactly how the query ran. Routed through
+      // the store so the production / read-only write-gate applies — a guarded
+      // connection prompts for a typed confirmation first.
+      const scope = this.scopeNode();
+      const res = await database.runManagedStatement(sql, scope);
       if (res === null) {
         // Write was cancelled at the confirmation prompt — keep the modal open.
         toasts.info('Write cancelled');
@@ -666,7 +711,7 @@ export class EditFlow {
       // Refresh what's ON SCREEN: re-run the statement that produced this grid
       // (`statement` is the tab's ran_statement, not the live editor buffer —
       // which may have been rewritten since) and stay on the current page.
-      await database.runQuery(this.statement ?? undefined, undefined, {
+      await database.runQuery(this.statement ?? undefined, scope, {
         transient: true,
         keepOffset: true,
       });
@@ -779,7 +824,7 @@ export class EditFlow {
     if (!text) return;
     void database.openInNewTab(text, {
       name: `INSERT ${target.table}`,
-      node: database.activeDb ?? undefined,
+      node: this.scopeNode() ?? undefined,
     });
     const n = idxs.length;
     toasts.success(

@@ -1106,6 +1106,7 @@
       error={tab.error}
       statement={tab.ran_statement ?? tab.statement}
       connectionId={database.selectedConnId}
+      ranNode={tab.ran_node}
       running={tab.running}
       offset={tab.offset}
       {viewMode}

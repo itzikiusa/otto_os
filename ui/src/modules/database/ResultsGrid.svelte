@@ -65,6 +65,13 @@
     statement?: string;
     /** Connection id the result came from — required for inline editing. */
     connectionId?: string | null;
+    /**
+     * The scope node the result RAN with (the tab's `ran_node`; `null` = no
+     * database selected at run time). Edits, "Copy as INSERT" and the
+     * post-apply refresh target it — never whatever the selector shows now.
+     * Omitted where there is no query tab (widgets, Athena).
+     */
+    ranNode?: string | null;
     /** True while the active tab's query is in flight — drives the running overlay. */
     running?: boolean;
     /** Active tab's current row offset (footer pager). */
@@ -92,6 +99,7 @@
     mini = false,
     statement,
     connectionId,
+    ranNode,
     running = false,
     offset = 0,
     viewMode,
@@ -430,9 +438,17 @@
   // `.svelte.ts` class must not create effects at construction); the views get
   // `flow` as a prop and read/call it directly.
   const accessChild = $derived(databaseAccessChild(connectionId === database.selectedConnId ? database.activeDb : undefined));
-  const canModify = $derived(!!connectionId && resourceAccess.can('connection',connectionId,'db_data','database','edit',accessChild));
+  // Edits run in the scope the result RAN with (`ranNode`), so authorize them
+  // against that scope rather than the selector's current value.
+  const editAccessChild = $derived(
+    ranNode === undefined
+      ? accessChild
+      : databaseAccessChild(connectionId === database.selectedConnId ? ranNode : undefined),
+  );
+  const canModify = $derived(!!connectionId && resourceAccess.can('connection',connectionId,'db_data','database','edit',editAccessChild));
   const canExport = $derived(!!connectionId && resourceAccess.can('connection',connectionId,'db_export','database','view',accessChild));
   $effect(()=>{if(connectionId)void resourceAccess.load('connection',connectionId,accessChild);});
+  $effect(()=>{if(connectionId&&editAccessChild!==accessChild)void resourceAccess.load('connection',connectionId,editAccessChild);});
 
   const flow = new EditFlow();
   $effect(() => {
@@ -441,6 +457,7 @@
       liveRows,
       statement,
       connectionId,
+      ranNode,
       engine,
       canModify,
       uniqueColNames,
@@ -457,6 +474,7 @@
   $effect(() => {
     void statement;
     void connectionId;
+    void ranNode;
     void result?.columns;
     void database.activeDb;
     void database.capabilities?.sql;
@@ -534,7 +552,8 @@
             void database.openInNewTab(sql, {
               run: true,
               name: fk.ref_table,
-              node: database.activeDb ?? undefined,
+              // The scope the SOURCE rows ran in, not the selector's value now.
+              node: flow.scopeNode() ?? undefined,
             }),
         });
       }

@@ -70,6 +70,19 @@ export function whereByPk(ctx: EditCtx, rowIdx: number): string {
     .join(' AND ');
 }
 
+/** The database/schema a scope node names — mirrors the daemon's `Scope`
+ *  parse: a `db:<name>/…` tree path yields its name, a Redis keyspace
+ *  (`kdb:N`) is not a database, anything else is a plain name taken verbatim
+ *  (so a database literally called `db` keeps its scope). Used for every
+ *  engine whose edits need the database a result ran in (SQL and Mongo). */
+export function scopeDatabase(node: string | null | undefined): string | null {
+  const n = node?.trim();
+  if (!n) return null;
+  if (n.startsWith('kdb:')) return null;
+  if (n.startsWith('db:')) return n.split('/')[0].slice(3).trim() || null;
+  return n;
+}
+
 /** Parse a simple SELECT … FROM <table>. Returns {db, table} or null. */
 export function parseSimpleSelect(sql: string): { db: string | null; table: string } | null {
   const s = sql.trim().replace(/;\s*$/, '');
