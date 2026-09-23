@@ -10,6 +10,7 @@
   } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
     onreview?: (name: string, source: string) => void;
@@ -245,8 +246,8 @@
 <div class="skills-browser" data-testid="skills-browser">
   <aside class="sb-side">
     <div class="sb-actions">
-      <button class="btn small primary" onclick={() => { showNew = !showNew; }} data-testid="new-skill">+ New</button>
-      <label class="btn small ghost sb-import" title="Import a skill .zip">
+      <button class="btn primary" onclick={() => { showNew = !showNew; }} data-testid="new-skill"><Icon name="plus" size={13} /> New skill</button>
+      <label class="btn ghost sb-import" title="Import a skill .zip">
         {importing ? 'Importing…' : 'Import'}
         <input type="file" accept=".zip" onchange={onImport} hidden />
       </label>

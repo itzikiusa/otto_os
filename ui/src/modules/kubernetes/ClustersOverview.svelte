@@ -13,6 +13,8 @@
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sCluster } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ClusterWizard from './ClusterWizard.svelte';
@@ -90,30 +92,29 @@
   const sourceLabel: Record<string, string> = { kubeconfig: 'kubeconfig', imported: 'pasted', eks: 'EKS' };
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Kubernetes</h1>
-      <div class="sub">
-        kubectl {k8s.status?.kubectl.version ?? ''}
-        {#if k8s.status?.k9s.installed}· k9s {k8s.status.k9s.version ?? ''}{:else if isAdmin}
-          · <button class="link" onclick={() => (k9sSheet = true)}>Install k9s</button>{/if}
-      </div>
-    </div>
-    <div class="actions">
-      <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
-        <Icon name="gauge" size={14} /> Monitor
+<div class="k8s-overview">
+<PageHeader
+  title="Kubernetes"
+  subtitle={`kubectl ${k8s.status?.kubectl.version ?? ''}${k8s.status?.k9s.installed ? ` · k9s ${k8s.status.k9s.version ?? ''}` : ''}`}
+>
+  {#snippet actions()}
+    {#if !k8s.status?.k9s.installed && isAdmin}
+      <button class="btn ghost" onclick={() => (k9sSheet = true)}>Install k9s</button>
+    {/if}
+    <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
+      <Icon name="gauge" size={14} /> Monitor
+    </button>
+    <button class="icon-btn" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
+      <Icon name="refresh" size={14} />
+    </button>
+    {#if isAdmin && k8s.clusters.length > 0}
+      <button class="btn primary" data-testid="k8s-add-cluster" onclick={() => { editing = null; wizardOpen = true; }}>
+        <Icon name="plus" size={14} /> Add cluster
       </button>
-      <button class="btn ghost" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
-        <Icon name="refresh" size={14} />
-      </button>
-      {#if isAdmin}
-        <button class="btn primary" data-testid="k8s-add-cluster" onclick={() => { editing = null; wizardOpen = true; }}>
-          <Icon name="plus" size={14} /> Add cluster
-        </button>
-      {/if}
-    </div>
-  </div>
+    {/if}
+  {/snippet}
+</PageHeader>
+<PageBody>
 
   {#if k8s.clustersError && !k8s.clusters.length}
     <EmptyState icon="helm" title="Couldn't load clusters" body={k8s.clustersError} actionLabel="Retry" onaction={() => void k8s.loadClusters()} />
@@ -127,6 +128,8 @@
         ? 'Add a cluster from a context in your kubeconfig, paste a kubeconfig, or import one from EKS in the AWS module.'
         : 'No clusters have been added. Ask an Otto admin to add one.'}
       actionLabel={isAdmin ? 'Add cluster' : undefined}
+      actionIcon="plus"
+      variant="page"
       onaction={isAdmin ? () => { editing = null; wizardOpen = true; } : undefined}
     />
   {:else}
@@ -171,6 +174,7 @@
       {/each}
     </div>
   {/if}
+</PageBody>
 </div>
 
 {#if wizardOpen}
@@ -193,18 +197,11 @@
 {/if}
 
 <style>
-  .actions {
+  .k8s-overview {
     display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .link {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--accent);
-    cursor: pointer;
-    font-size: inherit;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .grid {
     display: grid;

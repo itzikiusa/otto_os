@@ -6,6 +6,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunLauncher from './RunLauncher.svelte';
   import RunDetail from './RunDetail.svelte';
   import RunStageRail from './RunStageRail.svelte';
@@ -31,16 +34,13 @@
   }
 </script>
 
+<div class="rwo-page">
+<PageHeader
+  title="Run with Otto"
+  subtitle="Turn any source — a Jira story, a GitHub issue/PR, a Slack thread, a finding, a failing test — into a reviewed, evidence-backed PR draft. One button."
+/>
+<PageBody>
 <div class="rwo">
-  <header class="head">
-    <div>
-      <h1>Run with Otto</h1>
-      <p class="sub">
-        Turn any source — a Jira story, a GitHub issue/PR, a Slack thread, a finding, a failing
-        test — into a reviewed, evidence-backed PR draft. One button.
-      </p>
-    </div>
-  </header>
 
   {#if ws.currentId}
     <RunLauncher wsId={ws.currentId} {onLaunched} />
@@ -51,7 +51,7 @@
       {#if runWithOtto.loadingList && list.length === 0}
         <div class="muted">Loading runs…</div>
       {:else if list.length === 0}
-        <div class="empty">No runs yet. Paste a source above and press Run with Otto.</div>
+        <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto." />
       {:else}
         <ul class="runs">
           {#each list as r (r.id)}
@@ -96,18 +96,17 @@
     {/if}
   </div>
 </div>
+</PageBody>
+</div>
 
 <style>
-  .rwo { padding: 1rem 1.25rem; max-width: 1100px; margin: 0 auto; }
-  .head { margin-bottom: 0.75rem; }
-  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
-  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 72ch; }
+  .rwo-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .body { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
   .body.has-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
   @media (max-width: 860px) {
     .body.has-detail { grid-template-columns: 1fr; }
   }
-  .empty, .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
+  .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .run {
     width: 100%; text-align: left; cursor: pointer;

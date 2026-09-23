@@ -3,12 +3,11 @@
   // right now, what's degraded, and how do I fix it?". Root-only: backed by
   // GET /capabilities (5 s cached on the server) and GET /support-bundle.
   import { capabilitiesApi, featureLabel, settingsRoute, statusClass, statusLabel } from './capabilities';
-  import type { ModuleCapability, SupportBundle } from './capabilities';
+  import type { ModuleCapability } from './capabilities';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { downloadJson } from '../../lib/components/exporters';
   import { toasts } from '../../lib/toast.svelte';
 
   // ---------------------------------------------------------------------------
@@ -17,7 +16,6 @@
 
   let caps: ModuleCapability[] = $state([]);
   let loading = $state(true);
-  let bundleLoading = $state(false);
   /** Which feature is expanded (showing dep breakdown). */
   let expanded = $state<Set<string>>(new Set());
 
@@ -40,28 +38,6 @@
       toasts.error('Could not load capabilities', e instanceof Error ? e.message : String(e));
     } finally {
       loading = false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Support bundle download
-  // ---------------------------------------------------------------------------
-
-  async function downloadBundle(): Promise<void> {
-    if (bundleLoading) return;
-    bundleLoading = true;
-    try {
-      const bundle: SupportBundle = await capabilitiesApi.bundle();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      downloadJson(bundle, `otto-support-bundle-${ts}.json`);
-      toasts.success(
-        'Support bundle downloaded',
-        `${bundle.redaction_hits} secret value${bundle.redaction_hits !== 1 ? 's' : ''} redacted.`,
-      );
-    } catch (e) {
-      toasts.error('Bundle download failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      bundleLoading = false;
     }
   }
 
@@ -92,20 +68,9 @@
   );
 </script>
 
-<div class="page">
-  <div class="page-header head-row">
-    <div>
-      <h1>Capability & Health</h1>
-      <div class="sub">
-        What Otto can do right now — aggregated from config, PATH detection, and
-        stored accounts. Results are cached for a few seconds; reload to refresh.
-      </div>
-    </div>
-    <button class="btn" onclick={downloadBundle} disabled={bundleLoading} title="Download a redacted support bundle (secrets stripped)">
-      <Icon name="fetch" size={13} />
-      {bundleLoading ? 'Preparing…' : 'Download support bundle'}
-    </button>
-  </div>
+<!-- Body of Insights → Health; the page header (title, support-bundle
+     action) lives in InsightsPage. -->
+<div class="caps">
 
   {#if !loading && caps.length > 0}
     <!-- Summary chips -->
@@ -127,6 +92,7 @@
   {:else if caps.length === 0}
     <EmptyState
       icon="gauge"
+      variant="page"
       title="No capability data"
       body="Could not load capability information. Make sure you are logged in as root."
       actionLabel="Retry"
@@ -202,13 +168,7 @@
 </div>
 
 <style>
-  .page { padding: 24px; max-width: 900px; }
-
-  .page-header { margin-bottom: 20px; }
-  .head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-
-  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
-  .sub { color: var(--text-muted); font-size: 13px; max-width: 560px; }
+  .caps { max-width: 900px; }
 
   /* summary chips */
   .summary-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }

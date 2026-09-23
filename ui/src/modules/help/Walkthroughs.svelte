@@ -4,6 +4,7 @@
   // Videos are also registered as palette commands so they're reachable from ⌘K.
   import { registry } from '../../lib/commands.svelte';
   import { router } from '../../lib/router.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import { api } from '../../lib/api/client';
   import type { ResolveWalkthroughResp } from '../../lib/api/types';
   import cinematicCatalog from '../../lib/walkthroughs/catalog.json';
@@ -289,11 +290,12 @@
   });
 </script>
 
+<div class="wt-page">
+<PageHeader
+  title="Walkthroughs"
+  subtitle={cinematicBase ? 'Eight films. One complete workflow. Narration, sound, and chapters you can jump into.' : 'Short tours of Otto’s features. Search or use ⌘K → “Walkthrough:”.'}
+/>
 <div class="walkthroughs">
-  <div class="page-header">
-    <h1 class="page-title">Walkthroughs</h1>
-    <p class="page-sub">{cinematicBase ? 'Eight films. One complete workflow. Narration, sound, and chapters you can jump into.' : 'Short tours of Otto’s features. Search or use ⌘K → “Walkthrough:”.'}</p>
-  </div>
 
   <div class="layout">
     <!-- Left rail: search + video list.
@@ -429,6 +431,7 @@
     </div>
   </div>
 </div>
+</div>
 
 <style>
   .film-duration { color: var(--text-dim); font-size: 10.5px; margin: 3px 0; }
@@ -440,35 +443,24 @@
   .chapter-guide { color: var(--text-dim); font-size: 10px; padding: 9px; white-space: nowrap; text-decoration: none; }
   .chapter-button:focus-visible, .chapter-guide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+  .wt-page {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+  }
+
   .walkthroughs {
     container-type: inline-size;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    padding: 28px 32px 16px;
+    padding: 18px 20px 16px;
     box-sizing: border-box;
-    background: var(--bg);
     color: var(--text);
-  }
-
-  .page-header {
-    flex-shrink: 0;
-    margin-bottom: 20px;
-  }
-
-  .page-title {
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    margin: 0 0 4px;
-    color: var(--text);
-  }
-
-  .page-sub {
-    font-size: 13px;
-    color: var(--text-dim);
-    margin: 0;
   }
 
   .layout {
@@ -777,7 +769,6 @@
     .player-desc { line-height: 1.5; }
   }
   @media (max-width: 600px) {
-    .walkthroughs { padding: 18px 16px 12px; }
-    .page-header { margin-bottom: 14px; }
+    .walkthroughs { padding: 12px 14px 12px; }
   }
 </style>
