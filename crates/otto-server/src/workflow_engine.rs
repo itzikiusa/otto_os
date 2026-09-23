@@ -535,10 +535,16 @@ pub fn classify_resume(
         .collect();
     // Paused at an approval? That node is the re-entry point regardless of its
     // recorded status — the pause is fully persisted and re-awaiting the
-    // operator is free of side effects.
+    // operator is free of side effects. But a DIFFERENT step caught
+    // mid-flight wins: a stale pause flag (left by an older code path) must
+    // never make a side-effect step (`git_pr`, `channel_notify`) look like a
+    // resumable approval and get replayed.
     let entry = if run.waiting_approval {
-        run.approval_node_id
-            .clone()
+        running_ids
+            .iter()
+            .find(|id| kind_of(id.as_str()).is_some_and(|k| k != "human_approval"))
+            .cloned()
+            .or_else(|| run.approval_node_id.clone())
             .or_else(|| running_ids.first().cloned())
     } else {
         running_ids.first().cloned()
@@ -635,6 +641,27 @@ pub fn classify_resume(
         nodes,
         error: any_error.then(|| "one or more nodes failed".to_string()),
     }
+}
+
+/// Settle a run's node states for a terminal FAIL after a restart: a step
+/// still `running` becomes `error` ("interrupted") — retryable, and no
+/// ever-growing timer — and never-reached `pending` steps become `skipped`.
+/// Settled states pass through untouched.
+fn settle_interrupted_nodes(mut nodes: Vec<NodeRunState>) -> Vec<NodeRunState> {
+    for n in nodes.iter_mut() {
+        match n.status {
+            NodeStatus::Running => {
+                n.status = NodeStatus::Error;
+                if n.error.is_none() {
+                    n.error = Some("interrupted by a daemon restart".into());
+                }
+                n.activity = None;
+            }
+            NodeStatus::Pending => n.status = NodeStatus::Skipped,
+            NodeStatus::Success | NodeStatus::Error | NodeStatus::Skipped => {}
+        }
+    }
+    nodes
 }
 
 /// Reconcile every run a previous daemon process left in flight: resume where
@@ -743,7 +770,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                             .update_run(
                                 &run.id,
                                 RunStatus::Error,
-                                &run.nodes,
+                                &settle_interrupted_nodes(run.nodes.clone()),
                                 Some("Interrupted by a daemon restart; resume bookkeeping failed — re-run the workflow."),
                                 true,
                             )
@@ -753,6 +780,10 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 }
             }
             ResumeDecision::Fail { nodes, error } => {
+                // A failed run must not keep a step `running` forever (the UI
+                // timer counts up and the step can't be retried): the policy
+                // gates above hand over the raw snapshot.
+                let nodes = settle_interrupted_nodes(nodes);
                 let rev = repo
                     .update_run(&run.id, RunStatus::Error, &nodes, Some(&error), true)
                     .await
@@ -768,6 +799,12 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     &nodes,
                     false,
                 );
+                // Tell the chat thread that started it — its last message was
+                // otherwise "▶ … started" forever.
+                if let Ok((wf, _)) = &loaded {
+                    deliver_run_result(ctx, wf, &nodes, RunStatus::Error, None, &run.input, None)
+                        .await;
+                }
                 settled += 1;
             }
             ResumeDecision::Finish {
@@ -790,6 +827,9 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     &nodes,
                     false,
                 );
+                if let Ok((wf, _)) = &loaded {
+                    deliver_run_result(ctx, wf, &nodes, status, None, &run.input, None).await;
+                }
                 settled += 1;
             }
         }
@@ -7909,6 +7949,59 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    /// A STALE approval flag (the run had moved past its gate) must not mask
+    /// a side-effect step caught mid-flight: that step's outcome is unknown,
+    /// so the run fails instead of replaying it as a "resumable approval".
+    #[test]
+    fn classify_resume_stale_approval_flag_never_masks_a_side_effect_step() {
+        let g = WorkflowGraph {
+            nodes: vec![
+                node("gate", "human_approval"),
+                node("pr", "git_pr"),
+                node("c", "log"),
+            ],
+            edges: vec![edge("gate", "pr"), edge("pr", "c")],
+        };
+        let mut run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("gate", NodeStatus::Success),
+                nstate("pr", NodeStatus::Running),
+                nstate("c", NodeStatus::Pending),
+            ],
+        );
+        run.waiting_approval = true;
+        run.approval_node_id = Some("gate".into());
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Fail { nodes, error } => {
+                assert!(error.contains("'pr'"), "{error}");
+                assert_eq!(nodes[1].status, NodeStatus::Error);
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settle_interrupted_nodes_leaves_nothing_running() {
+        let nodes = settle_interrupted_nodes(vec![
+            nstate("a", NodeStatus::Success),
+            nstate("b", NodeStatus::Running),
+            nstate("c", NodeStatus::Pending),
+            nstate("d", NodeStatus::Error),
+        ]);
+        let st: Vec<NodeStatus> = nodes.iter().map(|n| n.status).collect();
+        assert_eq!(
+            st,
+            vec![
+                NodeStatus::Success,
+                NodeStatus::Error,
+                NodeStatus::Skipped,
+                NodeStatus::Error
+            ]
+        );
+        assert!(nodes[1].error.as_deref().unwrap().contains("interrupted"));
     }
 
     #[test]
