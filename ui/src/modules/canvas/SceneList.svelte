@@ -7,22 +7,12 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
-  import type { CanvasSceneSummary, CanvasFormat, CanvasScene } from './types';
+  import type { CanvasSceneSummary, CanvasScene } from './types';
 
-  interface Props {
-    /** Create a brand-new scene of the chosen format (the page opens it). */
-    oncreate: (format: CanvasFormat) => void;
-  }
-  let { oncreate }: Props = $props();
 
   let filter = $state('');
   let collapsed = $state<Record<string, boolean>>({});
-  let newMenu = $state(false);
 
-  function create(format: CanvasFormat): void {
-    newMenu = false;
-    oncreate(format);
-  }
 
   const rows = $derived.by((): CanvasSceneSummary[] => {
     const q = filter.trim().toLowerCase();
@@ -135,30 +125,6 @@
 </script>
 
 <div class="scene-list">
-  <div class="head">
-    <button class="btn primary new" onclick={() => (newMenu = !newMenu)}>
-      <Icon name="plus" size={14} /> New scene
-      <Icon name="chevronDown" size={12} />
-    </button>
-    {#if newMenu}
-      <button class="new-backdrop" aria-label="Close menu" onclick={() => (newMenu = false)}></button>
-      <div class="new-menu">
-        <button onclick={() => create('excalidraw')}>
-          <Icon name="shapes" size={15} />
-          <span><strong>Excalidraw board</strong><small>Editable shapes — draw by hand</small></span>
-        </button>
-        <button onclick={() => create('mermaid')}>
-          <Icon name="branch" size={15} />
-          <span><strong>Mermaid diagram</strong><small>Auto-rendered, any type</small></span>
-        </button>
-        <button onclick={() => create('d2')}>
-          <Icon name="layers" size={15} />
-          <span><strong>D2 diagram</strong><small>Architecture, sequence &amp; SQL tables</small></span>
-        </button>
-      </div>
-    {/if}
-  </div>
-
   <div class="search">
     <Icon name="search" size={13} />
     <input placeholder="Search scenes…" bind:value={filter} spellcheck="false" />
@@ -237,66 +203,11 @@
     height: 100%;
     min-height: 0;
   }
-  .head {
-    padding: 10px 10px 6px;
-    position: relative;
-  }
-  .new {
-    width: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-  }
-  .new-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 19;
-    border: none;
-    background: transparent;
-    cursor: default;
-  }
-  .new-menu {
-    position: absolute;
-    top: 44px;
-    left: 10px;
-    right: 10px;
-    z-index: 20;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow, 0 8px 28px rgba(0, 0, 0, 0.25));
-    overflow: hidden;
-  }
-  .new-menu button {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 9px 11px;
-    border: none;
-    background: none;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-  }
-  .new-menu button:hover {
-    background: var(--surface-2);
-  }
-  .new-menu span {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.3;
-  }
-  .new-menu small {
-    color: var(--text-dim);
-    font-size: 11px;
-  }
   .search {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 0 10px 8px;
+    margin: 10px 10px 8px;
     padding: 4px 8px;
     background: var(--surface-2);
     border: 1px solid var(--border);

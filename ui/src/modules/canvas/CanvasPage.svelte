@@ -4,6 +4,8 @@
   // hero to start a new canvas. You never write Mermaid — you describe what you
   // want in the Assistant and the agent edits the file; the board re-renders live.
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -63,6 +65,18 @@
     return { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
   }
 
+  /** Header "New scene ▾": pick the format from the shared (viewport-clamped) menu. */
+  function newSceneMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Excalidraw board', icon: 'shapes', action: () => void createBlank('excalidraw') },
+      { label: 'Mermaid diagram', icon: 'branch', action: () => void createBlank('mermaid') },
+      { label: 'D2 diagram', icon: 'layers', action: () => void createBlank('d2') },
+    ]);
+  }
+
+  /** No scenes anywhere → no empty list pane; the hero's mode cards are the CTA. */
+  const noScenes = $derived(!canvas.listLoading && !canvas.listError && canvas.scenes.length === 0);
+
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
       const created = await canvas.create('Untitled canvas', blankDoc(format));
@@ -73,9 +87,21 @@
   }
 </script>
 
+<div class="canvas-shell">
+<PageHeader title="Canvas" subtitle="Describe a diagram — the agent draws it and keeps refining it as you chat.">
+  {#snippet actions()}
+    <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
+    {#if ws.currentId && !noScenes}
+      <button class="btn primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
+        <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={11} />
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 {#if !ws.currentId}
   <div class="canvas-page empty-ws">
     <EmptyState
+      variant="page"
       icon="shapes"
       title="Select a workspace"
       body="Canvas scenes live in a workspace. Pick or create one to start drawing."
@@ -83,8 +109,8 @@
   </div>
 {:else}
   <div class="canvas-page" class:phone={readonly}>
-    <aside class="scenes" class:hidden={readonly && canvas.currentId}>
-      <SceneList oncreate={createBlank} />
+    <aside class="scenes" class:hidden={(readonly && canvas.currentId) || noScenes}>
+      <SceneList />
     </aside>
 
     <section class="main">
@@ -145,18 +171,24 @@
     </section>
   </div>
 {/if}
+</div>
 
 <style>
+  .canvas-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .canvas-page {
     display: flex;
-    height: 100%;
+    flex: 1;
     min-height: 0;
     background: var(--bg);
     color: var(--text);
   }
   .canvas-page.empty-ws {
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
   }
   .scenes {
     width: 240px;
@@ -223,19 +255,21 @@
   .ai-fab:hover {
     filter: brightness(1.08);
   }
+  /* The page's empty state: same fixed top offset as EmptyState variant="page". */
   .hero {
     flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 14px;
-    padding: 24px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 15vh 24px 48px;
+    overflow-y: auto;
     text-align: center;
   }
   .hero h2 {
     margin: 0;
-    font-size: 20px;
+    font-size: 15px;
     font-weight: 600;
   }
   .sub {

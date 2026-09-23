@@ -233,7 +233,10 @@ class ProductStore {
     const id = this.storyId();
     this.loadingDetail = true;
     try {
-      this.detail = await api.get<ProductStoryDetail>(`/product/stories/${id}`);
+      const detail = await api.get<ProductStoryDetail>(`/product/stories/${id}`);
+      // A later select() (e.g. a click right after the page auto-selected its
+      // first story) owns `detail` now — drop this stale response.
+      if (this.selectedId === id) this.detail = detail;
     } finally {
       this.loadingDetail = false;
     }
