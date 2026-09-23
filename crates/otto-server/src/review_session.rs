@@ -42,6 +42,12 @@ pub const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
 /// idles for the whole timeout.
 const PASTE_ECHO_WAIT: Duration = Duration::from_secs(8);
 const PASTE_ECHO_POLL: Duration = Duration::from_millis(250);
+/// Extra time a paste that has not echoed yet gets while the TUI is still
+/// busy drawing (output advanced within [`PASTE_BUSY_QUIET`]). A 46–70 KB
+/// reviewer prompt can take longer than [`PASTE_ECHO_WAIT`] to land, and
+/// re-pasting on top of a slow-but-successful paste submitted it TWICE.
+const PASTE_LATE_WAIT: Duration = Duration::from_secs(20);
+const PASTE_BUSY_QUIET: Duration = Duration::from_millis(1500);
 // After submitting, confirm the agent actually started (output advanced); if
 // not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
 const DISPATCH_WAIT: Duration = Duration::from_secs(6);
@@ -861,8 +867,14 @@ fn paste_probe(prompt: &str) -> String {
     norm.chars().take(40).collect()
 }
 
-/// True once the last screenful contains `probe` (whitespace-normalized) —
-/// i.e. the pasted prompt is really sitting in the input box.
+/// True once the screen contains `probe` (whitespace-normalized) or a paste
+/// placeholder — i.e. the pasted prompt is really sitting in the input box.
+///
+/// Matched against ANSI-FREE text: the emulator's current screen (the vt100
+/// grid — what a user would see) plus the escape-stripped scrollback tail.
+/// Matching the RAW PTY bytes missed pastes whose echo was interleaved with
+/// colour/cursor sequences, and every miss re-pasted a prompt that had in fact
+/// landed — 23 of 201 re-pasted review transcripts held the prompt twice.
 fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str) -> bool {
     if probe.is_empty() {
         return true;
@@ -870,9 +882,23 @@ fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str)
     let Some(h) = manager.live_handle(sid) else {
         return false;
     };
-    let raw = String::from_utf8_lossy(&h.scrollback(200)).into_owned();
-    let norm: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    screen_shows_paste(&norm, probe)
+    let rows = h.screen_rows();
+    let tail = crate::agent_tasks_nudge::strip_ansi(&h.scrollback(200));
+    [rows.join(" "), rows.concat(), tail]
+        .iter()
+        .any(|text| screen_shows_paste(&normalize_ws(text), probe))
+}
+
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// True while the TUI has drawn something within [`PASTE_BUSY_QUIET`] — a
+/// large paste still being ingested/rendered.
+fn tui_busy(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
+    manager
+        .live_handle(sid)
+        .is_some_and(|h| h.last_output_at().elapsed() < PASTE_BUSY_QUIET)
 }
 
 /// The paste counts as echoed when the screen shows the probe text OR a
@@ -903,14 +929,24 @@ pub async fn submit_prompt(
     }
     let probe = paste_probe(prompt);
     for attempt in 0..2 {
+        if attempt == 1 {
+            // Clear whatever partial line a half-landed paste left, so a
+            // re-paste never concatenates onto it.
+            let _ = manager.input(sid, b"\x15").await;
+            tokio::time::sleep(PASTE_TO_ENTER).await;
+        }
         let _ = manager.input(sid, &bracketed_paste(prompt)).await;
         tokio::time::sleep(PASTE_TO_ENTER).await;
         let deadline = Instant::now() + PASTE_ECHO_WAIT;
+        // Past the base wait, keep waiting (bounded) while the TUI is still
+        // drawing: a big paste that is slow to land is not a lost paste.
+        let late_deadline = deadline + PASTE_LATE_WAIT;
         loop {
             if paste_echoed(manager, sid, &probe) {
                 break;
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= late_deadline || (now >= deadline && !tui_busy(manager, sid)) {
                 break;
             }
             tokio::time::sleep(PASTE_ECHO_POLL).await;
@@ -919,9 +955,14 @@ pub async fn submit_prompt(
             break;
         }
         if attempt == 0 {
-            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
-            // Let whatever redraw ate the paste finish before trying again.
+            // Let whatever redraw ate the paste finish, then look ONE more
+            // time before re-sending — a paste that landed during the settle
+            // must not be pasted again.
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if paste_echoed(manager, sid, &probe) {
+                break;
+            }
+            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
         }
     }
     let before = manager.live_handle(sid).map(|h| h.last_output_at());
@@ -961,6 +1002,18 @@ mod tests {
         ));
         // An empty input box does not.
         assert!(!screen_shows_paste("› Ask Codex to do anything", probe));
+    }
+
+    #[test]
+    fn styled_echo_is_detected_once_escapes_are_stripped() {
+        // Raw PTY bytes interleave the echo with SGR/cursor sequences; the
+        // raw-byte match missed it and the prompt was pasted a second time.
+        let probe = "You are a Codex worker on /repo (branch";
+        let raw = b"\x1b[2m> \x1b[22mYou are a\x1b[1C Codex worker\x1b[0m on /repo (branch main)";
+        let plain = crate::agent_tasks_nudge::strip_ansi(raw);
+        assert!(screen_shows_paste(&normalize_ws(&plain), probe));
+        let placeholder = crate::agent_tasks_nudge::strip_ansi(b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m");
+        assert!(screen_shows_paste(&normalize_ws(&placeholder), probe));
     }
 
     #[test]
