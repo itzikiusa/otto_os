@@ -383,8 +383,8 @@ four.
 | `body` | One or two sentences on what this is for. |
 | `icon` | `IconName`, default `box`. Use the module's icon. |
 | `actionLabel` + `onaction` | The one CTA (a `.btn.primary`). |
-| `actionIcon` | `IconName`. **In flight: `feat/page-chrome`.** |
-| `variant` | `'page'` (the whole page or main pane; pinned about 15vh from the top, not vertically centred) or `'panel'` (the default, inside a pane or card). **In flight: `feat/page-chrome`.** |
+| `actionIcon` | `IconName`. |
+| `variant` | `'page'` (the whole page or main pane; pinned about 15vh from the top, not vertically centred) or `'panel'` (the default, inside a pane or card). |
 | `children` | A quiet secondary link or hint only (`.btn.ghost` or dim text). Never a second primary. |
 
 ```svelte

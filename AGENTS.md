@@ -154,9 +154,8 @@ macOS-only.
 
 Any change under `ui/` follows **[docs/design/guidelines/](./docs/design/guidelines/README.md)**.
 It covers foundations, layout, components, agent-facing patterns, copy,
-accessibility, and the PR review checklist. The docs mark what is still
-in flight: `PageHeader`/`PageBody` land with `feat/page-chrome`, and sidebar
-groups with `feat/shell-nav`. The rules below are the ones you must not break:
+accessibility, and the PR review checklist. The rules below are the ones you
+must not break:
 
 - **macOS-native, one product.**
   - Every module page renders the shared `PageHeader` (a single unified

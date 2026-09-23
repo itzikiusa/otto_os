@@ -51,9 +51,6 @@ The parts of the shell:
 
 ## 2. Sidebar
 
-**In flight: `feat/shell-nav`.** On integration today the list is flat and
-`SidebarModuleDef` has no `group`. The shape below is close to final.
-
 Every module is **one entry** in `SIDEBAR_MODULES` (`ui/src/lib/sidebar.ts`).
 Rail, Navigator, BottomNav, the Settings → Appearance customiser, the phone
 title and the ⌘K "Go to" commands all come from it. Don't hand-list modules
@@ -102,7 +99,7 @@ anywhere else.
 - **The active row stays visible.** The Navigator scrolls it into view on
   every route change.
 - **⌘K "Go to"** commands are generated from `availableModules()`, with the
-  section as dim `detail` text (`Command.detail`, added on `feat/shell-nav`).
+  section as dim `detail` text (`Command.detail`).
   A new module gets its Go-to command for free. Don't register one by hand.
 - **Labels:** as short as possible, one to three words. A module name is a
   proper noun and is written in Title Case everywhere it appears ("Scheduled
@@ -116,8 +113,8 @@ anywhere else.
 
 ## 3. Page chrome
 
-**In flight: `feat/page-chrome`.** `PageHeader.svelte` and `PageBody.svelte` are
-new in `ui/src/lib/components/`, and about 80 pages are migrated on that branch.
+`PageHeader.svelte` and `PageBody.svelte` live in `ui/src/lib/components/`, and
+every top-level module page (except Agents, which keeps its TabBar) uses them.
 
 ### 3.1 `PageHeader`: the unified toolbar
 
@@ -259,8 +256,7 @@ PageHeader: title = selected item (or module), item actions, primary
 ```
 
 - **Never open on an empty "pick one" pane when there are items.** Restore the
-  last selection or fall back to the first item, with `lib/lastSelection.ts`
-  (**in flight: `feat/page-chrome`**):
+  last selection or fall back to the first item, with `lib/lastSelection.ts`:
 
   ```ts
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';

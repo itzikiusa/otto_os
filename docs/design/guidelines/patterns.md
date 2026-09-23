@@ -219,7 +219,7 @@ inherits the same environment marking and confirmation.
 ## 8. Selection and state memory
 
 - List/detail pages remember their selection per device
-  (`lib/lastSelection.ts`, **in flight: `feat/page-chrome`**). Sidebar layout,
+  (`lib/lastSelection.ts`). Sidebar layout,
   folded sections, theme and similar live in the `ui` store (localStorage, per
   device).
 - **Every `localStorage` access is wrapped in try/catch**: private windows and

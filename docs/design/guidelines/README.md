@@ -110,11 +110,9 @@ a component API changed, fix the doc in the same PR.
 
 | Marker | Meaning |
 |---|---|
-| (none) | Shipped on `integration/2026-09-23-overhaul`. Use it. |
-| **In flight: `feat/page-chrome`** | Committed on that branch and not merged yet. The API is final unless it says otherwise. Build against it once it merges. Until then, match its shape. |
-| **In flight: `feat/shell-nav`** | Work in progress on that branch (grouped sidebar, active-item style, palette generated from the registry). The API shown is close to final. |
+| (none) | Shipped. Use it. |
 | **Proposed** | A design direction with no code yet. Don't reference tokens or components marked Proposed. `npm run check` fails on an undefined `var(--x)`. |
-| **TBD** | An open decision, or a follow-up to settle after the branches above merge. |
+| **TBD** | An open decision or a planned follow-up. |
 
 ## Checklist for a new feature or page
 

@@ -187,7 +187,7 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
 - New daemon routes need a fresh binary: `OTTO_E2E_BIN=target/debug/ottod`.
 - The e2e harness always starts an isolated throwaway daemon; it never touches
   real sessions.
-- The page-chrome spec on `feat/page-chrome` (`desktop-page-chrome.spec.ts`)
+- The page-chrome spec (`desktop-page-chrome.spec.ts`)
   asserts one header per route, a fixed header height, overflow into ⋯, and
   auto-select. Add a new route to its `ROUTES` list.
 

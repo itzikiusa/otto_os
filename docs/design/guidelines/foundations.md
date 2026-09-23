@@ -226,8 +226,7 @@ Rules:
   | 12.5 px | `--fs-s` or `--fs-m` |
   | 14 px | `--fs-m` or `--fs-l` |
 - **One title size.** Every page title is `--fs-l`/600 in `PageHeader`. Don't
-  give a page a bigger h1. (Legacy `.page-header h1` is aligned to `--fs-l` on
-  `feat/page-chrome`.)
+  give a page a bigger h1. (Legacy `.page-header h1` is aligned to `--fs-l`.)
 - **Weights:** 400 (body), 500 (buttons, labels, chips), 600 (titles, active
   nav item, table headers). No 700/800 in chrome.
 - **Uppercase micro-labels** exist in one form only: `.section-title`
@@ -239,9 +238,8 @@ Rules:
 - **Line height:** body 1.45 (global), markdown 1.6 (`.md-body`), single-line
   controls set explicit heights instead.
 
-**TBD after `feat/shell-nav` merges:** the sidebar section labels
-(`.group-label`) are 10.5 px. They are uppercase decorative headers, but they
-still sit below the floor. Move them to `--fs-xs`.
+Sidebar section labels, the Workspaces label and palette group text all use
+`--fs-xs` (the 11 px floor), like every other uppercase micro-label.
 
 ---
 
@@ -444,8 +442,8 @@ Rules:
   one-line comment if the metaphor isn't obvious. Check it at 12 px and at
   16 px.
 - **One icon per module.** Sidebar icons must be unique across
-  `SIDEBAR_MODULES`, because the collapsed Rail shows icons only. `feat/shell-nav`
-  adds `book` (Vault), `compass` (Browser), `server` (MCP) and `calendar`
+  `SIDEBAR_MODULES`, because the collapsed Rail shows icons only. The registry
+  uses `book` (Vault), `compass` (Browser), `server` (MCP) and `calendar`
   (Scheduled Tasks) to remove the old `globe`/`plug`/`clock` collisions. Don't
   reuse a module's icon for a different module.
 - **One icon per concept.** Don't give two adjacent buttons the same icon (as
