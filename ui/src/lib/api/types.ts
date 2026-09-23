@@ -8912,7 +8912,16 @@ export type DesignSignalKind =
   | 'brand_correction'
   | 'rule_feedback'
   | 'status_change'
-  | 'shipped';
+  | 'shipped'
+  /** An older version saved again as the new head — `version_id` = the new
+   *  head, `payload.from_version_id` (required) = the version restored. */
+  | 'restored'
+  /** A library artifact added as a reference — `payload.target_artifact_id`
+   *  (required). */
+  | 'reference_added'
+  /** "Start from this": recorded on the NEW artifact, `payload.source_artifact_id`
+   *  (required; `source_version_id` optional). */
+  | 'forked';
 export type DesignArtifactChange =
   | 'created'
   | 'content'
@@ -8922,7 +8931,10 @@ export type DesignArtifactChange =
   | 'deleted'
   /** An UNCOMMITTED, validated mid-turn edit by a design-assist agent
    *  (`version_id: null`); the turn's commit follows as `content`. */
-  | 'live';
+  | 'live'
+  /** A new rendered thumbnail was stored (`PUT …/thumbnail`) — refresh the
+   *  image only (not an edit; never re-render in response). */
+  | 'thumbnail';
 export type DesignLinkUpdateReason =
   | 'created'
   | 'deleted'
@@ -8964,7 +8976,8 @@ export interface DesignArtifact {
   head_seq: number | null;
   approved_version_id: Id | null;
   tags: string[];
-  /** sha256 of the PNG thumbnail (`GET /design/artifacts/{id}/thumbnail`). */
+  /** sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail` serves
+   *  it; `PUT …/thumbnail` stores a UI-rendered one). */
   thumb_blob: string | null;
   /** Imported rows carry `meta.imported_from = {kind, id, story_id?, …}`. */
   meta: Record<string, unknown>;
@@ -8975,6 +8988,19 @@ export interface DesignArtifact {
   created_session_id: Id | null;
   created_at: string;
   updated_at: string;
+  // Resolved on read (never written):
+  /** Display name of `created_by` (display name, else username); `null` for
+   *  a system author such as the legacy import. */
+  created_by_name: string | null;
+  /** `author_id` / `author_kind` of the head version — who saved last. */
+  last_editor_id: string | null;
+  last_editor_kind: DesignAuthorKind | null;
+  /** Display name of `last_editor_id` (`null` when it is not a user). */
+  last_editor_name: string | null;
+  /** Product stories this artifact is linked to (`implements`), sorted. */
+  story_ids: Id[];
+  /** Title of the `created_session_id` session (`null`: unset or gone). */
+  created_session_title: string | null;
 }
 
 export interface DesignVersion {
@@ -8992,6 +9018,8 @@ export interface DesignVersion {
   message: string;
   provenance: Record<string, unknown>;
   created_at: string;
+  /** Display name of `author_id`, resolved on read (`null`: not a user). */
+  author_name: string | null;
 }
 
 export interface DesignLink {

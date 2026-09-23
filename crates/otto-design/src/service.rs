@@ -195,6 +195,24 @@ pub fn bound_json(v: Value, max_bytes: usize, what: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// Kind-specific payload check for API-recorded signals: the kinds in
+/// [`SIGNAL_PAYLOAD_KEYS`] must carry their key as a non-empty string.
+pub fn check_signal_payload(kind: &str, payload: &Value) -> Result<()> {
+    for (k, key) in SIGNAL_PAYLOAD_KEYS {
+        if *k == kind
+            && !payload
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Err(Error::Invalid(format!(
+                "a {kind} signal needs payload.{key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Shallow-merge `patch` into `meta` (`null` values delete keys).
 pub fn merge_meta(meta: &mut Value, patch: Value) -> Result<()> {
     let Value::Object(p) = patch else {
@@ -1383,6 +1401,7 @@ impl DesignService {
             MAX_SIGNAL_PAYLOAD_BYTES,
             "signal payload",
         )?;
+        check_signal_payload(&req.kind, &payload)?;
         self.record_signal_row(NewSignal {
             workspace_id: a.workspace_id.clone(),
             artifact_id: a.id.clone(),
@@ -1450,6 +1469,59 @@ impl DesignService {
             report.versions.extend(doomed);
         }
         Ok(report)
+    }
+}
+
+/// Magic-byte type of a thumbnail image — PNG or WebP (what the UI renderer
+/// produces), else `None`.
+pub fn thumb_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+impl DesignService {
+    /// Store a thumbnail the UI rendered (`PUT …/thumbnail`): a PNG or WebP
+    /// (sniffed, ≤ [`MAX_THUMB_BYTES`]) becomes a blob and the artifact's
+    /// `thumb_blob`. A thumbnail is a cache, not an edit: `updated_at` is NOT
+    /// bumped (the Lobby's "recent" order stays put) and no version is made.
+    /// The same image again is a no-op; a new one emits
+    /// `design_artifact_updated {change:"thumbnail"}`. The previous blob is
+    /// left for the opt-in prune's GC.
+    pub async fn set_thumbnail(&self, a: &DesignArtifact, bytes: &[u8]) -> Result<DesignArtifact> {
+        if bytes.is_empty() {
+            return Err(Error::Invalid("the thumbnail is empty".into()));
+        }
+        if bytes.len() > MAX_THUMB_BYTES {
+            return Err(Error::PayloadTooLarge(format!(
+                "thumbnail is {} bytes (cap {MAX_THUMB_BYTES})",
+                bytes.len()
+            )));
+        }
+        if thumb_mime(bytes).is_none() {
+            return Err(Error::UnsupportedMedia(
+                "a thumbnail must be a PNG or WebP image".into(),
+            ));
+        }
+        let sha = self.blobs.put(bytes).await?;
+        if a.thumb_blob.as_deref() == Some(sha.as_str()) {
+            return Ok(a.clone());
+        }
+        self.store.set_thumb_blob(&a.id, &sha).await?;
+        let updated = self.store.require_artifact(&a.id).await?;
+        self.emit(Event::DesignArtifactUpdated {
+            workspace_id: updated.workspace_id.clone(),
+            artifact_id: updated.id.clone(),
+            format: updated.format.clone(),
+            change: "thumbnail".into(),
+            version_id: None,
+            content: None,
+        });
+        Ok(updated)
     }
 }
 
@@ -1558,6 +1630,19 @@ mod tests {
         ));
         let deep = json!({"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":1}}}}}}}}});
         assert!(bound_json(deep, 10_000, "x").is_err());
+        // restored / reference_added / forked must name what they point at.
+        for kind in ["restored", "reference_added", "forked"] {
+            assert!(one_of(SIGNAL_KINDS, kind), "{kind} is accepted");
+            assert!(check_signal_payload(kind, &json!({})).is_err(), "{kind}");
+            assert!(check_signal_payload(kind, &json!({"from_version_id": " "})).is_err());
+        }
+        assert!(check_signal_payload("restored", &json!({"from_version_id": "v1"})).is_ok());
+        assert!(
+            check_signal_payload("reference_added", &json!({"target_artifact_id": "A"})).is_ok()
+        );
+        assert!(check_signal_payload("forked", &json!({"source_artifact_id": "A"})).is_ok());
+        // Older kinds keep their free-form payloads.
+        assert!(check_signal_payload("variant_chosen", &json!({})).is_ok());
         assert_eq!(bound_json(Value::Null, 10, "x").unwrap(), json!({}));
         let mut m = json!({"a": 1, "b": 2});
         merge_meta(&mut m, json!({"b": null, "c": 3})).unwrap();

@@ -1249,6 +1249,8 @@ mod tests {
             "/api/v1/design/artifacts/{id}/assist",
             "/api/v1/design/artifacts/{id}/variants",
             "/api/v1/design/learned",
+            "/api/v1/design/links",
+            "/api/v1/design/artifacts/{id}/thumbnail",
         ] {
             assert_eq!(pol(Method::GET, path), Require(Design, View), "{path}");
         }
@@ -1256,6 +1258,7 @@ mod tests {
             (Method::POST, "/api/v1/design/projects"),
             (Method::PATCH, "/api/v1/design/projects/{id}"),
             (Method::PUT, "/api/v1/design/artifacts/{id}/content"),
+            (Method::PUT, "/api/v1/design/artifacts/{id}/thumbnail"),
             (Method::POST, "/api/v1/design/artifacts/{id}/versions"),
             (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
             (Method::POST, "/api/v1/design/artifacts/{id}/links"),
