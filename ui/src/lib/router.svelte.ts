@@ -64,6 +64,17 @@ export function getShareToken(sessionId: string): string | null {
   return _shareTokens.get(sessionId) ?? null;
 }
 
+/** decodeURIComponent that never throws: a malformed `%` escape in a pasted
+ *  or restored hash (`#/vault/100%`) threw from the Router constructor and
+ *  blanked the app at boot. Undecodable segments are kept verbatim. */
+function safeDecode(seg: string): string {
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+}
+
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
@@ -90,7 +101,7 @@ class Router {
 
   private parse(): void {
     const raw = window.location.hash.replace(/^#\/?/, '');
-    this.parts = raw === '' ? [] : raw.split('/').map(decodeURIComponent);
+    this.parts = raw === '' ? [] : raw.split('/').map(safeDecode);
 
     // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
     // into _shareTokens then strip it from the visible URL + history so it
@@ -106,7 +117,7 @@ class Router {
         history.replaceState(null, '', cleanHash);
         // Re-parse the now-clean URL so this.parts reflects the stripped form.
         const cleanRaw = cleanHash.replace(/^#\/?/, '');
-        this.parts = cleanRaw.split('/').map(decodeURIComponent);
+        this.parts = cleanRaw.split('/').map(safeDecode);
       }
     }
   }
@@ -155,15 +166,22 @@ class Router {
   back(): void {
     if (this.index <= 0) return;
     this.index -= 1;
-    this.navigating = true;
-    window.location.hash = this.stack[this.index];
+    this.moveTo(this.stack[this.index]);
   }
 
   forward(): void {
     if (this.index >= this.stack.length - 1) return;
     this.index += 1;
+    this.moveTo(this.stack[this.index]);
+  }
+
+  /** Internal back/forward. Setting the hash to its CURRENT value fires no
+   *  hashchange, which left `navigating` stuck true and made the next real
+   *  navigation skip its history push — only flag it when a change will fire. */
+  private moveTo(hash: string): void {
+    if (hash === this.currentHash()) return;
     this.navigating = true;
-    window.location.hash = this.stack[this.index];
+    window.location.hash = hash;
   }
 }
 
