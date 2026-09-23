@@ -162,8 +162,10 @@ Notes:
   agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
   own data dir is write-denied even under those roots (only its agent work areas —
   `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
-  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize` —
-  and the session's own `provider-accounts/<id>` home stay writable), and its
+  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize`,
+  the Design Hall working copies `design/<artifact>/work/**` (never
+  `design/blobs/`) — and the session's own `provider-accounts/<id>` home stay
+  writable), and its
   `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
   that make unsandboxed programs run agent-chosen code are write-denied
   (`~/.claude/settings.json`, `~/.claude/settings.local.json`,

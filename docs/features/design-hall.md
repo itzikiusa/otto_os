@@ -253,6 +253,12 @@ the artifact's assist session (`meta.assist`) when the provider matches.
 Costs stay bounded: one agent run per artifact at a time (409 otherwise), 20
 minutes per turn (the session is stopped past it), at most 4 variants.
 
+Under the opt-in process sandbox (`process_sandbox`, macOS Seatbelt) the
+agent may write `<data>/design/<artifact>/work/**` — per artifact, by
+pattern — and nothing else of `<data>/design/`: the blob store is denied
+again after that grant. Variant turns work in `design/<artifact>/variants/…`,
+which the sandbox does NOT open yet, so run variants with the sandbox off.
+
 **Variants.** `POST …/variants {prompt, n ≤ 4, providers?, directions?}` runs
 n fresh turns in parallel, one direction each (`defaults` follows the team
 rules, `explore` deliberately ignores soft preferences, then `calm`, `story`),
