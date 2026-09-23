@@ -1433,7 +1433,14 @@ async fn record_history(
     );
     request.entry("name").or_insert(Value::Null);
     request.insert("source".into(), source.clone());
+    cap_history_body(&mut history.response);
     let entry = repo.insert_history(history).await.ok()?;
+    // Retention (runtime cap, no migration): trim this workspace's history to
+    // its row/age limits after every insert, best-effort.
+    let (max_rows, max_days) = history_retention(ctx, &entry.workspace_id).await;
+    let _ = repo
+        .prune_history(&entry.workspace_id, max_rows, max_days)
+        .await;
     let source_kind = source
         .get("kind")
         .and_then(Value::as_str)
@@ -1447,6 +1454,53 @@ async fn record_history(
         request_id,
     });
     Some(entry.id)
+}
+
+/// Default history retention per workspace: newest rows kept …
+pub(crate) const HISTORY_KEEP_ROWS_DEFAULT: i64 = 1000;
+/// … and maximum age in days.
+pub(crate) const HISTORY_KEEP_DAYS_DEFAULT: i64 = 90;
+/// Response body kept in a history row. The live response already carried the
+/// full body (up to the 512 KB display cap); history keeps a preview.
+const HISTORY_BODY_MAX: usize = 64 * 1024;
+
+/// The workspace's history retention `(max_rows, max_days)` from
+/// `settings.api_client.history_max_rows` / `history_max_days` (non-negative
+/// integers; `0` disables that limit), defaulting to
+/// [`HISTORY_KEEP_ROWS_DEFAULT`] / [`HISTORY_KEEP_DAYS_DEFAULT`].
+pub(crate) async fn history_retention(ctx: &ServerCtx, wid: &Id) -> (i64, i64) {
+    let settings = ctx.workspaces.get(wid).await.ok().map(|ws| ws.settings);
+    let limit = |key: &str, default: i64| -> i64 {
+        settings
+            .as_ref()
+            .and_then(|s| s.get("api_client"))
+            .and_then(|a| a.get(key))
+            .and_then(Value::as_i64)
+            .filter(|v| *v >= 0)
+            .unwrap_or(default)
+    };
+    (
+        limit("history_max_rows", HISTORY_KEEP_ROWS_DEFAULT),
+        limit("history_max_days", HISTORY_KEEP_DAYS_DEFAULT),
+    )
+}
+
+/// Cap a history row's stored response `body` at [`HISTORY_BODY_MAX`] (UTF-8
+/// safe), flagging it `truncated`, so polling automations / agent loops can't
+/// balloon the state DB with full bodies.
+fn cap_history_body(response: &mut Value) {
+    let mut cut = false;
+    if let Some(Value::String(body)) = response.get_mut("body") {
+        if body.len() > HISTORY_BODY_MAX {
+            truncate_string(body, HISTORY_BODY_MAX);
+            cut = true;
+        }
+    }
+    if cut {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("truncated".into(), Value::Bool(true));
+        }
+    }
 }
 
 /// Reject overrides that could recursively expand a workspace secret.
@@ -4243,6 +4297,25 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn history_rows_keep_only_a_body_preview() {
+        let mut small = json!({"status": 200, "body": "ok", "truncated": false});
+        cap_history_body(&mut small);
+        assert_eq!(small["body"], "ok");
+        assert_eq!(small["truncated"], false);
+
+        let big = "é".repeat(HISTORY_BODY_MAX); // 2 bytes each → over the cap
+        let mut resp = json!({"status": 200, "body": big});
+        cap_history_body(&mut resp);
+        let body = resp["body"].as_str().unwrap();
+        assert!(body.len() <= HISTORY_BODY_MAX && body.len() > HISTORY_BODY_MAX - 2);
+        assert_eq!(resp["truncated"], true);
+        // A non-object / bodiless response is left alone.
+        let mut err = json!({"error": "boom"});
+        cap_history_body(&mut err);
+        assert_eq!(err, json!({"error": "boom"}));
     }
 
     #[test]
