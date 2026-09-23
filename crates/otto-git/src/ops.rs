@@ -40,6 +40,15 @@ impl PullMode {
     }
 }
 
+/// A `pull.rebase` / `branch.<name>.rebase` value that means "rebase": git's
+/// boolean-true spellings plus `merges`/`interactive` (and their `m`/`i`).
+fn is_rebase_value(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "true" | "yes" | "on" | "1" | "merges" | "m" | "interactive" | "i"
+    )
+}
+
 /// What a rebase onto `onto` would replay, for the confirm dialog.
 #[derive(Debug, Clone, Serialize)]
 pub struct RebasePreview {
@@ -135,11 +144,25 @@ impl LocalGit {
     /// `pull.ff`), so Otto's pull button stops silently overriding it. Read on
     /// every call — the config can change under us and two local `git config`
     /// spawns are cheaper than a stale policy.
+    ///
+    /// Git's own precedence: `branch.<current>.rebase` over `pull.rebase`, then
+    /// `pull.ff`. A rebase value is any git boolean-true spelling (`yes`, `on`,
+    /// `1` — they used to read as Merge) or `merges`/`interactive`. NOTE:
+    /// [`PullMode::Rebase`] pulls with a plain `--rebase`, so `merges` still
+    /// linearises merge commits.
     pub async fn pull_mode_default(&self) -> PullMode {
-        if let Some(v) = self.config_get("pull.rebase").await {
-            if matches!(v.as_str(), "true" | "merges" | "interactive") {
-                return PullMode::Rebase;
+        let branch_rebase = match self.current_branch().await {
+            Ok(b) if b != "HEAD" && !b.is_empty() => {
+                self.config_get(&format!("branch.{b}.rebase")).await
             }
+            _ => None,
+        };
+        let rebase = match branch_rebase {
+            Some(v) => Some(v),
+            None => self.config_get("pull.rebase").await,
+        };
+        if rebase.as_deref().is_some_and(is_rebase_value) {
+            return PullMode::Rebase;
         }
         if self.config_get("pull.ff").await.as_deref() == Some("only") {
             return PullMode::FfOnly;
@@ -627,6 +650,18 @@ mod tests {
         assert_eq!(git.pull_mode_default().await, PullMode::Rebase);
         sh_git(&dir, &["config", "pull.rebase", "false"]);
         assert_eq!(git.pull_mode_default().await, PullMode::FfOnly);
+
+        // Every git boolean-true spelling means rebase, not merge.
+        for v in ["yes", "on", "1", "merges"] {
+            sh_git(&dir, &["config", "pull.rebase", v]);
+            assert_eq!(git.pull_mode_default().await, PullMode::Rebase, "{v}");
+        }
+        // The current branch's own setting outranks pull.rebase.
+        sh_git(&dir, &["config", "branch.main.rebase", "false"]);
+        assert_eq!(git.pull_mode_default().await, PullMode::FfOnly);
+        sh_git(&dir, &["config", "pull.rebase", "false"]);
+        sh_git(&dir, &["config", "branch.main.rebase", "true"]);
+        assert_eq!(git.pull_mode_default().await, PullMode::Rebase);
     }
 
     /// `--ff-only` on a DIVERGED branch is the caller's choice of mode failing,
