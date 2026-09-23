@@ -4,13 +4,12 @@
 // scene from the doc when no viewport is mounted. Helpers/gizmo/grid are never
 // part of the content root, so nothing leaks into the export. The Blender
 // script export is server-side (`design_scene3d.rs::to_blender_script`) — not here.
+//
+// v2 adds USDZ (three's USDZExporter — iOS Quick Look / AR) and passes the
+// brand-colour resolver through so token colours export as their hex value.
 import type * as THREE_NS from 'three';
-import { buildLight, buildMesh, disposeTree, applyTransform, type Three } from './build';
+import { buildLight, buildMesh, disposeTree, applyTransform, loadThree, plainColors, type ColorResolver } from './build';
 import type { Scene3dDoc } from './types';
-
-async function loadThree(): Promise<Three> {
-  return (await import('three')) as unknown as Three;
-}
 
 async function exporterFor(): Promise<new () => { parseAsync(input: THREE_NS.Object3D, options?: object): Promise<ArrayBuffer | object> }> {
   const mod = await import('three/examples/jsm/exporters/GLTFExporter.js');
@@ -31,13 +30,25 @@ export async function exportObjectToGlb(root: THREE_NS.Object3D): Promise<Blob> 
 }
 
 /**
+ * Export an already-built object tree to USDZ (Apple Quick Look / AR). Only
+ * meshes with standard/physical materials carry over; lights and cameras are
+ * not part of USDZ's simple profile.
+ */
+export async function exportObjectToUsdz(root: THREE_NS.Object3D): Promise<Blob> {
+  const { USDZExporter } = await import('three/examples/jsm/exporters/USDZExporter.js');
+  const bytes = await new USDZExporter().parseAsync(root);
+  return new Blob([bytes], { type: 'model/vnd.usdz+zip' });
+}
+
+/**
  * Build the doc headlessly and export it. `resolveAttachment` turns a gltf object's
- * `attachment_id` into a blob URL (Track B: `product.attachmentBlobUrl`); models that
- * fail to load are skipped (the export still succeeds) and listed in `skipped`.
+ * `attachment_id` (or v2 `src` URI) into a blob URL; models that fail to load are
+ * skipped (the export still succeeds) and listed in `skipped`.
  */
 export async function exportSceneToGlb(
   doc: Scene3dDoc,
   resolveAttachment: (aid: string) => Promise<string>,
+  color: ColorResolver = plainColors,
 ): Promise<{ blob: Blob; skipped: string[] }> {
   const THREE = await loadThree();
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
@@ -60,11 +71,14 @@ export async function exportSceneToGlb(
   for (const [gid, gn] of groupNodes) attach(gid, gn);
 
   const loader = new GLTFLoader();
+  const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+  loader.setMeshoptDecoder(MeshoptDecoder);
   for (const o of doc.objects) {
     if (o.type === 'gltf') {
-      if (!o.attachment_id) continue;
+      const ref = o.src ?? o.attachment_id;
+      if (!ref) continue;
       try {
-        const url = await resolveAttachment(o.attachment_id);
+        const url = await resolveAttachment(ref);
         const gltf = await loader.loadAsync(url);
         const holder = new THREE.Group();
         holder.name = o.name;
@@ -77,7 +91,7 @@ export async function exportSceneToGlb(
       }
       continue;
     }
-    attach(o.id, buildMesh(THREE, o));
+    attach(o.id, buildMesh(THREE, o, color));
   }
   for (const l of doc.lights) {
     const { light, target } = buildLight(THREE, l);
@@ -93,7 +107,7 @@ export async function exportSceneToGlb(
 }
 
 /** Suggested download filename for a scene export. */
-export function glbFileName(title: string | undefined): string {
+export function glbFileName(title: string | undefined, ext: 'glb' | 'usdz' | 'png' = 'glb'): string {
   const base = (title ?? 'scene').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'scene';
-  return `${base}.glb`;
+  return `${base}.${ext}`;
 }

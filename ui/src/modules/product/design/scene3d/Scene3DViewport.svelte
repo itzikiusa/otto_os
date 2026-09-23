@@ -8,27 +8,44 @@
   // user edit goes through `ops.ts` → `onchange(newDoc)` (undebounced — the arena
   // owns the 600 ms autosave + dirty/conflict state). We never mutate `doc`.
   //
-  // gltf objects load through `resolveAttachment(attachment_id)` → blob URL (the
-  // authed fetch lives in Track B's store); there is no URL surface here.
+  // scene3d v2 (3D Studio 1.5): physical materials (presets + brand `token:`
+  // colours resolved against `brand`), procedural environments (IBL + gradient
+  // backdrop), named STATES — `stateId` picks one and the viewer tweens every
+  // object's pose to it (gizmo edits made in a non-default state are written to
+  // that state's overrides) — a turntable orbit, a view cube, and camera moves
+  // to named views. Motion respects `prefers-reduced-motion` (instant tweens).
+  //
+  // gltf objects load through `resolveAttachment(ref)` → blob URL, where `ref` is
+  // the object's `attachment_id` or its v2 `otto://design/…` src (the host fetches
+  // with auth); there is no URL surface here. Meshopt-compressed GLBs (Optimize
+  // for web) decode with three's bundled decoder.
   import { onDestroy } from 'svelte';
   import type * as THREE_NS from 'three';
   import type { OrbitControls as OrbitControlsT } from 'three/examples/jsm/controls/OrbitControls.js';
   import type { TransformControls as TransformControlsT } from 'three/examples/jsm/controls/TransformControls.js';
   import type { GLTFLoader as GLTFLoaderT } from 'three/examples/jsm/loaders/GLTFLoader.js';
-  import type { GizmoMode, Scene3dDoc, Scene3dObject } from './types';
+  import type { Easing, GizmoMode, Scene3dCamera, Scene3dDoc, Scene3dObject, Vec3 } from './types';
   import {
     applyTransform,
     buildLight,
     buildMesh,
     disposeTree,
+    geometryKey,
+    loadThree,
     RAD,
+    DEG,
     updateLight,
     updateMeshMaterial,
     USERDATA_ID,
     USERDATA_KIND,
+    type ColorResolver,
     type Three,
   } from './build';
-  import { duplicate, findNode, gizmoModeForKey, remove, setCamera, setTransform, summarize } from './ops';
+  import { duplicate, findNode, gizmoModeForKey, remove, setCamera, setStateOverride, setTransform, summarize } from './ops';
+  import { resolveColor } from './tokens';
+  import { resolveMaterial, type ResolvedMaterial } from './presets';
+  import { findState, initialState, lerpPoses, stateTiming, statePoses, transitionProgress, type Pose } from './states';
+  import { buildEnvironment, environmentKey, type BuiltEnvironment } from './environment';
 
   interface Props {
     doc: Scene3dDoc;
@@ -37,7 +54,19 @@
     /** Presentation view: hides gizmo/grid/helpers and looks through the doc camera. */
     play?: boolean;
     onchange: (doc: Scene3dDoc) => void;
-    resolveAttachment: (aid: string) => Promise<string>;
+    resolveAttachment: (ref: string) => Promise<string>;
+    /** v2: the brand kit document `token:color.<name>` resolves against. */
+    brand?: unknown;
+    /** v2: the active state (null / unknown = the document's initial state). */
+    stateId?: string | null;
+    /** v2: orbit the camera slowly around its target (speed from `doc.turntable`). */
+    turntable?: boolean;
+    /** Show the view cube (top-right). */
+    viewCube?: boolean;
+    /** Extra text for the stats pill ("saved", "edited"…). */
+    statusNote?: string;
+    /** Hide the W/E/R key hint line (hosts with their own chrome). */
+    compact?: boolean;
   }
   let {
     doc,
@@ -46,9 +75,16 @@
     play = false,
     onchange,
     resolveAttachment,
+    brand = null,
+    stateId = null,
+    turntable = false,
+    viewCube = false,
+    statusNote = '',
+    compact = false,
   }: Props = $props();
 
   let host = $state<HTMLDivElement | null>(null);
+  let cubeEl = $state<HTMLDivElement | null>(null);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let mode = $state<GizmoMode>('translate');
@@ -56,6 +92,7 @@
   let gltfErrors = $state<Record<string, string>>({});
   const status = $derived(summarize(doc));
   const canEdit = $derived(!readonly && !play);
+  const colorFn: ColorResolver = (ref, fallback) => resolveColor(ref, brand, fallback);
 
   // ── three state (plain lets, never reactive — these are heavy mutable objects) ──
   let THREE: Three | null = null;
@@ -72,34 +109,54 @@
   let axes: THREE_NS.AxesHelper | null = null;
   let selectionBox: THREE_NS.BoxHelper | null = null;
   let loader: GLTFLoaderT | null = null;
+  let env: BuiltEnvironment | null = null;
+  let envKey = '';
   let ro: ResizeObserver | null = null;
   let raf = 0;
   let dirty = true;
   let destroyed = false;
   let dragging = false;
   let cameraInitialised = false;
+  let lastFrame = 0;
   const nodes = new Map<string, THREE_NS.Object3D>(); // id → object/group/light node
-  const nodeType = new Map<string, string>(); // id → doc type ('box' | 'gltf' | 'group' | 'directional' …)
+  const nodeType = new Map<string, string>(); // id → geometry key ('box' | 'box:r0.04' | 'gltf:<ref>' | 'group' | 'directional' …)
   const lightTargets = new Map<string, THREE_NS.Object3D>();
   const lightMarkers = new Map<string, THREE_NS.Mesh>();
-  const gltfCache = new Map<string, Promise<THREE_NS.Group>>(); // attachment_id → template scene
+  const gltfCache = new Map<string, Promise<THREE_NS.Group>>(); // ref → template scene
+  const baseMaterial = new Map<string, ResolvedMaterial>(); // object id → resolved doc material (pose overrides restore to it)
   let pointerDown: { x: number; y: number } | null = null;
+
+  // v2 states: the pose currently on screen, and an in-flight tween.
+  let shownState: string | null = null;
+  let poses: Map<string, Pose> | null = null;
+  let tween: { from: Map<string, Pose>; to: Map<string, Pose>; start: number; duration: number; easing: Easing } | null = null;
+  // Camera move to a named view.
+  let camTween: { fromPos: THREE_NS.Vector3; fromTarget: THREE_NS.Vector3; toPos: THREE_NS.Vector3; toTarget: THREE_NS.Vector3; fromFov: number; toFov: number; start: number; duration: number } | null = null;
 
   const invalidate = () => {
     dirty = true;
   };
+  const reducedMotion = (): boolean =>
+    typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /** The state the viewer shows: the prop, else the document's initial state. */
+  function effectiveState(d: Scene3dDoc): string | null {
+    if (stateId && findState(d, stateId)) return stateId;
+    return initialState(d);
+  }
 
   // ── bootstrap ────────────────────────────────────────────────────────────────
   async function boot(el: HTMLDivElement): Promise<void> {
     try {
-      const [three, orbitMod, tcMod, gltfMod] = await Promise.all([
-        import('three'),
+      const [three, orbitMod, tcMod, gltfMod, meshopt] = await Promise.all([
+        loadThree(),
         import('three/examples/jsm/controls/OrbitControls.js'),
         import('three/examples/jsm/controls/TransformControls.js'),
         import('three/examples/jsm/loaders/GLTFLoader.js'),
+        import('three/examples/jsm/libs/meshopt_decoder.module.js'),
       ]);
       if (destroyed) return;
-      THREE = three as unknown as Three;
+      THREE = three;
       const T = THREE;
 
       renderer = new T.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -132,6 +189,7 @@
       orbit.screenSpacePanning = true;
       orbit.maxPolarAngle = Math.PI * 0.999;
       orbit.addEventListener('change', invalidate);
+      orbit.addEventListener('start', () => (camTween = null));
 
       gizmo = new tcMod.TransformControls(camera, renderer.domElement);
       gizmo.setMode(mode);
@@ -151,6 +209,7 @@
       helpers.add(grid, axes);
 
       loader = new gltfMod.GLTFLoader();
+      loader.setMeshoptDecoder(meshopt.MeshoptDecoder);
 
       ro = new ResizeObserver(() => resize());
       ro.observe(el);
@@ -159,7 +218,7 @@
       applyEnvironment();
       applyPlay();
       loading = false;
-      loop();
+      loop(performance.now());
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
       loading = false;
@@ -176,13 +235,26 @@
     invalidate();
   }
 
-  function loop(): void {
+  function loop(now: number): void {
     if (destroyed) return;
     raf = requestAnimationFrame(loop);
+    const dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0;
+    lastFrame = now;
+    stepTween(now);
+    stepCamera(now);
+    if (turntable && !dragging && camera && orbit && !camTween) {
+      const speed = doc.turntable?.speed ?? 20;
+      const offset = camera.position.clone().sub(orbit.target);
+      offset.applyAxisAngle(new THREE!.Vector3(0, 1, 0), speed * DEG * dt);
+      camera.position.copy(orbit.target).add(offset);
+      camera.lookAt(orbit.target);
+      dirty = true;
+    }
     if (!dirty || !renderer || !scene || !camera) return;
     dirty = false;
     if (selectionBox) selectionBox.update();
     renderer.render(scene, camera);
+    syncCube();
   }
 
   // ── doc → three reconciliation ───────────────────────────────────────────────
@@ -212,10 +284,10 @@
     for (const o of d.objects) {
       live.add(o.id);
       let node = nodes.get(o.id);
-      const typeKey = o.type === 'gltf' ? `gltf:${o.attachment_id}` : o.type;
+      const typeKey = geometryKey(o);
       if (!node || nodeType.get(o.id) !== typeKey) {
         if (node) dropNode(o.id);
-        node = o.type === 'gltf' ? spawnGltf(o) : buildMesh(T, o);
+        node = o.type === 'gltf' ? spawnGltf(o) : buildMesh(T, o, colorFn);
         nodes.set(o.id, node);
         nodeType.set(o.id, typeKey);
         content.add(node);
@@ -223,9 +295,10 @@
         applyTransform(node, o);
         node.name = o.name;
         node.visible = o.visible !== false;
-        if (o.type !== 'gltf') updateMeshMaterial(T, node as THREE_NS.Mesh, o);
+        if (o.type !== 'gltf') updateMeshMaterial(T, node as THREE_NS.Mesh, o, colorFn);
         if (o.type === 'text') node.userData.text = o.text;
       }
+      if (o.type !== 'gltf') baseMaterial.set(o.id, resolveMaterial(o.material, colorFn));
     }
     // Lights (+ a pickable marker in edit mode).
     for (const l of d.lights) {
@@ -269,6 +342,7 @@
     }
     // Remove what left the document.
     for (const id of [...nodes.keys()]) if (!live.has(id)) dropNode(id);
+    for (const id of [...baseMaterial.keys()]) if (!live.has(id)) baseMaterial.delete(id);
 
     // Parenting: groups are organisational (identity transform), so local == world.
     const parentOf = new Map<string, string>();
@@ -280,10 +354,77 @@
       if (node.parent !== want) want.add(node); // Object3D.add re-parents
     }
 
+    // v2 states: re-pose on top of the base transforms (unless a tween owns the pose).
+    const want = effectiveState(d);
+    if (tween && want === shownState) {
+      tween.to = statePoses(d, want, (c) => colorFn(c, '#000000'));
+    } else if (want !== shownState && shownState !== null && cameraInitialised) {
+      startStateTween(d, want);
+    } else {
+      shownState = want;
+      poses = statePoses(d, want, (c) => colorFn(c, '#000000'));
+      applyPoses(poses);
+    }
+
     // Selection may have vanished (agent deleted it, or we did).
     if (selectedId && !live.has(selectedId)) selectedId = null;
     syncSelection();
     invalidate();
+  }
+
+  /** Put every object at its pose (transform, visibility, colour/opacity overrides). */
+  function applyPoses(p: Map<string, Pose>): void {
+    for (const [id, pose] of p) {
+      const node = nodes.get(id);
+      if (!node) continue;
+      node.position.set(pose.position[0], pose.position[1], pose.position[2]);
+      node.rotation.set(pose.rotation[0] * DEG, pose.rotation[1] * DEG, pose.rotation[2] * DEG);
+      node.scale.set(pose.scale[0] || 1e-4, pose.scale[1] || 1e-4, pose.scale[2] || 1e-4);
+      node.visible = pose.visible;
+      const base = baseMaterial.get(id);
+      const mat = (node as THREE_NS.Mesh).material as THREE_NS.MeshPhysicalMaterial | undefined;
+      if (base && mat && 'clearcoat' in mat && !mat.map) {
+        mat.color.set(pose.color ?? base.color);
+        mat.emissive.set(pose.emissive ?? base.emissive);
+        const op = pose.opacity ?? base.opacity;
+        if (mat.opacity !== op || mat.transparent !== op < 1) {
+          mat.opacity = op;
+          const t = op < 1;
+          if (mat.transparent !== t) {
+            mat.transparent = t;
+            mat.needsUpdate = true;
+          }
+        }
+      }
+    }
+    invalidate();
+  }
+
+  function startStateTween(d: Scene3dDoc, to: string | null): void {
+    const from = poses ?? statePoses(d, shownState, (c) => colorFn(c, '#000000'));
+    const target = statePoses(d, to, (c) => colorFn(c, '#000000'));
+    const { duration, easing } = stateTiming(findState(d, to), reducedMotion());
+    shownState = to;
+    if (duration <= 0) {
+      tween = null;
+      poses = target;
+      applyPoses(target);
+      return;
+    }
+    tween = { from, to: target, start: performance.now(), duration, easing };
+    syncSelection(); // the gizmo stays detached while a tween owns the pose
+  }
+
+  function stepTween(now: number): void {
+    if (!tween) return;
+    const t = transitionProgress(now - tween.start, tween.duration, tween.easing);
+    const done = now - tween.start >= tween.duration;
+    poses = done ? tween.to : lerpPoses(tween.from, tween.to, t);
+    applyPoses(poses);
+    if (done) {
+      tween = null;
+      syncSelection();
+    }
   }
 
   function dropNode(id: string): void {
@@ -324,11 +465,11 @@
     placeholder.position.y = 0.5;
     placeholder.name = 'placeholder';
     holder.add(placeholder);
-    const aid = o.attachment_id!;
-    let p = gltfCache.get(aid);
+    const ref = (o.src ?? o.attachment_id)!;
+    let p = gltfCache.get(ref);
     if (!p) {
       p = (async () => {
-        const url = await resolveAttachment(aid);
+        const url = await resolveAttachment(ref);
         const gltf = await loader!.loadAsync(url);
         gltf.scene.traverse((n) => {
           const m = n as THREE_NS.Mesh;
@@ -339,7 +480,7 @@
         });
         return gltf.scene;
       })();
-      gltfCache.set(aid, p);
+      gltfCache.set(ref, p);
     }
     p.then(
       (template) => {
@@ -347,16 +488,16 @@
         holder.remove(placeholder);
         disposeTree(placeholder);
         holder.add(template.clone(true)); // materials/geometry shared with the template — disposed once with the cache
-        delete gltfErrors[aid];
+        delete gltfErrors[ref];
         gltfErrors = { ...gltfErrors };
         syncSelection();
         invalidate();
       },
       (err: unknown) => {
         if (destroyed) return;
-        gltfCache.delete(aid);
+        gltfCache.delete(ref);
         (placeholder.material as THREE_NS.MeshBasicMaterial).color.set('#ef4444');
-        gltfErrors = { ...gltfErrors, [aid]: err instanceof Error ? err.message : String(err) };
+        gltfErrors = { ...gltfErrors, [ref]: err instanceof Error ? err.message : String(err) };
         invalidate();
       },
     );
@@ -365,17 +506,36 @@
 
   let lastBg = '';
   function applyEnvironment(): void {
-    if (!THREE || !scene || !grid || !axes) return;
-    const bg = doc.background ?? '#0f172a';
+    if (!THREE || !scene || !grid || !axes || !renderer) return;
+    const e = doc.environment;
+    // v2 environment: prefiltered IBL + (optionally) its gradient backdrop.
+    const key = environmentKey(e);
+    if (key !== envKey) {
+      envKey = key;
+      env?.dispose();
+      env = e ? buildEnvironment(THREE, renderer, e) : null;
+      scene.environment = env?.envMap ?? null;
+      renderer.toneMappingExposure = env?.preset.exposure ?? 1;
+      lastBg = ''; // backdrop may change with the preset
+    }
+    scene.environmentIntensity = e?.intensity ?? 1;
+    const useBackdrop = !!(e && e.background !== false && env?.backdrop);
+    const bg = useBackdrop ? `env:${envKey}` : (doc.background ?? '#0f172a');
     if (bg !== lastBg) {
       lastBg = bg;
-      scene.background = new THREE.Color(bg);
-      if (host) host.style.background = bg;
+      const lumOf = useBackdrop ? env!.preset.backdrop[1] : bg;
+      if (useBackdrop) {
+        scene.background = env!.backdrop;
+        if (host) host.style.background = `linear-gradient(${env!.preset.backdrop[0]}, ${env!.preset.backdrop[1]})`;
+      } else {
+        scene.background = new THREE.Color(bg);
+        if (host) host.style.background = bg;
+      }
       // Grid contrast follows the background luminance so it reads on light and dark scenes.
-      const c = new THREE.Color(bg);
+      const c = new THREE.Color(lumOf);
       const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-      const major = lum > 0.5 ? 0x94a3b8 : 0x475569;
-      const minor = lum > 0.5 ? 0xcbd5e1 : 0x1e293b;
+      const major = lum > 0.5 ? 0xa8a4bd : 0x475569;
+      const minor = lum > 0.5 ? 0xd4d1e0 : 0x1e293b;
       grid.removeFromParent();
       grid.dispose();
       grid = new THREE.GridHelper(40, 40, major, minor);
@@ -438,7 +598,7 @@
     if (kind === 'group') {
       // Groups carry no transform in the doc (organisational only): outline, no gizmo.
       gizmo.detach();
-    } else if (canEdit) {
+    } else if (canEdit && !tween) {
       // Lights only translate; force the mode while one is selected.
       gizmo.setMode(kind === 'light' ? 'translate' : mode);
       gizmo.attach(node);
@@ -452,10 +612,22 @@
         helpers.add(selectionBox);
       }
     } else {
-      selectionBox = new THREE.BoxHelper(node, 0xfbbf24);
+      selectionBox = new THREE.BoxHelper(node, 0x8b7cff);
       helpers.add(selectionBox);
     }
     invalidate();
+  }
+
+  /**
+   * Where a gizmo edit goes: the base document, or — when a non-default state
+   * is showing (or the showing state already overrides this object) — that
+   * state's overrides, Spline-style.
+   */
+  function editsState(objectId: string): string | null {
+    const st = findState(doc, shownState);
+    if (!st) return null;
+    if (st.id !== initialState(doc) || st.overrides?.[objectId]) return st.id;
+    return null;
   }
 
   /** Gizmo moved the selected node → write the transform back through ops. */
@@ -471,13 +643,13 @@
       return;
     }
     if (n.kind !== 'object') return;
-    onchange(
-      setTransform(doc, selectedId, {
-        position: [obj.position.x, obj.position.y, obj.position.z],
-        rotation: [obj.rotation.x * RAD, obj.rotation.y * RAD, obj.rotation.z * RAD],
-        scale: [obj.scale.x, obj.scale.y, obj.scale.z],
-      }),
-    );
+    const t = {
+      position: [obj.position.x, obj.position.y, obj.position.z] as Vec3,
+      rotation: [obj.rotation.x * RAD, obj.rotation.y * RAD, obj.rotation.z * RAD] as Vec3,
+      scale: [obj.scale.x, obj.scale.y, obj.scale.z] as Vec3,
+    };
+    const st = editsState(selectedId);
+    onchange(st ? setStateOverride(doc, st, selectedId, t) : setTransform(doc, selectedId, t));
   }
 
   function pick(clientX: number, clientY: number): string | null {
@@ -532,22 +704,91 @@
     const dist = (size / 2) / Math.tan((camera.fov * Math.PI) / 360) * 1.25;
     const dir = camera.position.clone().sub(orbit.target).normalize();
     if (!Number.isFinite(dir.length()) || dir.length() === 0) dir.set(1, 0.8, 1).normalize();
-    camera.position.copy(center).add(dir.multiplyScalar(dist));
-    orbit.target.copy(center);
-    orbit.update();
-    invalidate();
+    moveCamera(center.clone().add(dir.multiplyScalar(dist)), center, camera.fov);
   }
 
   /** Write the current free camera into the doc (so Play / the agent / Blender see this view). */
   function saveViewAsCamera(): void {
     if (!camera || !orbit || readonly) return;
-    onchange(
-      setCamera(doc, {
-        position: [camera.position.x, camera.position.y, camera.position.z],
-        target: [orbit.target.x, orbit.target.y, orbit.target.z],
-        fov: camera.fov,
-      }),
-    );
+    onchange(setCamera(doc, currentView()));
+  }
+
+  // ── camera moves (named views, view cube) ────────────────────────────────────
+  function moveCamera(pos: THREE_NS.Vector3, target: THREE_NS.Vector3, fov: number): void {
+    if (!camera || !orbit) return;
+    if (reducedMotion()) {
+      camera.position.copy(pos);
+      orbit.target.copy(target);
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+      orbit.update();
+      invalidate();
+      return;
+    }
+    camTween = {
+      fromPos: camera.position.clone(),
+      fromTarget: orbit.target.clone(),
+      toPos: pos.clone(),
+      toTarget: target.clone(),
+      fromFov: camera.fov,
+      toFov: fov,
+      start: performance.now(),
+      duration: 450,
+    };
+  }
+
+  function stepCamera(now: number): void {
+    if (!camTween || !camera || !orbit) return;
+    const t = transitionProgress(now - camTween.start, camTween.duration, 'ease-in-out');
+    camera.position.lerpVectors(camTween.fromPos, camTween.toPos, t);
+    orbit.target.lerpVectors(camTween.fromTarget, camTween.toTarget, t);
+    camera.fov = camTween.fromFov + (camTween.toFov - camTween.fromFov) * t;
+    camera.updateProjectionMatrix();
+    orbit.update();
+    dirty = true;
+    if (now - camTween.start >= camTween.duration) camTween = null;
+  }
+
+  /** Fly to a camera (a named view, or the document camera). */
+  export function goToView(cam: { position: Vec3; target: Vec3; fov?: number }): void {
+    if (!THREE || !camera) return;
+    moveCamera(new THREE.Vector3(...cam.position), new THREE.Vector3(...cam.target), cam.fov ?? camera.fov);
+  }
+
+  /** The free camera right now (for "Save view as…"). */
+  export function currentView(): Scene3dCamera {
+    if (!camera || !orbit) return doc.camera;
+    return {
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [orbit.target.x, orbit.target.y, orbit.target.z],
+      fov: camera.fov,
+    };
+  }
+
+  const CUBE_FACES = [
+    { id: 'front', label: 'Front', dir: [0, 0, 1] },
+    { id: 'back', label: 'Back', dir: [0, 0, -1] },
+    { id: 'right', label: 'Right', dir: [1, 0, 0] },
+    { id: 'left', label: 'Left', dir: [-1, 0, 0] },
+    { id: 'top', label: 'Top', dir: [0, 1, 0.0001] },
+    { id: 'bottom', label: 'Bot', dir: [0, -1, 0.0001] },
+  ] as const;
+
+  function snapTo(dir: readonly [number, number, number]): void {
+    if (!THREE || !camera || !orbit) return;
+    const dist = camera.position.distanceTo(orbit.target);
+    const d = new THREE.Vector3(...dir).normalize().multiplyScalar(dist);
+    moveCamera(orbit.target.clone().add(d), orbit.target.clone(), camera.fov);
+  }
+
+  /** Rotate the DOM view cube to match the camera (written straight to style — no reactivity per frame). */
+  function syncCube(): void {
+    if (!cubeEl || !camera || !orbit) return;
+    const off = camera.position.clone().sub(orbit.target);
+    const r = off.length() || 1;
+    const yaw = Math.atan2(off.x, off.z) * RAD;
+    const pitch = Math.asin(Math.max(-1, Math.min(1, off.y / r))) * RAD;
+    cubeEl.style.transform = `translateZ(-28px) rotateX(${pitch.toFixed(2)}deg) rotateY(${(-yaw).toFixed(2)}deg)`;
   }
 
   function setMode(m: GizmoMode): void {
@@ -616,11 +857,14 @@
   $effect(() => {
     if (host && !renderer && !destroyed) void boot(host);
   });
-  // Reconcile the three scene whenever the document changes (agent edit, inspector,
-  // hierarchy, or our own gizmo write-back — idempotent for the latter).
+  // Reconcile the three scene whenever the document (or the brand kit / state)
+  // changes (agent edit, inspector, hierarchy, or our own gizmo write-back —
+  // idempotent for the latter).
   $effect(() => {
     // Deep read: also re-runs if the host hands us a `$state` proxy and mutates it in place.
     const d = $state.snapshot(doc) as Scene3dDoc;
+    void brand;
+    void stateId;
     if (!renderer) return;
     reconcile(d);
     applyEnvironment();
@@ -628,13 +872,18 @@
     else if (!cameraInitialised) applyDocCamera();
   });
   $effect(() => {
-    selectedId;
+    void selectedId;
     if (renderer) syncSelection();
   });
   $effect(() => {
-    play;
-    readonly;
+    void play;
+    void readonly;
     if (renderer) applyPlay();
+  });
+  $effect(() => {
+    void turntable;
+    lastFrame = 0;
+    invalidate();
   });
   $effect(() => {
     window.addEventListener('keydown', onKey);
@@ -649,6 +898,7 @@
     gizmo?.detach();
     gizmo?.dispose();
     selectionBox?.dispose();
+    env?.dispose();
     if (content) disposeTree(content);
     if (lightsRoot) disposeTree(lightsRoot);
     if (helpers) disposeTree(helpers);
@@ -671,6 +921,48 @@
     renderer.render(scene, camera);
     return new Promise((res) => renderer!.domElement.toBlob((b) => res(b), 'image/png'));
   }
+
+  /**
+   * Export ▾ → PNG turntable: `frames` renders around the orbit target, laid
+   * out as one sprite sheet (4 per row) — helpers hidden, the camera restored.
+   */
+  export async function turntableSheet(frames = 8, cell = 480): Promise<Blob | null> {
+    if (!THREE || !renderer || !scene || !camera || !orbit || !helpers) return null;
+    const cols = Math.min(4, frames);
+    const rows = Math.ceil(frames / cols);
+    const sheet = document.createElement('canvas');
+    const src = renderer.domElement;
+    const aspect = src.width / Math.max(1, src.height);
+    const cw = cell;
+    const ch = Math.round(cell / aspect);
+    sheet.width = cw * cols;
+    sheet.height = ch * rows;
+    const ctx = sheet.getContext('2d');
+    if (!ctx) return null;
+    const pos = camera.position.clone();
+    const helpersWere = helpers.visible;
+    const gizmoWas = gizmoHelper?.visible ?? false;
+    helpers.visible = false;
+    if (gizmoHelper) gizmoHelper.visible = false;
+    const offset = pos.clone().sub(orbit.target);
+    try {
+      for (let i = 0; i < frames; i++) {
+        const o = offset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), (i / frames) * Math.PI * 2);
+        camera.position.copy(orbit.target).add(o);
+        camera.lookAt(orbit.target);
+        renderer.render(scene, camera);
+        ctx.drawImage(src, (i % cols) * cw, Math.floor(i / cols) * ch, cw, ch);
+      }
+    } finally {
+      camera.position.copy(pos);
+      camera.lookAt(orbit.target);
+      helpers.visible = helpersWere;
+      if (gizmoHelper) gizmoHelper.visible = gizmoWas;
+      invalidate();
+    }
+    return new Promise((res) => sheet.toBlob((b) => res(b), 'image/png'));
+  }
+
   /** For Export ▾ → GLB: a clone of the live content (objects + groups + lights; helpers
    *  excluded). Geometry/materials are SHARED with the viewport — hand it to
    *  `exportObjectToGlb` and drop it; never `disposeTree` it. */
@@ -710,9 +1002,9 @@
     <div class="s3d-hud" role="group" aria-label="Viewport tools" onpointerdown={(e) => e.stopPropagation()} onpointerup={(e) => e.stopPropagation()}>
       {#if canEdit}
         <div class="s3d-seg" role="radiogroup" aria-label="Gizmo mode">
-          <button class:on={mode === 'translate'} title="Move (W)" onclick={() => setMode('translate')}>Move</button>
-          <button class:on={mode === 'rotate'} title="Rotate (E)" onclick={() => setMode('rotate')}>Rotate</button>
-          <button class:on={mode === 'scale'} title="Scale (R)" onclick={() => setMode('scale')}>Scale</button>
+          <button role="radio" aria-checked={mode === 'translate'} class:on={mode === 'translate'} title="Move (W)" onclick={() => setMode('translate')}>Move</button>
+          <button role="radio" aria-checked={mode === 'rotate'} class:on={mode === 'rotate'} title="Rotate (E)" onclick={() => setMode('rotate')}>Rotate</button>
+          <button role="radio" aria-checked={mode === 'scale'} class:on={mode === 'scale'} title="Scale (R)" onclick={() => setMode('scale')}>Scale</button>
         </div>
       {/if}
       <button class="s3d-hbtn" title="Frame selection (F)" onclick={frame}>Frame</button>
@@ -722,15 +1014,27 @@
         </button>
       {/if}
     </div>
-    <div class="s3d-status">
-      <span>{status}</span>
+    {#if viewCube}
+      <div class="s3d-cube-wrap" onpointerdown={(e) => e.stopPropagation()} onpointerup={(e) => e.stopPropagation()} role="group" aria-label="View cube">
+        <div class="s3d-cube" bind:this={cubeEl}>
+          {#each CUBE_FACES as f (f.id)}
+            <button class="s3d-face {f.id}" title="{f.label} view" aria-label="{f.label} view" onclick={() => snapTo(f.dir)}>{f.label}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    <div class="s3d-status" class:compact>
+      {#if !compact}<span>{status}</span>{/if}
       {#if Object.keys(gltfErrors).length}
         <span class="s3d-warn" title={Object.values(gltfErrors).join('\n')}>
           {Object.keys(gltfErrors).length} model{Object.keys(gltfErrors).length === 1 ? '' : 's'} failed to load
         </span>
       {/if}
-      {#if canEdit}
+      {#if canEdit && !compact}
         <span class="s3d-dim s3d-keys">W/E/R gizmo · F frame · ⌫ delete · ⌘D duplicate · Esc deselect</span>
+      {/if}
+      {#if compact}
+        <span class="s3d-pill" data-testid="s3d-stats">{status}{statusNote ? ` · ${statusNote}` : ''}</span>
       {/if}
     </div>
   {/if}
@@ -743,7 +1047,7 @@
     height: 100%;
     min-height: 240px;
     overflow: hidden;
-    background: #0f172a;
+    background: var(--term-bg);
     outline: none;
     border-radius: var(--radius-m, 8px);
     user-select: none;
@@ -761,7 +1065,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .s3d-error {
     pointer-events: auto;
@@ -771,7 +1075,7 @@
     border-radius: var(--radius-m, 8px);
     padding: 12px 14px;
     max-width: 360px;
-    font-size: 12px;
+    font-size: var(--fs-s);
     display: grid;
     gap: 4px;
   }
@@ -780,8 +1084,8 @@
   }
   .s3d-hud {
     position: absolute;
-    top: 8px;
-    left: 8px;
+    inset-block-start: 8px;
+    inset-inline-start: 8px;
     display: flex;
     gap: 6px;
     align-items: center;
@@ -801,16 +1105,16 @@
     border: 0;
     background: transparent;
     color: var(--text);
-    font: 11px/1 var(--font-ui);
+    font: var(--fs-xs) / 1 var(--font-ui);
     padding: 6px 9px;
     cursor: pointer;
   }
   .s3d-seg button + button {
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .s3d-seg button.on {
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
+    background: var(--accent-solid, var(--accent));
+    color: var(--accent-contrast);
   }
   .s3d-hbtn {
     background: color-mix(in srgb, var(--surface) 88%, transparent);
@@ -822,32 +1126,95 @@
   .s3d-seg button:hover:not(.on) {
     background: color-mix(in srgb, var(--surface-2) 92%, transparent);
   }
+  .s3d-seg button:focus-visible,
+  .s3d-hbtn:focus-visible,
+  .s3d-face:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
   .s3d-status {
     position: absolute;
-    left: 8px;
-    right: 8px;
-    bottom: 6px;
+    inset-inline: 8px;
+    inset-block-end: 6px;
     display: flex;
     gap: 12px;
     align-items: center;
-    font: 11px/1.2 var(--font-ui);
+    font: var(--fs-xs) / 1.2 var(--font-ui);
     color: var(--text);
     pointer-events: none;
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    text-shadow: 0 1px 2px color-mix(in srgb, var(--bg) 60%, transparent);
+  }
+  .s3d-status.compact {
+    justify-content: flex-end;
+    inset-block-end: 12px;
+    inset-inline-end: 12px;
+    text-shadow: none;
   }
   .s3d-status > span:first-child {
     font-variant-numeric: tabular-nums;
   }
+  .s3d-pill {
+    padding: 5px 10px;
+    border-radius: var(--radius-m);
+    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    backdrop-filter: blur(6px);
+  }
   .s3d-keys {
-    margin-left: auto;
+    margin-inline-start: auto;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .s3d-warn {
-    color: var(--status-warn, #e0a000);
+    color: var(--warning);
     pointer-events: auto;
   }
+  /* View cube: a CSS 3D cube synced to the orbit camera; faces snap the view. */
+  .s3d-cube-wrap {
+    position: absolute;
+    inset-block-start: 12px;
+    inset-inline-end: 12px;
+    width: 76px;
+    height: 76px;
+    perspective: 260px;
+  }
+  .s3d-cube {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    margin: 10px;
+    transform-style: preserve-3d;
+    transform: translateZ(-28px);
+  }
+  .s3d-face {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    color: var(--text-dim);
+    font: 600 var(--fs-xs) / 1 var(--font-ui);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    cursor: pointer;
+    backface-visibility: hidden;
+  }
+  .s3d-face:hover {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .s3d-face.front { transform: translateZ(28px); }
+  .s3d-face.back { transform: rotateY(180deg) translateZ(28px); }
+  .s3d-face.right { transform: rotateY(90deg) translateZ(28px); }
+  .s3d-face.left { transform: rotateY(-90deg) translateZ(28px); }
+  .s3d-face.top { transform: rotateX(90deg) translateZ(28px); }
+  .s3d-face.bottom { transform: rotateX(-90deg) translateZ(28px); }
   @media (max-width: 720px) {
     .s3d-keys {
       display: none;

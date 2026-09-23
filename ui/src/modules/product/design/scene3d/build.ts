@@ -2,10 +2,47 @@
 // lazy-loaded by the caller (it is ~650 kB) and passed in as the module namespace
 // so this file stays free of a static import. Rotation in the doc is DEGREES —
 // converted here, and only here, to radians.
+//
+// v2: every mesh gets a MeshPhysicalMaterial built from `presets.ts::resolveMaterial`
+// (preset defaults + explicit fields), colours go through a `ColorResolver` so
+// `token:color.<name>` resolves against the scene's brand kit, and boxes with a
+// `radius` use three's RoundedBoxGeometry (registered by the lazy loader).
 import type * as THREE_NS from 'three';
 import type { Scene3dLight, Scene3dMaterial, Scene3dObject, Vec3 } from './types';
+import { resolveMaterial, type ResolvedMaterial } from './presets';
+import { resolveColor } from './tokens';
 
 export type Three = typeof THREE_NS;
+
+/** Hex / `token:` colour → `#rrggbb` (the host binds the brand kit). */
+export type ColorResolver = (ref: string | undefined, fallback: string) => string;
+/** No brand kit: hex as-is, tokens fall back. */
+export const plainColors: ColorResolver = (ref, fallback) => resolveColor(ref, null, fallback);
+
+type RoundedBoxCtor = new (width?: number, height?: number, depth?: number, segments?: number, radius?: number) => THREE_NS.BufferGeometry;
+let roundedBox: RoundedBoxCtor | null = null;
+/** Register three's `RoundedBoxGeometry` (lazy-loaded alongside `three`). */
+export function setRoundedBoxGeometry(ctor: RoundedBoxCtor): void {
+  roundedBox = ctor;
+}
+
+/**
+ * Lazy-load `three` plus the example modules every scene3d surface needs
+ * (rounded boxes). One place, so the viewport, exporters and the embed
+ * runtime share the chunk.
+ */
+export async function loadThree(): Promise<Three> {
+  const [three, rb] = await Promise.all([import('three'), import('three/examples/jsm/geometries/RoundedBoxGeometry.js')]);
+  setRoundedBoxGeometry(rb.RoundedBoxGeometry as unknown as RoundedBoxCtor);
+  return three as unknown as Three;
+}
+
+/** Geometry identity for reconciliation: a rebuild is needed when this changes. */
+export function geometryKey(o: Scene3dObject): string {
+  if (o.type === 'gltf') return `gltf:${o.src ?? o.attachment_id}`;
+  if (o.type === 'box' && o.radius) return `box:r${o.radius}`;
+  return o.type;
+}
 
 export const DEG = Math.PI / 180;
 export const RAD = 180 / Math.PI;
@@ -24,7 +61,11 @@ export function applyTransform(target: THREE_NS.Object3D, o: Scene3dObject): voi
   target.scale.set(o.scale[0] || 1e-4, o.scale[1] || 1e-4, o.scale[2] || 1e-4);
 }
 
-export function makeGeometry(THREE: Three, type: Scene3dObject['type']): THREE_NS.BufferGeometry {
+export function makeGeometry(THREE: Three, type: Scene3dObject['type'], radius = 0): THREE_NS.BufferGeometry {
+  if (type === 'box' && radius > 0 && roundedBox) {
+    // Unit box; the radius is in unit-box space (scale stretches it with the box).
+    return new roundedBox(1, 1, 1, 4, Math.min(0.5, radius));
+  }
   switch (type) {
     case 'sphere':
       return new THREE.SphereGeometry(0.5, 32, 24);
@@ -44,18 +85,33 @@ export function makeGeometry(THREE: Three, type: Scene3dObject['type']): THREE_N
   }
 }
 
-export function makeMaterial(THREE: Three, m: Scene3dMaterial | undefined, opts: { doubleSided?: boolean } = {}): THREE_NS.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({
-    color: m?.color ?? '#94a3b8',
-    metalness: m?.metalness ?? 0.1,
-    roughness: m?.roughness ?? 0.7,
-    emissive: m?.emissive ?? '#000000',
-    wireframe: m?.wireframe ?? false,
-  });
-  if (m?.opacity !== undefined && m.opacity < 1) {
-    mat.transparent = true;
-    mat.opacity = m.opacity;
-  }
+/** Copy resolved fields onto a physical material (create or in-place update). */
+export function applyResolved(mat: THREE_NS.MeshPhysicalMaterial, r: ResolvedMaterial): void {
+  mat.color.set(r.color);
+  mat.metalness = r.metalness;
+  mat.roughness = r.roughness;
+  mat.emissive.set(r.emissive);
+  mat.emissiveIntensity = r.emissiveIntensity;
+  mat.wireframe = r.wireframe;
+  mat.clearcoat = r.clearcoat;
+  mat.clearcoatRoughness = r.clearcoatRoughness;
+  mat.transmission = r.transmission;
+  mat.ior = r.ior;
+  mat.thickness = r.thickness;
+  mat.sheen = r.sheen;
+  mat.sheenRoughness = 0.6;
+  mat.sheenColor.set(r.sheen > 0 ? r.color : '#000000');
+  mat.opacity = r.opacity;
+  mat.transparent = r.transparent;
+}
+
+export function makeMaterial(
+  THREE: Three,
+  m: Scene3dMaterial | undefined,
+  opts: { doubleSided?: boolean; color?: ColorResolver } = {},
+): THREE_NS.MeshPhysicalMaterial {
+  const mat = new THREE.MeshPhysicalMaterial();
+  applyResolved(mat, resolveMaterial(m, opts.color ?? plainColors));
   if (opts.doubleSided) mat.side = THREE.DoubleSide;
   return mat;
 }
@@ -86,11 +142,11 @@ export function makeTextTexture(THREE: Three, text: string, color: string): THRE
 }
 
 /** Build a primitive/text mesh (NOT gltf — the host loads those asynchronously). */
-export function buildMesh(THREE: Three, o: Scene3dObject): THREE_NS.Mesh {
-  const geom = makeGeometry(THREE, o.type);
-  const mat = makeMaterial(THREE, o.material, { doubleSided: o.type === 'plane' || o.type === 'text' });
+export function buildMesh(THREE: Three, o: Scene3dObject, color: ColorResolver = plainColors): THREE_NS.Mesh {
+  const geom = makeGeometry(THREE, o.type, o.radius ?? 0);
+  const mat = makeMaterial(THREE, o.material, { doubleSided: o.type === 'plane' || o.type === 'text', color });
   if (o.type === 'text') {
-    const tex = makeTextTexture(THREE, o.text ?? o.name, o.material?.color ?? '#e2e8f0');
+    const tex = makeTextTexture(THREE, o.text ?? o.name, color(o.material?.color, '#e2e8f0'));
     if (tex) {
       mat.map = tex;
       mat.color.set('#ffffff');
@@ -110,26 +166,20 @@ export function buildMesh(THREE: Three, o: Scene3dObject): THREE_NS.Mesh {
 }
 
 /** Re-apply a material patch to an existing mesh in place (avoids a rebuild on slider drag). */
-export function updateMeshMaterial(THREE: Three, mesh: THREE_NS.Mesh, o: Scene3dObject): void {
-  const mat = mesh.material as THREE_NS.MeshStandardMaterial;
-  if (!mat || !('metalness' in mat)) return;
-  const m = o.material;
+export function updateMeshMaterial(THREE: Three, mesh: THREE_NS.Mesh, o: Scene3dObject, color: ColorResolver = plainColors): void {
+  const mat = mesh.material as THREE_NS.MeshPhysicalMaterial;
+  if (!mat || !('clearcoat' in mat)) return;
+  const r = resolveMaterial(o.material, color);
+  applyResolved(mat, r);
   if (o.type === 'text') {
     // Colour lives in the texture for text quads — redraw it.
     mat.map?.dispose();
-    const tex = makeTextTexture(THREE, o.text ?? o.name, m?.color ?? '#e2e8f0');
-    mat.map = tex;
+    mat.map = makeTextTexture(THREE, o.text ?? o.name, r.color);
     mat.color.set('#ffffff');
-  } else {
-    mat.color.set(m?.color ?? '#94a3b8');
+    mat.transparent = true;
   }
-  mat.metalness = m?.metalness ?? 0.1;
-  mat.roughness = m?.roughness ?? 0.7;
-  mat.emissive.set(m?.emissive ?? '#000000');
-  mat.wireframe = m?.wireframe ?? false;
-  const op = m?.opacity ?? 1;
-  mat.transparent = op < 1 || o.type === 'text';
-  mat.opacity = op;
+  // Transmission / transparency / clearcoat toggles change the shader program;
+  // three re-uses the cached program when the key is unchanged.
   mat.needsUpdate = true;
 }
 
