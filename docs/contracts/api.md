@@ -1794,6 +1794,10 @@ trigger, chat, scheduled task) shares the gate. A run beyond the cap stays
 `workflow_runs` row **is** the queue entry, so the queue is persistent: on
 daemon restart, queued runs re-enqueue in creation order. `POST
 /workflow-runs/{id}/cancel` on a queued run is honored — it never starts.
+A run parked at a `human_approval` step gives its slot back while it waits
+and re-queues (FIFO) for one after the decision. The run's 10-hour budget is
+per execution (a retry or restart resume starts a fresh one) and excludes
+time parked at an approval.
 
 **Restart resume (0108).** A daemon restart no longer hard-fails executing
 runs. On startup a reconciler classifies every run left in flight

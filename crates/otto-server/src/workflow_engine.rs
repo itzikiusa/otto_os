@@ -948,6 +948,38 @@ fn run_gate() -> &'static tokio::sync::Semaphore {
     GATE.get_or_init(|| tokio::sync::Semaphore::new(max_parallel_runs()))
 }
 
+tokio::task_local! {
+    /// The run-gate permit of the run executing on this task — set by
+    /// [`spawn_run`] around [`run_workflow`]. A `human_approval` gate hands it
+    /// back while it waits for a human ([`release_run_permit`]) and re-takes
+    /// it after the decision ([`reacquire_run_permit`]): a run parked for
+    /// approval (up to 24h) used to hold one of the 2 daemon-wide slots the
+    /// whole time, queueing every other workflow behind it.
+    static RUN_PERMIT: std::cell::RefCell<Option<tokio::sync::SemaphorePermit<'static>>>;
+}
+
+/// Give this task's run-gate permit back while the run is parked. Returns
+/// whether a permit was released (false off a `spawn_run` task, or when it
+/// was already released) — pass it to [`reacquire_run_permit`].
+fn release_run_permit() -> bool {
+    RUN_PERMIT
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Re-take the run-gate permit released by [`release_run_permit`] — FIFO
+/// behind runs that queued meanwhile. No-op when nothing was released.
+async fn reacquire_run_permit(released: bool) {
+    if !released {
+        return;
+    }
+    if let Ok(permit) = run_gate().acquire().await {
+        let _ = RUN_PERMIT.try_with(|cell| *cell.borrow_mut() = Some(permit));
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -1049,8 +1081,14 @@ pub fn spawn_run(
                 return;
             }
         };
-        run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes).await;
-        drop(permit);
+        // The permit rides in a task-local so a parked approval gate can hand
+        // it back (see RUN_PERMIT); it is released when the run ends.
+        RUN_PERMIT
+            .scope(
+                std::cell::RefCell::new(Some(permit)),
+                run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes),
+            )
+            .await;
     });
 }
 
@@ -3841,7 +3879,10 @@ async fn execute_node(
                 .unwrap_or(86_400)
                 .max(60);
             let deadline = Instant::now() + Duration::from_secs(timeout_s);
-            loop {
+            // A parked run hands its run-gate slot back while a human decides
+            // (up to 24h) and re-takes it — FIFO — once decided.
+            let released = release_run_permit();
+            let decision = loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if Instant::now() >= deadline {
                     // Clear the pause flag before erroring so the run doesn't
@@ -3851,22 +3892,29 @@ async fn execute_node(
                             .bind(run_id)
                             .execute(pool)
                             .await;
-                    return Err(otto_core::Error::Upstream(
+                    break Err(otto_core::Error::Upstream(
                         "human_approval: timed out waiting for operator decision".into(),
                     ));
                 }
                 // Read the current state of the run row.
-                let row = sqlx::query(
+                let row = match sqlx::query(
                     "SELECT waiting_approval, approved_by, approval_note
                      FROM workflow_runs WHERE id = ?",
                 )
                 .bind(run_id)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| otto_core::Error::Internal(format!("human_approval poll: {e}")))?;
+                {
+                    Ok(row) => row,
+                    Err(e) => {
+                        break Err(otto_core::Error::Internal(format!(
+                            "human_approval poll: {e}"
+                        )))
+                    }
+                };
 
                 let Some(row) = row else {
-                    return Err(otto_core::Error::Internal(
+                    break Err(otto_core::Error::Internal(
                         "human_approval: run row disappeared".into(),
                     ));
                 };
@@ -3884,13 +3932,13 @@ async fn execute_node(
                     // the `approved_at` column for the "approved" path.
                     match approved_by {
                         None => {
-                            return Err(otto_core::Error::Upstream(format!(
+                            break Err(otto_core::Error::Upstream(format!(
                                 "human_approval: rejected — {}",
                                 note.as_deref().unwrap_or("no note")
                             )));
                         }
                         Some(by) => {
-                            return Ok((
+                            break Ok((
                                 json!({
                                     "approved": true,
                                     "approved_by": by,
@@ -3902,7 +3950,9 @@ async fn execute_node(
                         }
                     }
                 }
-            }
+            };
+            reacquire_run_permit(released).await;
+            decision
         }
 
         // --- Swarm Task (wired) ---------------------------------------------
