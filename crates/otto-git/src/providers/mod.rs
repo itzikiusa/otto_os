@@ -225,6 +225,26 @@ pub fn make_provider(account: &GitAccount, token: String) -> Arc<dyn GitProvider
     }
 }
 
+/// Refuse to call the forge for a remote the client can't actually reach.
+/// Any host containing "github" is DETECTED as GitHub (so the repo shows as
+/// GitHub), but the GitHub client only ever talks to api.github.com —
+/// GitHub Enterprise is out of scope. A GHE remote therefore sent the
+/// account's token to api.github.com and could come back with a public
+/// namesake repo's PRs as this repo's. Such a remote is now an explicit
+/// "not supported" instead.
+pub fn check_remote_reachable(kind: GitProviderKind, remote_url: &str) -> Result<()> {
+    if kind != GitProviderKind::Github {
+        return Ok(());
+    }
+    match detect::remote_host(remote_url) {
+        Some(host) if !detect::is_github_dot_com(&host) => Err(otto_core::Error::Invalid(format!(
+            "{host} looks like GitHub Enterprise, which Otto's PR integration does not \
+             support (it only talks to api.github.com)"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Map provider state strings to the common [`PrState`].
 pub(crate) fn map_state(s: &str) -> PrState {
     match s.to_ascii_lowercase().as_str() {
@@ -280,4 +300,27 @@ fn walk<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
         cur = cur.get(p)?;
     }
     Some(cur)
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::check_remote_reachable;
+    use otto_core::domain::GitProviderKind;
+
+    /// A GitHub Enterprise remote is refused BEFORE any token is loaded — it
+    /// used to be called at api.github.com with the account's token.
+    #[test]
+    fn github_enterprise_remote_is_refused() {
+        let gh = GitProviderKind::Github;
+        assert!(check_remote_reachable(gh, "git@github.com:o/r.git").is_ok());
+        assert!(check_remote_reachable(gh, "https://github.com/o/r").is_ok());
+        let err = check_remote_reachable(gh, "https://u:tok@github.corp.example.com/o/r.git")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("github.corp.example.com"), "{err}");
+        assert!(!err.contains("u:tok"), "no credentials in the text: {err}");
+        assert!(
+            check_remote_reachable(GitProviderKind::Gitlab, "https://gitlab.corp/o/r").is_ok()
+        );
+    }
 }
