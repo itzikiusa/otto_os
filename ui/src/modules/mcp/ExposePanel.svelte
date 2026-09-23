@@ -302,7 +302,7 @@
   }
   .t-warn {
     font-size: 11.5px;
-    color: #e0a000;
+    color: var(--warning);
   }
   .muted {
     color: var(--text-dim);

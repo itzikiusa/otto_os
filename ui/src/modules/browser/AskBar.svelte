@@ -180,7 +180,7 @@
     border-radius: var(--radius-s);
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: var(--accent-fg, #fff);
+    color: var(--accent-contrast);
     cursor: pointer;
   }
   .send:disabled {

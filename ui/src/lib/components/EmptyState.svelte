@@ -1,9 +1,9 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import Icon from './Icon.svelte';
+  import Icon, { type IconName } from './Icon.svelte';
 
   interface Props {
-    icon?: string;
+    icon?: IconName;
     title: string;
     body?: string;
     actionLabel?: string;

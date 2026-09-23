@@ -468,6 +468,6 @@
   .last-opened { font-size: 11px; margin-bottom: 3px; }
   .err {
     overflow-wrap: anywhere;
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
 </style>

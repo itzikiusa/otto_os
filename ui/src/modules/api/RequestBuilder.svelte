@@ -1376,7 +1376,7 @@
     height: 26px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
-    background: var(--surface-1, var(--surface-2));
+    background: var(--surface);
     color: var(--text);
     font-size: 12px;
     padding: 0 6px;
@@ -1707,7 +1707,7 @@
   }
   /* Guard opt-out active: make the loosened state visibly "warm". */
   .local-on {
-    color: var(--warning, #ff9f0a);
+    color: var(--warning);
   }
   .cookie-table {
     width: 100%;

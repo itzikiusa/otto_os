@@ -87,33 +87,33 @@
     font-size: 11px;
     padding: 2px 7px;
     border-radius: 10px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     vertical-align: middle;
     line-height: 1.4;
     cursor: default;
     user-select: none;
   }
   .forecast-chip.loading {
-    background: var(--surface-3, #0d1117);
-    color: var(--fg-muted, #8b949e);
-    border: 1px solid var(--border-subtle, #21262d);
+    background: var(--surface-3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .forecast-chip.ready {
-    background: var(--surface-3, #0d1117);
-    color: var(--accent, #388bfd);
-    border: 1px solid var(--accent-subtle, #1f3a5f);
+    background: var(--surface-3);
+    color: var(--accent);
+    border: 1px solid var(--accent-soft);
     cursor: pointer;
     position: relative;
   }
   .forecast-chip.ready:hover {
-    border-color: var(--accent, #388bfd);
-    background: var(--accent-muted, #0d2136);
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .forecast-chip.no-data {
-    background: var(--surface-3, #0d1117);
-    color: var(--fg-muted, #8b949e);
-    border: 1px dashed var(--border, #30363d);
+    background: var(--surface-3);
+    color: var(--text-dim);
+    border: 1px dashed var(--border);
   }
 
   .forecast-tooltip {
@@ -121,8 +121,8 @@
     z-index: 100;
     margin-top: 4px;
     padding: 10px 12px;
-    background: var(--surface-2, #161b22);
-    border: 1px solid var(--border, #30363d);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: 6px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     min-width: 200px;
@@ -133,20 +133,20 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     margin-bottom: 2px;
   }
   .forecast-value {
     display: block;
     font-size: 18px;
     font-weight: 700;
-    color: var(--fg, #e6edf3);
-    font-family: var(--font-mono, monospace);
+    color: var(--text);
+    font-family: var(--font-mono);
   }
   .forecast-basis {
     margin: 6px 0 0;
     font-size: 11px;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     line-height: 1.4;
   }
 

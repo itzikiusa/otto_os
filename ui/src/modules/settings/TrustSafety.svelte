@@ -362,10 +362,10 @@
     background: var(--surface-2);
   }
   .card.warn {
-    border-color: color-mix(in srgb, var(--warn, #d08400) 50%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
   }
   .card.ok {
-    border-color: color-mix(in srgb, var(--ok, #2f9e44) 40%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 40%, var(--border));
   }
   .card-label {
     font-size: 11px;
@@ -434,7 +434,7 @@
     font-size: 12.5px;
   }
   .empty.error {
-    color: var(--err, #e03131);
+    color: var(--danger);
   }
   .audit-table {
     width: 100%;
@@ -479,8 +479,8 @@
     font-size: 11px;
   }
   .badge.danger {
-    border-color: color-mix(in srgb, var(--err, #e03131) 45%, var(--border));
-    color: var(--err, #e03131);
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+    color: var(--danger);
   }
 
   /* Quick time-range preset buttons */

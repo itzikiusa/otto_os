@@ -359,7 +359,7 @@
     white-space: nowrap;
   }
   .mode-btn:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .body {
     flex: 1;

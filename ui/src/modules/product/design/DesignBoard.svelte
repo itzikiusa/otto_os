@@ -222,6 +222,6 @@
     pointer-events: none;
   }
   .board-err {
-    color: #ef4444;
+    color: var(--danger);
   }
 </style>

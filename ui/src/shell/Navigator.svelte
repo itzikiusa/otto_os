@@ -2,6 +2,7 @@
   // Expanded 240px navigator: modules (Agents with nested session list),
   // workspaces section, user/settings at the bottom.
   import Icon from '../lib/components/Icon.svelte';
+  import NotificationBell from './NotificationBell.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
   import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
@@ -392,6 +393,9 @@
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
     <span class="nav-title">Otto</span>
+    <!-- The one notification bell on desktop/tablet: same spot on every page,
+         so no module has to reserve room for a floating one. -->
+    <NotificationBell />
     <button
       class="icon-btn nav-back"
       onclick={() => router.back()}

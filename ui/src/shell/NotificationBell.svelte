@@ -1,11 +1,71 @@
 <script lang="ts">
   // Notification center bell: unread badge + dropdown panel of notices.
   // Click toggles the panel; opening it marks everything visible as read.
+  //
+  // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
+  // beside the sidebar) and in the phone top bar (`below`). The panel is
+  // portalled to <body> and positioned `fixed` from the button's rect: the
+  // sidebar's `backdrop-filter` makes it the containing block for fixed
+  // descendants, so an in-place panel would be clipped to the sidebar.
   import Icon from '../lib/components/Icon.svelte';
   import { notifications } from '../lib/stores/notifications.svelte';
   import type { Notice } from '../lib/api/types';
 
+  let { placement = 'side' }: { placement?: 'side' | 'below' } = $props();
+
   let open = $state(false);
+  let btnEl = $state<HTMLButtonElement | null>(null);
+  let pos = $state({ top: 0, left: 0, width: 340, maxHeight: 400 });
+
+  const PANEL_W = 340;
+  const EDGE = 8;
+
+  // Clamp the panel into the viewport (never flip without a floor) and cap its
+  // height to the room left below its top, so the list always scrolls in view.
+  function place(): void {
+    if (!btnEl) return;
+    const r = btnEl.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const width = Math.min(PANEL_W, vw - EDGE * 2);
+    const rtl = getComputedStyle(btnEl).direction === 'rtl';
+    let left: number;
+    let top: number;
+    if (placement === 'side') {
+      // Open beside the sidebar's edge (not the button's) so the panel never
+      // covers the Navigator it was opened from.
+      const edge = btnEl.closest('nav')?.getBoundingClientRect() ?? r;
+      left = rtl ? edge.left - 8 - width : edge.right + 8;
+      top = r.top;
+    } else {
+      left = rtl ? r.left : r.right - width;
+      top = r.bottom + 6;
+    }
+    left = Math.min(Math.max(left, EDGE), vw - width - EDGE);
+    top = Math.min(Math.max(top, EDGE), Math.max(EDGE, vh - EDGE - 160));
+    const maxHeight = Math.min(vh * 0.7, vh - top - EDGE);
+    pos = { top, left, width, maxHeight };
+  }
+
+  $effect(() => {
+    if (!open) return;
+    place();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('resize', place);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('keydown', onKey);
+    };
+  });
+
+  // Move a node to <body> for its lifetime (escapes the sidebar's containing block).
+  function portal(node: HTMLElement): { destroy(): void } {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
 
   // Tick so relative timestamps refresh while the panel is open.
   let now = $state(Date.now());
@@ -65,6 +125,7 @@
 
 <div class="bell-wrap">
   <button
+    bind:this={btnEl}
     class="icon-btn bell-btn"
     class:has-unread={notifications.unread > 0}
     onclick={toggle}
@@ -80,70 +141,77 @@
   </button>
 
   {#if open}
-    <!-- Backdrop closes the panel on any outside interaction. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="bell-backdrop"
-      onclick={close}
-      oncontextmenu={(e) => { e.preventDefault(); close(); }}
-      onkeydown={(e) => e.key === 'Escape' && close()}
-      role="presentation"
-    ></div>
+    <div class="bell-layer" use:portal>
+      <!-- Backdrop closes the panel on any outside interaction. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="bell-backdrop"
+        onclick={close}
+        oncontextmenu={(e) => { e.preventDefault(); close(); }}
+        onkeydown={(e) => e.key === 'Escape' && close()}
+        role="presentation"
+      ></div>
 
-    <div class="panel" role="dialog" aria-label="Notifications">
-      <header class="panel-head">
-        <span class="panel-title">Notifications</span>
-        <div class="panel-actions">
-          <button
-            class="link-btn"
-            onclick={() => notifications.markAllRead()}
-            disabled={notifications.notices.every((n) => n.read)}
-          >
-            Mark all read
-          </button>
-          <button
-            class="link-btn"
-            onclick={() => notifications.clear()}
-            disabled={notifications.notices.length === 0}
-          >
-            Clear
-          </button>
-        </div>
-      </header>
-
-      <div class="panel-list">
-        {#if notifications.notices.length === 0}
-          <div class="panel-empty">
-            <Icon name="bell" size={22} />
-            <p>You're all caught up</p>
+      <div
+        class="panel"
+        role="dialog"
+        aria-label="Notifications"
+        style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxHeight}px"
+      >
+        <header class="panel-head">
+          <span class="panel-title">Notifications</span>
+          <div class="panel-actions">
+            <button
+              class="link-btn"
+              onclick={() => notifications.markAllRead()}
+              disabled={notifications.notices.every((n) => n.read)}
+            >
+              Mark all read
+            </button>
+            <button
+              class="link-btn"
+              onclick={() => notifications.clear()}
+              disabled={notifications.notices.length === 0}
+            >
+              Clear
+            </button>
           </div>
-        {:else}
-          {#each notifications.notices as notice (notice.id)}
-            <div class="notice sev-{notice.severity}" class:unread={!notice.read}>
-              <span class="sev-dot"></span>
-              <div class="notice-body">
-                <div class="notice-row">
-                  <span class="notice-title">{notice.title}</span>
-                  <span class="notice-time">{relative(notice.created_at)}</span>
-                </div>
-                {#if notice.body}<p class="notice-text">{notice.body}</p>{/if}
-                {#if notice.action}
-                  <button class="btn small action-btn" onclick={() => notifications.runAction(notice)}>
-                    {actionLabel(notice)}
-                  </button>
-                {/if}
-              </div>
-              <button
-                class="dismiss"
-                onclick={() => notifications.dismiss(notice.id)}
-                aria-label="Dismiss notification"
-                title="Dismiss"
-              >
-                <Icon name="x" size={10} />
-              </button>
+        </header>
+
+        <div class="panel-list">
+          {#if notifications.notices.length === 0}
+            <div class="panel-empty">
+              <Icon name="bell" size={22} />
+              <p>You're all caught up</p>
             </div>
-          {/each}
-        {/if}
+          {:else}
+            {#each notifications.notices as notice (notice.id)}
+              <div class="notice sev-{notice.severity}" class:unread={!notice.read}>
+                <span class="sev-dot"></span>
+                <div class="notice-body">
+                  <div class="notice-row">
+                    <span class="notice-title">{notice.title}</span>
+                    <span class="notice-time">{relative(notice.created_at)}</span>
+                  </div>
+                  {#if notice.body}<p class="notice-text">{notice.body}</p>{/if}
+                  {#if notice.action}
+                    <button class="btn small action-btn" onclick={() => notifications.runAction(notice)}>
+                      {actionLabel(notice)}
+                    </button>
+                  {/if}
+                </div>
+                <button
+                  class="dismiss"
+                  onclick={() => notifications.dismiss(notice.id)}
+                  aria-label="Dismiss notification"
+                  title="Dismiss"
+                >
+                  <Icon name="x" size={10} />
+                </button>
+              </div>
+            {/each}
+          {/if}
+        </div>
       </div>
     </div>
   {/if}
@@ -187,12 +255,9 @@
   }
 
   .panel {
-    position: absolute;
-    top: calc(100% + 6px);
-    inset-inline-end: 0;
+    /* top/left/width/max-height come from place() — clamped to the viewport. */
+    position: fixed;
     z-index: 9999;
-    width: 340px;
-    max-height: 70vh;
     display: flex;
     flex-direction: column;
     background: var(--surface);
@@ -280,13 +345,13 @@
     background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
   .notice.sev-warn.unread {
-    background: color-mix(in srgb, #febc2e 9%, transparent);
+    background: color-mix(in srgb, var(--warning) 9%, transparent);
   }
   .notice.sev-error.unread {
     background: color-mix(in srgb, var(--status-exited) 9%, transparent);
   }
   .notice.sev-warn {
-    border-inline-start-color: #febc2e;
+    border-inline-start-color: var(--warning);
   }
   .notice.sev-error {
     border-inline-start-color: var(--status-exited);
@@ -301,7 +366,7 @@
     background: var(--accent);
   }
   .sev-warn .sev-dot {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .sev-error .sev-dot {
     background: var(--status-exited);

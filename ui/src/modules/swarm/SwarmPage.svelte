@@ -2,7 +2,7 @@
   import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import SessionView from '../agents/SessionView.svelte';
@@ -159,7 +159,7 @@
   const running = $derived(swarm.runs.filter((r) => r.status === 'running' || r.status === 'waiting').length);
   const cap = $derived(detail?.config.max_parallel_sessions ?? 4);
 
-  const VIEWS: { id: View; label: string; icon: string }[] = [
+  const VIEWS: { id: View; label: string; icon: IconName }[] = [
     { id: 'tree', label: 'Org', icon: 'user' },
     { id: 'graph', label: 'Graph', icon: 'split' },
     { id: 'kanban', label: 'Board', icon: 'note' },

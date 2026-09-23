@@ -102,14 +102,6 @@
   // actually being an agent session.
   const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
 
-  // When the Workflows editor docks its inspector to a right column, that panel
-  // owns the top-right corner — it renders its OWN notification bell in its
-  // header (agents-style) and reaches the window edge. So here we (a) hide the
-  // floating shell bell and (b) drop the 42px bell-gutter that would otherwise
-  // hold the panel 42px short of the edge (the black strip). Every other view
-  // keeps the floating bell + gutter.
-  const wfDocked = $derived(moduleName === 'workflows' && ui.wfDockSide);
-
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
   $effect(() => {
@@ -601,7 +593,7 @@
     <SnipEditor />
   {/key}
 {:else}
-<!-- Center column: banners + notification bell + (agents) TabBar + the module
+<!-- Center column: banners + (agents) TabBar + the module
      router. Extracted to a snippet so the desktop 3-pane and the mobile
      single-pane shells render byte-for-byte identical content — only the
      surrounding chrome differs by viewport. -->
@@ -641,15 +633,10 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
     </div>
   {/if}
-  {#if !wfDocked}
-    <div class="bell-anchor" class:tauri-top={isTauri}>
-      <NotificationBell />
-    </div>
-  {/if}
   {#if moduleName === 'agents'}
-    <TabBar bellGutter />
+    <TabBar />
   {/if}
-  <div class="content" class:bell-gutter={moduleName !== 'agents' && !wfDocked}>
+  <div class="content">
     {#if moduleName === 'agents'}
       <AgentsPage />
     {:else if moduleName === 'home'}
@@ -794,6 +781,11 @@
     <NavButtons />
     <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
     <span class="grow"></span>
+    <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
+         Navigator is a closed drawer, so the top bar carries it instead. -->
+    {#if viewport.isPhone}
+      <NotificationBell placement="below" />
+    {/if}
     {#if showRightPanel}
       <button
         class="mtop-btn"
@@ -1013,9 +1005,9 @@
     gap: 10px;
     padding: 7px 14px;
     font-size: 12.5px;
-    background: color-mix(in srgb, #e0a000 18%, var(--surface));
+    background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--text);
-    border-bottom: 1px solid color-mix(in srgb, #e0a000 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
     z-index: 5;
   }
   .pb-dismiss {
@@ -1051,29 +1043,12 @@
     flex-shrink: 0;
   }
   .imp-countdown.imp-urgent {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 600;
-  }
-  /* Always-visible notification bell, anchored to the top-right of the main
-     column so it's reachable from every module (the tab bar only renders on
-     Agents). Sits above content; the dropdown opens downward from here. */
-  .bell-anchor {
-    position: absolute;
-    top: 6px;
-    inset-inline-end: 10px;
-    z-index: 50;
-  }
-  .bell-anchor.tauri-top {
-    top: 8px;
   }
   .content {
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  /* Reserve room on the right of a module page so its header action buttons
-     never sit under the floating notification bell. */
-  .content.bell-gutter {
-    padding-inline-end: 42px;
   }
 </style>

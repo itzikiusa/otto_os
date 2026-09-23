@@ -329,7 +329,7 @@
   .se-tab.active {
     color: #0b0b0b;
     background: #7ee787;
-    border-color: #7ee787;
+    border-color: var(--success);
   }
   .se-content {
     flex: 1;

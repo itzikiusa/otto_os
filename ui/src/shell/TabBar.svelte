@@ -10,10 +10,6 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import ShareModal from '../modules/agents/ShareModal.svelte';
 
-  // `bellGutter` reserves space on the right so the shell's floating
-  // notification bell never overlaps the tab-bar controls.
-  let { bellGutter = false }: { bellGutter?: boolean } = $props();
-
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
 
@@ -159,7 +155,6 @@
 <div
   class="tabbar"
   class:tauri-pad={isTauri && !ui.railExpanded}
-  class:bell-gutter={bellGutter}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
@@ -332,9 +327,6 @@
   .tabbar.tauri-pad {
     padding-inline-start: 78px;
   }
-  .tabbar.bell-gutter {
-    padding-inline-end: 42px;
-  }
   .tabs {
     display: flex;
     align-items: center;
@@ -405,7 +397,7 @@
   /* "Needs you" — blocked on operator input. Amber accents stand out from the
      calmer active/idle styling without being alarming. */
   .tab.needs-you:not(.active) {
-    border-color: color-mix(in srgb, #febc2e 45%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
     color: var(--text);
   }
   .tab-needs-you {
@@ -415,8 +407,8 @@
     width: 14px;
     height: 14px;
     border-radius: 99px;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 18%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
   .susp-dot {
     display: grid;
@@ -424,7 +416,7 @@
     width: 8px;
     height: 8px;
     flex-shrink: 0;
-    color: #febc2e;
+    color: var(--warning);
   }
   .tab-title {
     overflow: hidden;

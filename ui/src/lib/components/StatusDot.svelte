@@ -46,12 +46,12 @@
     background: var(--status-exited);
   }
   .dot.reconnectable {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   /* "Needs you" — blocked on operator input. Amber pulse distinct from
      the green "working" pulse so the two states read differently at a glance. */
   .dot.needs-you {
-    background: #febc2e;
+    background: var(--status-warn);
     animation: needs-you-pulse 1.2s ease-in-out infinite;
   }
   @keyframes pulse {

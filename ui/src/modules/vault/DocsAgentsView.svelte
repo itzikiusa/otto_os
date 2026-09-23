@@ -1110,7 +1110,7 @@
     gap: 5px;
     font-size: 11.5px;
     color: var(--text);
-    background: var(--hover, rgba(127, 127, 127, 0.1));
+    background: var(--hover);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 3px 10px;
@@ -1831,8 +1831,8 @@
     visibility: visible;
   }
   .run-del:hover {
-    color: var(--danger, #ff6b6b);
-    background: color-mix(in srgb, var(--danger, #ff6b6b) 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .run-del:disabled {
     opacity: 0.5;

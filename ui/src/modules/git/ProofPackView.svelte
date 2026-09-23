@@ -181,7 +181,7 @@
     font-size: 12.5px;
   }
   .pp-stat strong { font-size: 14px; }
-  .pp-ok { color: #7ee787; }
+  .pp-ok { color: var(--success); }
   .pp-breakdown {
     display: flex;
     flex-wrap: wrap;
@@ -220,7 +220,7 @@
   .pp-artifacts { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
   .pp-artifact {
     font-size: 10.5px;
-    background: color-mix(in srgb, #7ee787 16%, transparent);
+    background: color-mix(in srgb, var(--success) 16%, transparent);
     color: var(--text);
   }
   .pp-timeline { list-style: none; margin: 6px 0 0; padding: 0; }

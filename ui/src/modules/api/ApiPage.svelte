@@ -2,7 +2,7 @@
   // Full API-client module page: a left sidebar (Collections / History / Env
   // tabs) and a center column with the RequestBuilder over the ResponseViewer.
   import { untrack } from 'svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
   import CollectionsTree from './CollectionsTree.svelte';
@@ -78,7 +78,7 @@
     }
   });
 
-  const sideTabs: { id: SideTab; icon: string; label: string }[] = [
+  const sideTabs: { id: SideTab; icon: IconName; label: string }[] = [
     { id: 'collections', icon: 'folder', label: 'Collections' },
     { id: 'automations', icon: 'zap', label: 'Automations' },
     { id: 'history', icon: 'clock', label: 'History' },

@@ -302,7 +302,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 12px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -376,9 +376,9 @@
     cursor: not-allowed;
   }
   .danger-btn:hover:not(:disabled) {
-    border-color: #ef4444;
-    color: #b91c1c;
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
 
   /* ── Note body (markdown rendered) ───────────────────────────────── */
@@ -413,7 +413,7 @@
     border-radius: 3px;
   }
   .n-body :global(pre) {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 12px;
@@ -466,7 +466,7 @@
     z-index: 200;
   }
   .modal-box {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     width: 480px;
@@ -525,7 +525,7 @@
     color: var(--text-dim);
   }
   .req {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 700;
   }
   .form-textarea,

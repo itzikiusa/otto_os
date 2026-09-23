@@ -5,6 +5,7 @@
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { vault, type TreeNode } from './vault.svelte';
 
@@ -172,8 +173,8 @@
             {
               label: 'New folder here',
               icon: 'folder',
-              action: () => {
-                const name = prompt('Folder name');
+              action: async () => {
+                const name = await confirmer.promptText('Folder name', { title: 'New folder', confirmLabel: 'Create' });
                 if (name?.trim()) void vault.createFolder(`${n.entry.path}/${name.trim()}`);
               },
             },
@@ -184,8 +185,8 @@
       {
         label: 'Move to…',
         icon: 'branch',
-        action: () => {
-          const to = prompt('Move to path', n.entry.path);
+        action: async () => {
+          const to = await confirmer.promptText('Move to path', { title: 'Move', confirmLabel: 'Move', initial: n.entry.path });
           if (to?.trim() && to.trim() !== n.entry.path) void vault.rename(n.entry.path, to.trim());
         },
       },
@@ -381,7 +382,7 @@
     white-space: nowrap;
   }
   .row:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .row.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);

@@ -4,7 +4,7 @@
   // queued/artifact/notice chips), with the per-turn system chip and the
   // Codex "N reasoning steps (not recorded)" footer.
   import { getContext } from 'svelte';
-  import Icon from '../../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import Markdown from './Markdown.svelte';
   import WorkSteps from './WorkSteps.svelte';
   import ImageBlock from './ImageBlock.svelte';
@@ -69,7 +69,7 @@
     if (a.url) return a.url;
     return null;
   }
-  function artifactIcon(a: Artifact): string {
+  function artifactIcon(a: Artifact): IconName {
     return a.kind === 'pr' ? 'pr' : a.kind === 'image' ? 'image' : a.kind === 'url' ? 'link' : a.kind === 'report' ? 'note' : 'file';
   }
 </script>

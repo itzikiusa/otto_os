@@ -5,6 +5,7 @@
 // actions (scale / ArgoCD sync) are surfaced via `needs` so the workspace can
 // open the matching sheet instead of posting straight away.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import { k8sApi } from '../../lib/api/k8s';
 import type { K8sAction, K8sActionResp, K8sResourceKind, K8sRow } from '../../lib/api/types';
 import { confirmer } from '../../lib/confirm.svelte';
@@ -14,7 +15,7 @@ import { kindDef } from './k8s-util';
 export interface ActionDef {
   id: K8sAction;
   label: string;
-  icon?: string;
+  icon?: IconName;
   danger?: boolean;
   /** Extra request params (fixed per menu entry, e.g. promote full / hard refresh). */
   params?: Record<string, unknown>;

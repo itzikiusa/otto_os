@@ -3,6 +3,7 @@
   // stage timeline, proof + findings, the approval gate, and the PR draft. Reads
   // the open run + its events straight from the store.
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import RunStageRail from './RunStageRail.svelte';
   import type { OttoRun } from '../../lib/api/types';
@@ -52,7 +53,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!confirm('Cancel this run?')) return;
+    if (!(await confirmer.ask('Cancel this run?', { title: 'Cancel run', confirmLabel: 'Cancel run' }))) return;
     error = '';
     busy = true;
     try {

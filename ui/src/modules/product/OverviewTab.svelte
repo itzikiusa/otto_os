@@ -2288,8 +2288,8 @@
     color: var(--text-dim);
   }
   .stage-review {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .stage-approved {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);
@@ -2365,7 +2365,7 @@
     white-space: nowrap;
   }
   .ver-select {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -2473,7 +2473,7 @@
     border-radius: 3px;
   }
   .md-body :global(pre) {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
@@ -2522,7 +2522,7 @@
     padding: 8px 0;
   }
   .jira-error {
-    color: #b91c1c;
+    color: var(--danger);
     font-style: normal;
   }
 
@@ -2531,7 +2531,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .collapsible-card {
     padding: 0;
@@ -2683,7 +2683,7 @@
     top: calc(100% + 4px);
     inset-inline-end: 0;
     z-index: 50;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
@@ -3111,9 +3111,9 @@
     font-weight: 600;
     padding: 2px 9px;
     border-radius: 999px;
-    background: color-mix(in srgb, #f59e0b 15%, transparent);
-    color: #b45309;
-    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
+    color: var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
   }
 
   /* ── History ────────────────────────────────────────────────── */
@@ -3272,7 +3272,7 @@
     letter-spacing: 0.04em;
   }
   .input {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -3286,7 +3286,7 @@
     border-color: var(--accent);
   }
   .textarea {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -3395,8 +3395,8 @@
     border-radius: var(--radius-s);
   }
   .del-transcript-btn:hover {
-    color: #ef4444;
-    background: color-mix(in srgb, #ef4444 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .transcript-body {
     padding: 8px 12px 10px;

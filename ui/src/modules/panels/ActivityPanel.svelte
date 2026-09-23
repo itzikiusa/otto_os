@@ -12,7 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
 
@@ -125,7 +125,7 @@
     }
   }
 
-  const KIND_ICON: Record<TrailKind, string> = {
+  const KIND_ICON: Record<TrailKind, IconName> = {
     session: 'play',
     prompt: 'comment',
     skill: 'zap',

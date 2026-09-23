@@ -166,8 +166,8 @@
     color: var(--status-idle, #3a8c3a);
   }
   .score.ok {
-    background: color-mix(in srgb, #e0a000 22%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .score.bad {
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);

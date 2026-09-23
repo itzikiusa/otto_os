@@ -18,7 +18,7 @@
   import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { renderNote } from '../vault/mdRender';
   import { toasts } from '../../lib/toast.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { Artifact } from '../../lib/api/types';
 
@@ -79,7 +79,7 @@
     return 'download';
   }
 
-  const KIND_ICON: Record<Artifact['kind'], string> = {
+  const KIND_ICON: Record<Artifact['kind'], IconName> = {
     file: 'file',
     pr: 'pr',
     image: 'image',

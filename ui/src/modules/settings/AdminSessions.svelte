@@ -330,7 +330,7 @@
   }
 
   .status-badge.live {
-    color: var(--green, #3fb950);
+    color: var(--success);
   }
 
   .status-badge.exited {
@@ -341,7 +341,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--green, #3fb950);
+    background: var(--success);
     flex-shrink: 0;
     animation: pulse 2s ease-in-out infinite;
   }

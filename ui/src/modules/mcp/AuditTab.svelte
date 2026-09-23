@@ -286,7 +286,7 @@
     margin-inline-start: 5px;
     font-size: 9px;
     text-transform: uppercase;
-    color: #3b82f6;
+    color: var(--info);
   }
   .bad {
     color: var(--status-exited, #ff5f57);

@@ -3,7 +3,7 @@
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
@@ -278,7 +278,7 @@
     const i = order.indexOf(effView);
     setView(order[(i + 1) % order.length]);
   }
-  const VIEW_META: [SessionViewMode, string, string][] = [
+  const VIEW_META: [SessionViewMode, string, IconName][] = [
     ['terminal', 'Terminal', 'terminal'],
     ['chat', 'Chat', 'comment'],
     ['split', 'Split', 'split'],
@@ -917,7 +917,7 @@
   }
   .pane-fullname {
     font-size: 11px;
-    color: var(--text-muted, var(--muted));
+    color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -952,8 +952,8 @@
     font-weight: 700;
     letter-spacing: 0.02em;
     text-transform: uppercase;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
     white-space: nowrap;
   }
   /* Per-session task roll-up "done/total" — matches the sidebar chip. */
@@ -1165,8 +1165,8 @@
     line-height: 1;
   }
   .dir-remove:hover {
-    color: var(--danger, #e5534b);
-    background: color-mix(in srgb, var(--danger, #e5534b) 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .dir-add {
     display: flex;

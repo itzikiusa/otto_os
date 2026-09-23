@@ -112,12 +112,12 @@
 </section>
 {#if picker !== null}<FolderPicker title="Choose context reference" start={picker} files onpick={addReference} onclose={() => (picker = null)} />{/if}
 <style>
-  .document { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+  .document { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
   h2 { margin: 0 0 8px; font-size: 15px; }
   .hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
   .path { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
   textarea { width: 100%; box-sizing: border-box; min-height: 280px; resize: vertical; padding: 10px; font: 12px var(--font-mono); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   select { min-width: 0; max-width: 100%; }
-  .error { color: var(--danger, #ef4444); margin: 10px 0; }
+  .error { color: var(--danger); margin: 10px 0; }
 </style>

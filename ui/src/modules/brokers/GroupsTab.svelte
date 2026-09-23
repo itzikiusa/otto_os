@@ -483,8 +483,8 @@
     color: var(--status-working, #28c840);
   }
   .state.warn {
-    background: color-mix(in srgb, #f5a623 22%, transparent);
-    color: #f5a623;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .state.dim {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -510,7 +510,7 @@
   }
   .lag-total.has-lag,
   td.has-lag {
-    color: #f5a623;
+    color: var(--warning);
     font-weight: 600;
   }
   .offsets-header {
@@ -538,12 +538,12 @@
   .lag-bar {
     height: 6px;
     border-radius: 3px;
-    background: color-mix(in srgb, #f5a623 15%, transparent);
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
     overflow: hidden;
   }
   .lag-fill {
     height: 100%;
-    background: #f5a623;
+    background: var(--status-warn);
     border-radius: 3px;
   }
   .reset-bar {
@@ -608,17 +608,17 @@
     flex-direction: column;
     gap: 6px;
     margin: 8px;
-    border: 1px solid color-mix(in srgb, var(--status-degraded, #e3b341) 45%, var(--border));
-    border-inline-start: 3px solid var(--status-degraded, #e3b341);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+    border-inline-start: 3px solid var(--warning);
     border-radius: var(--radius-s, 4px);
-    background: color-mix(in srgb, var(--status-degraded, #e3b341) 8%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
   }
   .acl-title {
     font-weight: 600;
     color: var(--text);
   }
   .acl-denied code {
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     background: var(--surface-2);
     padding: 0 4px;
     border-radius: 3px;
@@ -645,7 +645,7 @@
     color: var(--status-working, #28c840);
   }
   .dryrun-summary .warn {
-    color: #f5a623;
+    color: var(--warning);
   }
   .close-dry {
     margin-inline-start: auto;
@@ -676,7 +676,7 @@
     color: var(--status-working, #28c840);
   }
   .dryrun-table td.warn {
-    color: #f5a623;
+    color: var(--warning);
   }
   .dryrun-preview p {
     padding: 5px 10px;

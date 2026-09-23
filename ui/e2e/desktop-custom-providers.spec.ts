@@ -279,21 +279,19 @@ test('Dock opens a persistent side panel with a working close button', async ({ 
   await expect(inspector).toBeVisible({ timeout: 10_000 });
   await expect(inspector.locator('.insp-blank')).toContainText(/select a node/i);
 
-  // The panel header hosts the notification bell (the shell's floating bell is
-  // hidden in this layout) + the close (×).
-  await expect(inspector.locator('.insp-side-head .bell-wrap')).toBeVisible();
-  await expect(page.locator('.bell-anchor')).toHaveCount(0);
+  // The panel header holds only the title + close (×): the notification bell
+  // lives in the sidebar on every page, so nothing floats over the dock.
+  await expect(inspector.locator('.insp-side-head .bell-wrap')).toHaveCount(0);
+  await expect(page.locator('.sidebar').getByRole('button', { name: 'Notifications' })).toBeVisible();
 
   // The panel reaches the right edge of the viewport — no gutter black-strip.
   const box = (await inspector.boundingBox())!;
   const vw = page.viewportSize()!.width;
   expect(box.x + box.width).toBeGreaterThan(vw - 4);
 
-  // The × close button in the side header dismisses the dock; the floating shell
-  // bell returns.
+  // The × close button in the side header dismisses the dock.
   await inspector.getByRole('button', { name: 'Close panel' }).click();
   await expect(page.locator('.inspector.side')).toHaveCount(0);
-  await expect(page.locator('.bell-anchor')).toBeVisible();
   // Dock button returns to inactive (bottom mode).
   await expect(page.getByRole('button', { name: 'Dock' })).not.toHaveClass(/\bactive\b/);
 });

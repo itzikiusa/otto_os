@@ -202,7 +202,7 @@
     border-radius: 999px;
   }
   .stage-draft { background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-dim); }
-  .stage-review { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
+  .stage-review { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .stage-approved { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
   .stage-done { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .stage-other { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }

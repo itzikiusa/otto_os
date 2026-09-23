@@ -201,7 +201,7 @@
     margin-inline-start: auto;
     font-size: 10px;
     color: var(--text-dim);
-    background: var(--hover, rgba(127, 127, 127, 0.15));
+    background: var(--hover);
     border-radius: 999px;
     padding: 1px 7px;
   }
@@ -221,7 +221,7 @@
     color: var(--text);
   }
   .item:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .item:disabled {
     cursor: default;

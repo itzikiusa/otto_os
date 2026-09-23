@@ -118,15 +118,15 @@
     padding: 4px 10px;
   }
   .chip.good {
-    background: color-mix(in srgb, var(--status-done, green) 15%, transparent);
-    color: var(--status-done, green);
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    color: var(--success);
   }
   .chip.accent {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     color: var(--accent);
   }
   .chip.done {
-    background: color-mix(in srgb, var(--status-done, green) 10%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, transparent);
     color: var(--text-dim);
   }
 </style>

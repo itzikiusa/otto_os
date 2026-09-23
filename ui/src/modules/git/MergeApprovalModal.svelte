@@ -339,8 +339,8 @@
     gap: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, #febc2e 14%, transparent);
-    color: #b8860b;
+    background: color-mix(in srgb, var(--warning) 14%, transparent);
+    color: var(--warning);
     font-size: 11.5px;
     line-height: 1.45;
   }
@@ -356,9 +356,9 @@
     gap: 8px;
     padding: 9px 11px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, #febc2e 12%, transparent);
-    border: 1px solid color-mix(in srgb, #febc2e 35%, transparent);
-    color: #b8860b;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    color: var(--warning);
     font-size: 11.5px;
     line-height: 1.5;
   }

@@ -792,7 +792,7 @@
     color: var(--status-idle, #3a8c3a);
   }
   .reg.bad {
-    color: #b07d00;
+    color: var(--warning);
   }
 
   .impl,
@@ -866,7 +866,7 @@
   .val-waiting {
     margin: 0;
     font-size: 11px;
-    color: #b07d00;
+    color: var(--warning);
   }
 
   .findings {
@@ -931,7 +931,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 11px;
     line-height: 1.45;
-    background: var(--bg-1, #1b1b1b);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 8px 10px;
@@ -983,8 +983,8 @@
     color: var(--status-exited);
   }
   .ist-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
 
   .pf {
@@ -1020,8 +1020,8 @@
   }
   .score-badge.ok,
   .chip.score.ok {
-    background: color-mix(in srgb, #e0a000 22%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .score-badge.bad,
   .chip.score.bad {
@@ -1043,8 +1043,8 @@
     color: var(--accent);
   }
   .sev-warn {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
   .sev-fail {
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);

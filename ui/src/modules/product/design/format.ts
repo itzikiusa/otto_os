@@ -2,6 +2,7 @@
 // assistant and the templates (design/product-design-arena.md §2.2). ONE place
 // maps a `DesignFormat` to its file name / mime / label / arena group, so the
 // Rust `DesignFormat` enum and this table can be diffed side by side.
+import type { IconName } from '../../../lib/components/Icon.svelte';
 import type { DesignFormat, ProductAttachment } from '../types';
 import { designFormatOf, metaOf } from '../../../lib/stores/mockup-assist.svelte';
 import { SCENE3D_MIME } from './scene3d';
@@ -25,7 +26,7 @@ export interface FormatInfo {
   mime: string;
   /** Arena asset group (`meta.group` overrides). */
   group: string;
-  icon: string;
+  icon: IconName;
 }
 
 export const FORMATS: Record<DesignFormat, FormatInfo> = {

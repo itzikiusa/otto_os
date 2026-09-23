@@ -1,5 +1,6 @@
 // Shared label / colour / formatting helpers for the Mission Control module.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import type { WorkKind, WorkStatus, RiskLevel, WorkActor, ArtifactKind } from '../../lib/api/types';
 
 export const KIND_LABEL: Record<WorkKind, string> = {
@@ -13,7 +14,7 @@ export const KIND_LABEL: Record<WorkKind, string> = {
   external_trigger: 'External Trigger',
 };
 
-export const KIND_ICON: Record<WorkKind, string> = {
+export const KIND_ICON: Record<WorkKind, IconName> = {
   session: 'terminal',
   swarm: 'grid',
   goal_loop: 'refresh',
