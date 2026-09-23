@@ -4,8 +4,9 @@
 > surface, the legacy import, the Design Hall UI (§8), the unified
 > `design_assist` agent turn (every studio / format), variants, verified
 > reference citations, the suggest-only Learning v1 and the design MCP tools
-> (reads + approval-gated writes) ship now. Export/publish and the dedicated
-> studio editors (Site Studio, Brand Kit, 3D Studio 1.5) are the next phases
+> (reads + approval-gated writes) and the Brand Kit v1 editor (§9) ship now.
+> Export/publish and the other dedicated studio editors (Site Studio, 3D
+> Studio 1.5) are the next phases
 > (see the proposal's roadmap). The existing Product → Design arena and Canvas
 > keep working unchanged meanwhile.
 
@@ -347,11 +348,15 @@ with people.
   or `POST /design/admin/import`), not live — so Design Hall opens imported
   artifacts read-only, with "Open in Product/Canvas" and "Make an editable
   copy" (a `derived_from` fork).
-- `otto-site`, `otto-layout`, `otto-brand`, `otto-exhibit` are stored and
-  link-indexed as generic JSON; their own validators land with their studios.
+- `otto-site`, `otto-layout`, `otto-exhibit` are stored and link-indexed as
+  generic JSON; their own validators land with their studios. `otto-brand`
+  has its own validator and indexer (§9).
 - `#node` validation covers JSON formats (any `"id"`) and HTML/SVG (`id="…"`);
   Mermaid/D2 nodes are accepted as-is.
-- Brand-token references (`token:color.primary`) are not resolved yet.
+- Brand-token references (`token:color.primary`, `var(--brand-color-primary)`)
+  are read by the Brand Kit impact preview (§9) and resolved in the UI with
+  `resolveToken` / `brandCssVars` (`brand/tokens.ts`); the server doesn't
+  rewrite them into consumer documents.
 - The `edit_after_draft` summary is a bounded heuristic (changed JSON paths /
   line counts); the per-format structural diff arrives with Compare.
 - Thumbnails: the UI stores what it rendered with `PUT
@@ -401,7 +406,7 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 | `#/design` · `#/design/spatial` | Lobby — Grid (prompt hero, the seven studios, Continue, Projects, Linked to Product, the learning + agent-activity rail) or the Spatial (beta) CSS gallery of project bays |
 | `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); 3D adds hierarchy + inspector |
 | `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with its classic-or-planned note) / the designs implementing a story |
-| `#/design/brand` · `#/design/learned[/rules\|/memory]` | Brand Kit scaffold (`otto-brand` kits) · the signals log (Rules and Memory are Phase 1 empty states) |
+| `#/design/brand[/<id>]` · `#/design/learned[/rules\|/memory]` | The Brand Kit editor (§9; without an id it opens the most recent kit) · the signals log (Rules and Memory are Phase 1 empty states) |
 
 - **Phase 0 honesty.** The lobby prompt creates a *draft* in the chosen studio
   (the brief is kept in `meta.brief`); generation is Phase 1. Frames/Graphics
@@ -420,3 +425,90 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
 - **Product:** the story's Design tab shows a small graph of the designs that
   implement it (an epic: its children's too) above the unchanged arena, with
   "Open in Design Hall".
+
+## 9. Brand Kit (`#/design/brand/<id>`, `otto-brand/1`)
+
+A brand kit is one versioned artifact (studio `brand`, format `otto-brand`)
+that every studio reads by token name. Code: `crates/otto-design/src/brand/`
+(validator, indexer, exporters, contrast, impact) and
+`ui/src/modules/design-hall/brand/` (editor + the shared `tokens.ts`).
+Contract: [`api.md` § Brand Kit](../contracts/api.md).
+
+### The document
+
+```json
+{ "$schema": "otto-brand/1", "name": "Acme Brand Kit",
+  "color":  { "primary": { "$value": "#5B3DF5", "$description": "Buttons and links" } },
+  "font":   { "display": { "$value": "-apple-system, system-ui, sans-serif", "weights": [700, 800] } },
+  "type":   { "display": { "size": 64, "line": 72, "weight": 800 } },
+  "radius": { "md": { "$value": 14 } },
+  "space":  { "md": { "$value": 16 } },
+  "logos":  [ { "name": "Full logo", "kind": "full", "asset": "otto://design/<image id>" } ],
+  "imagery": { "summary": "…", "do": ["…"], "dont": ["…"] },
+  "voice":   { "summary": "Warm, confident, never salesy.", "do": ["…"], "dont": ["…"] } }
+```
+
+Every save (a person, the editor, an agent turn) is validated — hex colours,
+token names `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` (≤ 64 per group), font roles
+`display` / `body` / `mono` with CSS-safe stacks, positive type sizes, px
+radius/space, ≤ 16 logos whose asset is an `otto://design/…` image or
+`blob:<sha256>` (empty = a placeholder slot), ≤ 20 do/don't lines — and a bad
+document is a 400 naming the paths (`color.primary.$value: …`). Fonts are
+local family stacks only: nothing is downloaded from a web-font CDN.
+
+### How studios use a kit
+
+- **Link it**: a document's `brand` / `brand_kit` / `tokens` / `theme` key set
+  to `otto://design/<kit>` (or an explicit **Uses tokens** link) makes a
+  `uses_tokens` edge. Consumers follow the kit's **approved** version by
+  default; `@latest` follows every save, `@vN` pins.
+- **Name tokens**: `token:color.primary`, `token:type.display.size`, or the
+  CSS property `var(--brand-color-primary)`. The CSS names are
+  `--brand-<group>-<name>` (kebab-cased: `surfaceAlt` → `surface-alt`); type
+  styles expand to `--brand-type-<name>-size|-line|-weight`.
+- **Resolve** in the UI with `brandCssVars(doc)` (all properties, e.g. set on a
+  preview root) and `resolveToken(doc, "token:color.primary")` → `#5B3DF5`
+  (a type style without a sub-property resolves to a `font` shorthand).
+
+### The editor
+
+- **Left column:** Colors (colour input + hex, the CSS variable, live WCAG
+  badges vs white and the kit's ink, "Try a primary" presets), Typography
+  (font roles + the type scale as live specimens), Spacing & radius, Logos
+  (uploading a file imports it as a Graphics design and links it), Imagery and
+  Voice (summary + do/don't), and **Used in** (every consumer, its studio,
+  status, policy and the tokens it names).
+- **Right column — Applied to:** a landing hero, a social tile and a 3D card
+  swatch re-tint as you type (CSS custom properties; nothing is saved).
+- **Rule from team** chips: approved learned rules (`GET /design/learned`)
+  that mention brand words, a token name or a colour's hue ("amber is never
+  text" for a `#FFB547` accent) link to What Otto learned.
+- **Impact before save.** While token changes are unsaved, a banner says how
+  many designs in how many studios they reach (`POST …/brand/impact`,
+  debounced). **Save as vN** shows the impact preview first whenever designs
+  use the kit (the token diff with before → after, the affected designs and
+  when each moves: *follows approved* → on approve, *follows latest* → on
+  save, *pinned* → never until updated, plus contrast warnings), then commits
+  a named version with `base_version` (409 → "Save mine on top" / "Load vN").
+  A `brand_correction` signal records which tokens changed.
+- **Approve vN** is a separate, confirmed step; it moves the approved version
+  and the daemon's `design_link_updated {reason: "target_approved"}` tells
+  every following consumer.
+- **Export ▾** copies or downloads the saved kit as CSS variables, a Tailwind
+  v4 `@theme` block or W3C DTCG JSON (`GET …/brand/export`) — local only.
+- **New brand kit** starts from one of three starter kits (Vivid, Editorial,
+  Minimal), each contrast-checked.
+
+### Troubleshooting
+
+- **"invalid otto-brand document: …" on save** — the message names the path;
+  the editor shows the first problem in a red banner and keeps Save disabled.
+- **A design is missing from Used in** — it has no `uses_tokens` link to the
+  kit (set its `brand` field or add a Uses tokens link), it is archived, or it
+  lives in a workspace you can't view (counted as "more in workspaces you
+  can't see").
+- **Used in says "the whole kit"** — the design links the kit but names no
+  single token (a theme), or its head isn't readable text; every token change
+  counts as reaching it.
+- **Saved but designs didn't change** — they follow the approved kit; approve
+  the new version.
