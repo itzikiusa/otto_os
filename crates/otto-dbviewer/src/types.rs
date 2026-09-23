@@ -420,6 +420,102 @@ impl NodePath {
     }
 }
 
+/// The execution scope a request's `node` names, parsed ONCE from the
+/// overloaded wire string and read by the service (authorization child,
+/// canonical node) and by every driver.
+///
+/// `node` arrives in three shapes: a plain database/schema name (the UI's
+/// active-DB selector), a `db:<name>[/…]` tree path (MCP, assistant, tree
+/// actions) and a Redis `kdb:<n>[/…]` keyspace path. Only a value that STARTS
+/// with one of those two tags is read as a path; anything else is a plain name
+/// taken verbatim, so a database literally named `db` or `kdb`, or one whose
+/// name contains `:` or `/`, keeps its scope instead of collapsing to "no
+/// database".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// A database (MySQL / ClickHouse / MongoDB) or schema (PostgreSQL), by name.
+    Database(String),
+    /// A Redis logical database index.
+    Keyspace(i64),
+}
+
+impl Scope {
+    /// Parse a wire `node`. `None` for an absent/blank node or a tagged path
+    /// with an empty name — the profile's default then applies.
+    pub fn parse(node: Option<&str>) -> Option<Scope> {
+        let raw = node.map(str::trim).filter(|s| !s.is_empty())?;
+        if raw.starts_with("kdb:") {
+            let path = NodePath::parse(raw);
+            let value = path.get("kdb").map(str::trim).unwrap_or("");
+            if value.is_empty() {
+                return None;
+            }
+            // A non-numeric keyspace is kept as a name so the Redis driver can
+            // REFUSE it rather than silently falling back to db0.
+            return Some(match value.parse::<i64>() {
+                Ok(n) => Scope::Keyspace(n),
+                Err(_) => Scope::Database(raw.to_string()),
+            });
+        }
+        if raw.starts_with("db:") {
+            let path = NodePath::parse(raw);
+            return path
+                .get("db")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| Scope::Database(s.to_string()));
+        }
+        Some(Scope::Database(raw.to_string()))
+    }
+
+    /// The canonical wire form a driver receives: `kdb:<n>` for a keyspace, the
+    /// plain name for a database. A name that itself begins with a path tag is
+    /// re-wrapped as `db:<name>` so parsing the canonical form is idempotent.
+    pub fn to_node(&self) -> String {
+        match self {
+            Scope::Keyspace(n) => format!("kdb:{n}"),
+            Scope::Database(name) if name.starts_with("db:") || name.starts_with("kdb:") => {
+                format!("db:{name}")
+            }
+            Scope::Database(name) => name.clone(),
+        }
+    }
+
+    /// The resource-access child: access rules name databases and Redis
+    /// keyspaces bare (`shop`, `3`).
+    pub fn child(&self) -> String {
+        match self {
+            Scope::Keyspace(n) => n.to_string(),
+            Scope::Database(name) => name.clone(),
+        }
+    }
+
+    /// The database/schema name, for engines scoped by name.
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            Scope::Database(name) => Some(name.as_str()),
+            Scope::Keyspace(_) => None,
+        }
+    }
+
+    /// The Redis logical database: a keyspace, a bare integer name (callers
+    /// that already stripped the `kdb:` tag) or the tree label `db<n>`. `None`
+    /// for anything else.
+    pub fn keyspace(&self) -> Option<i64> {
+        match self {
+            Scope::Keyspace(n) => Some(*n),
+            Scope::Database(name) => {
+                let name = name.trim();
+                name.strip_prefix("db")
+                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+                    .unwrap_or(name)
+                    .parse::<i64>()
+                    .ok()
+            }
+        }
+    }
+}
+
 // --- Object detail (Structure tab) ------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -621,6 +717,19 @@ pub struct QueryRequest {
     /// always send it alongside `offset`.
     #[serde(default)]
     pub cursor: Option<Value>,
+}
+
+impl QueryRequest {
+    /// The typed scope of this request (see [`Scope`]).
+    pub fn scope(&self) -> Option<Scope> {
+        Scope::parse(self.node.as_deref())
+    }
+
+    /// The database/schema this request is scoped to; `None` = the profile's
+    /// default. A Redis keyspace scope is never a database name.
+    pub fn scope_database(&self) -> Option<String> {
+        self.scope().and_then(|s| s.database().map(str::to_string))
+    }
 }
 
 /// An engine-native handle the driver captured for an executing query, so the
@@ -1187,7 +1296,9 @@ fn has_word_then_digit(haystack: &str, word: &str) -> bool {
 /// input is a write if *any* part is a write (or unrecognised).
 pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
     match engine {
-        Engine::Mysql | Engine::Clickhouse | Engine::Postgres => sql_is_write(statement),
+        Engine::Mysql | Engine::Clickhouse | Engine::Postgres => {
+            sql_is_write_for(engine, statement)
+        }
         Engine::Redis => redis_is_write(statement),
         // Mongo's `run` accepts JSON commands / `db.coll.op(...)` shorthand whose
         // surface is large and easy to mis-parse; treat everything except a
@@ -1271,6 +1382,92 @@ fn sql_is_write(statement: &str) -> bool {
     false
 }
 
+/// The engine-aware SQL write classifier behind [`statement_is_write`]. A
+/// statement is a write when ANY of three independent checks says so:
+///
+/// 1. the Generic split ([`sql_is_write`]) — the historical guard;
+/// 2. the ENGINE's own split (the one its driver executes with). Lexers
+///    disagree about string / comment / identifier boundaries between
+///    dialects; where they do, the guard must never see fewer statements than
+///    the executor runs, so each dialect's statements are classified too;
+/// 3. for MySQL / PostgreSQL, every statement led by a keyword that has a
+///    write form (`SELECT` / `WITH` / `EXPLAIN`) must PARSE, with that
+///    engine's sqlparser dialect, into a provable read
+///    ([`crate::access::read_is_provable`]; `DESC`/`DESCRIBE` included, being
+///    MySQL synonyms of `EXPLAIN`). A first-keyword allowlist cannot
+///    see a write nested in a read-looking statement; the parser can, and a
+///    statement it cannot parse is unproven — so it counts as a write.
+///
+/// ClickHouse has no read-looking statement that writes (no `SELECT … INTO`,
+/// no data-changing CTE), and sqlparser does not cover its dialect well enough
+/// to make a parse failure meaningful, so it stops after step 2.
+fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
+    if sql_is_write(statement) {
+        return true;
+    }
+    let dialect = match engine {
+        Engine::Mysql => SqlDialect::Mysql,
+        Engine::Postgres => SqlDialect::Postgres,
+        Engine::Clickhouse => SqlDialect::Clickhouse,
+        Engine::Redis | Engine::Mongodb => SqlDialect::Generic,
+    };
+    let spans = split_statements(statement, dialect);
+    if spans
+        .iter()
+        .any(|span| !sql_first_keyword_is_read(&span.text))
+    {
+        return true;
+    }
+    if matches!(engine, Engine::Mysql | Engine::Postgres) {
+        return spans.iter().any(|span| {
+            // DESC / DESCRIBE are MySQL synonyms of EXPLAIN (including its
+            // executing ANALYZE form), so they are proven too.
+            matches!(
+                sql_first_keyword(&span.text).as_str(),
+                "SELECT" | "WITH" | "EXPLAIN" | "DESC" | "DESCRIBE"
+            ) && !crate::access::read_is_provable(engine, &span.text)
+        });
+    }
+    false
+}
+
+/// True when a user SQL statement can leave state on its SESSION — a default
+/// database or `search_path`, session variables, an open transaction, locks,
+/// temporary tables, prepared statements, a changed role. The MySQL and
+/// PostgreSQL drivers run on POOLED connections, so a session that ran such a
+/// statement is closed instead of being returned to the pool, where the next
+/// (unrelated) request — another tab, a widget, an agent — would inherit it.
+/// Conservative: routines (`CALL`, `DO`) may do any of these.
+pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
+    let kw = sql_first_keyword(statement);
+    if matches!(
+        kw.as_str(),
+        "SET"
+            | "USE"
+            | "BEGIN"
+            | "START"
+            | "LOCK"
+            | "UNLOCK"
+            | "XA"
+            | "SAVEPOINT"
+            | "PREPARE"
+            | "HANDLER"
+            | "DECLARE"
+            | "CALL"
+            | "DO"
+            | "LISTEN"
+            | "DISCARD"
+            | "RESET"
+    ) {
+        return true;
+    }
+    let upper = statement.to_ascii_uppercase();
+    (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
+        || upper.contains("GET_LOCK(")
+        || upper.contains("PG_ADVISORY_LOCK")
+        || upper.contains("SET_CONFIG(")
+}
+
 /// True when a single SQL statement's first keyword is a known row-returning
 /// read (mirrors the per-driver `is_read_statement`, kept conservative).
 ///
@@ -1330,6 +1527,21 @@ fn redis_is_write(statement: &str) -> bool {
         }
     }
     false
+}
+
+/// True when any command line is `KEYS`. It is a read, but it walks the whole
+/// keyspace in one blocking call — a classic cause of production outages — so
+/// guarded connections ask for confirmation and the MCP path refuses it in
+/// favour of `SCAN`.
+pub fn redis_uses_keys(statement: &str) -> bool {
+    statement.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_whitespace()
+                .next()
+                .is_some_and(|cmd| cmd.eq_ignore_ascii_case("KEYS"))
+    })
 }
 
 /// Read-only Redis commands (conservative subset — anything not listed counts
@@ -1404,6 +1616,33 @@ pub struct MongoshInfo {
 /// Re-export for drivers.
 pub type DbResult<T> = Result<T>;
 
+/// The largest integer an IEEE-754 double — what the UI's `JSON.parse` turns
+/// every JSON number into — represents exactly: 2^53 − 1.
+pub const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// A 64-bit integer cell as JSON without losing precision on the way to the
+/// UI: a number while a double holds it exactly, else its exact decimal
+/// STRING. A rounded snowflake id displayed the wrong value, and an edit or
+/// delete keyed on it targeted a neighbouring row (or silently none). The UI
+/// emits an integer column's digit string back unquoted, so the round trip is
+/// exact. (ClickHouse already quotes 64-bit integers; Mongo uses `$numberLong`.)
+pub fn i64_to_json(n: i64) -> Value {
+    if (-MAX_SAFE_JSON_INTEGER..=MAX_SAFE_JSON_INTEGER).contains(&n) {
+        Value::from(n)
+    } else {
+        Value::String(n.to_string())
+    }
+}
+
+/// [`i64_to_json`] for unsigned 64-bit integers (MySQL `BIGINT UNSIGNED`).
+pub fn u64_to_json(n: u64) -> Value {
+    if n <= MAX_SAFE_JSON_INTEGER as u64 {
+        Value::from(n)
+    } else {
+        Value::String(n.to_string())
+    }
+}
+
 /// Hard per-cell size cap. A single LONGTEXT/bytea/JSON cell larger than this
 /// would freeze the webview grid and bloat the WS payload; such a cell is
 /// truncated with a marker while the query still succeeds. Shared by every SQL
@@ -1435,6 +1674,98 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_integers_keep_every_digit() {
+        assert_eq!(i64_to_json(42), serde_json::json!(42));
+        assert_eq!(
+            i64_to_json(MAX_SAFE_JSON_INTEGER),
+            serde_json::json!(9_007_199_254_740_991_i64)
+        );
+        assert_eq!(
+            i64_to_json(9_007_199_254_740_993),
+            Value::String("9007199254740993".into())
+        );
+        assert_eq!(
+            i64_to_json(-9_007_199_254_740_993),
+            Value::String("-9007199254740993".into())
+        );
+        assert_eq!(i64_to_json(i64::MIN), Value::String(i64::MIN.to_string()));
+        assert_eq!(u64_to_json(7), serde_json::json!(7));
+        assert_eq!(u64_to_json(u64::MAX), Value::String(u64::MAX.to_string()));
+    }
+
+    /// One parse of the overloaded `node`: tagged paths are read as paths,
+    /// anything else is a plain name — including names the old path parser
+    /// swallowed (`db`, `kdb`, names with `:` or `/`).
+    #[test]
+    fn scope_parses_every_node_shape() {
+        assert_eq!(Scope::parse(None), None);
+        assert_eq!(Scope::parse(Some("  ")), None);
+        assert_eq!(Scope::parse(Some("kdb:3")), Some(Scope::Keyspace(3)));
+        assert_eq!(
+            Scope::parse(Some("kdb:3/key:session:42")),
+            Some(Scope::Keyspace(3))
+        );
+        assert_eq!(
+            Scope::parse(Some("db:shop/table:orders")),
+            Some(Scope::Database("shop".into()))
+        );
+        assert_eq!(Scope::parse(Some("db:")), None);
+        assert_eq!(
+            Scope::parse(Some(" shop ")),
+            Some(Scope::Database("shop".into()))
+        );
+        // Databases literally named like a path tag keep their scope.
+        for name in ["db", "kdb", "a:b", "a/b", "games:v2"] {
+            assert_eq!(
+                Scope::parse(Some(name)),
+                Some(Scope::Database(name.into())),
+                "{name}"
+            );
+        }
+        // A non-numeric keyspace is kept (so Redis can refuse it), not dropped.
+        assert_eq!(Scope::parse(Some("kdb:x")).and_then(|s| s.keyspace()), None);
+        assert!(Scope::parse(Some("kdb:x")).is_some());
+    }
+
+    #[test]
+    fn scope_canonical_node_round_trips() {
+        for node in ["kdb:0", "kdb:15", "shop", "db", "kdb", "a:b", "a/b"] {
+            let scope = Scope::parse(Some(node)).unwrap();
+            assert_eq!(
+                Scope::parse(Some(scope.to_node().as_str())),
+                Some(scope),
+                "{node}"
+            );
+        }
+        // A name that itself starts with a tag is re-wrapped, so the canonical
+        // form re-parses to the same name.
+        let odd = Scope::Database("db:x".into());
+        assert_eq!(odd.to_node(), "db:db:x");
+        assert_eq!(Scope::parse(Some(odd.to_node().as_str())), Some(odd));
+        // Access rules name keyspaces bare.
+        assert_eq!(Scope::Keyspace(3).child(), "3");
+        assert_eq!(Scope::Database("shop".into()).child(), "shop");
+        // A bare integer (pre-stripped `kdb:`) still names a Redis keyspace.
+        assert_eq!(Scope::Database("3".into()).keyspace(), Some(3));
+        assert_eq!(Scope::Database("db3".into()).keyspace(), Some(3));
+        assert_eq!(Scope::Database("db".into()).keyspace(), None);
+        assert_eq!(Scope::Database("shop".into()).keyspace(), None);
+        assert_eq!(Scope::Keyspace(3).database(), None);
+    }
+
+    #[test]
+    fn query_request_scope_database_ignores_keyspaces() {
+        let req = |node: &str| QueryRequest {
+            node: Some(node.into()),
+            ..Default::default()
+        };
+        assert_eq!(req("db:shop").scope_database().as_deref(), Some("shop"));
+        assert_eq!(req("shop").scope_database().as_deref(), Some("shop"));
+        assert_eq!(req("kdb:3").scope_database(), None);
+        assert_eq!(QueryRequest::default().scope_database(), None);
+    }
 
     /// The mongosh-script detector must catch real scripts (a seed/bootstrap
     /// file with comments, consts, functions, getSiblingDB) and must NEVER
@@ -2009,6 +2340,62 @@ mod tests {
                 statement_is_write(Engine::Mysql, sql),
                 "write missed: {sql}"
             );
+        }
+    }
+
+    /// Read-looking statements that write (or execute) are writes: the parser
+    /// check sees what the first keyword cannot. Plain reads stay reads.
+    #[test]
+    fn read_looking_writes_are_writes_for_mysql_and_postgres() {
+        for (engine, sql) in [
+            (
+                Engine::Postgres,
+                "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            ),
+            (Engine::Postgres, "SELECT 1 INTO new_table"),
+            (Engine::Postgres, "EXPLAIN ANALYZE DELETE FROM t"),
+            (Engine::Postgres, "EXPLAIN (ANALYZE) SELECT * FROM t"),
+            (Engine::Mysql, "EXPLAIN ANALYZE DELETE FROM t"),
+        ] {
+            assert!(statement_is_write(engine, sql), "{engine:?}: {sql}");
+        }
+        for (engine, sql) in [
+            (Engine::Postgres, "SELECT * FROM t WHERE a = 1"),
+            (Engine::Postgres, "WITH c AS (SELECT 1) SELECT * FROM c"),
+            (Engine::Postgres, "EXPLAIN SELECT * FROM t"),
+            (Engine::Mysql, "SELECT a, b FROM shop.orders WHERE id = 3"),
+            (Engine::Mysql, "EXPLAIN SELECT 1"),
+            (Engine::Mysql, "DESCRIBE t"),
+            (Engine::Mysql, "SHOW TABLES"),
+        ] {
+            assert!(!statement_is_write(engine, sql), "{engine:?}: {sql}");
+        }
+    }
+
+    /// The guard never classifies fewer writes than the engine's own split —
+    /// the statements the driver will actually execute.
+    #[test]
+    fn write_guard_covers_every_engine_split() {
+        let corpus = [
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1 # note\n; UPDATE t SET a = 1",
+            "SELECT `a;b` FROM t; DROP TABLE t",
+            "SELECT 1; SELECT 2",
+            "SELECT 'x'",
+        ];
+        for (engine, dialect) in [
+            (Engine::Mysql, SqlDialect::Mysql),
+            (Engine::Postgres, SqlDialect::Postgres),
+            (Engine::Clickhouse, SqlDialect::Clickhouse),
+        ] {
+            for sql in corpus {
+                let executor_sees_write = split_statements(sql, dialect)
+                    .iter()
+                    .any(|s| !sql_first_keyword_is_read(&s.text));
+                if executor_sees_write {
+                    assert!(statement_is_write(engine, sql), "{engine:?}: {sql}");
+                }
+            }
         }
     }
 

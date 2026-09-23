@@ -199,6 +199,7 @@ async fn lifecycle_cancelled_close_caller_keeps_owned_cleanup_alive() {
             user_id: user.clone(),
             resolved: Some(resolved),
             token,
+            abort: None,
         },
     );
     let closing = service.clone();
@@ -259,6 +260,7 @@ async fn lifecycle_native_cancel_deadline_releases_old_ownership() {
             user_id: user.clone(),
             resolved: Some(resolved),
             token,
+            abort: None,
         },
     );
     tokio::time::timeout(Duration::from_secs(2), service.close_connection(&conn))
@@ -270,4 +272,62 @@ async fn lifecycle_native_cancel_deadline_releases_old_ownership() {
         .resolve(&conn, &user, None, "db_query")
         .await
         .is_ok());
+}
+
+/// A Stop with no native handle (a mongosh script, a Mongo write, a Redis
+/// command) must really drop the detached execution and say so — never report
+/// success while the work keeps running.
+#[tokio::test]
+async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
+    let (service, conn, user) = fixture().await;
+    assert_eq!(
+        service
+            .cancel(&conn, &user, "unknown")
+            .await
+            .unwrap()
+            .status,
+        CancelStatus::NotRunning
+    );
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let held = DropCount(dropped.clone());
+    let task = tokio::spawn(async move {
+        let _held = held;
+        std::future::pending::<()>().await;
+    });
+    service.in_flight.lock().unwrap().insert(
+        "script".into(),
+        InFlightQuery {
+            conn_id: conn.clone(),
+            user_id: user.clone(),
+            resolved: None,
+            token: CancelToken::new(),
+            abort: Some(task.abort_handle()),
+        },
+    );
+    let outcome = service.cancel(&conn, &user, "script").await.unwrap();
+    assert_eq!(outcome.status, CancelStatus::Aborted);
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the execution future (and a mongosh child it owns) is dropped"
+    );
+
+    // Inline execution without a native handle: nothing can stop it from
+    // here, and the caller is told so.
+    service.in_flight.lock().unwrap().insert(
+        "inline".into(),
+        InFlightQuery {
+            conn_id: conn.clone(),
+            user_id: user.clone(),
+            resolved: None,
+            token: CancelToken::new(),
+            abort: None,
+        },
+    );
+    assert_eq!(
+        service.cancel(&conn, &user, "inline").await.unwrap().status,
+        CancelStatus::NotStoppable
+    );
 }

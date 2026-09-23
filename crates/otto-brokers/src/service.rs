@@ -43,6 +43,15 @@ pub struct BrokersService {
     pool: DashMap<Id, Pooled>,
     /// Per-cluster SSH tunnel + Kafka proxy (only for clusters with `ssh`).
     tunnels: DashMap<Id, Arc<BrokerTunnel>>,
+    /// Per-cluster single-flight locks for the MISS paths of [`Self::client_for`]
+    /// and [`Self::tunnel_for`]. Without them, concurrent first opens (the page
+    /// loading topics, groups and metrics together) each opened a tunnel and a
+    /// client; the later insert replaced the earlier one in both maps, the
+    /// earlier tunnel's last `Arc` went with its evicted pool entry, and its ssh
+    /// child died under a client still in use ("broker transport failure").
+    /// Two maps, because `client_for`'s miss path calls `tunnel_for`.
+    client_locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
+    tunnel_locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
     samplers: DashMap<Id, Mutex<ClusterMetricState>>,
     /// Per-cluster negative cache: present once a consumer-group operation has
     /// been refused by the broker's ACLs (`GroupAuthorizationFailed`). While
@@ -65,6 +74,16 @@ fn sr_secret_ref_for(id: &Id) -> String {
 fn join(e: tokio::task::JoinError) -> Error {
     Error::Internal(format!("broker task: {e}"))
 }
+/// The single-flight lock for `id` in `locks` (created on first use).
+fn open_lock(
+    locks: &DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
+    id: &Id,
+) -> Arc<tokio::sync::Mutex<()>> {
+    locks
+        .entry(id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 impl BrokersService {
     pub fn new(
@@ -77,6 +96,8 @@ impl BrokersService {
             secrets,
             pool: DashMap::new(),
             tunnels: DashMap::new(),
+            client_locks: DashMap::new(),
+            tunnel_locks: DashMap::new(),
             samplers: DashMap::new(),
             group_denied: DashMap::new(),
             audit,
@@ -309,14 +330,24 @@ impl BrokersService {
         uses_tls: bool,
         skip_verify: bool,
     ) -> Result<Arc<BrokerTunnel>> {
-        if let Some(t) = self.tunnels.get(id) {
-            if t.is_alive() {
-                return Ok(t.clone());
-            }
+        if let Some(t) = self.live_tunnel(id) {
+            return Ok(t);
+        }
+        // Single-flight: one opener per cluster; the others wait and reuse it.
+        let lock = open_lock(&self.tunnel_locks, id);
+        let _opening = lock.lock().await;
+        if let Some(t) = self.live_tunnel(id) {
+            return Ok(t);
         }
         let t = Arc::new(BrokerTunnel::open(ssh, bootstrap, uses_tls, skip_verify).await?);
         self.tunnels.insert(id.clone(), t.clone());
         Ok(t)
+    }
+
+    /// The cached tunnel for `id`, when its ssh child is still alive.
+    fn live_tunnel(&self, id: &Id) -> Option<Arc<BrokerTunnel>> {
+        let t = self.tunnels.get(id)?;
+        t.is_alive().then(|| t.clone())
     }
 
     /// Resolve a cluster row into a librdkafka spec + schema-registry client,
@@ -394,15 +425,16 @@ impl BrokersService {
     /// Pooled client for a cluster (reconnects if missing, stale, or its tunnel
     /// has died).
     async fn client_for(&self, id: &Id) -> Result<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
-        // `get_mut` so a cache hit refreshes `last_used` (keeps an actively-used
-        // cluster off the idle reaper). The guard is dropped before the miss path
-        // touches the same shard, so there's no self-deadlock.
-        if let Some(mut p) = self.pool.get_mut(id) {
-            let tunnel_ok = p.tunnel.as_ref().is_none_or(|t| t.is_alive());
-            if p.created.elapsed() < POOL_TTL && tunnel_ok {
-                p.last_used = Instant::now();
-                return Ok((p.client.clone(), p.registry.clone()));
-            }
+        if let Some(hit) = self.pooled_client(id) {
+            return Ok(hit);
+        }
+        // Single-flight: one opener per cluster; concurrent misses wait and then
+        // take the entry it inserted instead of replacing it (see
+        // `client_locks`).
+        let lock = open_lock(&self.client_locks, id);
+        let _opening = lock.lock().await;
+        if let Some(hit) = self.pooled_client(id) {
+            return Ok(hit);
         }
         let row = self.repo.get(id).await?;
         let (spec, registry, tunnel) = self.prepare(&row).await?;
@@ -423,6 +455,20 @@ impl BrokersService {
             },
         );
         Ok((client, registry))
+    }
+
+    /// The pooled client for `id` when it is fresh and its tunnel (if any) is
+    /// alive. `get_mut` so a hit refreshes `last_used` (keeps an actively-used
+    /// cluster off the idle reaper); the guard is dropped on return, before any
+    /// miss path touches the same shard, so there's no self-deadlock.
+    fn pooled_client(&self, id: &Id) -> Option<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
+        let mut p = self.pool.get_mut(id)?;
+        let tunnel_ok = p.tunnel.as_ref().is_none_or(|t| t.is_alive());
+        if p.created.elapsed() < POOL_TTL && tunnel_ok {
+            p.last_used = Instant::now();
+            return Some((p.client.clone(), p.registry.clone()));
+        }
+        None
     }
 
     /// Evict pooled clients (and their SSH tunnels) idle longer than `idle`.
@@ -1402,5 +1448,26 @@ fn lag_alert_from_row(
         enabled: r.enabled,
         created_at: r.created_at,
         breach_lag,
+    }
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use super::*;
+
+    /// Concurrent first opens of ONE cluster serialize on one lock (so the
+    /// later caller reuses the tunnel/client instead of replacing a live one);
+    /// other clusters are never blocked by it.
+    #[tokio::test]
+    async fn open_lock_is_shared_per_cluster() {
+        let locks: DashMap<Id, Arc<tokio::sync::Mutex<()>>> = DashMap::new();
+        let a = open_lock(&locks, &"c1".to_string());
+        let b = open_lock(&locks, &"c1".to_string());
+        let other = open_lock(&locks, &"c2".to_string());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &other));
+        let _held = a.lock().await;
+        assert!(b.try_lock().is_err(), "a second opener waits for the first");
+        assert!(other.try_lock().is_ok(), "other clusters are not blocked");
     }
 }

@@ -31,10 +31,30 @@ export function sqlLiteral(engine: DbEngine | null, raw: string, asNumber: boole
   if (asNumber && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
   return `'${escapeSqlString(raw, backslashEscapes(engine))}'`;
 }
-/** SQL-quote an existing typed value (for WHERE / INSERT values). */
-export function valueLiteral(engine: DbEngine | null, v: unknown): string {
+/** An integer column type (MySQL `BIGINT UNSIGNED`, Postgres `INT8`,
+ *  ClickHouse `Nullable(UInt64)`, …) — never `POINT` / `INTERVAL`. */
+export function isIntegerType(typeHint: string | null | undefined): boolean {
+  return !!typeHint && /(^|[^a-z])u?(tiny|small|medium|big)?int(eger|[0-9]*)?([^a-z]|$)/i.test(typeHint);
+}
+/** An integer cell that arrived as its exact decimal STRING: the daemon sends
+ *  64-bit values beyond ±(2^53 − 1) as digits, because `JSON.parse` would
+ *  round the number — and a rounded key targets a different row. */
+export function isExactIntegerCell(v: unknown, typeHint: string | null | undefined): v is string {
+  return typeof v === 'string' && /^-?\d+$/.test(v) && isIntegerType(typeHint);
+}
+/** Whether an edited cell's previous value was numeric (its draft is then
+ *  emitted bare) — including an exact-digits 64-bit integer. */
+function isNumericCell(v: unknown, typeHint: string | null | undefined): boolean {
+  return typeof v === 'number' || isExactIntegerCell(v, typeHint);
+}
+/** SQL-quote an existing typed value (for WHERE / INSERT values). `typeHint`
+ *  is the column's type: an integer column's exact-digits string is emitted
+ *  BARE — quoted, MySQL would compare it to the column as a double and match
+ *  neighbouring rows. */
+export function valueLiteral(engine: DbEngine | null, v: unknown, typeHint?: string | null): string {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number' || typeof v === 'bigint') return String(v);
+  if (isExactIntegerCell(v, typeHint)) return v;
   if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
   if (isComplex(v)) return `'${escapeSqlString(compactJson(v), backslashEscapes(engine))}'`;
   return `'${escapeSqlString(String(v), backslashEscapes(engine))}'`;
@@ -50,7 +70,8 @@ export function typedCellDraft(engine: DbEngine | null, tv: TypedValue): string 
     case 'bool':
       return engine === 'postgres' ? (tv.raw === 'true' ? 'TRUE' : 'FALSE') : tv.raw === 'true' ? '1' : '0';
     case 'number':
-      return String(Number(tv.raw));
+      // Keep integer digits verbatim — `Number()` rounds beyond 2^53.
+      return /^\s*-?\d+\s*$/.test(tv.raw) ? tv.raw.trim() : String(Number(tv.raw));
     default:
       return tv.raw === '' ? SET_EMPTY : tv.raw;
   }
@@ -65,9 +86,22 @@ export function whereByPk(ctx: EditCtx, rowIdx: number): string {
   return ctx.target.pkCols
     .map((pk) => {
       const ci = ctx.columns.findIndex((c) => c.name === pk);
-      return `${ctx.qid(pk)} = ${valueLiteral(ctx.engine, ctx.liveRows[rowIdx][ci])}`;
+      return `${ctx.qid(pk)} = ${valueLiteral(ctx.engine, ctx.liveRows[rowIdx][ci], ctx.columns[ci]?.type_hint)}`;
     })
     .join(' AND ');
+}
+
+/** The database/schema a scope node names — mirrors the daemon's `Scope`
+ *  parse: a `db:<name>/…` tree path yields its name, a Redis keyspace
+ *  (`kdb:N`) is not a database, anything else is a plain name taken verbatim
+ *  (so a database literally called `db` keeps its scope). Used for every
+ *  engine whose edits need the database a result ran in (SQL and Mongo). */
+export function scopeDatabase(node: string | null | undefined): string | null {
+  const n = node?.trim();
+  if (!n) return null;
+  if (n.startsWith('kdb:')) return null;
+  if (n.startsWith('db:')) return n.split('/')[0].slice(3).trim() || null;
+  return n;
 }
 
 /** Parse a simple SELECT … FROM <table>. Returns {db, table} or null. */
@@ -111,7 +145,7 @@ export const sqlAdapter: EditAdapter = {
       };
     }
     // `db` stays null when the SQL omits it — EditFlow defaults it from the
-    // schema root; `pkCols` is filled by the async object_detail lookup.
+    // scope the query RAN in; `pkCols` is filled by the async object_detail lookup.
     return { target: { db: parsed.db, table: parsed.table, pkCols: [] }, reason: null };
   },
 
@@ -126,7 +160,7 @@ export const sqlAdapter: EditAdapter = {
       if (entries.length === 0) continue;
       const sets = entries
         .map(([ci, value]) =>
-          `${ctx.qid(ctx.columns[ci].name)} = ${sqlLiteral(ctx.engine, value, typeof ctx.liveRows[rowIdx][ci] === 'number')}`)
+          `${ctx.qid(ctx.columns[ci].name)} = ${sqlLiteral(ctx.engine, value, isNumericCell(ctx.liveRows[rowIdx][ci], ctx.columns[ci].type_hint))}`)
         .join(', ');
       const where = whereByPk(ctx, rowIdx);
       stmts.push(
@@ -161,7 +195,7 @@ export const sqlAdapter: EditAdapter = {
     if (ctx.target.pkCols.length === 1) {
       const pk = ctx.target.pkCols[0];
       const ci = ctx.columns.findIndex((c) => c.name === pk);
-      const list = idxs.map((i) => valueLiteral(ctx.engine, ctx.liveRows[i][ci])).join(', ');
+      const list = idxs.map((i) => valueLiteral(ctx.engine, ctx.liveRows[i][ci], ctx.columns[ci]?.type_hint)).join(', ');
       where = `${ctx.qid(pk)} IN (${list})`;
     } else {
       // Composite key: OR a per-row AND of every key column.
@@ -186,7 +220,7 @@ export const sqlAdapter: EditAdapter = {
     const cols = ctx.columns.map((c) => ctx.qid(c.name)).join(', ');
     return idxs
       .map((i) => {
-        const vals = ctx.columns.map((_, ci) => valueLiteral(ctx.engine, ctx.liveRows[i][ci])).join(', ');
+        const vals = ctx.columns.map((c, ci) => valueLiteral(ctx.engine, ctx.liveRows[i][ci], c.type_hint)).join(', ');
         return `INSERT INTO ${ref} (${cols}) VALUES (${vals});`;
       })
       .join('\n');
@@ -202,7 +236,7 @@ export const sqlAdapter: EditAdapter = {
     ctx.columns.forEach((c, i) => {
       if (omitPk && ctx.target.pkCols.includes(c.name)) return; // single PK → regenerate
       cols.push(ctx.qid(c.name));
-      vals.push(valueLiteral(ctx.engine, ctx.liveRows[rowIdx][i]));
+      vals.push(valueLiteral(ctx.engine, ctx.liveRows[rowIdx][i], c.type_hint));
     });
     const sql = `INSERT INTO ${tableRef(ctx)} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
     return { title: 'Review INSERT (duplicate row)', sql };
@@ -217,7 +251,7 @@ export const sqlAdapter: EditAdapter = {
     for (const c of ctx.columns) {
       if (!(c.name in doc)) continue;
       cols.push(ctx.qid(c.name));
-      vals.push(valueLiteral(ctx.engine, doc[c.name]));
+      vals.push(valueLiteral(ctx.engine, doc[c.name], c.type_hint));
     }
     if (cols.length === 0) return null;
     return `INSERT INTO ${tableRef(ctx)} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
@@ -234,7 +268,7 @@ export const sqlAdapter: EditAdapter = {
       const prev = ctx.liveRows[rowIdx]?.[i];
       const next = doc[c.name];
       if (compactJson(prev ?? null) === compactJson(next ?? null)) return;
-      sets.push(`${ctx.qid(c.name)} = ${valueLiteral(ctx.engine, next)}`);
+      sets.push(`${ctx.qid(c.name)} = ${valueLiteral(ctx.engine, next, c.type_hint)}`);
       diff.push({ row: rowIdx, path: c.name, op: 'cell', before: shown(prev), after: shown(next) });
     });
     if (sets.length === 0) return null;

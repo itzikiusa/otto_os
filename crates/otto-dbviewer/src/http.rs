@@ -590,18 +590,19 @@ async fn mcp_query<S: DbViewerCtx>(
 /// role as `run_query` (`Editor`; global connections: root only): issuing a
 /// `KILL QUERY` is a privileged operation against the live database, and only
 /// someone who could have *started* the query should be able to stop it. An
-/// unknown / already-finished `query_id` is a no-op success (204), never an
-/// error — the caller just wants the query gone.
+/// unknown / already-finished `query_id` is a success (`not_running`), never
+/// an error — the caller just wants the query gone. The body says what the
+/// Stop actually achieved (see [`crate::service::CancelStatus`]).
 async fn cancel_query<S: DbViewerCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<CancelReq>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    ctx.db().cancel(&id, &user.id, &req.query_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    let outcome = ctx.db().cancel(&id, &user.id, &req.query_id).await?;
+    Ok(Json(outcome).into_response())
 }
 
 /// Server-side teardown for a connection the user closed in the UI: cancels its

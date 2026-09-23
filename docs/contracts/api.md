@@ -728,9 +728,9 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
-| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
+| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | `DbCancelOutcome` `{status}` — what the Stop achieved: `cancelled` (engine-native cancel issued and the run ended), `aborted` (Otto dropped the run: a mongosh child is killed and no further statement is sent, but a statement already on the server may still complete), `not_running` (unknown / already finished), `not_stoppable` (no native cancel and nothing Otto can drop — it runs until it ends or times out) |
 | POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
-| POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard; rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
+| POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard — statements are split with the engine's own lexer and, on MySQL/PostgreSQL, a `SELECT`/`WITH`/`EXPLAIN`/`DESCRIBE` must parse as a provable read (unparseable = refused). What passes then **executes in the engine's native read-only mode** (MySQL `START TRANSACTION READ ONLY`, PostgreSQL `BEGIN READ ONLY`, ClickHouse HTTP `readonly=2`); MongoDB and Redis run only allow-listed read operations. Rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
 | POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
@@ -807,7 +807,11 @@ database stops the heavy query and frees the cached connection, not just the
 client's HTTP wait. Cancel is gated at the same role as `query` (`ws editor`;
 global connections: `Database:Edit`). Cancelling an unknown / already-finished
 query, a query on a different connection, or one on an engine without a native
-per-query cancel (Redis) is a no-op success (`204`).
+per-query cancel is still a success (`200`): the body's `status` says whether
+anything actually stopped. Without a native handle (mongosh scripts, Mongo writes,
+Redis) the detached run is aborted instead (`aborted`); after a native cancel the
+run gets a short grace period to end on its own (`cancelled`) before it is
+aborted. A mongosh script also honours the request's `timeout_ms`.
 
 **MongoDB cancel.** A tracked run (`query_id` set) stamps its `find` /
 `aggregate` / `countDocuments` with `comment: "otto:<query_id>"` (a cursor's
@@ -817,9 +821,23 @@ and issues `{killOp: 1, op: <opid>}` per match, on a separate pooled connection.
 Best-effort by design: `allUsers: true` needs the `inprog` privilege — when
 refused, the lookup is retried scoped to the current user (no privilege needed;
 it is the user that ran the query); a refused `killOp` (`killop` privilege) is
-logged and answered `204`. Writes, index ops and `mongosh` scripts are never
-tagged (no server-side cancel path). A cancel that lands before the server has
-registered the op matches nothing and is a `204`.
+logged and the run is aborted (`aborted`). Writes, index ops and `mongosh`
+scripts have no server-side cancel path: their detached run is aborted (a script's
+`mongosh` child is killed). A cancel that lands before the server has registered
+the op matches nothing; the run is then aborted after the grace period.
+
+**Scope (`node`).** `RunQueryReq.node` (and the `node` of `mcp-query`, `query-plan`,
+export) names the scope a statement runs in: a plain database / schema name, a
+`db:<name>[/…]` tree path, or a Redis `kdb:<n>[/…]` keyspace. Only a value that
+starts with `db:` or `kdb:` is read as a path; anything else is a plain name taken
+verbatim (a database literally called `db` or `kdb`, or with `:` / `/` in its name,
+keeps its scope). Redis also accepts a bare index or the `db<n>` label and
+**refuses** any other scope rather than running on the default database. MongoDB:
+the scope wins over a profile `db`/`database` param (that is only the default).
+MySQL / PostgreSQL set the scope explicitly on every run (no scope → the profile's
+default database / the session's default `search_path`), never inheriting a
+pooled session's leftover. BIGINT values beyond ±(2^53 − 1) are sent as their
+exact decimal **string** (MySQL / PostgreSQL), since a JSON number would be rounded.
 
 `RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
 It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):

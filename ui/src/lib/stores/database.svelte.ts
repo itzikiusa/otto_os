@@ -18,6 +18,7 @@ import { confirmer } from '../confirm.svelte';
 import type {
   Connection,
   DbAssistMode,
+  DbCancelOutcome,
   DbCapabilities,
   DbCompletionItem,
   DbDashboard,
@@ -2371,10 +2372,13 @@ class DatabaseStore {
 
   // ── Query ─────────────────────────────────────────────────────────────────
 
-  /** Run the active tab's statement (or a given one) and store the result. */
+  /** Run the active tab's statement (or a given one) and store the result.
+   *  `node` scopes it: omitted (`undefined`) → the active database; `null` →
+   *  explicitly NO scope (how a result that ran unscoped is paged/refreshed —
+   *  it must not pick up a database selected since). */
   async runQuery(
     statement?: string,
-    node?: string,
+    node?: string | null,
     opts?: { transient?: boolean; keepOffset?: boolean; cursor?: unknown },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
@@ -2412,9 +2416,9 @@ class DatabaseStore {
       // default row cap. The server also injects this LIMIT into the SQL so a
       // huge table isn't fully scanned — this value just sizes that cap.
       const explicit = parseExplicitLimit(sql);
-      // Scope to the active database (so unqualified tables resolve) unless an
-      // explicit node was passed.
-      const scopeNode = node ?? (this.activeDb || null);
+      // Scope to the active database (so unqualified tables resolve) unless a
+      // node was passed — `null` included, which means "no scope".
+      const scopeNode = node === undefined ? this.activeDb || null : node;
       // Per-tab timeout (opt-in; null / 0 = no limit).
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
@@ -2452,7 +2456,7 @@ class DatabaseStore {
         // guarded connection. Ask for a typed confirmation and, if granted,
         // retry with the explicit confirm flag.
         if (isWriteBlocked(e)) {
-          const ok = await this.confirmGuardedWrite();
+          const ok = await this.confirmGuardedWrite(e);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
             this.clearPending(t);
@@ -2472,8 +2476,10 @@ class DatabaseStore {
       return result;
     } catch (e) {
       // A user-initiated abort isn't an error — leave the prior result intact.
+      // What the Stop actually achieved is reported by `abortQuery` from the
+      // server's cancel outcome — this only drops our wait, so it must not
+      // claim the query stopped.
       if (isAbortError(e) || controller.signal.aborted) {
-        toasts.info('Query stopped');
         return null;
       }
       // The server answered → the query itself finished with an error.
@@ -2517,9 +2523,10 @@ class DatabaseStore {
     const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
     t.offset = next;
     // Page the statement (and scope node) that PRODUCED the result — the editor
-    // buffer / active DB may have been edited since the run. `transient` keeps
-    // the buffer untouched.
-    void this.runQuery(t.ran_statement ?? undefined, t.ran_node ?? undefined, {
+    // buffer / active DB may have been edited since the run. `ran_node` is
+    // passed as-is: a `null` (ran unscoped) must stay unscoped, not fall back
+    // to a database selected since. `transient` keeps the buffer untouched.
+    void this.runQuery(t.ran_statement ?? undefined, t.ran_node, {
       keepOffset: true,
       transient: true,
       cursor,
@@ -2532,17 +2539,24 @@ class DatabaseStore {
    * production is a deliberate, explicit act. Returns true only on an exact,
    * case-insensitive match.
    */
-  private async confirmGuardedWrite(): Promise<boolean> {
+  private async confirmGuardedWrite(blocked?: unknown): Promise<boolean> {
     const conn = this.selectedConn;
     if (!conn) return false;
     const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+    // Redis `KEYS` is gated too — not a write, but it blocks the whole server
+    // while it walks every key; say that instead of "can modify data".
+    const blockingKeys = blocked instanceof ApiError && blocked.message.includes('KEYS blocks');
     const typed = await confirmer.promptText(
-      `You are about to run a WRITE / schema change on the ${label} connection ` +
-        `"${conn.name}". This can modify or destroy data. Type the connection ` +
-        `name to confirm.`,
+      blockingKeys
+        ? `KEYS blocks the Redis server while it scans every key on the ${label} ` +
+            `connection "${conn.name}" — prefer SCAN with MATCH/COUNT. Type the ` +
+            `connection name to run it anyway.`
+        : `You are about to run a WRITE / schema change on the ${label} connection ` +
+            `"${conn.name}". This can modify or destroy data. Type the connection ` +
+            `name to confirm.`,
       {
-        title: '⚠ Confirm production write',
-        confirmLabel: 'Run write',
+        title: blockingKeys ? '⚠ Confirm blocking command' : '⚠ Confirm production write',
+        confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
         placeholder: conn.name,
       },
     );
@@ -2560,7 +2574,10 @@ class DatabaseStore {
   async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     if (!id) throw new Error('No connection selected');
-    const scopeNode = node ?? (this.activeDb || null);
+    // Same scope rule as `runQuery`: only an OMITTED node means "active DB";
+    // an explicit `null` (a grid edit of a result that ran unscoped) stays
+    // unscoped instead of landing in whatever database is selected now.
+    const scopeNode = node === undefined ? this.activeDb || null : node;
     const post = (confirmWrite: boolean): Promise<QueryResult> =>
       api.post<QueryResult>(`${this.connBase(id)}/query`, {
         statement: sql,
@@ -2571,7 +2588,7 @@ class DatabaseStore {
       return await post(false);
     } catch (e) {
       if (isWriteBlocked(e)) {
-        const ok = await this.confirmGuardedWrite();
+        const ok = await this.confirmGuardedWrite(e);
         if (!ok) return null;
         return await post(true);
       }
@@ -2666,15 +2683,17 @@ class DatabaseStore {
    * fetch (drops our HTTP wait) AND tells the server to cancel the query
    * engine-side (`POST …/db/cancel` with the run's `query_id`) so the database
    * stops the heavy work and frees the cached connection — not just our client.
-   * The server cancel is best-effort/fire-and-forget: an unknown/finished query
-   * is a no-op there, and a cancel failure must not block stopping the UI.
+   * The server cancel never blocks stopping the UI. `report` (the user's Stop
+   * button / Esc) toasts what the server says the Stop ACHIEVED — "stopped"
+   * only when it really stopped; tab closes and superseded runs stay quiet.
    */
-  abortQuery(tabId?: number): void {
+  abortQuery(tabId?: number, opts?: { report?: boolean }): void {
+    const report = opts?.report === true;
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
     const t = this.tabs.find((x) => x.id === id);
     if (t) {
-      this.abortRunForTab(t);
+      this.abortRunForTab(t, report);
       this.persistTabs(); // the pending marker is persisted with the tabs
       return;
     }
@@ -2682,12 +2701,40 @@ class DatabaseStore {
     const entry = this.runControllers.get(id);
     if (!entry) return;
     this.runControllers.delete(id);
-    void api
-      .post(`${this.connBase(entry.connId)}/cancel`, { query_id: entry.queryId })
-      .catch(() => {
-        /* best-effort: server may have already finished/evicted the query */
-      });
+    this.sendCancel(entry.connId, entry.queryId, report);
     entry.controller.abort();
+  }
+
+  /** Ask the server to cancel a run (`POST …/db/cancel`). With `report`, toast
+   *  its outcome: only `cancelled` means the database stopped the work. */
+  private sendCancel(connId: Id, queryId: string, report: boolean): void {
+    void api
+      .post<DbCancelOutcome | undefined>(`${this.connBase(connId)}/cancel`, { query_id: queryId })
+      .then((out) => {
+        if (!report) return;
+        switch (out?.status) {
+          case 'aborted':
+            toasts.warn(
+              'Query stopped in Otto',
+              'No further statement will run, but a statement already sent may still finish on the server.',
+            );
+            break;
+          case 'not_stoppable':
+            toasts.warn(
+              'Query is still running',
+              'This engine cannot cancel it — it runs until it finishes or reaches its timeout.',
+            );
+            break;
+          case 'not_running':
+            toasts.info('Query had already finished');
+            break;
+          default:
+            toasts.info('Query stopped');
+        }
+      })
+      .catch((e) => {
+        if (report) toasts.error('Could not stop the query', errMsg(e));
+      });
   }
 
   /**
@@ -2698,17 +2745,13 @@ class DatabaseStore {
    * The run's identity is the live controller entry, or — when the HTTP wait
    * was already lost and the tab is in re-attach mode — its pending marker.
    */
-  private abortRunForTab(t: QueryTab): void {
+  private abortRunForTab(t: QueryTab, report = false): void {
     const entry = this.runControllers.get(t.id);
     const target = entry ?? (t.pending ? { ...t.pending } : null);
     if (!target) return;
     this.runControllers.delete(t.id);
-    // 1) Ask the server to cancel the query engine-side (fire-and-forget).
-    void api
-      .post(`${this.connBase(target.connId)}/cancel`, { query_id: target.queryId })
-      .catch(() => {
-        /* best-effort: server may have already finished/evicted the query */
-      });
+    // 1) Ask the server to cancel the query engine-side (never awaited).
+    this.sendCancel(target.connId, target.queryId, report);
     // 2) Abort our fetch (if still held) and clear the tab's run state. A user
     // Stop also forgets the pending marker — re-attach must not resurrect a
     // query the user explicitly killed.

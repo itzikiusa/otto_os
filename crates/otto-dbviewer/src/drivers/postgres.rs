@@ -534,7 +534,8 @@ impl Driver for PostgresDriver {
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let pool = self.pool(cfg).await?;
         // Active-db node = a schema → `SET search_path`.
-        let active_schema = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let scope_schema = req.scope_database();
+        let active_schema = scope_schema.as_deref();
         let timeout_ms = req.timeout_ms.filter(|&t| t > 0);
 
         let spans = split_statements(text, SqlDialect::Postgres);
@@ -601,12 +602,13 @@ impl Driver for PostgresDriver {
             .begin_with("BEGIN READ ONLY")
             .await
             .map_err(types::upstream)?;
-        if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            (&mut *conn)
-                .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-                .await
-                .map_err(types::upstream)?;
-        }
+        // Always explicit (inside the transaction, so it reverts on rollback):
+        // without a schema, the session default — not a pooled leftover.
+        let schema = node.map(str::trim).filter(|s| !s.is_empty());
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&search_path_sql(schema)))
+            .await
+            .map_err(types::upstream)?;
         let row = sqlx::query(&format!("EXPLAIN (FORMAT JSON) {stmt}"))
             .fetch_one(&mut *conn)
             .await
@@ -672,12 +674,13 @@ impl Driver for PostgresDriver {
             .begin_with("BEGIN READ ONLY")
             .await
             .map_err(types::upstream)?;
-        if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            (&mut *conn)
-                .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-                .await
-                .map_err(types::upstream)?;
-        }
+        // Always explicit (inside the transaction, so it reverts on rollback):
+        // without a schema, the session default — not a pooled leftover.
+        let schema = node.map(str::trim).filter(|s| !s.is_empty());
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&search_path_sql(schema)))
+            .await
+            .map_err(types::upstream)?;
 
         let mut rows = sqlx::query(statement).fetch(&mut *conn);
         let mut sink = ExportSink::new(w, format);
@@ -1433,6 +1436,44 @@ async fn capture_backend_pid(conn: &mut sqlx::PgConnection, token: &CancelToken)
     }
 }
 
+/// The `search_path` statement for a request: the selected schema, else the
+/// session DEFAULT (`RESET` — the role/database setting), never whatever an
+/// earlier request on the same pooled session left behind.
+fn search_path_sql(schema: Option<&str>) -> String {
+    schema
+        .map(set_search_path_sql)
+        .unwrap_or_else(|| "RESET search_path".to_string())
+}
+
+/// One round trip setting a request's session context: its `search_path`
+/// (see [`search_path_sql`]) and its statement timeout — `RESET` to the
+/// role/database default when the request sets none, so neither `0` (which
+/// would override a DBA's default) nor a timeout left by a cancelled run
+/// that never reached its reset applies.
+fn session_setup_sql(schema: Option<&str>, timeout_ms: Option<u64>) -> String {
+    let timeout = timeout_ms
+        .map(|ms| format!("SET statement_timeout = {ms}"))
+        .unwrap_or_else(|| "RESET statement_timeout".to_string());
+    format!("{}; {timeout}", search_path_sql(schema))
+}
+
+/// Acquire a pooled session with this request's context set EXPLICITLY (see
+/// [`session_setup_sql`]). Pooled sessions keep what an earlier request set,
+/// so a request without a selected schema used to run on whichever
+/// `search_path` its connection had last been given.
+async fn acquire_session(
+    pool: &sqlx::PgPool,
+    schema: Option<&str>,
+    timeout_ms: Option<u64>,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    (&mut *conn)
+        .execute(sqlx::raw_sql(&session_setup_sql(schema, timeout_ms)))
+        .await
+        .map_err(types::upstream)?;
+    Ok(conn)
+}
+
 async fn run_read(
     pool: &sqlx::PgPool,
     statement: &str,
@@ -1441,25 +1482,18 @@ async fn run_read(
     timeout_ms: Option<u64>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let mut conn = acquire_session(pool, active_schema, timeout_ms).await?;
     capture_backend_pid(&mut conn, token).await;
-    if let Some(schema) = active_schema {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-            .await
-            .map_err(types::upstream)?;
-    }
-    // Per-statement wall-clock cap (reset to unlimited afterwards so the pooled
-    // connection doesn't carry the timeout into its next use).
-    if let Some(ms) = timeout_ms {
-        let _ = (&mut *conn)
-            .execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}")))
-            .await;
+    // Reads leave no session state, except the explicit lock/config functions.
+    if types::sql_leaves_session_state(statement) {
+        conn.close_on_drop();
     }
     let out = exec_read_conn(&mut conn, statement, max_rows).await;
+    // Best-effort: don't leave the per-statement cap on the pooled session for
+    // the tree/completion queries that share it (the next run sets its own).
     if timeout_ms.is_some() {
         let _ = (&mut *conn)
-            .execute(sqlx::raw_sql("SET statement_timeout = 0"))
+            .execute(sqlx::raw_sql("RESET statement_timeout"))
             .await;
     }
     out
@@ -1471,13 +1505,12 @@ async fn run_write(
     active_schema: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let mut conn = acquire_session(pool, active_schema, None).await?;
     capture_backend_pid(&mut conn, token).await;
-    if let Some(schema) = active_schema {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-            .await
-            .map_err(types::upstream)?;
+    // A `SET`/`BEGIN`/`SET ROLE`/… would outlive this request on a pooled
+    // session: close it afterwards instead of returning it to the pool.
+    if types::sql_leaves_session_state(statement) {
+        conn.close_on_drop();
     }
     exec_write_conn(&mut conn, statement).await
 }
@@ -1493,18 +1526,13 @@ async fn run_batch(
     timeout_ms: Option<u64>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let mut conn = acquire_session(pool, active_schema, timeout_ms).await?;
     capture_backend_pid(&mut conn, token).await;
-    if let Some(schema) = active_schema {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-            .await
-            .map_err(types::upstream)?;
-    }
-    if let Some(ms) = timeout_ms {
-        let _ = (&mut *conn)
-            .execute(sqlx::raw_sql(&format!("SET statement_timeout = {ms}")))
-            .await;
+    if spans
+        .iter()
+        .any(|span| types::sql_leaves_session_state(&span.text))
+    {
+        conn.close_on_drop();
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -1533,7 +1561,7 @@ async fn run_batch(
     }
     if timeout_ms.is_some() {
         let _ = (&mut *conn)
-            .execute(sqlx::raw_sql("SET statement_timeout = 0"))
+            .execute(sqlx::raw_sql("RESET statement_timeout"))
             .await;
     }
     Ok(types::fold_batch_results(results))
@@ -1604,7 +1632,8 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
         return v.map(Value::from).unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-        return v.map(Value::from).unwrap_or(Value::Null);
+        // INT8: exact digits beyond 2^53 (see `types::i64_to_json`).
+        return v.map(types::i64_to_json).unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<i16>, _>(idx) {
         return v.map(|n| Value::from(n as i64)).unwrap_or(Value::Null);
@@ -2004,12 +2033,13 @@ async fn governed_read(
         .begin_with("BEGIN READ ONLY")
         .await
         .map_err(types::upstream)?;
-    if let Some(schema) = req.node.as_deref().filter(|n| !n.is_empty()) {
-        (&mut *tx)
-            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
-            .await
-            .map_err(types::upstream)?;
-    }
+    // Always explicit (reverted with the transaction): the selected schema,
+    // else the session default rather than a pooled leftover.
+    let schema = req.scope_database();
+    (&mut *tx)
+        .execute(sqlx::raw_sql(&search_path_sql(schema.as_deref())))
+        .await
+        .map_err(types::upstream)?;
     if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
         (&mut *tx)
             .execute(sqlx::raw_sql(&format!(
@@ -2124,6 +2154,45 @@ mod tests {
             set_search_path_sql("public"),
             "SET search_path TO \"public\""
         );
+    }
+
+    /// Every run sets its whole session context explicitly, so nothing an
+    /// earlier request left on the pooled session (a schema, a timeout from a
+    /// run cancelled before its reset) applies to it.
+    #[test]
+    fn session_setup_is_always_explicit() {
+        assert_eq!(
+            session_setup_sql(Some("shop"), Some(5000)),
+            "SET search_path TO \"shop\"; SET statement_timeout = 5000"
+        );
+        assert_eq!(
+            session_setup_sql(None, None),
+            "RESET search_path; RESET statement_timeout"
+        );
+    }
+
+    #[test]
+    fn session_changing_statements_retire_the_pooled_session() {
+        for sql in [
+            "SET search_path TO other",
+            "SET ROLE admin",
+            "BEGIN",
+            "START TRANSACTION",
+            "LOCK TABLE t",
+            "PREPARE p AS SELECT 1",
+            "CREATE TEMP TABLE t (id int)",
+            "SELECT set_config('search_path', 'x', false)",
+            "SELECT pg_advisory_lock(1)",
+        ] {
+            assert!(types::sql_leaves_session_state(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM t",
+            "UPDATE t SET a = 1",
+            "CREATE TABLE t (id int)",
+        ] {
+            assert!(!types::sql_leaves_session_state(sql), "{sql}");
+        }
     }
 
     #[test]
