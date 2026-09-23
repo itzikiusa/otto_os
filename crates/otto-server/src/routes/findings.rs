@@ -388,6 +388,35 @@ fn jira_description_md(f: &Finding) -> String {
 
 /// `POST /findings/{id}/jira` — file the finding as a Jira issue. Idempotent: if
 /// already filed, returns the finding unchanged. 400 if no Jira account exists.
+/// Process-wide set of findings with a Jira create in flight; the claim is
+/// released on drop (success, error or a dropped request alike).
+struct JiraCreateClaim(String);
+
+impl JiraCreateClaim {
+    fn inflight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+        static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        SET.get_or_init(Default::default)
+    }
+
+    fn take(finding_id: &str) -> Option<Self> {
+        let mut set = Self::inflight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.insert(finding_id.to_string())
+            .then(|| Self(finding_id.to_string()))
+    }
+}
+
+impl Drop for JiraCreateClaim {
+    fn drop(&mut self) {
+        let mut set = Self::inflight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.remove(&self.0);
+    }
+}
+
 async fn to_jira(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -397,6 +426,18 @@ async fn to_jira(
     let f = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     if f.jira_key.is_some() {
         return Ok(Json(f)); // already filed
+    }
+    // Check-then-create had no lock: a double click filed TWO Jira issues.
+    // Hold a per-finding in-flight claim across the create, then re-check
+    // (a request that just finished may have filed it).
+    let Some(_claim) = JiraCreateClaim::take(&id) else {
+        return Err(ApiError(Error::Conflict(
+            "a Jira issue is already being created for this finding".to_string(),
+        )));
+    };
+    let f = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
+    if f.jira_key.is_some() {
+        return Ok(Json(f));
     }
     let account = match &body.account_id {
         Some(aid) => ctx.issues_store.get_account(aid).await.map_err(ApiError)?,
@@ -1163,4 +1204,21 @@ async fn e2e_seed(
         f = drive_to_status(&ctx, &f.id, s, &who).await?;
     }
     Ok(Json(f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JiraCreateClaim;
+
+    #[test]
+    fn jira_create_claim_is_exclusive_until_dropped() {
+        let first = JiraCreateClaim::take("f-claim-test");
+        assert!(first.is_some());
+        // A concurrent (double-click) request is refused while the first runs.
+        assert!(JiraCreateClaim::take("f-claim-test").is_none());
+        // Other findings are independent.
+        assert!(JiraCreateClaim::take("f-claim-other").is_some());
+        drop(first);
+        assert!(JiraCreateClaim::take("f-claim-test").is_some());
+    }
 }
