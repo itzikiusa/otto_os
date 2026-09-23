@@ -705,8 +705,10 @@ counts the site.
   toolbar (clamped inside the canvas) has **Ask Otto**, **Variants**, move
   up/down, duplicate, hide on mobile and ⋯ (rename, hide everywhere, move to
   top/bottom, delete). Links and forms never navigate while editing. 3D
-  embeds show their artifact's thumbnail (else a CSS stand-in card) with a
-  badge: `Rewards Card 3D · v7 · follows approved`.
+  embeds render **live** through the 3D Studio embed runtime (§10.5, auto-
+  rotating, off under reduced motion); until the first frame — and in the
+  preview and the export — the artifact's thumbnail or a CSS stand-in card
+  shows. A badge names the link: `Rewards Card 3D · v7 · follows approved`.
 - **Design inspector** (right; under the left panel when the window is
   narrower): *nothing selected* → page title / URL / description, site name /
   domain / language, the brand kit (link or change it; swatches) and the
