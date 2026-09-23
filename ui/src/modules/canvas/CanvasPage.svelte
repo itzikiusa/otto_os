@@ -11,6 +11,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { router } from '../../lib/router.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
   import MermaidCanvas from './MermaidCanvas.svelte';
@@ -88,7 +89,12 @@
 </script>
 
 <div class="canvas-shell">
-<PageHeader title="Canvas" subtitle="Describe a diagram — the agent draws it and keeps refining it as you chat.">
+<!-- Canvas is Design Hall's Whiteboard studio: the crumb leads back to the Hall. -->
+<PageHeader
+  title="Canvas"
+  subtitle="Describe a diagram — the agent draws it and keeps refining it as you chat."
+  crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}
+>
   {#snippet actions()}
     <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
     {#if ws.currentId && !noScenes}

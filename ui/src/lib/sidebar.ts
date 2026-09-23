@@ -102,7 +102,10 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'product', icon: 'note', label: 'Product', group: 'build', feature: 'product', keywords: 'story jira confluence analysis rfc' },
   // Vault v3 — the file-backed docs home (Obsidian-parity markdown vaults, OKF).
   { id: 'vault', icon: 'book', label: 'Vault', group: 'build', keywords: 'docs notes markdown obsidian okf knowledge graph' },
-  { id: 'canvas', icon: 'shapes', label: 'Canvas', group: 'build', keywords: 'studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid' },
+  // Design Hall — one library for every design studio (Frames, Graphics, Site,
+  // 3D, Whiteboard, Brand Kit, Spatial). It replaces the Canvas entry: Canvas
+  // lives on as the Whiteboard studio (`#/canvas` still routes; see navIdForModule).
+  { id: 'design', icon: 'designHall', label: 'Design Hall', group: 'build', feature: 'design', keywords: 'design studio frames graphics site 3d whiteboard canvas brand kit mockup diagram sketch excalidraw mermaid d2 spatial' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Lab', group: 'build', feature: 'skill_eval', keywords: 'skill lab evaluate validate review edit improve' },
   // ── Infrastructure ──
   // The unified hub: SSH/custom terminals + databases + Kafka clusters live in
@@ -163,6 +166,8 @@ export function availableModules(
  */
 export function navIdForModule(routerModule: string): string {
   if (routerModule === 'database' || routerModule === 'brokers') return 'connections';
+  // Canvas is Design Hall's Whiteboard studio.
+  if (routerModule === 'canvas') return 'design';
   return routerModule;
 }
 
