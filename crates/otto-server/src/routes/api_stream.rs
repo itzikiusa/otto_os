@@ -293,7 +293,32 @@ async fn serve_websocket(
             max_frame_size: Some(1024 * 1024),
             ..Default::default()
         };
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
+        // SSRF guard, DNS-rebinding safe: resolve + vet the host ONCE and dial
+        // exactly the vetted address (tungstenite's own connect would resolve
+        // the name again, after `prepare_stream`'s pre-flight check). The
+        // workspace allow-local opt-in skips the vetting, as for HTTP.
+        let target = prepared.url().clone();
+        let port = target.port_or_known_default().unwrap_or(80);
+        let addrs: Vec<std::net::SocketAddr> =
+            if super::api_client::workspace_allows_local(ctx, wid).await {
+                let host = target
+                    .host_str()
+                    .unwrap_or("")
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string();
+                tokio::net::lookup_host((host.as_str(), port))
+                    .await
+                    .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
+                    .collect()
+            } else {
+                otto_netguard::resolve_checked(target.as_str()).await?.1
+            };
+        let socket = tokio::net::TcpStream::connect(addrs.as_slice())
+            .await
+            .map_err(|_| "WebSocket connection failed; check the server URL".to_string())?;
+        let _ = socket.set_nodelay(true);
+        tokio_tungstenite::client_async_tls_with_config(request, socket, Some(config), None).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
     };
     let result = tokio::select! {
         result = tokio::time::timeout(Duration::from_millis(spec.request.timeout_ms.unwrap_or(60_000)), connecting) =>

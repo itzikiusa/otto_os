@@ -68,7 +68,7 @@ const EXECUTE_TIMEOUT: Duration = Duration::from_secs(60);
 /// (audit S1). Re-exported here under the original `net_guard` path so existing
 /// call sites stay byte-for-byte unchanged.
 pub(crate) mod net_guard {
-    pub(crate) use otto_netguard::{check_url, redirect_policy};
+    pub(crate) use otto_netguard::{check_url, guarded_client_builder, guarded_redirect_policy};
 }
 
 fn repo(ctx: &ServerCtx) -> ApiClientRepo {
@@ -96,25 +96,28 @@ fn cookie_jar(wid: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
 /// Shared outbound HTTP client per (workspace, allow_local). Follows
 /// redirects, generous body timeout enforced per-request via `.timeout()`.
 /// `allow_local` (the workspace's explicit opt-in) swaps the SSRF-guarded
-/// redirect policy for a plain bounded one — the pre-flight check is skipped
-/// by the caller under the same flag.
+/// resolver + redirect policy for a plain bounded client — the pre-flight
+/// check is skipped by the caller under the same flag.
 fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
     static CLIENTS: OnceLock<StdMutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
     let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
     map.entry(format!("{wid}|{allow_local}"))
         .or_insert_with(|| {
-            let builder = reqwest::Client::builder()
-                .user_agent("Otto-ApiClient/1.0")
-                .cookie_provider(cookie_jar(wid));
             let builder = if allow_local {
-                builder.redirect(reqwest::redirect::Policy::limited(10))
+                reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10))
             } else {
-                // SSRF guard: cap + re-validate each redirect hop's host so an
-                // upstream 30x can't bounce us into a private/loopback address.
-                builder.redirect(net_guard::redirect_policy())
+                // SSRF guard: the guarded resolver re-vets every address at
+                // CONNECT time (a DNS-rebinding answer can't swap in 127.0.0.1
+                // after the pre-flight check), and each redirect hop is capped
+                // + re-validated.
+                net_guard::guarded_client_builder()
             };
-            builder.build().unwrap_or_default()
+            builder
+                .user_agent("Otto-ApiClient/1.0")
+                .cookie_provider(cookie_jar(wid))
+                .build()
+                .unwrap_or_default()
         })
         .clone()
 }
@@ -152,19 +155,26 @@ fn build_settings_client(
     if !no_redirect && !no_verify && proxy.is_none() {
         return None;
     }
-    let mut builder = reqwest::Client::builder()
+    // Tunnelled: the target resolves and is dialled at the FAR end — the local
+    // guard would only false-block bastion-only hosts (and would refuse the
+    // local SOCKS endpoint itself). allow_local: the workspace explicitly opted
+    // in to private targets. Everything else keeps the connect-time guard.
+    let guarded = proxy.is_none() && !allow_local;
+    let base = if guarded {
+        net_guard::guarded_client_builder()
+    } else {
+        reqwest::Client::builder()
+    };
+    let mut builder = base
         .user_agent("Otto-ApiClient/1.0")
         .cookie_provider(cookie_jar(wid));
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
-    } else if proxy.is_some() || allow_local {
-        // Tunnelled: redirects traverse the proxy and resolve at the FAR end —
-        // the local resolver check would only false-block bastion-only hosts.
-        // allow_local: the workspace explicitly opted in to private targets.
+    } else if !guarded {
         builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
         // Redirects still follow the SSRF-guarded policy.
-        builder.redirect(net_guard::redirect_policy())
+        builder.redirect(net_guard::guarded_redirect_policy())
     };
     if no_verify {
         builder = builder.danger_accept_invalid_certs(true);

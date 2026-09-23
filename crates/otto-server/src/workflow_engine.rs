@@ -3250,9 +3250,9 @@ async fn execute_node(
             otto_netguard::check_url(url)
                 .await
                 .map_err(otto_core::Error::Upstream)?;
-            let client = reqwest::Client::builder()
+            // Guarded resolver pins the vetted address (no DNS rebinding).
+            let client = otto_netguard::guarded_client_builder()
                 .timeout(Duration::from_secs(30))
-                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), url);
@@ -3936,9 +3936,9 @@ async fn execute_node(
             otto_netguard::check_url(&url)
                 .await
                 .map_err(otto_core::Error::Upstream)?;
-            let client = reqwest::Client::builder()
+            // Guarded resolver pins the vetted address (no DNS rebinding).
+            let client = otto_netguard::guarded_client_builder()
                 .timeout(Duration::from_secs(30))
-                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);

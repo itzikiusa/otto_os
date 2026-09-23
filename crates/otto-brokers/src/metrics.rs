@@ -318,9 +318,16 @@ pub async fn scrape(url: &str, skip_tls_verify: bool, socks_proxy: Option<&str>)
             .await
             .map_err(|m| Error::Forbidden(format!("metrics endpoint blocked: {m}")))?;
     }
-    let mut builder = reqwest::Client::builder()
+    // Direct scrapes also get the guarded resolver (the address dialled is the
+    // one vetted above — no DNS rebinding); tunnelled ones resolve at the far
+    // end and keep the plain re-validating redirect policy.
+    let base_builder = if socks_proxy.is_some() {
+        reqwest::Client::builder().redirect(otto_netguard::redirect_policy())
+    } else {
+        otto_netguard::guarded_client_builder()
+    };
+    let mut builder = base_builder
         .danger_accept_invalid_certs(skip_tls_verify)
-        .redirect(otto_netguard::redirect_policy())
         .timeout(Duration::from_secs(8));
     if let Some(proxy) = socks_proxy {
         builder = builder.proxy(

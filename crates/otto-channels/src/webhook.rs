@@ -33,11 +33,11 @@ pub struct WebhookAdapter {
 impl WebhookAdapter {
     /// Build an adapter that delivers replies to `callback_url` (if any).
     pub fn new(callback_url: Option<String>) -> Self {
-        let http = reqwest::Client::builder()
+        // SSRF guard end to end: the guarded resolver re-vets the address at
+        // connect time (no DNS rebinding after `check_url`), and the guarded
+        // redirect policy stops a 3xx bouncing the POST to an internal address.
+        let http = otto_netguard::guarded_client_builder()
             .timeout(CALLBACK_TIMEOUT)
-            // Reuse the SSRF guard's redirect policy so a 3xx can't bounce the
-            // POST to a blocked internal address.
-            .redirect(otto_netguard::redirect_policy())
             .build()
             .unwrap_or_default();
         Self {
