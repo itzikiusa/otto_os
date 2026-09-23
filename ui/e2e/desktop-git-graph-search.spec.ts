@@ -16,14 +16,19 @@ import { expectFullyInViewport, openPage } from './helpers';
 // that clicking the hit selects that commit in the graph.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REPO_NAME = 'e2e-search-repo';
+// Unique per beforeAll: the suite runs with several workers against ONE shared
+// daemon, so this file's two tests can land in different workers and seed two
+// repos. A fixed name let the second worker open the FIRST worker's repo — a
+// different needle sha — and fail the selection check on a correct selection.
+const REPO_NAME = `e2e-search-repo-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 const NEEDLE = 'feat: needle-xyz lands here';
 let repoDir = '';
 let needleSha = '';
+let wsId = '';
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
-  const wsId = await seedWorkspace(ctx, base);
+  wsId = await seedWorkspace(ctx, base);
   repoDir = mkdtempSync(join(tmpdir(), 'otto-e2e-search-'));
   const git = (...a: string[]) => execFileSync('git', ['-C', repoDir, ...a], { stdio: 'ignore' });
   git('init', '-q');
@@ -48,6 +53,7 @@ test.beforeAll(async () => {
 });
 
 async function openRepo(page: import('@playwright/test').Page): Promise<void> {
+  await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), wsId);
   await openPage(page, 'git');
   const existingTab = page.locator('.git-tab-name', { hasText: REPO_NAME });
   if (await existingTab.count()) {
@@ -105,7 +111,11 @@ test('clicking a search result selects that commit in the graph', async ({ page 
 
   const detailSha = page.locator('.detail-sha');
   await expect(detailSha).toBeVisible({ timeout: 15_000 });
-  const short = ((await detailSha.textContent()) ?? '').trim();
-  expect(short.length).toBeGreaterThan(3);
-  expect(needleSha.startsWith(short)).toBe(true);
+  // The reveal pages history in before it selects, so poll the detail header
+  // rather than reading whatever commit it shows first.
+  await expect(detailSha).toHaveText(/^\s*[0-9a-f]{4,}\s*$/);
+  await expect
+    .poll(async () => needleSha.startsWith(((await detailSha.textContent()) ?? '').trim()), { timeout: 15_000 })
+    .toBe(true);
+  await expect(page.locator('.detail-subject')).toHaveText(NEEDLE);
 });
