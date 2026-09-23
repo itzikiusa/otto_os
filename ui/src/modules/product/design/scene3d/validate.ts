@@ -4,20 +4,38 @@
 // `attachment_id` must be a safe id component (it becomes a URL path segment on
 // the authed fetch), colours are `#rrggbb`. Unknown keys are dropped on
 // `normalize` so an agent typo never reaches the renderer.
+//
+// Reads v1 and v2; always WRITES v2 (the normalized doc carries `version: 2`,
+// so a v1 scene upgrades on its next save — the Rust side accepts both). v2
+// adds `token:color.<name>` colours, physical material fields, `brand` /
+// `gltf.src` design URIs, environment, cameras, states and the turntable.
+// Malformed v2 pieces are dropped with a warning; only what Rust would also
+// refuse outright (a gltf with neither/both refs, a bad src) is fatal.
 import {
+  EASINGS,
+  ENV_PRESET_IDS,
   LIGHT_TYPES,
+  MATERIAL_PRESET_IDS,
   OBJECT_TYPES,
   SCENE3D_MAX_OBJECTS,
   SCENE3D_TYPE,
   SCENE3D_VERSION,
+  SCENE3D_VERSIONS,
+  type Easing,
+  type EnvPresetId,
   type LightType,
+  type MaterialPresetId,
   type ObjectType,
   type Scene3dCamera,
+  type Scene3dCameraPreset,
   type Scene3dDoc,
+  type Scene3dEnvironment,
   type Scene3dGroup,
   type Scene3dLight,
   type Scene3dMaterial,
   type Scene3dObject,
+  type Scene3dState,
+  type Scene3dStateOverride,
   type Vec3,
 } from './types';
 
@@ -41,12 +59,26 @@ const MAX_NOTES = 4000;
 const MAX_TEXT = 500;
 /** |coordinate| beyond this is almost certainly a typo (metres). */
 const MAX_COORD = 1e5;
+const MAX_CAMERAS = 32;
+const MAX_STATES = 32;
+const MAX_DURATION_MS = 10_000;
+/** Brand Kit's token-name grammar (`design-hall/brand/tokens.ts::isValidTokenName`). */
+const TOKEN_COLOR = /^token:color\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/** `otto://design/<id>[@approved|@latest|@vN][#node]` — the grammar of `uri.rs`. */
+const DESIGN_URI = /^otto:\/\/design\/[A-Za-z0-9_-]{1,64}(?:@(?:approved|latest|v[1-9][0-9]{0,17}))?(?:#[A-Za-z0-9_:.-]{1,128})?$/;
 
 export function isSafeId(s: unknown): s is string {
   return typeof s === 'string' && SAFE_ID.test(s);
 }
 export function isHexColor(s: unknown): s is string {
   return typeof s === 'string' && HEX_COLOR.test(s);
+}
+/** `#rrggbb` or (v2) `token:color.<name>`. */
+export function isColorRef(s: unknown): s is string {
+  return typeof s === 'string' && (HEX_COLOR.test(s) || TOKEN_COLOR.test(s));
+}
+export function isDesignUri(s: unknown): s is string {
+  return typeof s === 'string' && DESIGN_URI.test(s.trim());
 }
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -106,6 +138,33 @@ function color(v: unknown, path: string, ctx: Ctx): string | undefined {
   }
   return v.toLowerCase();
 }
+/** Material / override colours: hex (lower-cased) or a brand token (kept as written). */
+function colorRef(v: unknown, path: string, ctx: Ctx): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v === 'string' && TOKEN_COLOR.test(v)) return v;
+  if (!isHexColor(v)) {
+    ctx.warn(path, 'expected "#rrggbb" or "token:color.<name>"');
+    return undefined;
+  }
+  return v.toLowerCase();
+}
+function ranged(v: unknown, path: string, ctx: Ctx, lo: number, hi: number): number | undefined {
+  if (v === undefined) return undefined;
+  if (!finite(v) || v < lo || v > hi) {
+    ctx.warn(path, `expected a number in ${lo}..${hi}`);
+    return undefined;
+  }
+  return v;
+}
+function oneOf<T extends string>(v: unknown, path: string, ctx: Ctx, allowed: readonly T[]): T | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || !allowed.includes(v as T)) {
+    ctx.warn(path, `expected one of ${allowed.join(' | ')}`);
+    return undefined;
+  }
+  return v as T;
+}
+
 function str(v: unknown, path: string, ctx: Ctx, max: number): string | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== 'string') {
@@ -130,9 +189,11 @@ function material(v: unknown, path: string, ctx: Ctx): Scene3dMaterial | undefin
     return undefined;
   }
   const m: Scene3dMaterial = {};
-  const c = color(v.color, `${path}.color`, ctx);
+  const preset = oneOf<MaterialPresetId>(v.preset, `${path}.preset`, ctx, MATERIAL_PRESET_IDS);
+  if (preset) m.preset = preset;
+  const c = colorRef(v.color, `${path}.color`, ctx);
   if (c) m.color = c;
-  const e = color(v.emissive, `${path}.emissive`, ctx);
+  const e = colorRef(v.emissive, `${path}.emissive`, ctx);
   if (e) m.emissive = e;
   const met = unit(v.metalness, `${path}.metalness`, ctx);
   if (met !== undefined) m.metalness = met;
@@ -142,6 +203,16 @@ function material(v: unknown, path: string, ctx: Ctx): Scene3dMaterial | undefin
   if (op !== undefined) m.opacity = op;
   const wf = bool(v.wireframe, `${path}.wireframe`, ctx);
   if (wf !== undefined) m.wireframe = wf;
+  for (const k of ['clearcoat', 'clearcoat_roughness', 'transmission', 'sheen'] as const) {
+    const n = unit(v[k], `${path}.${k}`, ctx);
+    if (n !== undefined) m[k] = n;
+  }
+  const ior = ranged(v.ior, `${path}.ior`, ctx, 1, 2.333);
+  if (ior !== undefined) m.ior = ior;
+  const th = ranged(v.thickness, `${path}.thickness`, ctx, 0, 10);
+  if (th !== undefined) m.thickness = th;
+  const ei = ranged(v.emissive_intensity, `${path}.emissive_intensity`, ctx, 0, 100);
+  if (ei !== undefined) m.emissive_intensity = ei;
   return m;
 }
 
@@ -178,13 +249,32 @@ function object(v: unknown, path: string, ctx: Ctx, seen: Set<string>): Scene3dO
   const mat = material(v.material, `${path}.material`, ctx);
   if (mat) out.material = mat;
   if (type === 'gltf') {
-    if (!isSafeId(v.attachment_id)) {
-      ctx.err(`${path}.attachment_id`, 'gltf objects need a safe attachment_id (never a URL)');
+    if (v.attachment_id !== undefined && v.src !== undefined) {
+      ctx.err(path, 'gltf objects take attachment_id OR src, not both');
       return null;
     }
-    out.attachment_id = v.attachment_id;
-  } else if (v.attachment_id !== undefined) {
-    ctx.warn(`${path}.attachment_id`, 'only gltf objects carry attachment_id');
+    if (v.src !== undefined) {
+      if (!isDesignUri(v.src)) {
+        ctx.err(`${path}.src`, 'src must be an otto://design/<id>[@approved|@latest|@vN] reference (never a URL)');
+        return null;
+      }
+      out.src = (v.src as string).trim();
+    } else if (!isSafeId(v.attachment_id)) {
+      ctx.err(`${path}.attachment_id`, 'gltf objects need a safe attachment_id or an otto://design src (never a URL)');
+      return null;
+    } else {
+      out.attachment_id = v.attachment_id;
+    }
+  } else {
+    if (v.attachment_id !== undefined) ctx.warn(`${path}.attachment_id`, 'only gltf objects carry attachment_id');
+    if (v.src !== undefined) ctx.warn(`${path}.src`, 'only gltf objects carry src');
+  }
+  if (v.radius !== undefined) {
+    if (type !== 'box') ctx.warn(`${path}.radius`, 'only box objects carry radius');
+    else {
+      const r = ranged(v.radius, `${path}.radius`, ctx, 0, 0.5);
+      if (r !== undefined) out.radius = r;
+    }
   }
   if (type === 'text') {
     out.text = str(v.text, `${path}.text`, ctx, MAX_TEXT) ?? out.name;
@@ -320,8 +410,8 @@ export function validate(input: unknown): ValidationResult {
   if (input.type !== SCENE3D_TYPE) {
     ctx.err('type', `expected "${SCENE3D_TYPE}"`);
   }
-  if (input.version !== SCENE3D_VERSION) {
-    ctx.err('version', `expected ${SCENE3D_VERSION}`);
+  if (!(SCENE3D_VERSIONS as readonly unknown[]).includes(input.version)) {
+    ctx.err('version', `expected ${SCENE3D_VERSIONS.join(' or ')}`);
   }
   const cam = camera(input.camera, ctx);
 
@@ -408,7 +498,138 @@ export function validate(input: unknown): ValidationResult {
   if (bg) doc.background = bg;
   const grid = bool(input.grid, 'grid', ctx);
   if (grid !== undefined) doc.grid = grid;
+  validateV2(input, doc, ctx, new Set(objects.map((o) => o.id)));
   return { ok: true, doc, issues: ctx.issues };
+}
+
+/** v2 top-level blocks. Malformed pieces are dropped (warned), never fatal. */
+function validateV2(input: Record<string, unknown>, doc: Scene3dDoc, ctx: Ctx, objectIds: Set<string>): void {
+  if (input.brand !== undefined) {
+    if (isDesignUri(input.brand)) doc.brand = input.brand.trim();
+    else ctx.warn('brand', 'expected an otto://design/<id>[@approved] reference');
+  }
+  if (input.environment !== undefined) {
+    const e = input.environment;
+    const preset = isRecord(e) ? oneOf<EnvPresetId>(e.preset, 'environment.preset', ctx, ENV_PRESET_IDS) : undefined;
+    if (!isRecord(e) || !preset) ctx.warn('environment', 'expected {preset: studio-soft | sunset | night | none}');
+    else {
+      const env: Scene3dEnvironment = { preset };
+      const i = ranged(e.intensity, 'environment.intensity', ctx, 0, 10);
+      if (i !== undefined) env.intensity = i;
+      const b = bool(e.background, 'environment.background', ctx);
+      if (b !== undefined) env.background = b;
+      const r = ranged(e.rotation, 'environment.rotation', ctx, -360, 360);
+      if (r !== undefined) env.rotation = r;
+      doc.environment = env;
+    }
+  }
+  if (input.turntable !== undefined) {
+    const t = input.turntable;
+    if (!isRecord(t)) ctx.warn('turntable', 'expected an object');
+    else {
+      const tt: NonNullable<Scene3dDoc['turntable']> = {};
+      const en = bool(t.enabled, 'turntable.enabled', ctx);
+      if (en !== undefined) tt.enabled = en;
+      const sp = ranged(t.speed, 'turntable.speed', ctx, -360, 360);
+      if (sp !== undefined) tt.speed = sp;
+      doc.turntable = tt;
+    }
+  }
+  if (input.cameras !== undefined) {
+    if (!Array.isArray(input.cameras)) ctx.warn('cameras', 'expected an array');
+    else {
+      const seen = new Set<string>();
+      const cams: Scene3dCameraPreset[] = [];
+      for (const [i, c] of input.cameras.slice(0, MAX_CAMERAS).entries()) {
+        const path = `cameras[${i}]`;
+        if (!isRecord(c) || !isSafeId(c.id) || seen.has(c.id)) {
+          ctx.warn(path, 'expected {id (unique, safe), position, target}');
+          continue;
+        }
+        const sub = new Ctx();
+        const position = vec3(c.position, `${path}.position`, sub, null);
+        const target = vec3(c.target, `${path}.target`, sub, [0, 0, 0]);
+        if (!position || !target) {
+          ctx.warn(path, 'expected finite position/target');
+          continue;
+        }
+        const cam: Scene3dCameraPreset = { id: c.id, position, target };
+        const name = str(c.name, `${path}.name`, ctx, MAX_NAME);
+        if (name) cam.name = name;
+        const fov = ranged(c.fov, `${path}.fov`, ctx, 1, 179);
+        if (fov !== undefined) cam.fov = fov;
+        seen.add(c.id);
+        cams.push(cam);
+      }
+      if (input.cameras.length > MAX_CAMERAS) ctx.warn('cameras', `only the first ${MAX_CAMERAS} are kept`);
+      doc.cameras = cams;
+    }
+  }
+  if (input.states !== undefined) {
+    if (!Array.isArray(input.states)) ctx.warn('states', 'expected an array');
+    else {
+      const seen = new Set<string>();
+      const states: Scene3dState[] = [];
+      for (const [i, sv] of input.states.slice(0, MAX_STATES).entries()) {
+        const path = `states[${i}]`;
+        if (!isRecord(sv) || !isSafeId(sv.id) || seen.has(sv.id)) {
+          ctx.warn(path, 'expected {id (unique, safe), name?, overrides?}');
+          continue;
+        }
+        const st: Scene3dState = { id: sv.id };
+        const name = str(sv.name, `${path}.name`, ctx, MAX_NAME);
+        if (name) st.name = name;
+        const d = ranged(sv.duration_ms, `${path}.duration_ms`, ctx, 0, MAX_DURATION_MS);
+        if (d !== undefined) st.duration_ms = Math.round(d);
+        const easing = oneOf<Easing>(sv.easing, `${path}.easing`, ctx, EASINGS);
+        if (easing) st.easing = easing;
+        if (sv.overrides !== undefined) {
+          if (!isRecord(sv.overrides)) ctx.warn(`${path}.overrides`, 'expected {objectId: override}');
+          else {
+            const ovs: Record<string, Scene3dStateOverride> = {};
+            for (const [oid, ov] of Object.entries(sv.overrides)) {
+              const opath = `${path}.overrides.${oid}`;
+              if (!objectIds.has(oid) || !isRecord(ov)) {
+                ctx.warn(opath, 'unknown object (or not an object)');
+                continue;
+              }
+              ovs[oid] = stateOverride(ov, opath, ctx);
+            }
+            st.overrides = ovs;
+          }
+        }
+        seen.add(sv.id);
+        states.push(st);
+      }
+      if (input.states.length > MAX_STATES) ctx.warn('states', `only the first ${MAX_STATES} are kept`);
+      doc.states = states;
+      if (input.default_state !== undefined) {
+        if (typeof input.default_state === 'string' && seen.has(input.default_state)) doc.default_state = input.default_state;
+        else ctx.warn('default_state', 'not a state id');
+      }
+    }
+  } else if (input.default_state !== undefined) {
+    ctx.warn('default_state', 'no states defined');
+  }
+}
+
+function stateOverride(ov: Record<string, unknown>, path: string, ctx: Ctx): Scene3dStateOverride {
+  const out: Scene3dStateOverride = {};
+  for (const k of ['position', 'rotation', 'scale'] as const) {
+    if (ov[k] === undefined) continue;
+    const v = vec3(ov[k], `${path}.${k}`, new Ctx(), null);
+    if (v) out[k] = v;
+    else ctx.warn(`${path}.${k}`, 'expected [x, y, z] finite numbers');
+  }
+  const vis = bool(ov.visible, `${path}.visible`, ctx);
+  if (vis !== undefined) out.visible = vis;
+  const op = unit(ov.opacity, `${path}.opacity`, ctx);
+  if (op !== undefined) out.opacity = op;
+  const c = colorRef(ov.color, `${path}.color`, ctx);
+  if (c) out.color = c;
+  const e = colorRef(ov.emissive, `${path}.emissive`, ctx);
+  if (e) out.emissive = e;
+  return out;
 }
 
 /** Parse + validate a `scene.json` body. */

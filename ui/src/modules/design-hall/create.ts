@@ -6,7 +6,7 @@
 import * as design from '../../lib/api/design';
 import type { CreateDesignArtifactReq, DesignArtifactFormat, DesignStudio } from '../../lib/api/types';
 import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../product/design/templates';
-import { emptyScene } from '../product/design/scene3d';
+import { emptyScene, serializeScene, studioScene } from '../product/design/scene3d';
 import { fileToB64 } from '../product/design/format';
 import { brandStarter, formatForFile, isTextFormat, studioInfo } from './model';
 import { SITE_TEMPLATES, starterSite } from './site/engine/templates';
@@ -41,7 +41,8 @@ export function starterContent(studio: DesignStudio, format: string, title: stri
     case 'excalidraw':
       return blankSource(format, emptyScene);
     case 'scene3d':
-      return blankSource('scene3d', emptyScene);
+      // 3D Studio 1.5 starter (scene3d v2): studio environment, key + rim, a plinth, Idle/Hover, a Hero view.
+      return serializeScene(studioScene());
     case 'd2':
       return D2_STARTER;
     case 'svg':

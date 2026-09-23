@@ -1,11 +1,21 @@
 // scene3d — the agent-editable 3D document format (docs/design/product-design-arena.md §2.3).
-// Version 1. Small, declarative, human-readable: the browser renders it, the agent
-// edits it, the inspector round-trips it. Rotation is DEGREES in the doc (agents and
-// humans think in degrees); the viewer converts to radians for three.
+// Small, declarative, human-readable: the browser renders it, the agent edits it,
+// the inspector round-trips it. Rotation is DEGREES in the doc (agents and humans
+// think in degrees); the viewer converts to radians for three.
+//
+// Version 2 (3D Studio 1.5) — every addition is optional, v1 documents are read
+// unchanged and written back as v2 on their next save: physical material presets
+// + fields, brand colours as `token:color.<name>`, the brand kit URI, procedural
+// environments, named cameras (`#view:<id>`), tweened states (`#state:<id>`), a
+// turntable, rounded boxes and `gltf` objects that point at a Design Hall model
+// (`src: otto://design/<id>[@…]`). Mirrored by `design_scene3d.rs`.
 
 export const SCENE3D_MIME = 'application/vnd.otto.scene3d+json';
 export const SCENE3D_TYPE = 'otto-scene3d';
-export const SCENE3D_VERSION = 1;
+/** What the validator writes (every normalized document is v2). */
+export const SCENE3D_VERSION = 2;
+/** What the validator reads. */
+export const SCENE3D_VERSIONS = [1, 2] as const;
 /** Hard cap mirrored by the Rust validator (`design_scene3d.rs::validate`). */
 export const SCENE3D_MAX_OBJECTS = 2000;
 
@@ -20,13 +30,79 @@ export type PrimitiveType = (typeof PRIMITIVE_TYPES)[number];
 export const LIGHT_TYPES = ['directional', 'ambient', 'point', 'spot', 'hemisphere'] as const;
 export type LightType = (typeof LIGHT_TYPES)[number];
 
+/** v2 physical material presets — a preset supplies defaults, explicit fields win. */
+export const MATERIAL_PRESET_IDS = ['glossy-plastic', 'brushed-metal', 'frosted-glass', 'matte-paper', 'satin'] as const;
+export type MaterialPresetId = (typeof MATERIAL_PRESET_IDS)[number];
+
+/** A colour: `#rrggbb`, or (v2) a brand token reference `token:color.<name>`. */
+export type ColorRef = string;
+
 export interface Scene3dMaterial {
-  color?: string;      // '#rrggbb'
+  color?: ColorRef;    // '#rrggbb' | 'token:color.<name>'
   metalness?: number;  // 0..1
   roughness?: number;  // 0..1
   opacity?: number;    // 0..1 (< 1 ⇒ transparent)
-  emissive?: string;   // '#rrggbb'
+  emissive?: ColorRef; // '#rrggbb' | 'token:color.<name>'
   wireframe?: boolean;
+  // ── v2 physical ──
+  preset?: MaterialPresetId;
+  clearcoat?: number;           // 0..1
+  clearcoat_roughness?: number; // 0..1
+  transmission?: number;        // 0..1 (glass)
+  ior?: number;                 // 1..2.333
+  thickness?: number;           // 0..10 m
+  sheen?: number;               // 0..1
+  emissive_intensity?: number;  // 0..100
+}
+
+/** v2 procedural environments (generated in the viewer — nothing is fetched). */
+export const ENV_PRESET_IDS = ['studio-soft', 'sunset', 'night', 'none'] as const;
+export type EnvPresetId = (typeof ENV_PRESET_IDS)[number];
+
+export interface Scene3dEnvironment {
+  preset: EnvPresetId;
+  intensity?: number;   // 0..10 (default 1)
+  /** Show the environment as the backdrop (default true); else `background`. */
+  background?: boolean;
+  rotation?: number;    // degrees, -360..360
+}
+
+/** v2 named camera ("Hero angle"); embeds ask for it as `#view:<id>`. */
+export interface Scene3dCameraPreset {
+  id: string;
+  name?: string;
+  position: Vec3;
+  target: Vec3;
+  fov?: number;
+}
+
+export const EASINGS = ['linear', 'ease-in', 'ease-out', 'ease-in-out', 'spring'] as const;
+export type Easing = (typeof EASINGS)[number];
+
+/** v2 per-object override inside a state (absent fields = the base document). */
+export interface Scene3dStateOverride {
+  position?: Vec3;
+  rotation?: Vec3;     // degrees
+  scale?: Vec3;
+  visible?: boolean;
+  opacity?: number;
+  color?: ColorRef;
+  emissive?: ColorRef;
+}
+
+/** v2 named state (Idle / Hover / Flipped…) — the viewer tweens between them. */
+export interface Scene3dState {
+  id: string;
+  name?: string;
+  duration_ms?: number; // ≤ 10 000 (default 400)
+  easing?: Easing;      // default ease-in-out
+  overrides?: Record<string, Scene3dStateOverride>;
+}
+
+export interface Scene3dTurntable {
+  enabled?: boolean;
+  /** Degrees per second (negative = clockwise); default 20. */
+  speed?: number;
 }
 
 export interface Scene3dObject {
@@ -39,6 +115,10 @@ export interface Scene3dObject {
   material?: Scene3dMaterial;
   /** `type:'gltf'` only — an attachment id (never a URL); resolved by the host via `resolveAttachment`. */
   attachment_id?: string;
+  /** v2, `type:'gltf'` only — a Design Hall model, `otto://design/<id>[@…]` (instead of `attachment_id`). */
+  src?: string;
+  /** v2, `type:'box'` only — corner radius of the unit box (0..0.5). */
+  radius?: number;
   /** `type:'text'` only — the string to extrude/draw. */
   text?: string;
   visible?: boolean;   // default true
@@ -80,13 +160,21 @@ export interface Scene3dGroup {
 
 export interface Scene3dDoc {
   type: typeof SCENE3D_TYPE;
-  version: typeof SCENE3D_VERSION;
+  version: (typeof SCENE3D_VERSIONS)[number];
   background?: string; // '#rrggbb'
   grid?: boolean;      // default true
   camera: Scene3dCamera;
   lights: Scene3dLight[];
   objects: Scene3dObject[];
   groups: Scene3dGroup[];
+  // ── v2 ──
+  /** The brand kit `token:` colours resolve against: `otto://design/<id>[@approved]`. */
+  brand?: string;
+  environment?: Scene3dEnvironment;
+  cameras?: Scene3dCameraPreset[];
+  states?: Scene3dState[];
+  default_state?: string;
+  turntable?: Scene3dTurntable;
 }
 
 /** What the hierarchy/inspector consider "selectable": an object, a light or a group. */
@@ -115,5 +203,39 @@ export function emptyScene(): Scene3dDoc {
       },
     ],
     groups: [],
+  };
+}
+
+/**
+ * The 3D Studio 1.5 starter (Design Hall → New 3D design): a soft studio
+ * environment, a key + rim light pair, a plinth, Idle/Hover states and a
+ * "Hero angle" camera an embed can ask for as `#view:hero`.
+ */
+export function studioScene(): Scene3dDoc {
+  return {
+    type: SCENE3D_TYPE,
+    version: SCENE3D_VERSION,
+    background: '#eceaf3',
+    grid: true,
+    environment: { preset: 'studio-soft', intensity: 1, background: true },
+    camera: { position: [3.2, 2.2, 4.2], target: [0, 0.8, 0], fov: 35 },
+    cameras: [{ id: 'hero', name: 'Hero angle', position: [2.6, 1.8, 3.4], target: [0, 0.8, 0], fov: 32 }],
+    lights: [
+      { id: 'key', name: 'Key light', type: 'directional', position: [4, 6, 3], target: [0, 0.5, 0], intensity: 1.6, color: '#ffffff', shadow: true },
+      { id: 'rim', name: 'Rim light', type: 'directional', position: [-4, 3, -4], target: [0, 0.8, 0], intensity: 0.8, color: '#dcd6ff' },
+    ],
+    objects: [
+      {
+        id: 'plinth', name: 'Plinth', type: 'cylinder',
+        position: [0, 0.2, 0], rotation: [0, 0, 0], scale: [1.6, 0.4, 1.6],
+        material: { preset: 'matte-paper', color: '#ecebf5' },
+      },
+    ],
+    groups: [],
+    states: [
+      { id: 'idle', name: 'Idle' },
+      { id: 'hover', name: 'Hover', duration_ms: 300, easing: 'ease-out', overrides: {} },
+    ],
+    default_state: 'idle',
   };
 }

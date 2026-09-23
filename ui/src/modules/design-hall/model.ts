@@ -81,9 +81,9 @@ export const STUDIOS: readonly StudioInfo[] = [
     name: '3D Studio',
     blurb: 'Models, scenes and text-to-3D',
     icon: 'box',
-    phase: 'classic',
-    note: 'Today’s scene3d studio: hierarchy, viewport and inspector. PBR presets, states and text-to-3D arrive in Phase 1.',
-    roadmap: 'Phase 1',
+    phase: 'ready',
+    note: '3D Studio 1.5: physical material presets, brand colours, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
+    roadmap: null,
     formats: ['scene3d'],
   },
   {

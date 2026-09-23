@@ -11,7 +11,6 @@
   // <img>; scene3d JSON is parsed + validated before it reaches the viewport.
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { authedBlobUrl } from '../../lib/api/client';
   import type { DesignArtifact } from '../../lib/api/types';
   import DeviceFrame, { type DeviceKind } from '../product/design/DeviceFrame.svelte';
   import DesignBoard from '../product/design/DesignBoard.svelte';
@@ -27,6 +26,7 @@
   import { renderD2 } from '../canvas/d2';
   import { brandColors, contrastRatio, renderKind } from './model';
   import SiteStudio from './site/SiteStudio.svelte';
+  import { resolveModelRef } from './studio3d/sources';
 
   interface Props {
     artifact: DesignArtifact;
@@ -148,10 +148,11 @@
     };
     return { ...base, objects: [...base.objects, hero] };
   });
-  /** gltf references: the model's own bytes, else a legacy product attachment. */
+  /** gltf references: the model's own bytes, else a v2 `otto://design` src or a
+   *  legacy id (a Design Hall artifact, else a Product attachment). */
   function resolveAttachment(aid: string): Promise<string> {
     if (kind === 'model' && aid === artifact.id && blobUrl) return Promise.resolve(blobUrl);
-    return authedBlobUrl(`/product/attachments/${encodeURIComponent(aid)}`);
+    return resolveModelRef(aid);
   }
 
   // ── Brand kit ─────────────────────────────────────────────────────────────

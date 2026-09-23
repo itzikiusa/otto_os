@@ -166,6 +166,17 @@ the inspector round-trips it. Version 1:
   (`design_scene3d.rs::to_blender_script`, a fixed template interpolating only
   validated numbers/enums/escaped names); the UI offers it as a download.
 
+> **scene3d v2 (3D Studio 1.5, 2026-09-23).** Version 2 adds optional fields —
+> physical material `preset`s and fields (clearcoat, transmission, ior,
+> thickness, sheen, emissive intensity), `token:color.<name>` brand colours
+> with a top-level `brand` kit URI, a procedural `environment`, named
+> `cameras` (`#view:<id>`), tweened `states` (`#state:<id>`), a `turntable`,
+> rounded boxes (`radius`) and gltf objects that reference a Design Hall model
+> by `src: otto://design/<id>[@…]`. Both validators read v1 and v2; the TS one
+> always writes v2, so an arena scene upgrades on its next save. The Blender
+> export ignores the v2 extras (token colours fall back to the neutral
+> default). Full reference: `docs/features/design-hall.md` §10.
+
 ---
 
 ## 3. Epic tree behaviour
