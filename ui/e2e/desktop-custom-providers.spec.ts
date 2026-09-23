@@ -137,11 +137,12 @@ test('Workflow agent node offers provider + model from the registry', async ({ p
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
   // The new node is auto-selected → its inspector shows the Provider select +
-  // Model input (agent_prompt was Model-only before, no provider).
+  // the shared catalog-backed ModelPicker ("Model (optional)", shown for the
+  // default provider) — agent_prompt was Model-only before, no provider.
   const providerSelect = page.locator('#np-provider');
   await expect(providerSelect).toBeVisible({ timeout: 10_000 });
   await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
-  await expect(page.locator('#np-model')).toBeVisible();
+  await expect(page.getByLabel('Model (optional)')).toBeVisible();
 });
 
 test('Workflow node inspector docks to a resizable side panel', async ({ page }) => {
