@@ -986,12 +986,17 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .mtop-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A module page that draws its own PageHeader already titles itself right
+     below the bar — don't show the same name twice. */
+  :global(.shell.mobile:has(.mcenter [data-testid='page-header'])) .mtop-title {
+    display: none;
   }
   .mbody {
     flex: 1;

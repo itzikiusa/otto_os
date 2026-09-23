@@ -26,7 +26,6 @@ const title = (page: Page) => page.locator('.mtop-title');
 test('phone: drawer closed on load; top-bar title uses registry labels', async ({ page }) => {
   await boot(page, 'mission-control');
   test.skip(!(await isPhone(page)), 'phone-mode only (≤640px live viewport)');
-  await expect(title(page)).toHaveText('Mission Control');
   await expect(drawer(page)).toHaveCount(0);
 
   // A reload doesn't bring it back either.
@@ -34,10 +33,17 @@ test('phone: drawer closed on load; top-bar title uses registry labels', async (
   await expect(page.locator('.shell')).toBeVisible();
   await expect(drawer(page)).toHaveCount(0);
 
+  // Pages that draw their own PageHeader aren't titled twice: the bar's title
+  // steps aside (its text is still the registry label, never the raw id).
+  await expect(page.getByTestId('page-header').first()).toBeVisible();
+  await expect(title(page)).toHaveText('Mission Control');
+  await expect(title(page)).toBeHidden();
   await page.goto('/#/skills-eval');
   await expect(title(page)).toHaveText('Skills Lab');
-  await page.goto('/#/api');
-  await expect(title(page)).toHaveText('API');
+  // Agents has no PageHeader (its TabBar is the chrome): the bar titles it.
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('page-header')).toHaveCount(0);
+  await expect(title(page)).toBeVisible();
 });
 
 test('phone: tapping a module in the drawer navigates and closes it', async ({ page }) => {
