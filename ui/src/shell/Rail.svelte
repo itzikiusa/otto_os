@@ -1,6 +1,7 @@
 <script lang="ts">
   // Collapsed 44px icon rail (⌘1 expands to the Navigator).
   import Icon from '../lib/components/Icon.svelte';
+  import NotificationBell from './NotificationBell.svelte';
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -47,6 +48,7 @@
   >
     <Icon name="sidebar" />
   </button>
+  <NotificationBell />
 
   <div class="rail-modules">
     {#each modules as m (m.id)}

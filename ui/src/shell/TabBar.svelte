@@ -10,10 +10,6 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import ShareModal from '../modules/agents/ShareModal.svelte';
 
-  // `bellGutter` reserves space on the right so the shell's floating
-  // notification bell never overlaps the tab-bar controls.
-  let { bellGutter = false }: { bellGutter?: boolean } = $props();
-
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
 
@@ -159,7 +155,6 @@
 <div
   class="tabbar"
   class:tauri-pad={isTauri && !ui.railExpanded}
-  class:bell-gutter={bellGutter}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
@@ -331,9 +326,6 @@
   }
   .tabbar.tauri-pad {
     padding-inline-start: 78px;
-  }
-  .tabbar.bell-gutter {
-    padding-inline-end: 42px;
   }
   .tabs {
     display: flex;

@@ -11,9 +11,6 @@
   import RunSteps from './RunSteps.svelte';
   import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
-  // Hosted in the side-docked inspector header so the bell stays reachable when
-  // the shell's floating bell is hidden for the docked layout (agents-style).
-  import NotificationBell from '../../shell/NotificationBell.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -1698,13 +1695,11 @@
         >
           {#if sideDock}
             <!-- Persistent side-panel header (mirrors the agents Right panel):
-                 title on the left; the notification bell + a real close (×) on
-                 the right. The shell's floating bell is hidden in this layout,
-                 so this is the reachable bell. -->
+                 title on the left, a real close (×) on the right. The
+                 notification bell lives in the sidebar, not here. -->
             <div class="insp-side-head">
               <strong>Inspector</strong>
               <span class="grow"></span>
-              <NotificationBell />
               <button
                 class="icon-btn"
                 onclick={closeInspector}
@@ -3166,7 +3161,7 @@
   }
   /* Persistent header for the side-docked panel (mirrors the agents Right panel
      header): full-bleed to the panel edges, sticks to the top while the body
-     scrolls. Holds the title, the notification bell, and the close (×). */
+     scrolls. Holds the title and the close (×). */
   .insp-side-head {
     display: flex;
     align-items: center;
