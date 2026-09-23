@@ -2084,13 +2084,14 @@ resolved. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_hos
 (boolean, default false) confirm it, and are honoured only for a person's credential —
 never for an agent (bridge/MCP headers, a managed-session token or an MCP token).
 
-**History retention.** After every recorded run (execute, saved run, automation step) the
-daemon trims the workspace's history: rows older than `settings.api_client.history_max_days`
-(default 90) are deleted, then only the newest `settings.api_client.history_max_rows`
-(default 1000) are kept; `0` disables either limit. Both live in the workspace settings JSON
-(`PATCH /workspaces/{id}`, admin). A history row keeps at most 64 KB of the response `body`
-(`truncated: true` when cut) — the live response is unaffected. There is no migration:
-pre-existing rows beyond the limits are trimmed on the workspace's next run.
+**History retention (opt-in).** After every recorded run (execute, saved run, automation
+step) the daemon trims the workspace's history: rows older than
+`settings.api_client.history_max_days` are deleted, then only the newest
+`settings.api_client.history_max_rows` are kept. Both default to `0` = **no limit**, so
+nothing is ever deleted until an admin picks a limit (History list → retention control, or
+`PATCH /workspaces/{id}` settings JSON). Once set, pre-existing rows beyond the limits are
+trimmed on the workspace's next run. A history row keeps at most 64 KB of the response `body`
+(`truncated: true` when cut) — the live response is unaffected. No migration.
 
 **Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
 captured executing in one workspace are never replayed for another. The cookies endpoints

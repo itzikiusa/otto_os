@@ -1294,14 +1294,15 @@ class WorkspaceStore {
 
   /** API-client history retention for this workspace (the daemon trims after
    *  every run): `settings.api_client.history_max_rows` / `history_max_days`,
-   *  defaults 1000 rows / 90 days; 0 disables that limit. */
+   *  default 0 / 0 = keep everything (opt-in); 0 disables that limit. */
   get apiHistoryRetention(): { rows: number; days: number } {
     const api = this.current?.settings?.api_client as
       | { history_max_rows?: number; history_max_days?: number }
       | undefined;
     const pick = (v: unknown, fallback: number): number =>
       typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
-    return { rows: pick(api?.history_max_rows, 1000), days: pick(api?.history_max_days, 90) };
+    // 0 = no limit: retention is opt-in (pruning deletes recorded runs).
+    return { rows: pick(api?.history_max_rows, 0), days: pick(api?.history_max_days, 0) };
   }
 
   /** Set the API-client history retention (admin-gated by the workspaces

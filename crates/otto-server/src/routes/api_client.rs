@@ -1457,9 +1457,13 @@ async fn record_history(
 }
 
 /// Default history retention per workspace: newest rows kept …
-pub(crate) const HISTORY_KEEP_ROWS_DEFAULT: i64 = 1000;
-/// … and maximum age in days.
-pub(crate) const HISTORY_KEEP_DAYS_DEFAULT: i64 = 90;
+///
+/// `0` (no limit) by default — retention is opt-in. Pruning deletes the
+/// user's recorded runs, so a workspace only loses history after someone
+/// picks a limit in the History list's retention control.
+pub(crate) const HISTORY_KEEP_ROWS_DEFAULT: i64 = 0;
+/// … and maximum age in days (`0` = no limit, same opt-in rule).
+pub(crate) const HISTORY_KEEP_DAYS_DEFAULT: i64 = 0;
 /// Response body kept in a history row. The live response already carried the
 /// full body (up to the 512 KB display cap); history keeps a preview.
 const HISTORY_BODY_MAX: usize = 64 * 1024;

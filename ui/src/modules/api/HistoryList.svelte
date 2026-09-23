@@ -50,7 +50,8 @@
   }
 
   // Retention: the daemon keeps the newest N rows / D days per workspace
-  // (defaults 1000 / 90; 0 = no limit) and trims after every run.
+  // (default 0 / 0 = no limit — opt-in, pruning deletes runs) and trims after
+  // every run once a limit is set.
   function parseLimit(v: string | null): number | null {
     if (v === null) return null;
     const n = Number(v.trim());
