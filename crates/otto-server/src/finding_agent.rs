@@ -315,16 +315,18 @@ pub async fn spawn_session(
         }
     };
     let sid = session.id.clone();
-    // Inject the prompt once the session has settled (handoff pattern: a short
-    // delay then a bracketed-paste + Enter).
+    // Inject the prompt through the shared submit path: wait for the TUI to
+    // draw, paste, confirm the paste echoed, then Enter. A blind paste 1.5 s
+    // after spawn landed before a cold CLI had drawn its input box, so the
+    // fix/verify/regression agent sat idle with no prompt.
     let manager = ctx.manager.clone();
     let sid_for_task = sid.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let payload = format!("\u{1b}[200~{prompt}\u{1b}[201~");
-        let _ = manager.input(&sid_for_task, payload.as_bytes()).await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let _ = manager.input(&sid_for_task, b"\r").await;
+        if !crate::review_session::submit_prompt(&manager, &sid_for_task, &prompt).await {
+            tracing::warn!(
+                "finding agent: session {sid_for_task} never drew its TUI; prompt not sent"
+            );
+        }
     });
     Some(sid)
 }
