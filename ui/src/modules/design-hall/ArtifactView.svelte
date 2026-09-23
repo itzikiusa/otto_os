@@ -735,7 +735,7 @@
         <button class="btn small" onclick={() => void load(id)}>Retry</button>
       </div>
     {:else}
-      <div class="studio" class:has-left={kind === 'scene3d' && !!sceneDoc}>
+      <div class="studio" class:has-left={kind === 'scene3d' && !!sceneDoc} class:wide-right={rightTab === 'otto'}>
         {#if kind === 'scene3d' && sceneDoc}
           <aside class="left" aria-label="Scene hierarchy">
             <Hierarchy doc={sceneDoc} bind:selectedId={sceneSel} onchange={onScene} {readonly} />
@@ -905,6 +905,13 @@
   .studio.has-left {
     grid-template-columns: 240px minmax(0, 1fr) 320px;
   }
+  /* The Otto tab holds a conversation and a variants tray: a little wider. */
+  .studio.wide-right {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+  .studio.has-left.wide-right {
+    grid-template-columns: 240px minmax(0, 1fr) 360px;
+  }
   .left {
     border-inline-end: 1px solid var(--border);
     background: var(--surface);
@@ -1016,7 +1023,9 @@
   }
   @container (max-width: 900px) {
     .studio,
-    .studio.has-left {
+    .studio.has-left,
+    .studio.wide-right,
+    .studio.has-left.wide-right {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(360px, 1fr) auto;
       overflow-y: auto;

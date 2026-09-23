@@ -349,6 +349,7 @@
                 {#if useRefs}<Icon name="check" size={12} />{/if} Use references
               </button>
               <span class="grow"></span>
+              <span class="go">
               <button class="btn ghost" disabled={!prompt.trim() || creating} onclick={createFromPrompt} data-testid="design-prompt-create"
                 title="Save the brief on an empty draft, without asking Otto">
                 Draft only
@@ -357,6 +358,7 @@
                 title="Create the draft and ask Otto to design it (⌘Enter)">
                 <Icon name="sparkle" size={13} /> {creating ? 'Starting…' : 'Generate'}
               </button>
+              </span>
             </div>
             {#if useRefs && refHits.length}
               <div class="refs" aria-label="References Otto gets first" data-testid="design-prompt-ref-chips">
@@ -667,6 +669,12 @@
   .as-btn:hover {
     color: var(--text);
     border-color: var(--border-strong);
+  }
+  .go {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-inline-start: auto;
   }
   .refs {
     display: flex;

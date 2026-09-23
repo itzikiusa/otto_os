@@ -531,7 +531,8 @@ export function buildThread(turns: DesignAssistTurn[], runs: DesignVariantRun[])
   }
   for (const r of runs) {
     if (mainIds.has(r.run_id)) continue;
-    const starts = [...r.turns.map((t) => t.started_at), ...r.versions.map((v) => v.created_at)].sort();
+    // When the run started: its first turn, else (after a restart) its first version.
+    const starts = (r.turns.length ? r.turns.map((t) => t.started_at) : r.versions.map((v) => v.created_at)).sort();
     items.push({ kind: 'run', at: starts[0] ?? '', run: r });
   }
   return items.sort((a, b) => a.at.localeCompare(b.at));

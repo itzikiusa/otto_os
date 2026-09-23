@@ -75,7 +75,9 @@
       turn.mode
     ] ?? turn.mode,
   );
-  const rules = $derived(turn.team_rules.map((k) => ({ key: k, text: ruleText(k) ?? k.replace(/[_:]/g, ' ') })));
+  const rules = $derived(
+    turn.team_rules.map((k) => ({ key: k, text: (ruleText(k) ?? k.replace(/[_:]/g, ' ')).replace(/[.\s]+$/, '') })),
+  );
   const provider = $derived(turn.provider || 'claude');
 </script>
 
@@ -101,7 +103,7 @@
         {st.label}
       </span>
     </div>
-    <div class="meta">{modeLabel}{#if turn.provider} · {turn.provider}{/if}{#if base} · from v{base.seq}{/if}</div>
+    <div class="meta">{[modeLabel, turn.provider, base ? `from v${base.seq}` : ''].filter(Boolean).join(' · ')}</div>
 
     {#if st.working}
       <p class="body dim">
@@ -122,7 +124,7 @@
     {#if turn.status === 'done' && turn.version_id}
       <div class="result">
         <Icon name="commit" size={12} />
-        <span>Saved as <strong>v{version?.seq ?? '…'}</strong> (Otto){#if base} — v{base.seq} stays in history{/if}.</span>
+        <span>Saved as <strong>v{version?.seq ?? '…'}</strong> (Otto){base ? ` — v${base.seq} stays in history.` : '.'}</span>
         {#if base}
           <button class="linkbtn" onclick={() => oncompare(base.id, turn.version_id!)}>Compare</button>
         {/if}

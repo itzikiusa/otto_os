@@ -434,7 +434,7 @@
     void thread.length;
     void running?.status;
     const el = threadEl;
-    if (el) queueMicrotask(() => (el.scrollTop = el.scrollHeight));
+    if (el) requestAnimationFrame(() => (el.scrollTop = el.scrollHeight));
   });
 
   const placeholder = $derived(sel ? 'Ask Otto to change the selected section…' : 'Ask Otto to change this design…');
@@ -462,7 +462,7 @@
         <StatusDot status="working" /> {runningRun && !running ? 'Drawing variants' : running?.status === 'starting' ? 'Starting' : 'Working'} on
         {head ? `v${head.seq}` : 'this design'}
       {:else}
-        <StatusDot status="idle" /> Ready{#if storedProvider} · resumes its {storedProvider} session{/if}
+        <StatusDot status="idle" /> {`Ready${storedProvider ? ` · resumes its ${storedProvider} session` : ''}`}
       {/if}
     </div>
     {#if pickerOpen}
@@ -616,7 +616,9 @@
 <style>
   .otto {
     height: 100%;
-    min-height: 0;
+    /* In a short (stacked, narrow-window) details pane the panel scrolls as a
+       whole instead of squeezing the thread and hiding the composer. */
+    min-height: 520px;
     display: flex;
     flex-direction: column;
   }
@@ -835,6 +837,17 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  /* One row of quick actions that scrolls sideways, so the thread keeps the
+     height (the mockup's chip rail). */
+  .quick {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    padding-block-end: 2px;
+  }
+  .quick .chip {
+    flex: none;
   }
   .quick .chip {
     display: inline-flex;

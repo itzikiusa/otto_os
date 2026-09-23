@@ -90,7 +90,7 @@
 <style>
   .tray {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
     gap: 8px;
   }
   .card {
@@ -203,6 +203,11 @@
   }
   .acts .btn {
     flex: 1;
+    min-width: 0;
     justify-content: center;
+    padding-inline: 4px;
+  }
+  .acts .icon-btn {
+    width: 20px;
   }
 </style>
