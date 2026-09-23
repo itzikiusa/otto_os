@@ -205,10 +205,10 @@ workspace from the row.
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
-| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun |
+| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
 | 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status= | ws viewer | — | `SwarmRun[]` |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
-| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun |
+| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
 | 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph |
 | 84 | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/start\|pause\|abort\|resume | ws editor | — | Swarm |
 | 85 | GET /api/v1/swarm/swarms/{sid}/board?project_id=&task_id= | ws viewer | — | `SwarmMessage[]` |
