@@ -42,7 +42,12 @@
 
   // Currently-open report (rendered in the iframe overlay).
   let openReport: InsightReport | null = $state(null);
-  let openUrl: string | null = $state(null);
+  // The open report's HTML, rendered via `srcdoc` in a SANDBOXED iframe. The
+  // report is agent-generated from transcripts; a same-origin blob: iframe (or
+  // tab) let any script / unescaped `<img onerror>` in it read the bearer
+  // token from localStorage. `allow-scripts` without `allow-same-origin` gives
+  // it an opaque origin: charts still run, the app's storage is out of reach.
+  let openHtml: string | null = $state(null);
   let openLoading = $state(false);
 
   const kinds: { id: 'all' | InsightKind; label: string }[] = [
@@ -145,9 +150,9 @@
   async function open(r: InsightReport): Promise<void> {
     openReport = r;
     openLoading = true;
-    openUrl = null;
+    openHtml = null;
     try {
-      openUrl = await insightsApi.reportUrl(r.html_path);
+      openHtml = await reportHtml(r.html_path);
     } catch (e) {
       toasts.error('Could not open report', e instanceof Error ? e.message : String(e));
       close();
@@ -156,9 +161,18 @@
     }
   }
 
+  /** Fetch a report's HTML text (via the authed blob, revoked right away). */
+  async function reportHtml(htmlPath: string): Promise<string> {
+    const url = await insightsApi.reportUrl(htmlPath);
+    try {
+      return await (await fetch(url)).text();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   function close(): void {
-    if (openUrl) URL.revokeObjectURL(openUrl);
-    openUrl = null;
+    openHtml = null;
     openReport = null;
     openLoading = false;
   }
@@ -178,10 +192,18 @@
     }
   }
 
-  /** Open the report in a new browser tab (Tauri webview). */
+  /** Open the report in a new browser tab (Tauri webview). The tab is a
+   *  trusted wrapper page whose only content is the report in a sandboxed,
+   *  opaque-origin iframe — never the report itself at the app's origin. */
   async function openInTab(r: InsightReport): Promise<void> {
     try {
-      const url = await insightsApi.reportUrl(r.html_path);
+      const html = await reportHtml(r.html_path);
+      const attr = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const wrapper =
+        '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
+        '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +
+        `<iframe sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc="${attr}"></iframe>`;
+      const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
       // Don't revoke — the new tab needs the URL. It'll be GC'd on close.
     } catch (e) {
@@ -192,7 +214,7 @@
   // Revoke any live object URL on unmount.
   $effect(() => {
     return () => {
-      if (openUrl) URL.revokeObjectURL(openUrl);
+      openHtml = null;
       if (pollTimer) clearTimeout(pollTimer);
     };
   });
@@ -368,8 +390,13 @@
     <div class="overlay-body">
       {#if openLoading}
         <div class="overlay-loading dim">Loading report…</div>
-      {:else if openUrl}
-        <iframe class="report-frame" src={openUrl} title="Insight report"></iframe>
+      {:else if openHtml !== null}
+        <iframe
+          class="report-frame"
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+          srcdoc={openHtml}
+          title="Insight report"
+        ></iframe>
       {/if}
     </div>
   </div>
