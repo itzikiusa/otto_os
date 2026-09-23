@@ -2118,17 +2118,23 @@ async fn run_task(
         .map_err(ApiError)?;
     // The same gates the coordinator applies: a manual (or manager-agent
     // `swarm_run_task`) run must not start a second turn for a task already
-    // running, run on a paused/aborted swarm, or bypass the budget pause.
+    // running, run on an aborted swarm, or bypass the budget pause. (A swarm
+    // that is merely paused — including a new one, which starts paused — may
+    // still run a task by hand.)
     if !matches!(task.status.as_str(), "todo" | "blocked" | "backlog") {
         return Err(ApiError(Error::Conflict(format!(
             "task is {} — only a todo, blocked or backlog task can be run",
             task.status
         ))));
     }
-    if swarm.status != "active" {
+    if swarm.status == "aborted" {
+        return Err(ApiError(Error::Conflict(
+            "swarm is aborted — tasks can't run".into(),
+        )));
+    }
+    if let Some(reason) = swarm.pause_reason.as_deref().filter(|r| !r.is_empty()) {
         return Err(ApiError(Error::Conflict(format!(
-            "swarm is {} — resume it to run tasks",
-            swarm.status
+            "swarm is paused: {reason} — raise the budget and resume first"
         ))));
     }
     if let Some(reason) = budget_exceeded(&ctx, &swarm).await {
