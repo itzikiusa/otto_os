@@ -288,6 +288,14 @@ impl ConfluenceClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // 409 = someone saved a newer version between our read and this
+            // write (`version + 1` is taken). Surface it as a conflict, not an
+            // upstream outage, so callers can tell the user to re-read.
+            if status == reqwest::StatusCode::CONFLICT {
+                return Err(Error::Conflict(format!(
+                    "confluence page {id} was changed by someone else — re-read it and re-apply the edit ({body})"
+                )));
+            }
             return Err(Error::Upstream(format!(
                 "confluence update_page {id} failed ({status}): {body}"
             )));
@@ -955,7 +963,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 let body = extract_body_tag(macro_src, "ac:plain-text-body")
                     .or_else(|| extract_body_tag(macro_src, "ac:rich-text-body"))
                     .unwrap_or("");
-                format!("\n```{}\n{}\n```\n", lang, body.trim())
+                // Confluence wraps plain-text bodies in CDATA; the literal
+                // `<![CDATA[` / `]]>` used to leak into the Markdown (and from
+                // there, escaped, back into the page on publish).
+                format!("\n```{}\n{}\n```\n", lang, unwrap_cdata(body.trim()))
             }
             // ── Panel macros (info / note / warning / tip) → blockquote ──
             "info" | "note" | "warning" | "tip" => {
@@ -1264,6 +1275,79 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     let result = out.trim_end_matches('\n').to_string();
     // Collapse more-than-2 consecutive newlines to exactly 2.
     collapse_excess_newlines(&result)
+}
+
+/// Join the CDATA sections of a storage text body into plain text
+/// (`<![CDATA[a]]>` → `a`; a `]]>` inside code is split by Confluence into
+/// `]]]]><![CDATA[>`, which this rejoins). Text without CDATA is returned as-is.
+fn unwrap_cdata(s: &str) -> String {
+    if !s.contains("<![CDATA[") {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("<![CDATA[") {
+        out.push_str(&rest[..open]);
+        let body = &rest[open + "<![CDATA[".len()..];
+        match body.find("]]>") {
+            Some(close) => {
+                out.push_str(&body[..close]);
+                rest = &body[close + "]]>".len()..];
+            }
+            None => {
+                out.push_str(body);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Storage elements that the Markdown round-trip (import → `storage_to_markdown`
+/// → edit → `markdown_to_storage` → publish) cannot carry and would DELETE
+/// from the page: images, links to pages/users, mentions, task lists,
+/// emoticons, inline-comment anchors, and any macro other than the handful the
+/// converter understands (code / panels / status). Empty ⇒ publishing the
+/// Markdown back loses no page content. Labels are deduplicated, in first-seen
+/// order, for the refusal message.
+pub fn storage_lossy_elements(storage: &str) -> Vec<String> {
+    const LOSSY_TAGS: [&str; 6] = [
+        "ac:image",
+        "ac:link",
+        "ri:user",
+        "ac:task-list",
+        "ac:emoticon",
+        "ac:inline-comment-marker",
+    ];
+    const KNOWN_MACROS: [&str; 6] = ["code", "info", "note", "warning", "tip", "status"];
+    let lc = storage.to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for tag in LOSSY_TAGS {
+        if lc.contains(&format!("<{tag}")) {
+            out.push(tag.to_string());
+        }
+    }
+    let mut from = 0;
+    while let Some(rel) = lc[from..].find("<ac:structured-macro") {
+        let start = from + rel;
+        let end = lc[start..].find('>').map(|i| start + i).unwrap_or(lc.len());
+        let name = extract_attr(&storage[start..end], "ac:name")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !KNOWN_MACROS.contains(&name.as_str()) {
+            let label = if name.is_empty() {
+                "unnamed macro".to_string()
+            } else {
+                format!("{name} macro")
+            };
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        from = end;
+    }
+    out
 }
 
 /// Case-insensitive ASCII prefix test at byte offset `pos`. Compares BYTES and
@@ -2105,6 +2189,38 @@ mod tests {
             "<p>b</p><ac:image ac:alt=\"z\"><ri:attachment ri:filename=\"f.png\"",
         );
         let _ = storage_to_markdown("<ac:image");
+    }
+
+    #[test]
+    fn code_macro_body_is_unwrapped_from_cdata() {
+        let storage = "<ac:structured-macro ac:name=\"code\">\
+            <ac:parameter ac:name=\"language\">rust</ac:parameter>\
+            <ac:plain-text-body><![CDATA[let a = b[0]; // x < y]]></ac:plain-text-body>\
+            </ac:structured-macro>";
+        let md = storage_to_markdown(storage);
+        assert!(
+            md.contains("```rust\nlet a = b[0]; // x < y\n```"),
+            "got: {md:?}"
+        );
+        assert!(!md.contains("CDATA"), "got: {md:?}");
+        // Confluence splits a literal `]]>` across two sections.
+        assert_eq!(unwrap_cdata("<![CDATA[a]]]]><![CDATA[>b]]>"), "a]]>b");
+    }
+
+    #[test]
+    fn lossy_elements_are_reported_and_known_macros_are_not() {
+        let safe = "<p>x</p><ac:structured-macro ac:name=\"code\"></ac:structured-macro>\
+                    <ac:structured-macro ac:name=\"info\"></ac:structured-macro>";
+        assert!(storage_lossy_elements(safe).is_empty());
+        let lossy = "<p><ac:link><ri:user ri:account-id=\"1\"/></ac:link></p>\
+                     <ac:structured-macro ac:name=\"toc\"/>\
+                     <ac:structured-macro ac:name=\"jira\"></ac:structured-macro>\
+                     <ac:structured-macro ac:name=\"toc\"/>\
+                     <ac:image><ri:attachment ri:filename=\"a.png\"/></ac:image>";
+        assert_eq!(
+            storage_lossy_elements(lossy),
+            vec!["ac:image", "ac:link", "ri:user", "toc macro", "jira macro"]
+        );
     }
 
     #[test]

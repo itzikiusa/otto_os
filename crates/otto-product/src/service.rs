@@ -72,6 +72,16 @@ pub struct FetchedSource {
     pub issue_type: Option<String>,
 }
 
+/// The Confluence page `version` recorded in a version row's `raw_json`
+/// (import/refresh write the whole page summary; a publish writes
+/// `{"version": n}`). `None` for Jira rows and rows without one.
+fn raw_page_version(raw_json: Option<&str>) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(raw_json?)
+        .ok()?
+        .get("version")?
+        .as_i64()
+}
+
 impl ProductService {
     pub fn new(repo: ProductRepo, issues: IssuesRepo, secrets: Arc<dyn SecretStore>) -> Self {
         Self {
@@ -326,9 +336,16 @@ impl ProductService {
             .await?;
 
         let latest = self.repo.latest_source_version(story_id).await?;
+        // A new page VERSION counts as a change even when the Markdown is the
+        // same (e.g. an edit to a macro the converter drops): the recorded
+        // version is the base the publish conflict check compares against.
         let changed = match &latest {
             None => true,
-            Some(v) => v.body_md != src.body_md,
+            Some(v) => {
+                v.body_md != src.body_md
+                    || raw_page_version(v.raw_json.as_deref())
+                        != raw_page_version(src.raw_json.as_deref())
+            }
         };
 
         if changed {
@@ -546,6 +563,19 @@ impl ProductService {
         Ok(results)
     }
 
+    /// The Confluence page version Otto last saw for a story: the `version` in
+    /// the `raw_json` of the NEWEST `source` (import/refresh) or `published`
+    /// row. `None` when that row carries none (stories synced or published
+    /// before versions were recorded) — the publish then keeps its old
+    /// last-writer-wins behaviour rather than raising a false conflict.
+    async fn synced_page_version(&self, story_id: &Id) -> Result<Option<i64>> {
+        let versions = self.repo.list_versions(story_id).await?; // newest first
+        Ok(versions
+            .iter()
+            .find(|v| v.kind == "source" || v.kind == "published")
+            .and_then(|v| raw_page_version(v.raw_json.as_deref())))
+    }
+
     /// Publish a suggested version to the issue tracker.
     ///
     /// - Jira: updates the issue description with the version body.
@@ -561,6 +591,7 @@ impl ProductService {
         let token = self.account_token(&account)?;
 
         // 2. Push to the issue tracker.
+        let mut published_raw: Option<String> = None;
         match story.source_kind.as_str() {
             "jira" => {
                 let client = JiraClient::new(&account.base_url, &account.email, &token);
@@ -571,7 +602,29 @@ impl ProductService {
             "confluence" => {
                 let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
                 let page = client.get_page(&story.source_key).await?;
-                client
+                // Optimistic concurrency: the edit was made against the page
+                // version Otto last synced. Writing on top of whatever is current
+                // silently discarded a human's edit made in the meantime.
+                if let Some(base) = self.synced_page_version(&story.id).await? {
+                    if page.version != base {
+                        return Err(Error::Conflict(format!(
+                            "the Confluence page changed since Otto last synced it (version {base} → {}); \
+                             refresh the story, review the changes, then publish again",
+                            page.version
+                        )));
+                    }
+                }
+                // The Markdown round-trip can't carry macros, images, mentions,
+                // links or task lists — publishing would delete them from the page.
+                let lossy = otto_issues::confluence::storage_lossy_elements(&page.body_storage);
+                if !lossy.is_empty() {
+                    return Err(Error::Conflict(format!(
+                        "publishing would remove content Otto can't round-trip from the Confluence \
+                         page ({}); edit the page in Confluence instead",
+                        lossy.join(", ")
+                    )));
+                }
+                let updated = client
                     .update_page(
                         &story.source_key,
                         &page.title,
@@ -579,6 +632,12 @@ impl ProductService {
                         page.version,
                     )
                     .await?;
+                // Remember the version this publish produced, so the NEXT
+                // publish's conflict check has the right base.
+                published_raw = serde_json::to_string(&serde_json::json!({
+                    "version": updated.version
+                }))
+                .ok();
             }
             other => {
                 return Err(Error::Invalid(format!(
@@ -594,7 +653,7 @@ impl ProductService {
                 kind: "published".into(),
                 title: version.title.clone(),
                 body_md: version.body_md.clone(),
-                raw_json: None,
+                raw_json: published_raw,
                 change_notes: version.change_notes.clone(),
                 created_by: by.clone(),
             })
@@ -1753,6 +1812,18 @@ mod tests {
 
     use super::*;
     use crate::types::ImportStoryReq;
+
+    #[test]
+    fn raw_page_version_reads_import_and_publish_rows() {
+        assert_eq!(
+            raw_page_version(Some(r#"{"id":"1","version":7,"title":"t"}"#)),
+            Some(7)
+        );
+        assert_eq!(raw_page_version(Some(r#"{"version":8}"#)), Some(8));
+        assert_eq!(raw_page_version(Some(r#"{"key":"PROJ-1"}"#)), None);
+        assert_eq!(raw_page_version(Some("not json")), None);
+        assert_eq!(raw_page_version(None), None);
+    }
 
     #[test]
     fn watch_cursor_roundtrip_handles_same_timestamp_ties() {

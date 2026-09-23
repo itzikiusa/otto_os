@@ -2265,6 +2265,9 @@ export interface UpdateConfluencePageReq {
   body_md?: string | null;
   /** Replacement body in Confluence storage XHTML. Wins over body_md. */
   body_html?: string | null;
+  /** The page `version` this edit was based on; the server answers 409 when
+   *  the page has changed since (instead of overwriting the newer edit). */
+  base_version?: number | null;
 }
 
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
