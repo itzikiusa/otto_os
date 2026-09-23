@@ -157,7 +157,7 @@ impl ImprovementEngine {
     /// The ACTIVE learned design rules (the skill file's rule lines).
     pub async fn design_rules_active(&self, ws_id: &Id) -> Result<Vec<(String, String)>> {
         let path = self.design_skill_path(ws_id).await?;
-        let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        let body = tokio::fs::read_to_string(path).await.unwrap_or_default();
         Ok(parse_rules(&body))
     }
 

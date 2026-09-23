@@ -1005,7 +1005,7 @@ fn registry() -> &'static Mutex<HashMap<Id, ArtifactRuns>> {
 
 fn with_registry<T>(f: impl FnOnce(&mut HashMap<Id, ArtifactRuns>) -> T) -> T {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut g)
+    f(&mut *g)
 }
 
 /// Holds an artifact's single run slot; released on drop (every path).
@@ -1041,12 +1041,13 @@ fn busy_of(artifact_id: &str) -> Option<String> {
 fn put_turn(t: DesignAssistTurn) {
     with_registry(|m| {
         let r = m.entry(t.artifact_id.clone()).or_default();
-        if let Some(slot) = r.turns.iter_mut().find(|x| x.turn_id == t.turn_id) {
-            *slot = t;
-        } else {
-            r.turns.push_back(t);
-            while r.turns.len() > TURN_HISTORY {
-                r.turns.pop_front();
+        match r.turns.iter().position(|x| x.turn_id == t.turn_id) {
+            Some(i) => r.turns[i] = t,
+            None => {
+                r.turns.push_back(t);
+                while r.turns.len() > TURN_HISTORY {
+                    r.turns.pop_front();
+                }
             }
         }
     });
@@ -1063,7 +1064,7 @@ fn update_turn(
             .turns
             .iter_mut()
             .find(|x| x.turn_id == turn_id)?;
-        f(t);
+        f(&mut *t);
         Some(t.clone())
     })
 }
@@ -1775,7 +1776,7 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
     if let Some(p) = poll {
         p.abort();
     }
-    let _ = std::fs::remove_file(&done_path);
+    let _ = std::fs::remove_file(done_path);
     let known_sid: Option<Id> = { sid_cell.lock().unwrap_or_else(|e| e.into_inner()).clone() };
 
     let result: Result<(String, Id), String> = match turn {
@@ -2536,8 +2537,8 @@ pub async fn list_variant_runs(
         let Some((run, _k)) = otto_design::variants::parse_branch(&v.branch) else {
             continue;
         };
-        match runs.iter_mut().find(|r| r.run_id == run) {
-            Some(r) => r.versions.insert(0, v),
+        match runs.iter().position(|r| r.run_id == run) {
+            Some(i) => runs[i].versions.insert(0, v),
             None => {
                 if runs.len() >= 10 {
                     continue;
