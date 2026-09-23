@@ -251,8 +251,29 @@ async fn run_turn_inner(
     cancel: &Arc<AtomicBool>,
 ) -> Option<SwarmTurnResult> {
     let repo = &ctx.swarm_repo;
-    let swarm = repo.get_swarm(&run.swarm_id).await.ok()?;
-    let agent = repo.get_agent(&run.agent_id).await.ok()?;
+    // Stopped (Stop / pause / board clear) while it sat queued: never start.
+    if let Ok(cur) = repo.get_run(&run.id).await {
+        if !matches!(cur.status.as_str(), "queued" | "running" | "waiting") {
+            return None;
+        }
+    }
+    // A vanished swarm/agent (deleted between enqueue and start) must settle
+    // the run: a bare `?` left it `queued`, holding a parallel slot until the
+    // next daemon restart.
+    let swarm = match repo.get_swarm(&run.swarm_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            mark_run_error(ctx, run, &format!("swarm unavailable: {e}")).await;
+            return None;
+        }
+    };
+    let agent = match repo.get_agent(&run.agent_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            mark_run_error(ctx, run, &format!("agent unavailable: {e}")).await;
+            return None;
+        }
+    };
     let task: Option<SwarmTask> = match &run.task_id {
         Some(tid) => repo.get_task(tid).await.ok(),
         None => None,
@@ -374,16 +395,22 @@ async fn run_turn_inner(
     // below can bound usage to THIS turn — the agent's session is reused across
     // turns, so an unbounded session total would accumulate run1+run2+….
     let turn_started_at = Utc::now();
-    let _ = repo
-        .update_run(
+    match repo
+        .update_run_if_status(
             &run.id,
+            &["queued", "running", "waiting"],
             RunPatch {
                 status: Some("running".into()),
                 started_at: Some(Some(turn_started_at)),
                 ..Default::default()
             },
         )
-        .await;
+        .await
+    {
+        // Stopped while its cwd/brief were being prepared.
+        Ok(None) => return None,
+        Ok(Some(_)) | Err(_) => {}
+    }
     emit_run(ctx, &run.id).await;
 
     // Spawn/resume + inject + watch, with bounded recovery.
@@ -431,6 +458,7 @@ async fn run_turn_inner(
             let out = out.clone();
             let run_id = run.id.clone();
             let agent_id = agent.id.clone();
+            let cancel = Arc::clone(cancel);
             let title = format!(
                 "{} · {}",
                 agent.name,
@@ -450,6 +478,7 @@ async fn run_turn_inner(
                     &prompt,
                     &out,
                     &run_id,
+                    &cancel,
                 )
                 .await
             }
@@ -490,9 +519,13 @@ async fn run_turn_inner(
             &cwd,
             &prompt,
         );
-        let _ = repo
-            .update_run(
+        // CAS: a turn that finished after the operator stopped it (or a pause
+        // cut it) must not overwrite `stopped` with `done`, nor be routed —
+        // it used to mark the task done / create subtasks anyway.
+        let written = repo
+            .update_run_if_status(
                 &run.id,
+                &["queued", "running", "waiting"],
                 RunPatch {
                     status: Some("done".into()),
                     session_id: Some(outcome.session_id.clone()),
@@ -511,6 +544,9 @@ async fn run_turn_inner(
             )
             .await;
         emit_run(ctx, &run.id).await;
+        if matches!(written, Ok(None)) {
+            return None;
+        }
         parsed
     } else {
         let reason = outcome.reason.map(|r| r.as_str()).unwrap_or("error");
@@ -518,8 +554,9 @@ async fn run_turn_inner(
         // Even on failure, keep the brief/cwd for inspection.
         let result = enrich_result(None, &cwd, &prompt);
         let _ = repo
-            .update_run(
+            .update_run_if_status(
                 &run.id,
+                &["queued", "running", "waiting"],
                 RunPatch {
                     status: Some(if stopped {
                         "stopped".into()
@@ -593,7 +630,11 @@ async fn run_attempt(
     prompt: &str,
     out: &std::path::Path,
     run_id: &str,
+    cancel: &Arc<AtomicBool>,
 ) -> RunOutcome {
+    if cancel.load(Ordering::Relaxed) {
+        return RunOutcome::failed(None, FailReason::Stopped);
+    }
     // Reuse the agent's live/resumable session (no history re-feed) — but ONLY if
     // it's in the cwd this turn wants. If the project's repo path was set/changed
     // after the session was first created (e.g. it started in a scratch dir),
@@ -626,6 +667,7 @@ async fn run_attempt(
         }
         None => None,
     };
+    let reused = reuse.is_some();
     let sid = match reuse {
         Some(existing) => existing,
         None => {
@@ -745,7 +787,18 @@ async fn run_attempt(
         .ok()
         .and_then(|s| s.provider_session_id);
 
-    watch_for_result(
+    // A RESUMED session's transcript still ends with the PREVIOUS turn's
+    // reply: the watch's whole-file transcript fallback could adopt it as this
+    // turn's result the moment the brief landed (the run then completed with
+    // the old result while the agent kept working on the new brief). For a
+    // reused session only a turn completed past `transcript_offset` — i.e.
+    // after this brief — counts; the out-file is per-run either way.
+    let watch_ok: fn(&str) -> bool = if reused {
+        never_transcript
+    } else {
+        transcript_ok
+    };
+    let watch = watch_for_result(
         &ctx.manager,
         &sid,
         provider,
@@ -755,13 +808,61 @@ async fn run_attempt(
         TURN_TIMEOUT,
         WAITING_IDLE,
         STUCK_IDLE,
-        transcript_ok,
+        watch_ok,
         |st| async move {
             // Reflect waiting/resumed onto the run row.
             let _ = st;
         },
-    )
-    .await
+    );
+    tokio::pin!(watch);
+    let mut tick = tokio::time::interval(CANCEL_POLL);
+    loop {
+        tokio::select! {
+            res = &mut watch => return res,
+            _ = tick.tick() => {
+                // Stop / pause / board clear: end the watch now. It used to keep
+                // watching (the flag was only read BETWEEN attempts) for up to
+                // the whole turn, while the freed slot pasted a second brief
+                // into this same busy session.
+                if cancel.load(Ordering::Relaxed) {
+                    return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
+                }
+                if reused && provider == "claude" {
+                    if let Some(turn) = provider_session_id
+                        .as_deref()
+                        .and_then(|psid| turn_since(cwd, psid, transcript_offset))
+                    {
+                        if transcript_ok(&turn) {
+                            return RunOutcome::ok(turn, sid.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How often a running turn checks its cancel flag (and, for a reused
+/// session, the transcript tail).
+const CANCEL_POLL: Duration = Duration::from_secs(2);
+
+/// Transcript acceptance for a REUSED session's watch: never from the whole
+/// file (see [`turn_since`]).
+fn never_transcript(_: &str) -> bool {
+    false
+}
+
+/// The last completed claude turn written AFTER byte `offset` of the session's
+/// transcript — i.e. a turn that answered the brief injected at `offset`, never
+/// the previous turn's reply. Reads only the tail.
+fn turn_since(cwd: &str, psid: &str, offset: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut tail = String::new();
+    f.read_to_string(&mut tail).ok()?;
+    otto_orchestrator::claude_pty::completed_turn_text(&tail)
 }
 
 async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {

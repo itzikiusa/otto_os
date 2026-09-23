@@ -321,6 +321,7 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
         .pause_swarm_with_reason(&swarm.id, reason)
         .await;
     set_paused(ctx, &swarm.id, true);
+    stop_runs_for_pause(ctx, &swarm.id).await;
     for s in swarm_session_ids(ctx, &swarm.workspace_id, &swarm.id).await {
         let _ = ctx.manager.suspend(&s).await;
     }
@@ -339,6 +340,32 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
         title: "Swarm paused (budget)".into(),
         body: format!("“{}”: {reason}", swarm.name),
     });
+}
+
+/// `swarm_runs.error` of a turn cut short by a swarm pause (vs. an operator
+/// Stop): its task goes back to `todo` for the resume, attempt refunded.
+pub(crate) const PAUSED_RUN_REASON: &str = "paused";
+
+/// Cut a pausing swarm's in-flight turns short: mark them `stopped`
+/// ([`PAUSED_RUN_REASON`]) and trip their cancel flags BEFORE the sessions are
+/// suspended. Suspending alone killed the PTY mid-turn; the watch saw
+/// `SessionGone`, the retry loop killed the (resumable) session, spawned a
+/// fresh one and re-sent the whole brief — spending on while the swarm showed
+/// "paused" (the budget auto-pause included), and burning an attempt each time.
+async fn stop_runs_for_pause(ctx: &ServerCtx, swarm_id: &str) {
+    match ctx
+        .swarm_repo
+        .stop_active_runs_with_reason(&swarm_id.to_string(), PAUSED_RUN_REASON)
+        .await
+    {
+        Ok(ids) => {
+            for rid in &ids {
+                swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
+                swarm_run::emit_run(ctx, rid).await;
+            }
+        }
+        Err(e) => tracing::warn!(swarm = %swarm_id, "pause: stopping in-flight runs: {e}"),
+    }
 }
 
 /// Keyword-overlap score of an agent's title+specialization against task text.
@@ -444,10 +471,74 @@ async fn route_result(
     // The board may have been cleared (or the task deleted) while this turn ran.
     // A finished turn for a deleted task must do NOTHING — no retries, no
     // handoffs, no feed posts — or a cleared board immediately repopulates.
-    if repo.get_task(&task.id).await.is_err() {
+    let Ok(current) = repo.get_task(&task.id).await else {
+        return;
+    };
+    // The operator moved the card (cancelled / blocked / done / back to todo)
+    // or reassigned it while the turn ran: their decision wins. The turn's
+    // outcome is noted on the board, but no status change, retry, subtask,
+    // verification or merge follows (a failed turn used to resurrect a
+    // cancelled task as `todo`).
+    let reassigned = current.assignee_agent_id != task.assignee_agent_id
+        && current.assignee_agent_id.as_deref() != Some(run.agent_id.as_str());
+    if current.status != "in_progress" || reassigned {
+        let outcome = match &result {
+            Some(r) if !r.summary.is_empty() => format!("finished ({})", clip(&r.summary, 160)),
+            Some(_) => "finished".to_string(),
+            None => "ended without a result".to_string(),
+        };
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "status",
+            &format!(
+                "A run for “{}” {outcome}, but the task was changed meanwhile ({}) — left as you set it.",
+                task.title,
+                if reassigned { "reassigned".to_string() } else { current.status.clone() }
+            ),
+        )
+        .await;
         return;
     }
     let Some(res) = result else {
+        // Stopped rather than failed? A PAUSE parks the task for the resume
+        // (the interrupted turn doesn't count as an attempt); an operator Stop
+        // parks it as `blocked` — re-queueing it as `todo` made Stop behave
+        // like a restart on the next tick.
+        let run_now = repo.get_run(&run.id).await.ok();
+        if let Some(r) = run_now.filter(|r| r.status == "stopped") {
+            let paused = r.error.as_deref() == Some(PAUSED_RUN_REASON);
+            if paused {
+                let _ = repo.refund_task_attempt(&task.id).await;
+            }
+            let _ = repo
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some(if paused { "todo" } else { "blocked" }.into()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            emit_task(ctx, &task.id).await;
+            if !paused {
+                system_post(
+                    ctx,
+                    &task.swarm_id,
+                    Some(&task.project_id),
+                    Some(&task.id),
+                    "status",
+                    &format!(
+                        "Run for “{}” was stopped — the task is parked as blocked; move it back to To do to run it again.",
+                        task.title
+                    ),
+                )
+                .await;
+            }
+            return;
+        }
         // Turn failed/stopped. Retry on the next tick up to the attempt ceiling
         // (D8); once exhausted, block the task so it isn't retried forever.
         if attempt_ceiling_reached(ctx, task).await {
@@ -1718,7 +1809,10 @@ async fn pause(
         .await
         .map_err(ApiError)?;
     set_paused(&ctx, &sid, true);
-    // Suspend idle swarm sessions to free RAM (resume-friendly).
+    // In-flight turns end first (their tasks re-queue for the resume) so the
+    // retry loop can't respawn them; then suspend the sessions to free RAM
+    // (resume-friendly).
+    stop_runs_for_pause(&ctx, &sid).await;
     for s in swarm_session_ids(&ctx, &ws, &sid).await {
         let _ = ctx.manager.suspend(&s).await;
     }
@@ -1879,6 +1973,17 @@ async fn clear_project_h(
         .map_err(ApiError)?;
     for rid in &stopped {
         swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
+        // Stop the agent itself — the flag alone left it working (and
+        // burning tokens) in its worktree on a board that no longer exists.
+        if let Some(sid) = ctx
+            .swarm_repo
+            .get_run(rid)
+            .await
+            .ok()
+            .and_then(|r| r.session_id)
+        {
+            let _ = ctx.manager.kill_session(&sid).await;
+        }
         swarm_run::emit_run(&ctx, rid).await;
     }
     let (tasks_deleted, messages_deleted) = ctx
@@ -1967,18 +2072,25 @@ async fn stop_run(
     let run = ctx.swarm_repo.get_run(&rid).await.map_err(ApiError)?;
     check(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     swarm_run::signal_cancel(&ctx.swarm_run_cancels, &rid);
-    if matches!(run.status.as_str(), "queued" | "running" | "waiting") {
-        let _ = ctx
-            .swarm_repo
-            .update_run(
-                &rid,
-                RunPatch {
-                    status: Some("stopped".into()),
-                    finished_at: Some(Some(Utc::now())),
-                    ..Default::default()
-                },
-            )
-            .await;
+    let stopped = ctx
+        .swarm_repo
+        .update_run_if_status(
+            &rid,
+            &["queued", "running", "waiting"],
+            RunPatch {
+                status: Some("stopped".into()),
+                finished_at: Some(Some(Utc::now())),
+                ..Default::default()
+            },
+        )
+        .await
+        .ok()
+        .flatten();
+    // Stop the agent, not just the row: the session kept working for up to
+    // the whole turn, and the slot freed by `stopped` then pasted the next
+    // brief into this same busy session.
+    if let Some(sid) = stopped.and_then(|r| r.session_id) {
+        let _ = ctx.manager.kill_session(&sid).await;
     }
     swarm_run::emit_run(&ctx, &rid).await;
     Ok(Json(ctx.swarm_repo.get_run(&rid).await.map_err(ApiError)?))
