@@ -1020,8 +1020,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /repos/{id}/local-review | ws editor | LocalReviewReq | Review (review the working diff) |
 | GET /repos/{id}/local-review | ws viewer | — | latest local Review |
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
-| POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
-| POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
+| POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
+| POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |

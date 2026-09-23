@@ -3004,6 +3004,21 @@ fn default_draft_severity() -> String {
     "info".to_string()
 }
 
+/// Whether a freshly summarized comment is the same one as an already-decided
+/// comment of this review: same file and either the same anchored line or the
+/// same (whitespace-normalized) text. The summarizer re-words between runs, so
+/// the line is the primary key and the text covers path-/line-less comments.
+fn same_draft_comment(kept: &ReviewComment, c: &DraftComment) -> bool {
+    if kept.path != c.path {
+        return false;
+    }
+    if kept.line.is_some() && kept.line == c.line {
+        return true;
+    }
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    norm(&kept.body) == norm(&c.body)
+}
+
 /// Parse the summarizer's reply into draft comments (tolerates fences/prose).
 fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment> {
     let stripped = summary_text
@@ -3234,16 +3249,38 @@ async fn summarize_and_persist(
         Some(pr_number)
     };
     let mut seen_fingerprints: Vec<String> = Vec::new();
+    // Comments the user already decided on (or that are on the PR) — a re-run
+    // must not re-draft them. Empty on a first run.
+    let kept_comments: Vec<ReviewComment> = ctx
+        .reviews_store
+        .get_review(review_id)
+        .await
+        .map(|r| {
+            r.comments
+                .into_iter()
+                .filter(|k| k.state != CommentState::Draft || k.posted)
+                .collect()
+        })
+        .unwrap_or_default();
     // File contents read for fingerprint anchoring, one read per path.
     let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
         std::collections::HashMap::new();
     for c in parsed {
         if is_cancelled().await { return Ok(()); }
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
-        let comment = ctx
-            .reviews_store
-            .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
-            .await?;
+        // A summarizer RE-RUN (retry_summarizer) replaces only the drafts; a
+        // comment the user already approved/declined (or that is on the PR)
+        // must not come back as a fresh draft — approving that copy posted a
+        // duplicate. Reuse the decided comment instead.
+        let comment_id = match kept_comments.iter().find(|k| same_draft_comment(k, &c)) {
+            Some(k) => k.id.clone(),
+            None => {
+                ctx.reviews_store
+                    .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
+                    .await?
+                    .id
+            }
+        };
 
         // Derive the enriched fields from the comment when the summarizer didn't
         // emit them (back-compat; §15.9).
@@ -3332,7 +3369,7 @@ async fn summarize_and_persist(
                             "review",
                             None,
                             Some("open"),
-                            serde_json::json!({ "comment_id": comment.id }),
+                            serde_json::json!({ "comment_id": comment_id }),
                         )
                         .await;
                 }
@@ -3568,6 +3605,58 @@ mod review_scope_tests {
         assert_eq!(
             diff_file_paths(diff),
             vec!["src/a.rs", "gone.rs", "old name.rs", "new name.rs"]
+        );
+    }
+
+    fn kept(path: Option<&str>, line: Option<u32>, body: &str) -> otto_core::domain::ReviewComment {
+        otto_core::domain::ReviewComment {
+            id: "c1".into(),
+            review_id: "r1".into(),
+            path: path.map(str::to_string),
+            line,
+            severity: otto_core::domain::CommentSeverity::Warn,
+            body: body.into(),
+            state: otto_core::domain::CommentState::Approved,
+            posted: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn draft(path: Option<&str>, line: Option<u32>, body: &str) -> super::DraftComment {
+        serde_json::from_value(serde_json::json!({
+            "path": path, "line": line, "severity": "warn", "body": body
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn decided_comments_are_not_redrafted_by_a_summarizer_rerun() {
+        use super::same_draft_comment;
+        let k = kept(Some("a.rs"), Some(10), "Unchecked unwrap");
+        // Re-worded on the same line → the same comment.
+        assert!(same_draft_comment(&k, &draft(Some("a.rs"), Some(10), "unwrap may panic")));
+        // Another line / file → a different comment.
+        assert!(!same_draft_comment(&k, &draft(Some("a.rs"), Some(11), "unwrap may panic")));
+        assert!(!same_draft_comment(&k, &draft(Some("b.rs"), Some(10), "Unchecked unwrap")));
+        // A general comment matches on its text.
+        let g = kept(None, None, "Overall:  add tests");
+        assert!(same_draft_comment(&g, &draft(None, None, "Overall: add tests")));
+    }
+
+    #[test]
+    fn only_an_anchor_rejection_falls_back_to_a_general_comment() {
+        use super::{general_comment_body, inline_anchor_rejected};
+        use otto_core::Error;
+        assert!(inline_anchor_rejected(&Error::Conflict(
+            "github 422: pull_request_review_thread.line must be part of the diff".into()
+        )));
+        assert!(inline_anchor_rejected(&Error::Upstream("gitlab 400: position is invalid".into())));
+        // Auth / 5xx are not anchor problems — never re-post on those.
+        assert!(!inline_anchor_rejected(&Error::Forbidden("github 403: bad token".into())));
+        assert!(!inline_anchor_rejected(&Error::Upstream("github 502: bad gateway".into())));
+        assert_eq!(
+            general_comment_body(&kept(Some("a.rs"), Some(3), "x")),
+            "**`a.rs:3`**\n\nx"
         );
     }
 
@@ -6255,27 +6344,30 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
-    // Post the comment to the PR provider.
-    let pr_posted = match resolve_provider_remote(&ctx, &user, &repo).await {
-        Ok((provider, remote)) => {
-            let req = NewPrCommentReq {
-                body: comment.body.clone(),
-                path: comment.path.clone(),
-                line: comment.line,
-                in_reply_to: None,
-            };
-            match provider.comment(&remote, review.pr_number, &req).await {
-                Ok(_) => true,
-                Err(e) => {
-                    tracing::warn!(comment = %cid, "failed to post comment to PR: {e}");
-                    false
-                }
-            }
+    // Post the comment to the PR provider — at most once.
+    // - A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
+    //   decision; calling the forge only 404'd against "PR #0".
+    // - An already-posted comment is never re-posted, and the post is CLAIMED
+    //   atomically (posted 0→1) before the forge call, so a double click or a
+    //   retried request can't post twice; a failed call releases the claim.
+    let pr_posted = if review.pr_number == LOCAL_REVIEW_PR_NUMBER {
+        comment.posted
+    } else if comment.posted {
+        true
+    } else if !ctx
+        .reviews_store
+        .claim_comment_post(&cid)
+        .await
+        .map_err(crate::error::ApiError)?
+    {
+        // Another request holds (or completed) the post.
+        true
+    } else {
+        let posted = post_review_comment(&ctx, &user, &repo, review.pr_number, &comment).await;
+        if !posted {
+            let _ = ctx.reviews_store.release_comment_post(&cid).await;
         }
-        Err(e) => {
-            tracing::warn!(comment = %cid, "failed to resolve provider for approve: {e}");
-            false
-        }
+        posted
     };
 
     // Append to the review markdown file.
@@ -6290,6 +6382,77 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
+}
+
+/// Post one approved review comment to its PR. Inline first; when the forge
+/// rejects the ANCHOR (GitHub 422 "line is not part of the diff" → `Conflict`,
+/// GitLab/Bitbucket 400 on an invalid position) it falls back to a general
+/// comment that cites `path:line`, instead of silently leaving the approved
+/// finding unposted. Any other failure (auth, network, 5xx) is NOT retried —
+/// a 5xx may have created the comment, and a second call would duplicate it.
+async fn post_review_comment(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    repo: &otto_core::domain::Repo,
+    pr_number: u64,
+    comment: &ReviewComment,
+) -> bool {
+    let (provider, remote) = match resolve_provider_remote(ctx, user, repo).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(comment = %comment.id, "failed to resolve provider for approve: {e}");
+            return false;
+        }
+    };
+    let req = NewPrCommentReq {
+        body: comment.body.clone(),
+        path: comment.path.clone(),
+        line: comment.line,
+        in_reply_to: None,
+    };
+    let err = match provider.comment(&remote, pr_number, &req).await {
+        Ok(_) => return true,
+        Err(e) => e,
+    };
+    let inline = comment.path.is_some() && comment.line.is_some();
+    if !(inline && inline_anchor_rejected(&err)) {
+        tracing::warn!(comment = %comment.id, "failed to post comment to PR: {err}");
+        return false;
+    }
+    tracing::info!(comment = %comment.id, "inline anchor rejected ({err}); posting as a general comment");
+    let general = NewPrCommentReq {
+        body: general_comment_body(comment),
+        path: None,
+        line: None,
+        in_reply_to: None,
+    };
+    match provider.comment(&remote, pr_number, &general).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(comment = %comment.id, "failed to post fallback comment to PR: {e}");
+            false
+        }
+    }
+}
+
+/// Whether a failed inline post was the forge rejecting the ANCHOR (the line
+/// is not in the PR's current diff) rather than the request as a whole.
+fn inline_anchor_rejected(e: &Error) -> bool {
+    match e {
+        Error::Conflict(_) => true,
+        Error::Upstream(m) | Error::Invalid(m) => m.contains(" 400:"),
+        _ => false,
+    }
+}
+
+/// Body of the general-comment fallback: the location it was meant for, then
+/// the finding.
+fn general_comment_body(comment: &ReviewComment) -> String {
+    match (&comment.path, comment.line) {
+        (Some(p), Some(l)) => format!("**`{p}:{l}`**\n\n{}", comment.body),
+        (Some(p), None) => format!("**`{p}`**\n\n{}", comment.body),
+        _ => comment.body.clone(),
+    }
 }
 
 async fn decline_comment(
@@ -6314,9 +6477,11 @@ async fn decline_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
+    // Keep `posted` as-is: declining a comment that is already on the PR does
+    // not un-post it, and resetting the flag let a later approve post it AGAIN.
     let updated = ctx
         .reviews_store
-        .set_comment_state(&cid, CommentState::Declined, false)
+        .set_comment_state(&cid, CommentState::Declined, comment.posted)
         .await
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
