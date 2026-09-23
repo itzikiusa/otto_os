@@ -1,7 +1,7 @@
 # Design Hall — the artifact graph
 
-> **Status: Phase 0 backend.** The graph, its REST/WS surface, the legacy
-> import and the read-only agent tools ship now; the Lobby UI, the unified
+> **Status: Phase 0.** The graph, its REST/WS surface, the legacy import, the
+> read-only agent tools and the Design Hall UI (§8) ship now; the unified
 > `design_assist` agent turn, variants, export/publish and learning are later
 > phases (see the proposal's roadmap). The existing Product → Design arena and
 > Canvas keep working unchanged meanwhile.
@@ -201,10 +201,11 @@ at it. Agents should cite what they borrow as `otto://design/<id>@v<seq>`.
 
 ## 6. Capabilities & limits
 
-- Phase 0 has no UI of its own yet; the Product Design tab and Canvas keep
-  their own storage and routes. Edits made there reach the graph through the
-  import's `sync` versions (next start or `POST /design/admin/import`), not
-  live.
+- The Product Design tab and Canvas keep their own storage and routes. Edits
+  made there reach the graph through the import's `sync` versions (next start
+  or `POST /design/admin/import`), not live — so Design Hall opens imported
+  artifacts read-only, with "Open in Product/Canvas" and "Make an editable
+  copy" (a `derived_from` fork).
 - `otto-site`, `otto-layout`, `otto-brand`, `otto-exhibit` are stored and
   link-indexed as generic JSON; their own validators land with their studios.
 - `#node` validation covers JSON formats (any `"id"`) and HTML/SVG (`id="…"`);
@@ -230,3 +231,33 @@ at it. Agents should cite what they borrow as `otto://design/<id>@v<seq>`.
   `design: legacy import done` has the counts.
 - **`design:` 403 for a non-root user** — grant the `design` feature in
   Settings → Users (it was copied from `canvas` once, at upgrade).
+
+## 8. The UI (`#/design`, `ui/src/modules/design-hall/`)
+
+The sidebar's **Design Hall** entry (Build group) replaces Canvas; `#/canvas`
+still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
+
+| Route | View |
+|---|---|
+| `#/design` · `#/design/spatial` | Lobby — Grid (prompt hero, the seven studios, Continue, Projects, Linked to Product, the learning + agent-activity rail) or the Spatial (beta) CSS gallery of project bays |
+| `#/design/a/<id>` | One artifact: breadcrumb, status ▾ (Approve is explicit and human-only), version strip, Compare (side by side / text Changes; Restore saves a NEW version), right panel Links (Uses / Used in, add/remove explicit links) + References (library search, Add as reference, Start from this, Compare, provenance lineage); 3D adds hierarchy + inspector |
+| `#/design/p/<id>` · `#/design/studio/<studio>` · `#/design/story/<id>` | A project / a studio (with its classic-or-planned note) / the designs implementing a story |
+| `#/design/brand` · `#/design/learned[/rules\|/memory]` | Brand Kit scaffold (`otto-brand` kits) · the signals log (Rules and Memory are Phase 1 empty states) |
+
+- **Phase 0 honesty.** The lobby prompt creates a *draft* in the chosen studio
+  (the brief is kept in `meta.brief`); generation is Phase 1. Frames/Graphics
+  edit HTML (and SVG) as source with a live preview, 3D uses the arena's
+  scene3d studio, Whiteboard edits Mermaid/D2/Excalidraw; Site Studio and
+  Spatial Hall show their planned release instead of an editor.
+- **Saving** is explicit (Save / ⌘S): `PUT …/content` with `base_version`; a
+  409 asks "Save mine on top" or "Load vN (discard my edits)".
+- **Signals the UI posts:** `variant_chosen` on Restore and when a conflicting
+  agent version is taken, `variant_rejected` when a person keeps their edits
+  over an agent version. Approve / status / shipped / edit-after-draft signals
+  are recorded by the daemon, not posted twice.
+- **Live:** the `design_*` events refresh the lobby, the open artifact (a new
+  head while you have unsaved edits shows a "newer version" notice instead of
+  replacing your copy), its Links panel and the learning log.
+- **Product:** the story's Design tab shows a small graph of the designs that
+  implement it (an epic: its children's too) above the unchanged arena, with
+  "Open in Design Hall".

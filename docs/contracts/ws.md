@@ -847,8 +847,10 @@ their own routes.
   mockup events.
 - TypeScript types: the `design_artifact_updated` / `design_link_updated` /
   `design_learning_update` members of `OttoEvent` in `ui/src/lib/api/types.ts`
-  (`DesignArtifactChange`, `DesignLinkUpdateReason`, `DesignSignalKind`). No UI
-  routing yet (the Design Hall lobby lands separately).
+  (`DesignArtifactChange`, `DesignLinkUpdateReason`, `DesignSignalKind`). The
+  UI routes all three into `designBus` (`ui/src/lib/events.svelte.ts`), a short
+  sequenced log each open Design Hall view reads once; a WS reconnect bumps its
+  `resyncTick` so open views reload.
 
 ### `canvas_refs_changed`
 
