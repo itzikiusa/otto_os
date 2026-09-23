@@ -752,7 +752,32 @@ async fn route_result(
                         },
                     )
                     .await;
-                enqueue_reviews(ctx, task, run, &res).await;
+                if enqueue_reviews(ctx, task, run, &res).await == 0 {
+                    // Nobody to review it: an `in_review` task without a review
+                    // child never advances. Complete it, saying so.
+                    let _ = repo
+                        .update_task(
+                            &task.id,
+                            TaskPatch {
+                                status: Some("done".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    complete_parent_if_done(ctx, task).await;
+                    system_post(
+                        ctx,
+                        &task.swarm_id,
+                        Some(&task.project_id),
+                        Some(&task.id),
+                        "status",
+                        &format!(
+                            "No reviewer could be found for “{}” — completed without review.",
+                            task.title
+                        ),
+                    )
+                    .await;
+                }
             } else if crate::swarm_verify::task_has_goals(ctx, task).await {
                 // Goals attached → the leader verifies each sequentially before the
                 // task is done + its worktree branch is merged (requirement 3).
@@ -797,7 +822,31 @@ async fn route_result(
                     },
                 )
                 .await;
-            enqueue_reviews(ctx, task, run, &res).await;
+            if enqueue_reviews(ctx, task, run, &res).await == 0 {
+                // A review is required but nobody can do it: park it for a
+                // human instead of an `in_review` that never advances.
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("blocked".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                system_post(
+                    ctx,
+                    &task.swarm_id,
+                    Some(&task.project_id),
+                    Some(&task.id),
+                    "status",
+                    &format!(
+                        "“{}” needs a review but no reviewer could be found — blocked for a human.",
+                        task.title
+                    ),
+                )
+                .await;
+            }
         }
         "blocked" => {
             let _ = repo
@@ -1096,15 +1145,26 @@ async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run:
     }
 }
 
+/// Create one review task per requested review. A reviewer role that doesn't
+/// resolve falls back to the working agent's manager. Returns how many review
+/// tasks were created (0 ⇒ the caller must not leave the task `in_review`).
 async fn enqueue_reviews(
     ctx: &ServerCtx,
     task: &SwarmTask,
     run: &otto_state::SwarmRun,
     res: &SwarmTurnResult,
-) {
+) -> usize {
     let repo = &ctx.swarm_repo;
+    let manager = repo
+        .get_agent(&run.agent_id)
+        .await
+        .ok()
+        .and_then(|a| a.reports_to);
+    let mut created = 0usize;
     for rv in &res.reviews {
-        let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role).await;
+        let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role)
+            .await
+            .or_else(|| manager.clone());
         let Some(reviewer) = reviewer else { continue };
         // A review run: a new task assigned to the reviewer.
         let _ = repo.create_task(NewTask {
@@ -1125,21 +1185,26 @@ async fn enqueue_reviews(
             order_idx: 0,
             created_by: run.agent_id.clone(),
         }).await;
+        created += 1;
     }
-    system_post(
-        ctx,
-        &task.swarm_id,
-        Some(&task.project_id),
-        Some(&task.id),
-        "review_request",
-        &format!("Review requested on “{}”.", task.title),
-    )
-    .await;
+    if created > 0 {
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "review_request",
+            &format!("Review requested on “{}”.", task.title),
+        )
+        .await;
+    }
+    created
 }
 
 /// When a task completes, if it has a parent and all the parent's children are
-/// done, complete the parent too (recursively).
-async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
+/// done, complete the parent too (recursively). Also called by the goal
+/// verification controller when it completes a task.
+pub(crate) async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
     let repo = &ctx.swarm_repo;
     let Some(parent_id) = &task.parent_task_id else {
         return;
