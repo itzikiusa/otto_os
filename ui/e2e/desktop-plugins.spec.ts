@@ -97,7 +97,12 @@ test('enabled plugins are listed and the section hosts the iframe', async ({ pag
   expect(slugs).toContain('team-performance');
 
   const frame = await pluginFrame(page, 'team-performance');
-  await expect(frame.locator('h1')).toHaveText('Team Performance');
+  // The heading carries the running plugin's version (from its /config), so
+  // the iframe is proven to talk to THIS install's sidecar, not just render.
+  const { version } = JSON.parse(
+    readFileSync(join(EXAMPLES, 'team-performance', 'otto-plugin.json'), 'utf8'),
+  ) as { version: string };
+  await expect(frame.locator('h1')).toHaveText(`Team Performance v${version}`);
 });
 
 test('team-performance: scan → team dashboard with bars, predictions, estimation guide', async ({ page }) => {
@@ -107,7 +112,8 @@ test('team-performance: scan → team dashboard with bars, predictions, estimati
   // Account/project preselected from fixtures (other specs may add accounts —
   // assert ours exists rather than pinning the count).
   await expect(frame.locator('#account option', { hasText: 'E2E Jira' })).toHaveCount(1);
-  await expect(frame.locator('#project')).toContainText('TP');
+  // The project picker is a multi-select button labelled with the selection.
+  await expect(frame.locator('#proj-btn')).toContainText('TP');
 
   await frame.locator('#scan').click();
   // Team view renders once the scan lands: 2 developers.
@@ -115,7 +121,11 @@ test('team-performance: scan → team dashboard with bars, predictions, estimati
 
   // Phase-split bars (SVG marks) + legend.
   await expect(frame.locator('#assignee-bars svg rect').first()).toBeVisible();
-  await expect(frame.locator('#assignee-bars .legend')).toContainText('design');
+  // Several charts share the area now (delivered, estimate vs actual, …);
+  // the phase-split one carries the phase legend.
+  const phaseLegend = frame.locator('#assignee-bars .legend', { hasText: 'implementation' });
+  await expect(phaseLegend).toHaveCount(1);
+  await expect(phaseLegend).toContainText('design');
 
   // Team-level open tasks carry predictions + projected dates.
   const openRows = frame.locator('#open-tasks tbody tr');
@@ -144,8 +154,10 @@ test('team-performance: developer drill-down — verdicts, bullet bars, evidence
 
   // Evidence drill-down: click a row → stored status intervals appear.
   await frame.locator('#completed-table tr.task-row').first().click();
-  await expect(frame.locator('.evidence.open')).toContainText('status history');
-  await expect(frame.locator('.evidence.open table tbody tr').first()).toBeVisible();
+  // (The evidence row is a Status / Phase / Span / Calendar table.)
+  const history = frame.locator('.evidence.open table', { has: frame.locator('th', { hasText: 'Phase' }) });
+  await expect(history.locator('thead')).toContainText('Status');
+  await expect(history.locator('tbody tr').first()).toBeVisible();
 
   // Open task prediction for Alice (TP-7).
   await expect(frame.locator('#dev-open')).toContainText('TP-7');
