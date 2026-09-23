@@ -12,7 +12,22 @@
 //!
 //! `validate` runs before every render/save (TS mirror: `scene3d/validate.ts`)
 //! and before the Blender export: known `type`s only, finite numbers, bounded
-//! array lengths, safe id components. `to_blender_script` is a FIXED template
+//! array lengths, safe id components.
+//!
+//! **Version 2** (3D Studio 1.5; v1 documents are still read unchanged) adds,
+//! all optional: physical material `preset`s + fields (clearcoat,
+//! transmission, ior, thickness, sheen, emissive intensity), brand colours as
+//! `token:color.<name>` references (resolved by the UI against the kit named
+//! by the top-level `brand` — an `otto://design/…` URI, so it becomes a
+//! `uses_tokens` link), a procedural `environment` preset, named camera
+//! presets (`cameras`, addressable by embeds as `#view:<id>`), named `states`
+//! (per-object overrides tweened by the viewer, `#state:<id>`), a `turntable`,
+//! rounded boxes (`radius`) and `gltf` objects that reference a Design Hall
+//! model by `src: "otto://design/<id>[@…]"` instead of an `attachment_id`.
+//! v2 fields are validated whenever present; a token colour requires
+//! `version: 2`.
+//!
+//! `to_blender_script` is a FIXED template
 //! that interpolates only validated numbers / enums / escaped strings — it is
 //! generated server-side from a validated document and never from a user or
 //! agent file (see `design_blender.rs`).
@@ -34,7 +49,19 @@ const MAX_NOTES: usize = 4_000;
 const MAX_MAGNITUDE: f64 = 1.0e6;
 
 pub const DOC_TYPE: &str = "otto-scene3d";
+/// The version new starter documents are written as (v1 stays the Product
+/// arena's starter; the Design Hall studio upgrades a document to v2 on its
+/// first save).
 pub const DOC_VERSION: u32 = 1;
+/// The newest version this validator understands (3D Studio 1.5).
+pub const DOC_VERSION_V2: u32 = 2;
+/// Named camera presets / states per document.
+pub const MAX_CAMERAS: usize = 32;
+pub const MAX_STATES: usize = 32;
+/// Longest state transition we accept (ms).
+const MAX_DURATION_MS: u32 = 10_000;
+/// `token:color.<name>` — the only non-hex colour syntax (v2).
+const TOKEN_PREFIX: &str = "token:";
 
 // ---------------------------------------------------------------------------
 // Document types (serde; unknown keys are ignored for forward compatibility)
@@ -57,6 +84,111 @@ pub struct Scene3d {
     pub objects: Vec<Object3d>,
     #[serde(default)]
     pub groups: Vec<Group>,
+    // ---- v2 (all optional) ----
+    /// The brand kit tokens resolve against: `otto://design/<id>[@…]`.
+    #[serde(default)]
+    pub brand: Option<String>,
+    #[serde(default)]
+    pub environment: Option<Environment>,
+    #[serde(default)]
+    pub cameras: Vec<CameraPreset>,
+    #[serde(default)]
+    pub states: Vec<State>,
+    #[serde(default)]
+    pub default_state: Option<String>,
+    #[serde(default)]
+    pub turntable: Option<Turntable>,
+}
+
+/// v2: a procedural image-based-lighting preset (generated in the viewer —
+/// nothing is fetched).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Environment {
+    pub preset: EnvPreset,
+    #[serde(default)]
+    pub intensity: Option<f64>,
+    /// Show the environment as the backdrop (else `background` / the default).
+    #[serde(default)]
+    pub background: Option<bool>,
+    /// Y rotation of the environment, degrees.
+    #[serde(default)]
+    pub rotation: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnvPreset {
+    StudioSoft,
+    Sunset,
+    Night,
+    None,
+}
+
+/// v2: a named camera ("Hero angle") embeds can ask for as `#view:<id>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CameraPreset {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub position: [f64; 3],
+    #[serde(default = "zero3")]
+    pub target: [f64; 3],
+    #[serde(default)]
+    pub fov: Option<f64>,
+}
+
+/// v2: a named state (Idle / Hover / Flipped…) — per-object overrides of the
+/// base document the viewer tweens to over `duration_ms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct State {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u32>,
+    #[serde(default)]
+    pub easing: Option<Easing>,
+    /// object id → override.
+    #[serde(default)]
+    pub overrides: std::collections::BTreeMap<String, StateOverride>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Easing {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Spring,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StateOverride {
+    #[serde(default)]
+    pub position: Option<[f64; 3]>,
+    #[serde(default)]
+    pub rotation: Option<[f64; 3]>,
+    #[serde(default)]
+    pub scale: Option<[f64; 3]>,
+    #[serde(default)]
+    pub visible: Option<bool>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub emissive: Option<String>,
+}
+
+/// v2: slow camera orbit around the target (editor preview + embeds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Turntable {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Degrees per second (negative = clockwise).
+    #[serde(default)]
+    pub speed: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +253,13 @@ pub struct Object3d {
     /// Free-form per-object notes (the 3D stand-in for pinned annotations).
     #[serde(default)]
     pub notes: Option<String>,
+    /// v2, `gltf` only — a Design Hall model as `otto://design/<id>[@…]`
+    /// (instead of `attachment_id`).
+    #[serde(default)]
+    pub src: Option<String>,
+    /// v2, `box` only — corner radius of the unit box (0..=0.5).
+    #[serde(default)]
+    pub radius: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +290,34 @@ pub struct Material {
     pub emissive: Option<String>,
     #[serde(default)]
     pub wireframe: Option<bool>,
+    // ---- v2 physical material ----
+    #[serde(default)]
+    pub preset: Option<MaterialPreset>,
+    #[serde(default)]
+    pub clearcoat: Option<f64>,
+    #[serde(default)]
+    pub clearcoat_roughness: Option<f64>,
+    #[serde(default)]
+    pub transmission: Option<f64>,
+    #[serde(default)]
+    pub ior: Option<f64>,
+    #[serde(default)]
+    pub thickness: Option<f64>,
+    #[serde(default)]
+    pub sheen: Option<f64>,
+    #[serde(default)]
+    pub emissive_intensity: Option<f64>,
+}
+
+/// v2 physical material presets: a preset supplies defaults, explicit fields win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MaterialPreset {
+    GlossyPlastic,
+    BrushedMetal,
+    FrostedGlass,
+    MattePaper,
+    Satin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,12 +363,13 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
             s.doc_type
         )));
     }
-    if s.version != DOC_VERSION {
+    if s.version != DOC_VERSION && s.version != DOC_VERSION_V2 {
         return Err(bad(format!(
-            "unsupported version {} (expected {DOC_VERSION})",
+            "unsupported version {} (expected {DOC_VERSION} or {DOC_VERSION_V2})",
             s.version
         )));
     }
+    let v2 = s.version >= DOC_VERSION_V2;
     if let Some(bg) = &s.background {
         check_color("background", bg)?;
     }
@@ -260,29 +428,25 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
         check_vec3(&format!("{at}.rotation"), &o.rotation)?;
         check_vec3(&format!("{at}.scale"), &o.scale)?;
         if let Some(m) = &o.material {
-            if let Some(c) = &m.color {
-                check_color(&format!("{at}.material.color"), c)?;
-            }
-            if let Some(c) = &m.emissive {
-                check_color(&format!("{at}.material.emissive"), c)?;
-            }
-            for (k, v) in [
-                ("metalness", m.metalness),
-                ("roughness", m.roughness),
-                ("opacity", m.opacity),
-            ] {
-                if let Some(v) = v {
-                    check_num(&format!("{at}.material.{k}"), v, 0.0, 1.0)?;
-                }
-            }
+            check_material(&format!("{at}.material"), m, v2)?;
         }
         match o.kind {
-            ObjectKind::Gltf => match o.attachment_id.as_deref() {
-                Some(aid) if otto_core::paths::safe_component(aid).is_some() => {}
-                Some(aid) => {
+            ObjectKind::Gltf => match (o.attachment_id.as_deref(), o.src.as_deref()) {
+                (Some(_), Some(_)) => {
+                    return Err(bad(format!(
+                        "{at}: gltf objects take attachment_id OR src, not both"
+                    )))
+                }
+                (Some(aid), None) if otto_core::paths::safe_component(aid).is_some() => {}
+                (Some(aid), None) => {
                     return Err(bad(format!("{at}.attachment_id {aid:?} is not a safe id")))
                 }
-                None => return Err(bad(format!("{at}: gltf objects require attachment_id"))),
+                (None, Some(src)) => check_design_uri(&format!("{at}.src"), src)?,
+                (None, None) => {
+                    return Err(bad(format!(
+                        "{at}: gltf objects require attachment_id (or a v2 src)"
+                    )))
+                }
             },
             _ => {
                 if o.attachment_id.is_some() {
@@ -290,7 +454,16 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
                         "{at}.attachment_id is only valid on gltf objects"
                     )));
                 }
+                if o.src.is_some() {
+                    return Err(bad(format!("{at}.src is only valid on gltf objects")));
+                }
             }
+        }
+        if let Some(r) = o.radius {
+            if o.kind != ObjectKind::Box {
+                return Err(bad(format!("{at}.radius is only valid on box objects")));
+            }
+            check_num(&format!("{at}.radius"), r, 0.0, 0.5)?;
         }
         if let Some(t) = &o.text {
             check_str(&format!("{at}.text"), t, MAX_TEXT)?;
@@ -322,7 +495,177 @@ fn validate_scene(s: &Scene3d) -> Result<(), Error> {
             }
         }
     }
+    validate_v2_scene(s, &object_ids, v2)
+}
+
+/// The v2 top-level blocks (validated whenever present, whatever `version`
+/// says — only token colours are version-gated).
+fn validate_v2_scene(s: &Scene3d, object_ids: &HashSet<&str>, v2: bool) -> Result<(), Error> {
+    if let Some(b) = &s.brand {
+        check_design_uri("brand", b)?;
+    }
+    if let Some(env) = &s.environment {
+        if let Some(i) = env.intensity {
+            check_num("environment.intensity", i, 0.0, 10.0)?;
+        }
+        if let Some(r) = env.rotation {
+            check_num("environment.rotation", r, -360.0, 360.0)?;
+        }
+    }
+    if let Some(t) = &s.turntable {
+        if let Some(sp) = t.speed {
+            check_num("turntable.speed", sp, -360.0, 360.0)?;
+        }
+    }
+    if s.cameras.len() > MAX_CAMERAS {
+        return Err(bad(format!(
+            "too many cameras ({} > {MAX_CAMERAS})",
+            s.cameras.len()
+        )));
+    }
+    let mut cam_ids: HashSet<&str> = HashSet::new();
+    for (i, c) in s.cameras.iter().enumerate() {
+        let at = format!("cameras[{i}]");
+        check_id(&at, &c.id, &mut cam_ids)?;
+        if let Some(n) = &c.name {
+            check_str(&format!("{at}.name"), n, MAX_NAME)?;
+        }
+        check_vec3(&format!("{at}.position"), &c.position)?;
+        check_vec3(&format!("{at}.target"), &c.target)?;
+        if let Some(fov) = c.fov {
+            if !fov.is_finite() || !(1.0..=179.0).contains(&fov) {
+                return Err(bad(format!("{at}.fov must be within 1..=179")));
+            }
+        }
+    }
+    if s.states.len() > MAX_STATES {
+        return Err(bad(format!(
+            "too many states ({} > {MAX_STATES})",
+            s.states.len()
+        )));
+    }
+    let mut state_ids: HashSet<&str> = HashSet::new();
+    for (i, st) in s.states.iter().enumerate() {
+        let at = format!("states[{i}]");
+        check_id(&at, &st.id, &mut state_ids)?;
+        if let Some(n) = &st.name {
+            check_str(&format!("{at}.name"), n, MAX_NAME)?;
+        }
+        if let Some(d) = st.duration_ms {
+            if d > MAX_DURATION_MS {
+                return Err(bad(format!("{at}.duration_ms must be ≤ {MAX_DURATION_MS}")));
+            }
+        }
+        if st.overrides.len() > MAX_OBJECTS {
+            return Err(bad(format!("{at}.overrides is too long")));
+        }
+        for (oid, ov) in &st.overrides {
+            let oat = format!("{at}.overrides[{oid:?}]");
+            if !object_ids.contains(oid.as_str()) {
+                return Err(bad(format!("{oat} references unknown object")));
+            }
+            for (k, v) in [
+                ("position", &ov.position),
+                ("rotation", &ov.rotation),
+                ("scale", &ov.scale),
+            ] {
+                if let Some(v) = v {
+                    check_vec3(&format!("{oat}.{k}"), v)?;
+                }
+            }
+            if let Some(o) = ov.opacity {
+                check_num(&format!("{oat}.opacity"), o, 0.0, 1.0)?;
+            }
+            if let Some(c) = &ov.color {
+                check_color_or_token(&format!("{oat}.color"), c, v2)?;
+            }
+            if let Some(c) = &ov.emissive {
+                check_color_or_token(&format!("{oat}.emissive"), c, v2)?;
+            }
+        }
+    }
+    if let Some(d) = &s.default_state {
+        if !state_ids.contains(d.as_str()) {
+            return Err(bad(format!("default_state {d:?} is not a state id")));
+        }
+    }
     Ok(())
+}
+
+fn check_material(at: &str, m: &Material, v2: bool) -> Result<(), Error> {
+    if let Some(c) = &m.color {
+        check_color_or_token(&format!("{at}.color"), c, v2)?;
+    }
+    if let Some(c) = &m.emissive {
+        check_color_or_token(&format!("{at}.emissive"), c, v2)?;
+    }
+    for (k, v) in [
+        ("metalness", m.metalness),
+        ("roughness", m.roughness),
+        ("opacity", m.opacity),
+        ("clearcoat", m.clearcoat),
+        ("clearcoat_roughness", m.clearcoat_roughness),
+        ("transmission", m.transmission),
+        ("sheen", m.sheen),
+    ] {
+        if let Some(v) = v {
+            check_num(&format!("{at}.{k}"), v, 0.0, 1.0)?;
+        }
+    }
+    if let Some(v) = m.ior {
+        check_num(&format!("{at}.ior"), v, 1.0, 2.333)?;
+    }
+    if let Some(v) = m.thickness {
+        check_num(&format!("{at}.thickness"), v, 0.0, 10.0)?;
+    }
+    if let Some(v) = m.emissive_intensity {
+        check_num(&format!("{at}.emissive_intensity"), v, 0.0, 100.0)?;
+    }
+    Ok(())
+}
+
+/// A v2 reference to another Design Hall artifact (`brand`, `gltf.src`).
+fn check_design_uri(at: &str, s: &str) -> Result<(), Error> {
+    if otto_design::uri::DesignUri::parse(s).is_none() {
+        return Err(bad(format!(
+            "{at} must be an otto://design/<id>[@approved|@latest|@vN] reference, got {s:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// A hex colour, or (v2 only) `token:color.<name>` — a brand-kit token the UI
+/// resolves; the name is `[A-Za-z0-9_.-]{1,96}` after `color.`.
+fn check_color_or_token(at: &str, c: &str, v2: bool) -> Result<(), Error> {
+    let Some(rest) = c.strip_prefix(TOKEN_PREFIX) else {
+        return check_color(at, c);
+    };
+    if !v2 {
+        return Err(bad(format!(
+            "{at}: token colours ({c:?}) need \"version\": 2"
+        )));
+    }
+    let name = rest.strip_prefix("color.").unwrap_or("");
+    let ok = !name.is_empty()
+        && name.len() <= 96
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if !ok {
+        return Err(bad(format!(
+            "{at} must be a #rrggbb colour or token:color.<name>, got {c:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// A colour for the Blender export: a hex string as-is; a brand token (the
+/// kit lives in Otto, not in the script) falls back to `default`.
+fn export_color<'a>(c: Option<&'a str>, default: &'a str) -> &'a str {
+    match c {
+        Some(c) if !c.starts_with(TOKEN_PREFIX) => c,
+        _ => default,
+    }
 }
 
 fn bad(msg: impl Into<String>) -> Error {
@@ -508,8 +851,8 @@ pub fn to_blender_script(scene: &Scene3d) -> String {
         };
         let name = o.name.as_deref().unwrap_or(&o.id);
         let m = o.material.clone().unwrap_or_default();
-        let (cr, cg, cb) = rgb(m.color.as_deref().unwrap_or("#cbd5e1"));
-        let (er, eg, eb) = rgb(m.emissive.as_deref().unwrap_or("#000000"));
+        let (cr, cg, cb) = rgb(export_color(m.color.as_deref(), "#cbd5e1"));
+        let (er, eg, eb) = rgb(export_color(m.emissive.as_deref(), "#000000"));
         py.push_str(&format!(
             "add_object({}, {}, \"{}\", {}, {}, {}, dict(color=({}, {}, {}), metalness={}, roughness={}, opacity={}, emissive=({}, {}, {}), wireframe={}), text={}, visible={})\n",
             py_str(&o.id),
@@ -898,6 +1241,152 @@ add_group(\"g\", \"g\", [\"b\", \"t\"])
         assert!(py.contains("\"render.png\""));
         assert!(py.contains("\"scene.glb\""));
         assert!(py.contains("--out"));
+    }
+
+    /// A v2 document using every new block (the 3D Studio 1.5 "Rewards Card").
+    fn sample_v2() -> Value {
+        json!({
+            "type": "otto-scene3d", "version": 2,
+            "background": "#f4f3fa",
+            "brand": "otto://design/brand01@approved",
+            "environment": { "preset": "studio-soft", "intensity": 1.1, "background": true, "rotation": 30 },
+            "camera": { "position": [3, 2, 4], "target": [0, 1, 0], "fov": 35 },
+            "cameras": [ { "id": "hero", "name": "Hero angle", "position": [2.4, 1.6, 3], "target": [0, 1, 0], "fov": 30 } ],
+            "turntable": { "enabled": false, "speed": 18 },
+            "lights": [ { "id": "key", "type": "directional", "position": [3, 5, 2], "intensity": 1.4 } ],
+            "objects": [
+                { "id": "card", "name": "Card", "type": "box", "radius": 0.04,
+                  "position": [0, 1, 0], "scale": [1.6, 1, 0.03],
+                  "material": { "preset": "glossy-plastic", "color": "token:color.violet",
+                                "roughness": 0.35, "clearcoat": 1, "clearcoat_roughness": 0.1 } },
+                { "id": "glass", "type": "sphere",
+                  "material": { "preset": "frosted-glass", "transmission": 0.9, "ior": 1.45, "thickness": 0.4, "sheen": 0.2,
+                                "emissive": "#000000", "emissive_intensity": 2 } },
+                { "id": "gift", "type": "gltf", "src": "otto://design/giftbox@v3" }
+            ],
+            "states": [
+                { "id": "idle", "name": "Idle" },
+                { "id": "flipped", "name": "Flipped", "duration_ms": 500, "easing": "ease-in-out",
+                  "overrides": { "card": { "rotation": [0, 180, 0], "color": "token:color.amber", "opacity": 0.9 } } }
+            ],
+            "default_state": "idle"
+        })
+    }
+
+    #[test]
+    fn v2_documents_validate_and_v1_stays_readable() {
+        let s = validate(&sample_v2()).unwrap();
+        assert_eq!(s.version, DOC_VERSION_V2);
+        assert_eq!(s.cameras[0].id, "hero");
+        assert_eq!(s.states[1].easing, Some(Easing::EaseInOut));
+        assert_eq!(
+            s.objects[0].material.as_ref().unwrap().preset,
+            Some(MaterialPreset::GlossyPlastic)
+        );
+        assert_eq!(
+            s.environment.as_ref().unwrap().preset,
+            EnvPreset::StudioSoft
+        );
+        // v1 documents (and their Blender export) are unchanged.
+        assert!(validate(&sample()).is_ok());
+        // A v1 document may use v2 blocks except token colours.
+        let mut d = sample();
+        d["cameras"] = json!([{ "id": "hero", "position": [1, 1, 1] }]);
+        assert!(validate(&d).is_ok());
+        d["objects"][1]["material"]["color"] = json!("token:color.violet");
+        let err = validate(&d).unwrap_err();
+        assert!(err.to_string().contains("version"), "{err}");
+    }
+
+    /// `sample_v2()` with one mutation must fail validation.
+    fn rejects(what: &str, mutate: impl FnOnce(&mut Value)) {
+        let mut d = sample_v2();
+        mutate(&mut d);
+        assert!(validate(&d).is_err(), "{what} must be rejected");
+    }
+
+    #[test]
+    fn v2_rejects_bad_tokens_uris_states_and_ranges() {
+        rejects("token without color. prefix", |d| {
+            d["objects"][0]["material"]["color"] = json!("token:violet")
+        });
+        rejects("token with a space", |d| {
+            d["objects"][0]["material"]["color"] = json!("token:color.vio let")
+        });
+        rejects("brand is a raw URL", |d| {
+            d["brand"] = json!("https://example.com/brand.json")
+        });
+        rejects("gltf src is a path", |d| {
+            d["objects"][2]["src"] = json!("../model.glb")
+        });
+        rejects("gltf with both refs", |d| {
+            d["objects"][2]["attachment_id"] = json!("att1")
+        });
+        rejects("gltf with neither ref", |d| {
+            d["objects"][2].as_object_mut().unwrap().remove("src");
+        });
+        rejects("src on a box", |d| {
+            d["objects"][0]["src"] = json!("otto://design/x1")
+        });
+        rejects("radius on a sphere", |d| {
+            d["objects"][1]["radius"] = json!(0.1)
+        });
+        rejects("radius too large", |d| {
+            d["objects"][0]["radius"] = json!(0.9)
+        });
+        rejects("ior out of range", |d| {
+            d["objects"][1]["material"]["ior"] = json!(3.0)
+        });
+        rejects("clearcoat > 1", |d| {
+            d["objects"][0]["material"]["clearcoat"] = json!(1.5)
+        });
+        rejects("unknown preset", |d| {
+            d["objects"][0]["material"]["preset"] = json!("chrome")
+        });
+        rejects("unknown environment", |d| {
+            d["environment"]["preset"] = json!("forest")
+        });
+        rejects("environment intensity", |d| {
+            d["environment"]["intensity"] = json!(-1)
+        });
+        rejects("duplicate camera id", |d| {
+            d["cameras"] = json!([
+                { "id": "a", "position": [0, 0, 1] },
+                { "id": "a", "position": [0, 0, 2] }
+            ])
+        });
+        rejects("camera fov", |d| d["cameras"][0]["fov"] = json!(200));
+        rejects("state overrides unknown object", |d| {
+            d["states"][1]["overrides"] = json!({ "ghost": { "visible": false } })
+        });
+        rejects("state duration too long", |d| {
+            d["states"][1]["duration_ms"] = json!(60000)
+        });
+        rejects("unknown easing", |d| {
+            d["states"][1]["easing"] = json!("bounce")
+        });
+        rejects("default_state unknown", |d| {
+            d["default_state"] = json!("hover")
+        });
+        rejects("turntable too fast", |d| {
+            d["turntable"]["speed"] = json!(1000)
+        });
+        rejects("unsafe state id", |d| d["states"][0]["id"] = json!("../x"));
+        rejects("unknown future version", |d| d["version"] = json!(3));
+    }
+
+    #[test]
+    fn v2_blender_export_falls_back_for_tokens_and_hides_srcs() {
+        let scene = validate(&sample_v2()).unwrap();
+        let py = to_blender_script(&scene);
+        // The token colour never reaches the script: the neutral default is used.
+        assert!(!py.contains("token:"));
+        assert!(py.contains(
+            "add_object(\"card\", \"Card\", \"box\", (0.0, 1.0, 0.0), (0.0, 0.0, 0.0), (1.6, 1.0, 0.03), dict(color=(0.796078431372549, 0.8352941176470589, 0.8823529411764706)"
+        ));
+        // Nor does a model reference (no fs / URL surface in the script).
+        assert!(!py.contains("otto://"));
+        assert!(py.contains("add_object(\"gift\", \"gift\", \"gltf\""));
     }
 
     #[test]
