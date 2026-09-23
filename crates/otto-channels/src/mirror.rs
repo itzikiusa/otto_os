@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
@@ -104,6 +105,27 @@ struct SessionEntry {
     /// Whether the typing indicator should be sent right now (on while a turn is
     /// in progress, off after its Final).
     typing_active: Arc<AtomicBool>,
+    /// Where the feed + reply go. Replaced by every `attach`, so the LATEST
+    /// turn's destination wins: a webhook caller's own callback URL (a new
+    /// `WebhookAdapter` per request — two automations sharing a conversation
+    /// must not get each other's replies), and a Slack/Telegram adapter built
+    /// with the current (possibly rotated) token instead of a revoked one.
+    dest: Arc<StdMutex<Destination>>,
+}
+
+/// A session's channel destination (see [`SessionEntry::dest`]).
+#[derive(Clone)]
+struct Destination {
+    adapter: Arc<dyn Adapter>,
+    chat: String,
+    thread: Option<String>,
+    agent_reply: bool,
+}
+
+/// Snapshot the current destination (never held across an `.await`; a
+/// poisoned lock still yields the last value written).
+fn current_dest(dest: &StdMutex<Destination>) -> Destination {
+    dest.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 /// Shared mirror state — holds one entry per tracked session.
@@ -150,22 +172,32 @@ impl Mirror {
         thread: Option<String>,
         agent_reply: bool,
     ) {
+        let destination = Destination {
+            adapter,
+            chat,
+            thread,
+            agent_reply,
+        };
         let mut guard = self.sessions.lock().await;
 
-        // If we already have a live tailer for this session, do nothing.
-        if guard.contains_key(&session_id) {
+        // A live tailer already exists: just point it at this turn's
+        // destination (it re-reads it when `begin_turn` starts the turn).
+        if let Some(entry) = guard.get(&session_id) {
+            *entry.dest.lock().unwrap_or_else(|p| p.into_inner()) = destination;
             return;
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
         let new_turn = Arc::new(AtomicBool::new(false));
         let typing_active = Arc::new(AtomicBool::new(true));
+        let dest = Arc::new(StdMutex::new(destination));
         guard.insert(
             session_id.clone(),
             SessionEntry {
                 cancel: Arc::clone(&cancel),
                 new_turn: Arc::clone(&new_turn),
                 typing_active: Arc::clone(&typing_active),
+                dest: Arc::clone(&dest),
             },
         );
         drop(guard);
@@ -178,17 +210,7 @@ impl Mirror {
         let mirror = Arc::clone(self);
         tokio::spawn(async move {
             mirror
-                .run_tailer(
-                    session_id,
-                    adapter,
-                    chat,
-                    thread,
-                    agent_reply,
-                    since,
-                    cancel,
-                    new_turn,
-                    typing_active,
-                )
+                .run_tailer(session_id, dest, since, cancel, new_turn, typing_active)
                 .await;
         });
     }
@@ -207,10 +229,7 @@ impl Mirror {
     async fn run_tailer(
         &self,
         session_id: Id,
-        adapter: Arc<dyn Adapter>,
-        chat: String,
-        thread: Option<String>,
-        agent_reply: bool,
+        dest: Arc<StdMutex<Destination>>,
         since: chrono::DateTime<chrono::Utc>,
         cancel: Arc<AtomicBool>,
         new_turn: Arc<AtomicBool>,
@@ -256,20 +275,29 @@ impl Mirror {
         {
             let stop = Arc::clone(&typing_stop);
             let active = Arc::clone(&typing_active);
-            let adapter_clone = Arc::clone(&adapter);
-            let chat_clone = chat.clone();
+            let dest = Arc::clone(&dest);
             tokio::spawn(async move {
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
                     if active.load(Ordering::Relaxed) {
-                        let _ = adapter_clone.typing(&chat_clone).await;
+                        let d = current_dest(&dest);
+                        let _ = d.adapter.typing(&d.chat).await;
                     }
                     tokio::time::sleep(TYPING_INTERVAL).await;
                 }
             });
         }
+
+        // This turn's destination; refreshed from `dest` whenever a new turn
+        // starts (a later `attach` may have replaced it).
+        let Destination {
+            mut adapter,
+            mut chat,
+            mut thread,
+            mut agent_reply,
+        } = current_dest(&dest);
 
         // Process events: maintain a rolling feed of the agent's steps (edited in
         // place) whose header rotates through "still working" phrases on a timer
@@ -287,11 +315,10 @@ impl Mirror {
         // send forever, flooding the channel API into 429s.
         let mut feed = FeedHealth::new();
         let mut ticks_since_liveness: u32 = 0;
-        let thread_ref = thread.as_deref();
         // Slack renders mrkdwn (``` code fences) in chat.update text; Telegram's
         // in-place edit carries no parse mode, so fences would show literally —
         // there the command preview is rendered as plain indented lines instead.
-        let code_blocks = matches!(adapter.channel(), Channel::Slack);
+        let mut code_blocks = matches!(adapter.channel(), Channel::Slack);
 
         // Liveness ticker: advances the header phrase while a turn is in flight.
         let mut status_ticker = tokio::time::interval(STATUS_TICK);
@@ -312,6 +339,12 @@ impl Mirror {
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 feed = FeedHealth::new();
                 typing_active.store(true, Ordering::Relaxed);
+                let d = current_dest(&dest);
+                adapter = d.adapter;
+                chat = d.chat;
+                thread = d.thread;
+                agent_reply = d.agent_reply;
+                code_blocks = matches!(adapter.channel(), Channel::Slack);
             }
 
             tokio::select! {
@@ -335,7 +368,7 @@ impl Mirror {
                             if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                                 last_edit = Instant::now();
                                 let body = render_feed(&status_header(status_idx), &activity_lines);
-                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &body).await);
                             }
                         }
                         TranscriptEvent::Final { text } => {
@@ -356,7 +389,7 @@ impl Mirror {
                             let done_body = render_feed(&header, &activity_lines);
                             last_edit = Instant::now();
                             if feed.can_send() {
-                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &done_body).await);
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &done_body).await);
                             }
 
                             // Otto posts the reply itself via the adapter (the bot that
@@ -389,11 +422,11 @@ impl Mirror {
                                     let cleaned = redact_secrets(&strip_file_directives(body), true);
                                     let cleaned = cleaned.trim();
                                     if !cleaned.is_empty() {
-                                        post_reply(&adapter, &chat, thread_ref, cleaned).await;
+                                        post_reply(&adapter, &chat, thread.as_deref(), cleaned).await;
                                     }
                                 }
                                 for path in &file_paths {
-                                    upload_file_path(&adapter, &chat, thread_ref, path, &cwd).await;
+                                    upload_file_path(&adapter, &chat, thread.as_deref(), path, &cwd).await;
                                 }
                                 last_posted_final = Some(joined);
 
@@ -445,7 +478,7 @@ impl Mirror {
                         if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                             last_edit = Instant::now();
                             let body = render_feed(&status_header(status_idx), &activity_lines);
-                            feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
+                            feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &body).await);
                         }
                         status_idx = status_idx.wrapping_add(1);
                     }
