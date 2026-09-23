@@ -2370,10 +2370,13 @@ class DatabaseStore {
 
   // ── Query ─────────────────────────────────────────────────────────────────
 
-  /** Run the active tab's statement (or a given one) and store the result. */
+  /** Run the active tab's statement (or a given one) and store the result.
+   *  `node` scopes it: omitted (`undefined`) → the active database; `null` →
+   *  explicitly NO scope (how a result that ran unscoped is paged/refreshed —
+   *  it must not pick up a database selected since). */
   async runQuery(
     statement?: string,
-    node?: string,
+    node?: string | null,
     opts?: { transient?: boolean; keepOffset?: boolean; cursor?: unknown },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
@@ -2411,9 +2414,9 @@ class DatabaseStore {
       // default row cap. The server also injects this LIMIT into the SQL so a
       // huge table isn't fully scanned — this value just sizes that cap.
       const explicit = parseExplicitLimit(sql);
-      // Scope to the active database (so unqualified tables resolve) unless an
-      // explicit node was passed.
-      const scopeNode = node ?? (this.activeDb || null);
+      // Scope to the active database (so unqualified tables resolve) unless a
+      // node was passed — `null` included, which means "no scope".
+      const scopeNode = node === undefined ? this.activeDb || null : node;
       // Per-tab timeout (opt-in; null / 0 = no limit).
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
@@ -2516,9 +2519,10 @@ class DatabaseStore {
     const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
     t.offset = next;
     // Page the statement (and scope node) that PRODUCED the result — the editor
-    // buffer / active DB may have been edited since the run. `transient` keeps
-    // the buffer untouched.
-    void this.runQuery(t.ran_statement ?? undefined, t.ran_node ?? undefined, {
+    // buffer / active DB may have been edited since the run. `ran_node` is
+    // passed as-is: a `null` (ran unscoped) must stay unscoped, not fall back
+    // to a database selected since. `transient` keeps the buffer untouched.
+    void this.runQuery(t.ran_statement ?? undefined, t.ran_node, {
       keepOffset: true,
       transient: true,
       cursor,
@@ -2559,7 +2563,10 @@ class DatabaseStore {
   async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     if (!id) throw new Error('No connection selected');
-    const scopeNode = node ?? (this.activeDb || null);
+    // Same scope rule as `runQuery`: only an OMITTED node means "active DB";
+    // an explicit `null` (a grid edit of a result that ran unscoped) stays
+    // unscoped instead of landing in whatever database is selected now.
+    const scopeNode = node === undefined ? this.activeDb || null : node;
     const post = (confirmWrite: boolean): Promise<QueryResult> =>
       api.post<QueryResult>(`${this.connBase(id)}/query`, {
         statement: sql,
