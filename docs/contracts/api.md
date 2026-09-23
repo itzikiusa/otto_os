@@ -810,9 +810,23 @@ and issues `{killOp: 1, op: <opid>}` per match, on a separate pooled connection.
 Best-effort by design: `allUsers: true` needs the `inprog` privilege — when
 refused, the lookup is retried scoped to the current user (no privilege needed;
 it is the user that ran the query); a refused `killOp` (`killop` privilege) is
-logged and answered `204`. Writes, index ops and `mongosh` scripts are never
-tagged (no server-side cancel path). A cancel that lands before the server has
-registered the op matches nothing and is a `204`.
+logged and the run is aborted (`aborted`). Writes, index ops and `mongosh`
+scripts have no server-side cancel path: their detached run is aborted (a script's
+`mongosh` child is killed). A cancel that lands before the server has registered
+the op matches nothing; the run is then aborted after the grace period.
+
+**Scope (`node`).** `RunQueryReq.node` (and the `node` of `mcp-query`, `query-plan`,
+export) names the scope a statement runs in: a plain database / schema name, a
+`db:<name>[/…]` tree path, or a Redis `kdb:<n>[/…]` keyspace. Only a value that
+starts with `db:` or `kdb:` is read as a path; anything else is a plain name taken
+verbatim (a database literally called `db` or `kdb`, or with `:` / `/` in its name,
+keeps its scope). Redis also accepts a bare index or the `db<n>` label and
+**refuses** any other scope rather than running on the default database. MongoDB:
+the scope wins over a profile `db`/`database` param (that is only the default).
+MySQL / PostgreSQL set the scope explicitly on every run (no scope → the profile's
+default database / the session's default `search_path`), never inheriting a
+pooled session's leftover. BIGINT values beyond ±(2^53 − 1) are sent as their
+exact decimal **string** (MySQL / PostgreSQL), since a JSON number would be rounded.
 
 `RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
 It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):
