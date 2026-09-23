@@ -224,6 +224,14 @@ impl LocalGit {
         if self.op_in_progress().await != Some("rebase") {
             return Err(Error::Conflict("no rebase in progress".into()));
         }
+        // `rebase --skip` hard-resets the tree. At a CONFLICT stop that is the
+        // point; at an `edit`/`break` stop it silently discarded the user's
+        // in-progress edits. Those get a LISTED backup stash first (tracked
+        // changes — the only kind the reset touches). `stash create` can't
+        // snapshot an unmerged index, hence the conflict-free case only.
+        if self.conflicted_paths().await?.is_empty() {
+            self.stash_backup("otto: backup before rebase skip").await?;
+        }
         if let Err(e) = self
             .run_env(
                 &["rebase", "--skip"],
@@ -711,6 +719,25 @@ mod tests {
         local.start_interactive_rebase(plan).await.unwrap();
         local.skip_rebase().await.unwrap();
         assert!(local.op_in_progress().await.is_none());
+    }
+
+    /// Skipping at an `edit` stop hard-resets the tree; the user's
+    /// in-progress edits survive as a listed backup stash.
+    #[tokio::test]
+    async fn skip_at_edit_stop_backs_up_in_progress_edits() {
+        let (dir, local) = fixture();
+        let mut plan = local.interactive_plan("HEAD~2").await.unwrap();
+        plan.commits[0].action = RebaseAction::Edit;
+        local.start_interactive_rebase(plan).await.unwrap();
+        std::fs::write(dir.path().join("file0"), "half-done edit").unwrap();
+        local.skip_rebase().await.unwrap();
+        let stashes = local.stash_list().await.unwrap();
+        assert!(
+            stashes
+                .iter()
+                .any(|s| s.message.contains("otto: backup before rebase skip")),
+            "{stashes:?}"
+        );
     }
     #[tokio::test]
     async fn bisect_counts_candidates_and_rejects_stale_marks() {

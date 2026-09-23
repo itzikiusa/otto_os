@@ -351,8 +351,17 @@ pub(crate) async fn provider_ctx<S: GitCtx>(
         .remote_url
         .as_deref()
         .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
-    let (_, remote_ref) =
-        detect(remote).ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote}")))?;
+    // Userinfo stripped: a remote URL can embed `user:token@`, and this text
+    // reaches the UI and the logs.
+    let (_, remote_ref) = detect(remote).ok_or_else(|| {
+        Error::Invalid(format!(
+            "unsupported remote: {}",
+            crate::local::strip_url_userinfo(remote)
+        ))
+    })?;
+    // Before the token is loaded: a GitHub Enterprise remote must never send
+    // it to api.github.com.
+    crate::providers::check_remote_reachable(kind, remote)?;
     let token = account_token(s, &account).await?;
     Ok((make_provider(&account, token), remote_ref))
 }
