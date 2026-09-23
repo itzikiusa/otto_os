@@ -315,6 +315,27 @@ class EventsClient {
     this.connect();
   }
 
+  /** Refetch everything the always-mounted shell caches from events. A daemon
+   *  restart kills sessions and finishes runs without a single event reaching
+   *  this client, so the sidebar kept showing them "working", with stale
+   *  badges and unread counts, until a full reload. Page-scoped stores reload
+   *  on mount; swarm + open transcripts resync themselves. */
+  private resyncAfterReconnect(): void {
+    void swarm.resync();
+    transcript.resyncVisible();
+    void ws.refreshSessions().catch(() => {
+      /* transient — the next reconnect or workspace switch retries */
+    });
+    void ws.refreshActiveWorkflowRuns();
+    // refreshOtherSessions only SEEDS statuses (it must not clobber fresher
+    // event-fed values on a normal refresh); after a gap the fetched rows are
+    // the freshest truth, so apply them.
+    void ws.refreshOtherSessions().then(() => {
+      for (const s of ws.otherWsSessions) ws.statusMap[s.id] = s.status;
+    });
+    void notifications.load();
+  }
+
   private connect(): void {
     if (this.stopped) return;
     this.state = 'connecting';
@@ -334,10 +355,7 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
-      if (reconnected) {
-        void swarm.resync();
-        transcript.resyncVisible();
-      }
+      if (reconnected) this.resyncAfterReconnect();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
