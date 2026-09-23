@@ -3344,9 +3344,64 @@ pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (
     let open = all.iter().filter(|f| is_open(f)).count() as u64;
     let blocker = all
         .iter()
-        .filter(|f| f.severity == "bug" && is_open(f))
+        .filter(|f| is_blocking_severity(&f.severity) && is_open(f))
         .count() as u64;
     (total, open, blocker)
+}
+
+/// Whether a stored finding severity is a blocker (critical/high). Rows are
+/// persisted in the normalized vocabulary (`critical|high|medium|low|info`,
+/// see [`otto_core::finding::FindingSeverity::normalize`]), so comparing the
+/// raw string against the reviewer token `"bug"` never matched and every
+/// review reported 0 blockers. Normalizing first also covers legacy
+/// `bug`/`blocker` rows.
+pub(crate) fn is_blocking_severity(severity: &str) -> bool {
+    use otto_core::finding::FindingSeverity;
+    matches!(
+        FindingSeverity::normalize(severity),
+        FindingSeverity::Critical | FindingSeverity::High
+    )
+}
+
+/// Sort rank for a stored severity: critical first, info last. Shares
+/// [`is_blocking_severity`]'s normalization so legacy `bug`/`warn` rows and the
+/// normalized `high`/`medium` rows rank the same.
+fn severity_rank(severity: &str) -> u8 {
+    use otto_core::finding::FindingSeverity;
+    match FindingSeverity::normalize(severity) {
+        FindingSeverity::Critical => 0,
+        FindingSeverity::High => 1,
+        FindingSeverity::Medium => 2,
+        FindingSeverity::Low => 3,
+        FindingSeverity::Info => 4,
+    }
+}
+
+#[cfg(test)]
+mod severity_tests {
+    use super::{is_blocking_severity, severity_rank};
+
+    #[test]
+    fn blockers_are_counted_in_the_stored_vocabulary() {
+        // What the store actually holds (normalized on write)…
+        assert!(is_blocking_severity("critical"));
+        assert!(is_blocking_severity("high"));
+        assert!(!is_blocking_severity("medium"));
+        assert!(!is_blocking_severity("low"));
+        assert!(!is_blocking_severity("info"));
+        // …and legacy reviewer tokens on older rows.
+        assert!(is_blocking_severity("bug"));
+        assert!(is_blocking_severity("blocker"));
+        assert!(!is_blocking_severity("warn"));
+    }
+
+    #[test]
+    fn rank_orders_highest_first() {
+        assert!(severity_rank("critical") < severity_rank("high"));
+        assert!(severity_rank("high") < severity_rank("medium"));
+        assert!(severity_rank("medium") < severity_rank("info"));
+        assert_eq!(severity_rank("bug"), severity_rank("high"));
+    }
 }
 
 /// Short, human-facing one-liners for a review's OPEN findings (severity dot + a
@@ -3368,19 +3423,14 @@ pub(crate) async fn review_finding_briefs(
             otto_state::FindingState::Open | otto_state::FindingState::Regressed
         )
     };
-    let sev_rank = |s: &str| match s {
-        "bug" => 0,
-        "warn" => 1,
-        _ => 2,
-    };
     let mut open: Vec<&otto_state::ReviewFindingRow> = all.iter().filter(|f| is_open(f)).collect();
-    open.sort_by_key(|f| sev_rank(&f.severity));
+    open.sort_by_key(|f| severity_rank(&f.severity));
     open.into_iter()
         .take(max)
         .map(|f| {
-            let sev = match f.severity.as_str() {
-                "bug" => "🔴",
-                "warn" => "🟡",
+            let sev = match severity_rank(&f.severity) {
+                0 | 1 => "🔴",
+                2 => "🟡",
                 _ => "🔵",
             };
             let first = f
