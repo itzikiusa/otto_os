@@ -557,6 +557,96 @@ impl AuthRepo {
         Ok(hashes.len() as u64)
     }
 
+    /// Daemon-boot sweep of **managed** per-session credentials (`session_scope`
+    /// set, kind `api`/`agent_mcp`). Each is injected into exactly one agent
+    /// process, no agent process survives a daemon restart, and every resume
+    /// mints a fresh one — so at boot all of them are dead credentials that
+    /// would otherwise keep the owner's full permissions for their 10-year TTL
+    /// while their session row lingers (exited / reconnectable / archived).
+    /// Marked revoked + expired, not deleted (the token list keeps showing
+    /// them until the next spawn's rotation or the user removes them).
+    /// Returns the number revoked.
+    pub async fn expire_managed_session_tokens(&self) -> Result<u64> {
+        let hashes: Vec<String> = sqlx::query_scalar(
+            "UPDATE auth_sessions SET revoked = 1, expires_at = ?
+             WHERE session_scope IS NOT NULL AND kind IN ('api', 'agent_mcp') AND revoked = 0
+             RETURNING token_hash",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("expire managed session tokens: {e}")))?;
+        if let Some(cache) = &self.cache {
+            for hash in &hashes {
+                cache.evict(hash);
+            }
+        }
+        Ok(hashes.len() as u64)
+    }
+
+    /// Daemon-boot sweep of the **legacy** per-session MCP tokens: full-owner
+    /// `kind='api'` tokens labelled `otto-mcp:<session ULID>` with no
+    /// `session_scope`, minted by Otto before managed ownership existed
+    /// (`created_at < cutover`). Nothing mints them any more and their agent
+    /// processes died with an earlier daemon, yet they kept authenticating —
+    /// thousands of live 10-year credentials, many for deleted sessions.
+    ///
+    /// Label-based, so deliberately narrow: only an exact Otto label (see
+    /// [`legacy_session_label`]), only rows older than `cutover` (a token a
+    /// user names this way later is never touched), and never one whose label
+    /// names ANOTHER user's existing session. Marked revoked + expired, not
+    /// deleted, so a mistaken match stays visible in the token list. Returns
+    /// the number revoked.
+    pub async fn expire_legacy_session_label_tokens(&self, cutover: DateTime<Utc>) -> Result<u64> {
+        let rows = sqlx::query(
+            "SELECT a.id, a.label, a.token_hash, a.user_id, s.created_by AS session_owner
+             FROM auth_sessions a LEFT JOIN sessions s ON s.id = substr(a.label, 10)
+             WHERE a.kind = 'api' AND a.session_scope IS NULL AND a.revoked = 0
+               AND a.label LIKE 'otto-mcp:%' AND a.created_at < ?",
+        )
+        .bind(cutover.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list legacy session tokens: {e}")))?;
+        let stale: Vec<(String, String)> = rows
+            .into_iter()
+            .filter(|row| {
+                let label: Option<String> = row.get("label");
+                let owner: String = row.get("user_id");
+                let session_owner: Option<String> = row.get("session_owner");
+                label.as_deref().and_then(legacy_session_label).is_some()
+                    && session_owner.is_none_or(|o| o == owner)
+            })
+            .map(|row| (row.get("id"), row.get("token_hash")))
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Internal(format!("expire legacy session tokens: {e}")))?;
+        for (id, _) in &stale {
+            sqlx::query("UPDATE auth_sessions SET revoked = 1, expires_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::Internal(format!("expire legacy session token: {e}")))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| Error::Internal(format!("expire legacy session tokens: {e}")))?;
+        if let Some(cache) = &self.cache {
+            for (_, hash) in &stale {
+                cache.evict(hash);
+            }
+        }
+        Ok(stale.len() as u64)
+    }
+
     /// Mint a **restricted MCP** token (`kind='mcp'`) for the outward "Otto as
     /// MCP server". It carries `user_id`'s identity (so the invoke handler can
     /// re-check that user's RBAC per tool) but the feature guard authorizes it
@@ -1547,6 +1637,79 @@ mod tests {
         assert!(matches!(repo.authenticate(&first).await, Err(Error::Unauthorized)));
         assert!(matches!(repo.authenticate(&second).await, Err(Error::Unauthorized)));
         assert!(repo.authenticate(&personal).await.is_ok(), "labels do not confer lifecycle ownership");
+    }
+
+    /// Boot sweep: managed credentials of sessions whose processes died with
+    /// the previous daemon stop authenticating, rows kept; personal tokens
+    /// and share links are untouched.
+    #[tokio::test]
+    async fn boot_sweep_expires_managed_session_tokens_only() {
+        let pool = mem_pool().await;
+        let (repo, _) = cached_repo(pool.clone());
+        let owner = seed_user(&pool, "boot_managed").await;
+        let sid = seed_managed_session(&pool, &owner).await;
+        let (managed, info) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
+        let (personal, _) = repo.issue_api_token(&owner, Some("CI deploy")).await.unwrap();
+        assert!(repo.authenticate(&managed).await.is_ok());
+
+        assert_eq!(repo.expire_managed_session_tokens().await.unwrap(), 1);
+        assert!(matches!(repo.authenticate(&managed).await, Err(Error::Unauthorized)));
+        assert!(repo.authenticate(&personal).await.is_ok());
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE id = ?")
+            .bind(&info.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(kept, 1, "the sweep revokes, it does not delete rows");
+        // Idempotent.
+        assert_eq!(repo.expire_managed_session_tokens().await.unwrap(), 0);
+        // A resume mints a fresh, working credential.
+        let (fresh, _) = repo.issue_session_api_token(&owner, &sid).await.unwrap();
+        assert!(repo.authenticate(&fresh).await.is_ok());
+    }
+
+    /// Boot sweep of legacy `otto-mcp:<session>` tokens: pre-cutover Otto
+    /// labels die (session gone or the owner's own); a later hand-named token,
+    /// a non-ULID label and a label naming ANOTHER user's session survive.
+    #[tokio::test]
+    async fn boot_sweep_expires_pre_cutover_legacy_label_tokens() {
+        let pool = mem_pool().await;
+        let (repo, _) = cached_repo(pool.clone());
+        let owner = seed_user(&pool, "legacy_owner").await;
+        let other = seed_user(&pool, "legacy_other").await;
+        let own_sid = seed_managed_session(&pool, &owner).await;
+        let others_sid = seed_managed_session(&pool, &other).await;
+        let gone_sid = new_id();
+        let old = "2026-09-01T00:00:00+00:00";
+        let cutover = DateTime::parse_from_rfc3339("2026-09-23T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mint_old = |label: String| {
+            let repo = repo.clone();
+            let pool = pool.clone();
+            let owner = owner.clone();
+            async move {
+                let (raw, info) = repo.issue_api_token(&owner, Some(&label)).await.unwrap();
+                sqlx::query("UPDATE auth_sessions SET created_at = ? WHERE id = ?")
+                    .bind(old).bind(&info.id).execute(&pool).await.unwrap();
+                raw
+            }
+        };
+        let gone = mint_old(format!("otto-mcp:{gone_sid}")).await;
+        let own = mint_old(format!("otto-mcp:{own_sid}")).await;
+        let foreign = mint_old(format!("otto-mcp:{others_sid}")).await;
+        let not_ulid = mint_old("otto-mcp:my-laptop".to_string()).await;
+        // Named like a session token AFTER the cutover: a human's choice.
+        let (recent, _) = repo
+            .issue_api_token(&owner, Some(&format!("otto-mcp:{gone_sid}")))
+            .await
+            .unwrap();
+
+        assert_eq!(repo.expire_legacy_session_label_tokens(cutover).await.unwrap(), 2);
+        assert!(matches!(repo.authenticate(&gone).await, Err(Error::Unauthorized)));
+        assert!(matches!(repo.authenticate(&own).await, Err(Error::Unauthorized)));
+        assert!(repo.authenticate(&foreign).await.is_ok());
+        assert!(repo.authenticate(&not_ulid).await.is_ok());
+        assert!(repo.authenticate(&recent).await.is_ok());
+        assert_eq!(repo.expire_legacy_session_label_tokens(cutover).await.unwrap(), 0);
     }
 
     /// Interactive login token: mint → authenticate → revoke → auth fails.

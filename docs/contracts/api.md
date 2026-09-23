@@ -159,7 +159,18 @@ Notes:
   Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
   agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
   the workspace cwd, the resolved git dir (so worktree commits still work), the
-  agent CLIs' own config/cache dirs and temp — while leaving reads global. `network`
+  agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
+  own data dir is write-denied even under those roots (only its agent work areas —
+  `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
+  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize` —
+  and the session's own `provider-accounts/<id>` home stay writable), and its
+  `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
+  that make unsandboxed programs run agent-chosen code are write-denied
+  (`~/.claude/settings.json`, `~/.claude/settings.local.json`,
+  `~/.codex/config.toml`, `~/.config/git/`), `/bin/launchctl` cannot be executed,
+  and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
+  network configuration + DNS, TLS trust and the keychain) — LaunchServices and
+  AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
   defaults to `full` (agents still reach their model API; loopback always allowed);
   `loopback`/`none` are stricter postures suited to non-model shells. `providers`
   defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
@@ -308,7 +319,7 @@ Notes:
 - `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
   `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
 - `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at, session_id?, legacy_session_id?, session_exists?}`. `session_id` is durable ownership for credentials minted by the session manager. `legacy_session_id` only recognizes a historical `otto-mcp:<ULID>` label and is a cleanup candidate, not ownership proof. `session_exists` is null for personal tokens and otherwise indicates whether that session still exists for the same owner. Listing never revokes credentials; legacy cleanup uses the existing owner-scoped DELETE per selected token.
-- Managed session credentials are replaced on session spawn and revoked on deletion or failed spawn, using persisted session ownership across daemon restarts. They cannot authenticate after their originating session is deleted. Archiving keeps the existing lifecycle behavior; it does not revoke the token. Label-only legacy tokens are never automatically revoked merely because their name matches.
+- Managed session credentials are replaced on every spawn/resume and live only as long as that process: they are revoked when it is retired (exit, kill, idle suspend, archive, daemon shutdown), on deletion and on a failed spawn, using persisted session ownership across daemon restarts. At daemon boot every still-valid managed credential is marked revoked + expired (no agent process survives a restart; a resume mints a fresh one). They cannot authenticate after their originating session is deleted. Label-only legacy `otto-mcp:<ULID>` tokens (no `session_id`) created before 2026-09-23, when Otto stopped minting them, are also marked revoked + expired at boot unless the label names another user's existing session; a token created later is never revoked for its name. Boot sweeps keep the rows (they list with a past `expires_at`).
 - `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.
 - `DELETE` only revokes the caller's own API tokens (scoped by `user_id` + `kind='api'`).

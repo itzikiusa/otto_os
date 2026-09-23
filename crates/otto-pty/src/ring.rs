@@ -59,6 +59,17 @@ impl RingBuffer {
                 self.bytes -= front.len();
             }
         }
+        // One line with no newline in sight (a minified bundle / JSON blob, a
+        // `\r` progress bar, a cursor-addressing TUI) must be bounded too —
+        // whole-line eviction never touches the last line, so it grew without
+        // limit (and `tail`/`search` cloned all of it). Drop its oldest bytes.
+        if self.bytes > self.max_bytes {
+            if let Some(only) = self.lines.front_mut() {
+                let excess = (self.bytes - self.max_bytes).min(only.len());
+                *only = only.split_off(excess);
+                self.bytes -= excess;
+            }
+        }
     }
 
     /// Concatenated bytes of the last `lines` lines (all lines when larger).
@@ -157,5 +168,38 @@ fn strip_ansi(raw: &[u8]) -> String {
 impl Default for RingBuffer {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Output without a newline used to grow the last line without bound.
+    #[test]
+    fn a_single_unterminated_line_is_bounded_by_max_bytes() {
+        let mut ring = RingBuffer::new(100, 64);
+        for i in 0..1000u32 {
+            ring.push(format!("\r{i:05}%").as_bytes());
+        }
+        assert_eq!(ring.len(), 1);
+        let tail = ring.tail(1);
+        assert!(tail.len() <= 64, "line kept {} bytes", tail.len());
+        assert!(
+            String::from_utf8_lossy(&tail).ends_with("\r00999%"),
+            "the newest bytes must be the ones kept"
+        );
+        // A later newline still starts a fresh line and eviction resumes.
+        ring.push(b"\ndone\n");
+        assert!(String::from_utf8_lossy(&ring.tail(1)).contains("done"));
+        assert!(ring.tail(10).len() <= 64);
+    }
+
+    #[test]
+    fn whole_lines_still_evict_first() {
+        let mut ring = RingBuffer::new(3, 1024);
+        ring.push(b"a\nb\nc\nd\n");
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.tail(10), b"b\nc\nd\n".to_vec());
     }
 }

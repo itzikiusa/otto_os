@@ -432,6 +432,11 @@
             break;
           }
           case 'status':
+            // A live status after an `exit` means the server moved this
+            // socket onto a respawned process (chat send, channel follow-up,
+            // restart from elsewhere) — drop the exited overlay; the
+            // accompanying snapshot rebuilds the screen.
+            if (msg.status !== 'exited' && msg.status !== 'reconnectable') exitCode = null;
             onstatus?.(msg.status as SessionStatus);
             break;
           case 'exit':

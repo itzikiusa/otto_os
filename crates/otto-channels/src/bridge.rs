@@ -215,6 +215,16 @@ async fn submit_to_agent(
     label: String,
     input: Vec<u8>,
 ) {
+    // 0. A reused thread session may have been idle-suspended (its PTY freed,
+    //    status `reconnectable`): resume it with `--resume` so the follow-up
+    //    lands in the SAME conversation, exactly like a terminal attach or the
+    //    chat keep-alive does. A no-op when it is already live.
+    if !manager.is_live(&session_id) {
+        if let Err(e) = manager.ensure_live(&session_id).await {
+            warn!(channel = %label, session = %session_id, "bridge: resuming the thread's session failed: {e}");
+        }
+    }
+
     // 1. Don't type until the claude TUI has drawn and settled.
     if wait_for_tui(&manager, &session_id).await == Readiness::Gone {
         warn!(channel = %label, session = %session_id, "bridge: session not live before input could be sent");
