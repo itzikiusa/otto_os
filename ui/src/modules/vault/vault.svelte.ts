@@ -41,6 +41,7 @@ import { authedBlobUrl } from '../../lib/api/client';
 import { assetPath } from '../../lib/api/vault';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
+import { confirmer } from '../../lib/confirm.svelte';
 
 export type LeftMode = 'files' | 'search' | 'tags';
 export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file' | 'trash' | 'history';
@@ -65,6 +66,18 @@ export interface TreeNode {
   loaded: boolean;
   loading: boolean;
   children: TreeNode[];
+}
+
+/** How a vault 409 should be handled. The daemon uses 409 both for a REAL
+ *  optimistic-concurrency conflict ("note changed on disk") and for transient
+ *  back-pressure ("indexing is busy" / "index is refreshing; retry"). Showing
+ *  the conflict banner for the latter pushed users to "reload", discarding
+ *  their draft over a condition that clears in a second. */
+export function vaultConflictKind(e: unknown): 'disk' | 'busy' | null {
+  if (!(e instanceof ApiError) || e.status !== 409) return null;
+  if (/changed on disk/i.test(e.message)) return 'disk';
+  if (/busy|refreshing|retry/i.test(e.message)) return 'busy';
+  return null;
 }
 
 const LAST_VAULT_KEY = 'otto_vault_last';
@@ -194,6 +207,8 @@ class VaultStore {
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Consecutive "vault busy" save failures — drives the retry backoff. */
+  private busyRetries = 0;
 
   get wsId(): string {
     return ws.current?.id ?? '';
@@ -715,10 +730,13 @@ class VaultStore {
           this.conflict = false;
           this.persistDraft();
         } while (this.dirty);
+        this.busyRetries = 0;
         void this.reloadBacklinks();
         return true;
       } catch (e) {
-        if (e instanceof ApiError && e.status === 409) this.conflict = true;
+        const kind = vaultConflictKind(e);
+        if (kind === 'disk') this.conflict = true;
+        else if (kind === 'busy') this.retryBusySave(id, path);
         else toasts.error(`Save: ${msg(e)}`);
         return false;
       } finally {
@@ -731,9 +749,29 @@ class VaultStore {
     return success;
   }
 
-  /** Conflict banner: discard local edits and reload the disk version. */
+  /** Transient "vault busy" 409: keep the draft (already persisted locally)
+   *  and retry with backoff instead of raising the conflict banner. */
+  private retryBusySave(id: number, path: string): void {
+    const delay = Math.min(10_000, 500 * 2 ** this.busyRetries);
+    this.busyRetries += 1;
+    if (this.busyRetries === 1) {
+      toasts.warn('Vault is busy indexing', 'Your edits are kept — saving will retry automatically.');
+    }
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      if (this.current?.id === id && this.notePath === path && this.dirty) void this.saveNow();
+    }, delay);
+  }
+
+  /** Conflict banner: discard local edits and reload the disk version. The
+   *  one irreversible choice (the draft is not in revision history), so it is
+   *  never a single click. */
   async conflictReload(): Promise<void> {
     if (this.notePath) {
+      if (this.dirty && !(await confirmer.ask(
+        `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This cannot be undone.`,
+        { title: 'Discard your edits?', confirmLabel: 'Discard my edits', danger: true },
+      ))) return;
       if (this.current) localStorage.setItem(this.draftKey(this.current.id, this.notePath), 'null');
       this.dirty = false;
       this.conflict = false;

@@ -22,7 +22,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     exports: {} as Record<string, any>, $state: (v: unknown) => v,
     require: (p: string) => p.endsWith('treeRefresh') ? {refreshVisibleTree} : p.endsWith('/vault') ? api : p.endsWith('/client') ? {ApiError}
       : p.includes('workspace.svelte') ? {ws: {current: {id: 'ws'}}}
-      : p.includes('toast') ? {toasts: {error() {}, success() {}}} : {},
+      : p.includes('toast') ? {toasts: {error() {}, success() {}, warn() {}}} : {},
     localStorage: {setItem() {}, getItem() {return null;}}, setTimeout, clearTimeout, setInterval, clearInterval, URL,
   };
   runInNewContext(ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);
@@ -33,7 +33,7 @@ function setup(overrides: Record<string, unknown> = {}) {
 }
 
 test('failed save retains draft, conflict and current tab on navigation', async () => {
-  const v = setup({writeVaultNote: async () => {throw new ApiError('changed');}});
+  const v = setup({writeVaultNote: async () => {throw new ApiError('conflict: note changed on disk (hash x)');}});
   await v.open('b.md');
   assert.equal(v.notePath, 'a.md'); assert.equal(v.draft, 'local edit');
   assert.equal(v.conflict, true); assert.equal(v.tabs[0].path, 'a.md');
@@ -130,4 +130,17 @@ test('reopening a still-loading branch ignores the older directory response', as
   releases[0]({entries: [{kind: 'note', path: 'folder/old.md', name: 'old.md'}]});
   await first;
   assert.equal(node.children[0].entry.path, 'folder/new.md');
+});
+
+test('transient busy 409 keeps the draft, raises no conflict banner and retries', async () => {
+  let calls = 0;
+  const v = setup({writeVaultNote: async (_ws: string, _id: number, body: {path: string; content: string}) => {
+    calls += 1;
+    if (calls === 1) throw new ApiError('conflict: Vault indexing is busy; retry the operation');
+    return note(body.path, body.content).meta;
+  }});
+  assert.equal(await v.saveNow(), false);
+  assert.equal(v.conflict, false); assert.equal(v.draft, 'local edit'); assert.equal(v.dirty, true);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(calls, 2); assert.equal(v.dirty, false); assert.equal(v.conflict, false);
 });
