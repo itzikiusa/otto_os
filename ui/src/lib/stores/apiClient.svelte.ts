@@ -122,7 +122,6 @@ function blankDraft(): ApiDraft {
   };
 }
 
-/** Drop empty/disabled key-vals before sending; keep enabled (default true). */
 /** Ask the person whether a stored secret may go to `host` (the daemon's
  *  `409 needs_confirm=new_host`). Only a person can confirm — agents can't. */
 export function confirmNewHost(host: string): Promise<boolean> {
@@ -133,6 +132,7 @@ export function confirmNewHost(host: string): Promise<boolean> {
   );
 }
 
+/** Drop empty/disabled key-vals before sending; keep enabled (default true). */
 function liveKv(rows: ApiKeyVal[]): ApiKeyVal[] {
   return rows.filter((r) => r.enabled !== false && r.key.trim() !== '');
 }
