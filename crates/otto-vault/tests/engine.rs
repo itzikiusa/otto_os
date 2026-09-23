@@ -1051,3 +1051,63 @@ async fn okf_index_generation_preserves_declared_version() {
         assert!(raw.contains(&format!("okf_version: \"{version}\"")), "{raw}");
     }
 }
+
+/// A symlinked note (`docs/README.md -> ../README.md` is a common layout) used
+/// to fail every scan as "incomplete", which also froze pruning of deletions
+/// and made delete/rename/restore report failure after they had succeeded.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_symlinked_note_does_not_wedge_scans_or_pruning() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    std::os::unix::fs::symlink("../index.md", td.path().join("runbooks/linked.md")).unwrap();
+    eng.scan(id).await.unwrap();
+    // An external deletion is still pruned while the symlink is present.
+    std::fs::remove_file(td.path().join("log.md")).unwrap();
+    eng.scan(id).await.unwrap();
+    let root = eng.dir(WS, id, "").await.unwrap();
+    assert!(
+        !root.entries.iter().any(|e| e.path == "log.md"),
+        "{:?}",
+        root.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+    );
+    let runbooks = eng.dir(WS, id, "runbooks").await.unwrap();
+    assert!(!runbooks
+        .entries
+        .iter()
+        .any(|e| e.path == "runbooks/linked.md"));
+    eng.delete_note(WS, id, "runbooks/deploy.md").await.unwrap();
+    assert!(td.path().join(".trash/runbooks/deploy.md").is_file());
+    // The symlink itself is never touched.
+    assert!(std::fs::symlink_metadata(td.path().join("runbooks/linked.md")).is_ok());
+}
+
+/// A case-only rename left the old-case row "present" on case-insensitive
+/// APFS (`stat note.md` still succeeds), so every later scan was incomplete.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_case_only_rename_prunes_old_row() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let paths = |listing: DirListing| -> Vec<String> {
+        listing.entries.into_iter().map(|e| e.path).collect()
+    };
+    eng.rename(WS, id, "runbooks/deploy.md", "runbooks/Deploy.md")
+        .await
+        .unwrap();
+    assert!(td.path().join("runbooks/Deploy.md").is_file());
+    eng.scan(id).await.unwrap();
+    assert_eq!(
+        paths(eng.dir(WS, id, "runbooks").await.unwrap()),
+        vec!["runbooks/Deploy.md".to_string()]
+    );
+    // The same shape arises from an external case-only rename.
+    std::fs::rename(
+        td.path().join("runbooks/Deploy.md"),
+        td.path().join("runbooks/deploy.md"),
+    )
+    .unwrap();
+    eng.scan(id).await.unwrap();
+    assert_eq!(
+        paths(eng.dir(WS, id, "runbooks").await.unwrap()),
+        vec!["runbooks/deploy.md".to_string()]
+    );
+}

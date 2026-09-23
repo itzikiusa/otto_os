@@ -363,6 +363,17 @@ impl VaultEngine {
         }
     }
 
+    /// Rescan after a filesystem mutation that has ALREADY succeeded (move to
+    /// trash, rename, restore). A scan failure here must not turn the call
+    /// into an error: the UI would stay on the old path and later recreate
+    /// the moved note there. Log it and retry in the background instead.
+    pub(crate) async fn rescan_after_mutation(self: &Arc<Self>, id: i64) {
+        if let Err(e) = self.scan(id).await {
+            tracing::warn!(vault = id, error = %e, "vault rescan after mutation failed; retrying in background");
+            self.kick_scan(id);
+        }
+    }
+
     /// Incremental scan (parse changed, drop removed, re-resolve links).
     /// Explicit scans always run after acquiring the lock: an older scan may
     /// have walked a path before our write, even if it completed after it.
@@ -455,8 +466,16 @@ impl VaultEngine {
             }
             let prepared = match self.preparation.file(root.join(&rel), rel.clone()).await {
                 Ok(note) => note,
-                Err(_) => {
+                // Transient (changed mid-read, canceled): retry the scan.
+                Err(Error::Conflict(_)) => {
                     incomplete = true;
+                    continue;
+                }
+                // A persistent per-file problem (unreadable, not a regular
+                // file) must not fail every scan forever: the path is present
+                // in the walk, so skipping it cannot prune anything wrongly.
+                Err(e) => {
+                    tracing::warn!(vault = id, path = %rel, error = %e, "vault note skipped by scan");
                     continue;
                 }
             };
@@ -536,7 +555,21 @@ impl VaultEngine {
                 }
                 match tokio::fs::symlink_metadata(root.join(&rel)).await {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => {
+                    // Something answers at this path: only a byte-exact
+                    // regular file is the indexed entry reappearing. A case
+                    // variant (APFS case-only rename) or a symlink is not.
+                    Ok(_) => {
+                        let (root_owned, rel_owned) = (root.to_path_buf(), rel.clone());
+                        let exact = tokio::task::spawn_blocking(move || {
+                            scan::exact_regular_file(&root_owned, &rel_owned)
+                        })
+                        .await;
+                        if !matches!(exact, Ok(Ok(false))) {
+                            incomplete = true;
+                            continue;
+                        }
+                    }
+                    Err(_) => {
                         incomplete = true;
                         continue;
                     }
@@ -1033,7 +1066,7 @@ impl VaultEngine {
         )
         .map_err(|e| Error::Internal(format!("trash move: {e}")))?;
         drop(publication);
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(())
     }
 
@@ -1206,7 +1239,7 @@ impl VaultEngine {
         // One scan picks up the moved files, rewritten sources, and re-resolves
         // everything (including newly-ambiguous basenames).
         drop(publication);
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(RenameResult {
             from: from_rel,
             to: to_rel,
