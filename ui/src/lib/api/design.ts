@@ -11,6 +11,8 @@ import type {
   CreateDesignProjectReq,
   DesignArtifact,
   DesignArtifactDetail,
+  DesignAssistReq,
+  DesignAssistTurn,
   DesignCommitReq,
   DesignContentPutReq,
   DesignLink,
@@ -213,4 +215,41 @@ export async function thumbnailUrl(id: Id): Promise<string> {
   const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/thumbnail`, { headers });
   if (!resp.ok) throw new ApiError(resp.status, { code: 'not_found', message: resp.statusText });
   return URL.createObjectURL(await resp.blob());
+}
+
+// ── Agent assist + rendered thumbnails ──────────────────────────────────────
+
+/**
+ * One design-assist agent turn (`POST …/assist`, 202 once the session is live).
+ * The result lands as a new `agent` version; progress arrives over WS
+ * (`design_assist_updated`, `design_artifact_updated {change:"live"}`).
+ */
+export function assistArtifact(id: Id, body: DesignAssistReq) {
+  return api.post<DesignAssistTurn>(`/design/artifacts/${enc(id)}/assist`, body);
+}
+
+/** Recent assist turns of an artifact (in memory, newest first; empty after a restart). */
+export function listAssistTurns(id: Id) {
+  return api.get<DesignAssistTurn[]>(`/design/artifacts/${enc(id)}/assist`);
+}
+
+/**
+ * Store a UI-rendered thumbnail (`PUT …/thumbnail`, raw PNG/WebP ≤ 2 MB). A
+ * thumbnail is a cache, not an edit: no version is created.
+ */
+export async function putThumbnail(id: Id, image: Blob): Promise<DesignArtifact> {
+  const token = getToken();
+  const headers: Record<string, string> = { 'Content-Type': image.type || 'image/png' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/thumbnail`, { method: 'PUT', headers, body: image });
+  if (!resp.ok) {
+    let problem: Problem = { code: 'internal', message: resp.statusText };
+    try {
+      problem = await resp.json();
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(resp.status, problem);
+  }
+  return (await resp.json()) as DesignArtifact;
 }
