@@ -126,9 +126,14 @@ label in `--status-working`; use `--success`.
 - **No categorical rainbows.** Label sources and kinds (Jira, GitHub, Slack…)
   with neutral chips and their icon, not eight hues. (Run with Otto's source
   chips are the known offender.)
-- **Proposed:** a categorical palette for charts and studio kinds (`--cat-1…6`,
-  per scheme). Until it exists, charts use `--accent` plus the four tones, and
-  kinds are told apart by icon and label.
+- **Studio badges** (Design Hall) are the one categorical exception:
+  `--studio-frames`, `--studio-graphics`, `--studio-site`, `--studio-3d`,
+  `--studio-whiteboard`, `--studio-brand` and `--studio-spatial` fill a
+  studio's small badge tile behind a `--studio-glyph` icon, always next to the
+  studio's name. They are never text, status or a large area.
+- **Proposed:** a categorical palette for charts (`--cat-1…6`, per scheme).
+  Until it exists, charts use `--accent` plus the four tones, and other kinds
+  are told apart by icon and label.
 - **Proposed:** an `--agent` identity colour for agent-authored accents (the
   Design Hall mockup uses violet). It isn't defined, so don't use it. See
   [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content)
