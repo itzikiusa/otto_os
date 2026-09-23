@@ -24,6 +24,7 @@ use otto_sessions::SessionManager;
 
 use crate::adapter::Adapter;
 use crate::attach_guard::{AttachmentPolicy, MAX_ATTACHMENT_BYTES};
+use crate::secrets_redact::redact_secrets;
 use crate::transcript::{self, TranscriptEvent};
 
 /// Hook that runs Otto's self-improvement on a just-finished channel
@@ -383,7 +384,9 @@ impl Mirror {
                             let joined = messages.join("\u{1e}");
                             if last_posted_final.as_deref() != Some(joined.as_str()) {
                                 for body in &messages {
-                                    let cleaned = strip_file_directives(body);
+                                    // Scrub tokens/passwords the agent may have
+                                    // echoed (emails stay — they're content).
+                                    let cleaned = redact_secrets(&strip_file_directives(body), true);
                                     let cleaned = cleaned.trim();
                                     if !cleaned.is_empty() {
                                         post_reply(&adapter, &chat, thread_ref, cleaned).await;

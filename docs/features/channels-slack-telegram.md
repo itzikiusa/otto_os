@@ -140,6 +140,12 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
      formatted code block under a `💻 terminal` label — a readable preview of the
      call (a ``` fenced block on Slack; indented lines on Telegram, whose
      in-place edits carry no parse mode), capped to ~8 lines / 500 chars.
+   - **Secrets redacted.** Commands and step summaries are scrubbed before they
+     are posted (`secrets_redact.rs`): sensitive `KEY=value` assignments,
+     `--password`/`--token` values, `Authorization`/`Bearer`/`Basic` header
+     values, mysql `-p<pw>`, `-u user:pass`, URL userinfo, PEM blocks, JWTs,
+     AWS keys and e-mails become `[redacted]`. The final reply gets the same
+     pass except that e-mail addresses are kept.
 8. **Final reply.** On the agent's final message the feed is frozen to
    `🧠 done — N steps` (the liveness rotation stops), and the reply is posted:
    - **Short reply** → posted inline (with channel-native formatting:

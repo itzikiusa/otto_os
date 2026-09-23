@@ -12,6 +12,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::secrets_redact::redact_secrets;
+
 /// An event emitted by the tailer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEvent {
@@ -190,7 +192,9 @@ fn parse_line_with_home(line: &str, home: &str) -> Option<TranscriptEvent> {
             // `<emoji> <label>: <summary>` with the home dir abbreviated.
             if name == "Bash" {
                 if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                    let code = terminal_preview(cmd, home);
+                    // Redact BEFORE truncating, so a cut can't leave half a
+                    // secret that no longer matches a pattern.
+                    let code = terminal_preview(&redact_secrets(cmd, false), home);
                     return Some(TranscriptEvent::Tool {
                         name,
                         display: format!("{emoji} {label}"),
@@ -199,7 +203,9 @@ fn parse_line_with_home(line: &str, home: &str) -> Option<TranscriptEvent> {
                 }
             }
 
-            let summary = summarize_input(&name, &input, home);
+            // The feed is posted to a shared channel: scrub tokens/passwords
+            // (URLs with `?token=`, MCP args, …) before it leaves the machine.
+            let summary = redact_secrets(&summarize_input(&name, &input, home), false);
             // Truncate summary to ~70 chars.
             let truncated_summary = truncate_chars(&summary, 70);
             let display = format!("{emoji} {label}: {truncated_summary}");

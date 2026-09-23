@@ -10,6 +10,7 @@ pub mod improve_notify;
 pub mod manager;
 pub mod mirror;
 pub mod run_trigger;
+pub mod secrets_redact;
 pub mod seed;
 pub mod slack;
 pub mod swarm_trigger;
