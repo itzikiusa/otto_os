@@ -588,7 +588,8 @@ impl Driver for MysqlDriver {
 
         // The active database (if the user selected one) scopes unqualified
         // table names: we `USE` it on the connection before running the query.
-        let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let scope_db = req.scope_database();
+        let active_db = scope_db.as_deref();
 
         // Split with MySQL's lexical rules (backticks, `#` comments, backslash
         // escapes). A true batch (>1 statement) runs every statement in order on
@@ -2239,9 +2240,9 @@ async fn governed_read(
 ) -> Result<QueryResult> {
     let mut conn = pool.acquire().await.map_err(types::upstream)?;
     capture_conn_id(&mut conn, token).await;
-    if let Some(db) = req.node.as_deref().filter(|n| !n.is_empty()) {
+    if let Some(db) = req.scope_database() {
         (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .execute(sqlx::raw_sql(&use_db_sql(&db)))
             .await
             .map_err(types::upstream)?;
     }

@@ -1683,7 +1683,8 @@ impl Driver for ClickhouseDriver {
 
         // The active database (if the user selected one) scopes unqualified
         // table names — see query_rows_db for how it's applied per transport.
-        let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let scope_db = req.scope_database();
+        let active_db = scope_db.as_deref();
 
         // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
         let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));

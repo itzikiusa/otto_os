@@ -420,6 +420,102 @@ impl NodePath {
     }
 }
 
+/// The execution scope a request's `node` names, parsed ONCE from the
+/// overloaded wire string and read by the service (authorization child,
+/// canonical node) and by every driver.
+///
+/// `node` arrives in three shapes: a plain database/schema name (the UI's
+/// active-DB selector), a `db:<name>[/…]` tree path (MCP, assistant, tree
+/// actions) and a Redis `kdb:<n>[/…]` keyspace path. Only a value that STARTS
+/// with one of those two tags is read as a path; anything else is a plain name
+/// taken verbatim, so a database literally named `db` or `kdb`, or one whose
+/// name contains `:` or `/`, keeps its scope instead of collapsing to "no
+/// database".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// A database (MySQL / ClickHouse / MongoDB) or schema (PostgreSQL), by name.
+    Database(String),
+    /// A Redis logical database index.
+    Keyspace(i64),
+}
+
+impl Scope {
+    /// Parse a wire `node`. `None` for an absent/blank node or a tagged path
+    /// with an empty name — the profile's default then applies.
+    pub fn parse(node: Option<&str>) -> Option<Scope> {
+        let raw = node.map(str::trim).filter(|s| !s.is_empty())?;
+        if raw.starts_with("kdb:") {
+            let path = NodePath::parse(raw);
+            let value = path.get("kdb").map(str::trim).unwrap_or("");
+            if value.is_empty() {
+                return None;
+            }
+            // A non-numeric keyspace is kept as a name so the Redis driver can
+            // REFUSE it rather than silently falling back to db0.
+            return Some(match value.parse::<i64>() {
+                Ok(n) => Scope::Keyspace(n),
+                Err(_) => Scope::Database(raw.to_string()),
+            });
+        }
+        if raw.starts_with("db:") {
+            let path = NodePath::parse(raw);
+            return path
+                .get("db")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| Scope::Database(s.to_string()));
+        }
+        Some(Scope::Database(raw.to_string()))
+    }
+
+    /// The canonical wire form a driver receives: `kdb:<n>` for a keyspace, the
+    /// plain name for a database. A name that itself begins with a path tag is
+    /// re-wrapped as `db:<name>` so parsing the canonical form is idempotent.
+    pub fn to_node(&self) -> String {
+        match self {
+            Scope::Keyspace(n) => format!("kdb:{n}"),
+            Scope::Database(name) if name.starts_with("db:") || name.starts_with("kdb:") => {
+                format!("db:{name}")
+            }
+            Scope::Database(name) => name.clone(),
+        }
+    }
+
+    /// The resource-access child: access rules name databases and Redis
+    /// keyspaces bare (`shop`, `3`).
+    pub fn child(&self) -> String {
+        match self {
+            Scope::Keyspace(n) => n.to_string(),
+            Scope::Database(name) => name.clone(),
+        }
+    }
+
+    /// The database/schema name, for engines scoped by name.
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            Scope::Database(name) => Some(name.as_str()),
+            Scope::Keyspace(_) => None,
+        }
+    }
+
+    /// The Redis logical database: a keyspace, a bare integer name (callers
+    /// that already stripped the `kdb:` tag) or the tree label `db<n>`. `None`
+    /// for anything else.
+    pub fn keyspace(&self) -> Option<i64> {
+        match self {
+            Scope::Keyspace(n) => Some(*n),
+            Scope::Database(name) => {
+                let name = name.trim();
+                name.strip_prefix("db")
+                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+                    .unwrap_or(name)
+                    .parse::<i64>()
+                    .ok()
+            }
+        }
+    }
+}
+
 // --- Object detail (Structure tab) ------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -621,6 +717,19 @@ pub struct QueryRequest {
     /// always send it alongside `offset`.
     #[serde(default)]
     pub cursor: Option<Value>,
+}
+
+impl QueryRequest {
+    /// The typed scope of this request (see [`Scope`]).
+    pub fn scope(&self) -> Option<Scope> {
+        Scope::parse(self.node.as_deref())
+    }
+
+    /// The database/schema this request is scoped to; `None` = the profile's
+    /// default. A Redis keyspace scope is never a database name.
+    pub fn scope_database(&self) -> Option<String> {
+        self.scope().and_then(|s| s.database().map(str::to_string))
+    }
 }
 
 /// An engine-native handle the driver captured for an executing query, so the
@@ -1435,6 +1544,78 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One parse of the overloaded `node`: tagged paths are read as paths,
+    /// anything else is a plain name — including names the old path parser
+    /// swallowed (`db`, `kdb`, names with `:` or `/`).
+    #[test]
+    fn scope_parses_every_node_shape() {
+        assert_eq!(Scope::parse(None), None);
+        assert_eq!(Scope::parse(Some("  ")), None);
+        assert_eq!(Scope::parse(Some("kdb:3")), Some(Scope::Keyspace(3)));
+        assert_eq!(
+            Scope::parse(Some("kdb:3/key:session:42")),
+            Some(Scope::Keyspace(3))
+        );
+        assert_eq!(
+            Scope::parse(Some("db:shop/table:orders")),
+            Some(Scope::Database("shop".into()))
+        );
+        assert_eq!(Scope::parse(Some("db:")), None);
+        assert_eq!(
+            Scope::parse(Some(" shop ")),
+            Some(Scope::Database("shop".into()))
+        );
+        // Databases literally named like a path tag keep their scope.
+        for name in ["db", "kdb", "a:b", "a/b", "games:v2"] {
+            assert_eq!(
+                Scope::parse(Some(name)),
+                Some(Scope::Database(name.into())),
+                "{name}"
+            );
+        }
+        // A non-numeric keyspace is kept (so Redis can refuse it), not dropped.
+        assert_eq!(Scope::parse(Some("kdb:x")).and_then(|s| s.keyspace()), None);
+        assert!(Scope::parse(Some("kdb:x")).is_some());
+    }
+
+    #[test]
+    fn scope_canonical_node_round_trips() {
+        for node in ["kdb:0", "kdb:15", "shop", "db", "kdb", "a:b", "a/b"] {
+            let scope = Scope::parse(Some(node)).unwrap();
+            assert_eq!(
+                Scope::parse(Some(scope.to_node().as_str())),
+                Some(scope),
+                "{node}"
+            );
+        }
+        // A name that itself starts with a tag is re-wrapped, so the canonical
+        // form re-parses to the same name.
+        let odd = Scope::Database("db:x".into());
+        assert_eq!(odd.to_node(), "db:db:x");
+        assert_eq!(Scope::parse(Some(odd.to_node().as_str())), Some(odd));
+        // Access rules name keyspaces bare.
+        assert_eq!(Scope::Keyspace(3).child(), "3");
+        assert_eq!(Scope::Database("shop".into()).child(), "shop");
+        // A bare integer (pre-stripped `kdb:`) still names a Redis keyspace.
+        assert_eq!(Scope::Database("3".into()).keyspace(), Some(3));
+        assert_eq!(Scope::Database("db3".into()).keyspace(), Some(3));
+        assert_eq!(Scope::Database("db".into()).keyspace(), None);
+        assert_eq!(Scope::Database("shop".into()).keyspace(), None);
+        assert_eq!(Scope::Keyspace(3).database(), None);
+    }
+
+    #[test]
+    fn query_request_scope_database_ignores_keyspaces() {
+        let req = |node: &str| QueryRequest {
+            node: Some(node.into()),
+            ..Default::default()
+        };
+        assert_eq!(req("db:shop").scope_database().as_deref(), Some("shop"));
+        assert_eq!(req("shop").scope_database().as_deref(), Some("shop"));
+        assert_eq!(req("kdb:3").scope_database(), None);
+        assert_eq!(QueryRequest::default().scope_database(), None);
+    }
 
     /// The mongosh-script detector must catch real scripts (a seed/bootstrap
     /// file with comments, consts, functions, getSiblingDB) and must NEVER

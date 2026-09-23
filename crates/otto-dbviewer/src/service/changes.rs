@@ -218,7 +218,9 @@ impl DbViewerService {
         }
         let req = QueryRequest {
             statement: attempt.script.clone(),
-            node: crate::access::child(attempt.node.as_deref()),
+            // Canonical node, not the access child: a bare keyspace index would
+            // land a reviewed Redis change on the default database.
+            node: crate::access::canonical_node(attempt.node.as_deref()),
             confirm_write: false,
             ..Default::default()
         };

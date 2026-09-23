@@ -534,7 +534,8 @@ impl Driver for PostgresDriver {
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let pool = self.pool(cfg).await?;
         // Active-db node = a schema → `SET search_path`.
-        let active_schema = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let scope_schema = req.scope_database();
+        let active_schema = scope_schema.as_deref();
         let timeout_ms = req.timeout_ms.filter(|&t| t > 0);
 
         let spans = split_statements(text, SqlDialect::Postgres);
@@ -2004,9 +2005,9 @@ async fn governed_read(
         .begin_with("BEGIN READ ONLY")
         .await
         .map_err(types::upstream)?;
-    if let Some(schema) = req.node.as_deref().filter(|n| !n.is_empty()) {
+    if let Some(schema) = req.scope_database() {
         (&mut *tx)
-            .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
+            .execute(sqlx::raw_sql(&set_search_path_sql(&schema)))
             .await
             .map_err(types::upstream)?;
     }

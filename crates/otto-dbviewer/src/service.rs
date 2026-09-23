@@ -1412,8 +1412,11 @@ impl DbViewerService {
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
     pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+        // Normalize the scope ONCE: drivers get the canonical node (`kdb:<n>`
+        // for a Redis keyspace, the plain name otherwise); authorization and
+        // resolution use the bare access child derived from it below.
         let req = &QueryRequest {
-            node: crate::access::child(req.node.as_deref()),
+            node: crate::access::canonical_node(req.node.as_deref()),
             ..req.clone()
         };
         self.execution_access(conn_id, user_id, req).await?;
@@ -1726,6 +1729,9 @@ impl DbViewerService {
         dest: &std::path::Path,
     ) -> Result<(crate::export::ExportCounts, u64)> {
         self.require_local_path_access(conn_id, user_id).await?;
+        // Drivers receive the canonical scope (see `access::canonical_node`).
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         // Reuse the write-gate: an export is a read; a write/DDL on a guarded
         // (production / read-only) connection is refused (no confirm path here).
         self.guard_export(conn_id, user_id, statement, node).await?;
@@ -1800,6 +1806,8 @@ impl DbViewerService {
         max_rows: Option<usize>,
         w: Box<dyn std::io::Write + Send>,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
@@ -2049,6 +2057,8 @@ impl DbViewerService {
         statement: &str,
         node: Option<&str>,
     ) -> Result<DbQueryPlan> {
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         let child = crate::access::child(node);
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_query")
@@ -2422,13 +2432,9 @@ fn render_plan_text(res: &crate::types::QueryResult) -> String {
 /// Now an un-tagged node falls back to its raw name. `None` → the connection's
 /// default schema (empty string, resolved downstream).
 fn node_to_schema(node: Option<&str>) -> String {
-    node.map(|n| {
-        NodePath::parse(n)
-            .get("db")
-            .map(str::to_string)
-            .unwrap_or_else(|| n.to_string())
-    })
-    .unwrap_or_default()
+    crate::types::Scope::parse(node)
+        .map(|scope| scope.child())
+        .unwrap_or_default()
 }
 
 /// Render a [`SchemaGraph`] as a COMPLETE markdown schema for the DB Assistant —
