@@ -2165,21 +2165,18 @@ impl SessionManager {
     /// session-removal path so the `otto` tool server's credential dies with the
     /// session. Best-effort.
     async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) -> Result<()> {
-        let _ = std::fs::remove_file(codex_creds_path(session_id));
-        if let Some(auth) = &self.auth {
-            auth.revoke_session_tokens(owner, session_id).await?;
+        revoke_session_credentials(self.auth.as_ref(), &self.mcp_tokens, owner, session_id).await
+    }
+
+    /// A session's process was retired (exit, kill, suspend, archive): its
+    /// per-session MCP credential has no live holder any more, so revoke it
+    /// now instead of leaving the owner's full permissions valid for the
+    /// token's 10-year TTL. Every respawn mints a fresh one
+    /// (`maybe_enable_otto_tools`). Best-effort, logged.
+    async fn retire_credentials(&self, session: &Session) {
+        if let Err(e) = self.revoke_mcp_token(&session.created_by, &session.id).await {
+            tracing::warn!(session = %session.id, "revoke retired session credentials: {e}");
         }
-        if let Some((_, token_id)) = self.mcp_tokens.remove(session_id) {
-            if let Some(auth) = &self.auth {
-                if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
-                    tracing::warn!("otto MCP tools: revoke token failed: {e}");
-                }
-                if let Err(e) = auth.revoke_vault_reviewer_token(owner, &token_id).await {
-                    tracing::warn!("otto reviewer MCP token: revoke failed: {e}");
-                }
-            }
-        }
-        Ok(())
     }
 
     /// All `(provider_name, update_command)` pairs for providers that have an
@@ -3272,6 +3269,7 @@ impl SessionManager {
         if let Some(handle) = self.live_handle(id) {
             let _ = handle.kill();
         }
+        self.retire_credentials(&session).await;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Killed");
         let _ = self.events.send(Event::SessionStatus {
@@ -3332,6 +3330,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.retire_credentials(&session).await;
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
             .await?;
@@ -3871,6 +3870,7 @@ impl SessionManager {
             // Best-effort status update; ignore errors during shutdown.
             let _ = self.repo.update_status(&id, SessionStatus::Exited).await;
             if let Ok(s) = self.repo.get(&id).await {
+                self.retire_credentials(&s).await;
                 let _ = self.events.send(Event::SessionStatus {
                     session_id: id.clone(),
                     workspace_id: s.workspace_id,
@@ -3897,6 +3897,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.retire_credentials(&session).await;
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Archived");
@@ -4171,6 +4172,7 @@ impl SessionManager {
         &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
     ) -> Result<()> {
+        self.expire_orphaned_session_credentials().await;
         for session in self.repo.list_all_restorable().await? {
             self.repo
                 .update_status(&session.id, SessionStatus::Reconnectable)
@@ -4182,6 +4184,29 @@ impl SessionManager {
             });
         }
         Ok(())
+    }
+
+    /// Boot-time credential sweep (see [`Self::restore_all`]): no agent process
+    /// survives a daemon restart, so every per-session MCP credential still
+    /// valid at boot has no live holder — revoke them all (a resume mints a
+    /// fresh one). Also retires the legacy `otto-mcp:<session>` label tokens
+    /// minted before managed ownership (thousands of full-owner, 10-year
+    /// credentials that nothing revoked). Best-effort; rows are kept.
+    async fn expire_orphaned_session_credentials(&self) {
+        let Some(auth) = &self.auth else { return };
+        match auth.expire_managed_session_tokens().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "revoked per-session MCP credentials left over from the previous daemon run"),
+            Err(e) => tracing::warn!("boot credential sweep (managed): {e}"),
+        }
+        match auth
+            .expire_legacy_session_label_tokens(legacy_session_token_cutover())
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "revoked legacy otto-mcp:<session> tokens"),
+            Err(e) => tracing::warn!("boot credential sweep (legacy): {e}"),
+        }
     }
 
     /// Per-session status task: every 2s classify working/idle from PTY
@@ -4226,6 +4251,8 @@ impl SessionManager {
         let locks = Arc::clone(&self.resume_locks);
         let suspend_cpu = Arc::clone(&self.suspend_cpu);
         let suspend_hold = Arc::clone(&self.suspend_hold);
+        let auth = self.auth.clone();
+        let mcp_tokens = Arc::clone(&self.mcp_tokens);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
@@ -4277,6 +4304,13 @@ impl SessionManager {
                             // crashed, or `kill_session` killed it in place).
                             suspend_cpu.remove(&id);
                             suspend_hold.remove(&id);
+                            // Its MCP credential has no live holder any more
+                            // (a resume mints a fresh one).
+                            if let Ok(s) = repo.get(&id).await {
+                                if let Err(e) = revoke_session_credentials(auth.as_ref(), &mcp_tokens, &s.created_by, &id).await {
+                                    tracing::warn!(session = %id, "revoke exited session credentials: {e}");
+                                }
+                            }
                             let _ = repo.update_status(&id, SessionStatus::Exited).await;
                             let _ = events.send(Event::SessionStatus {
                                 session_id: id.clone(),
@@ -4302,6 +4336,44 @@ impl SessionManager {
             }
         });
     }
+}
+
+/// Otto stopped minting label-only `otto-mcp:<session>` tokens when managed
+/// (`session_scope`) ownership shipped on 2026-09-22 (on the author's install
+/// the last legacy row is 10:37Z, the first managed one 11:18Z). A label-only
+/// token created after this instant is a human's own naming and is never
+/// auto-revoked. (Falls back to "nothing is legacy" if the literal is bad.)
+fn legacy_session_token_cutover() -> chrono::DateTime<chrono::Utc> {
+    chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 23, 0, 0, 0)
+        .single()
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+}
+
+/// Revoke the per-session MCP credentials minted for `session_id` (managed
+/// rows by durable `session_scope`, plus the row id this daemon recorded in
+/// `mcp_tokens`) and delete the Codex creds file if one was written.
+/// Free-standing so the status task can call it without `&self`.
+async fn revoke_session_credentials(
+    auth: Option<&AuthRepo>,
+    mcp_tokens: &DashMap<Id, String>,
+    owner: &Id,
+    session_id: &Id,
+) -> Result<()> {
+    let _ = std::fs::remove_file(codex_creds_path(session_id));
+    if let Some(auth) = auth {
+        auth.revoke_session_tokens(owner, session_id).await?;
+    }
+    if let Some((_, token_id)) = mcp_tokens.remove(session_id) {
+        if let Some(auth) = auth {
+            if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
+                tracing::warn!("otto MCP tools: revoke token failed: {e}");
+            }
+            if let Err(e) = auth.revoke_vault_reviewer_token(owner, &token_id).await {
+                tracing::warn!("otto reviewer MCP token: revoke failed: {e}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The per-session resume lock (see `SessionManager::resume_locks`), created
@@ -4818,16 +4890,43 @@ mod tests {
         assert!(auth.list_api_tokens(&user).await.unwrap().is_empty());
     }
 
+    /// A retired process's MCP credential dies with it (it used to stay valid,
+    /// with the owner's full permissions, for its 10-year TTL while the row
+    /// lingered): archive / suspend / kill revoke it, the session row stays,
+    /// and a resume mints a fresh one.
     #[tokio::test]
-    async fn archiving_session_preserves_managed_credentials_until_removed() {
+    async fn retiring_a_session_revokes_its_managed_credentials() {
+        for operation in ["archive", "suspend", "kill"] {
+            let (mgr, repo, ws, user) = test_manager().await;
+            let id = seed_session(&repo, &ws, &user, Some("sid-cred")).await;
+            let auth = mgr.auth.as_ref().unwrap();
+            let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+            assert!(auth.authenticate(&token).await.is_ok());
+            match operation {
+                "archive" => mgr.archive(&id).await.map(|_| ()),
+                "suspend" => mgr.suspend(&id).await,
+                _ => mgr.kill_session(&id).await,
+            }
+            .unwrap();
+            assert!(
+                auth.authenticate(&token).await.is_err(),
+                "{operation} left the session's MCP credential valid"
+            );
+            assert!(repo.get(&id).await.is_ok(), "{operation} must keep the session row");
+        }
+    }
+
+    /// The boot sweep (`restore_all`) revokes credentials left valid by the
+    /// previous daemon run — no agent process survives a restart.
+    #[tokio::test]
+    async fn restore_all_revokes_leftover_session_credentials() {
         let (mgr, repo, ws, user) = test_manager().await;
-        let id = seed_session(&repo, &ws, &user, None).await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-boot")).await;
         let auth = mgr.auth.as_ref().unwrap();
         let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
-        mgr.archive(&id).await.unwrap();
-        assert!(auth.authenticate(&token).await.is_ok());
-        mgr.remove(&id).await.unwrap();
+        mgr.restore_all(&|_| None).await.unwrap();
         assert!(auth.authenticate(&token).await.is_err());
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Reconnectable);
     }
 
     #[tokio::test]
