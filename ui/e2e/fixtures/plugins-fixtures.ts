@@ -272,9 +272,24 @@ export function makeFixtureRepo(): string {
 // Install / enable helpers (root API)
 // ---------------------------------------------------------------------------
 
-export async function installPlugin(ctx: APIRequestContext, base: string, source: string): Promise<void> {
+/** Install from `source`; resolves to the installed plugin's slug. */
+export async function installPlugin(ctx: APIRequestContext, base: string, source: string): Promise<string> {
   const r = await ctx.post(`${base}/api/v1/plugin-admin/install`, { data: { source } });
   if (!r.ok()) throw new Error(`install ${source} → ${r.status()} ${await r.text()}`);
+  return ((await r.json()) as { slug: string }).slug;
+}
+
+/** Slugs of every plugin currently installed on the daemon. */
+export async function installedPlugins(ctx: APIRequestContext, base: string): Promise<string[]> {
+  const r = await ctx.get(`${base}/api/v1/plugin-admin`);
+  if (!r.ok()) throw new Error(`plugin-admin list → ${r.status()} ${await r.text()}`);
+  return ((await r.json()) as { slug: string }[]).map((p) => p.slug);
+}
+
+/** Uninstall (stop the sidecar + delete the record). Already gone is fine. */
+export async function uninstallPlugin(ctx: APIRequestContext, base: string, slug: string): Promise<void> {
+  const r = await ctx.delete(`${base}/api/v1/plugin-admin/${slug}`);
+  if (!r.ok() && r.status() !== 404) throw new Error(`uninstall ${slug} → ${r.status()} ${await r.text()}`);
 }
 
 export async function enablePlugin(ctx: APIRequestContext, base: string, slug: string): Promise<void> {

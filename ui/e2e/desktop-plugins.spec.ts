@@ -16,6 +16,8 @@ import {
   startMockJira,
   makeFixtureRepo,
   installPlugin,
+  installedPlugins,
+  uninstallPlugin,
   enablePlugin,
   waitPluginHealthy,
   type MockJira,
@@ -37,6 +39,17 @@ let api: APIRequestContext;
 let base: string;
 let mockJira: MockJira;
 let repoDir: string;
+/** Plugins THIS spec installed (absent before it ran) — removed in afterAll so
+ *  they don't leak into the shared daemon (an enabled plugin adds a sidebar
+ *  section every later spec would see). */
+const installedHere = new Set<string>();
+let preinstalled = new Set<string>();
+
+async function install(source: string): Promise<string> {
+  const slug = await installPlugin(api, base, source);
+  if (!preinstalled.has(slug)) installedHere.add(slug);
+  return slug;
+}
 
 function pluginsHome(): string {
   const slot = process.env.OTTO_E2E_SLOT ?? '0';
@@ -77,14 +90,21 @@ test.beforeAll(async ({}, testInfo) => {
   });
   expect(acct.ok(), await acct.text()).toBeTruthy();
 
+  preinstalled = new Set(await installedPlugins(api, base));
+
   // team-performance: install + enable (Node sidecar — instant).
-  await installPlugin(api, base, join(EXAMPLES, 'team-performance'));
+  await install(join(EXAMPLES, 'team-performance'));
   await enablePlugin(api, base, 'team-performance');
   await waitPluginHealthy(api, base, 'team-performance', 20_000);
 });
 
 test.afterAll(async () => {
-  await mockJira?.close();
+  try {
+    for (const slug of installedHere) await uninstallPlugin(api, base, slug);
+    installedHere.clear();
+  } finally {
+    await mockJira?.close();
+  }
 });
 
 test.beforeEach(async ({}, testInfo) => {
@@ -188,7 +208,7 @@ test.describe('dora-metrics (needs cargo)', () => {
     test.skip(!hasCargo, 'cargo not on PATH — dora sidecar cannot compile');
     // Install, prebuild (compile-sized budget), then enable → health is fast.
     testInfo.setTimeout(600_000);
-    await installPlugin(api, base, join(EXAMPLES, 'dora-metrics'));
+    await install(join(EXAMPLES, 'dora-metrics'));
     execSync('cargo build --release', {
       cwd: join(pluginsHome(), 'dora-metrics'),
       stdio: 'pipe',
