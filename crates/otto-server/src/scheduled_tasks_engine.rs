@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{ScheduledTask, SessionKind};
+use otto_core::domain::{ScheduledTask, ScheduledTaskRun, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
 use otto_state::{FinishRun, NewScheduledRun};
@@ -150,8 +150,55 @@ fn emit(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str, status: &str) {
 /// report, and (for `trigger == "schedule"`) advances the cursor. Returns the run
 /// id; the run row carries the outcome (`ok`/`error`) so a manual caller can poll.
 pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> Result<String> {
-    let repo = &ctx.scheduled_tasks;
-    let run = repo
+    let run = open_run(ctx, task, trigger).await?;
+    complete_run(ctx, task, &run.id, trigger).await
+}
+
+/// Start a run in the BACKGROUND and return its freshly-opened (`running`)
+/// row at once — the manual "Run now" path. Running the whole task inside the
+/// HTTP request made the MCP self-call time out at 30s (the agent was told
+/// the tool failed while the run went on), greyed the UI out for minutes, and
+/// a dropped request cancelled `run_task` mid-await: its row stayed `running`
+/// until the next daemon restart, the agent session ran on with nobody
+/// collecting its report, and the concurrency permit was released early.
+/// Refuses (409) while another run of the task is still `running`.
+pub async fn spawn_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    trigger: &str,
+) -> Result<ScheduledTaskRun> {
+    let busy = ctx
+        .scheduled_tasks
+        .list_runs(&task.id, 1)
+        .await?
+        .first()
+        .is_some_and(|r| r.status == "running");
+    if busy {
+        return Err(otto_core::Error::Conflict(
+            "a run of this task is already in progress".into(),
+        ));
+    }
+    let run = open_run(ctx, task, trigger).await?;
+    let (ctx2, task2, run_id, trigger2) = (
+        ctx.clone(),
+        task.clone(),
+        run.id.clone(),
+        trigger.to_string(),
+    );
+    tokio::spawn(async move {
+        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2).await;
+    });
+    Ok(run)
+}
+
+/// Open the run row (`running`) and announce it.
+async fn open_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    trigger: &str,
+) -> Result<ScheduledTaskRun> {
+    let run = ctx
+        .scheduled_tasks
         .create_run(NewScheduledRun {
             task_id: task.id.clone(),
             workspace_id: task.workspace_id.clone(),
@@ -159,9 +206,22 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
         })
         .await?;
     emit(ctx, task, &run.id, "running");
+    Ok(run)
+}
+
+/// Execute an opened run to completion and settle its row (+ the cursor for
+/// a scheduled run). Returns the run id.
+async fn complete_run(
+    ctx: &ServerCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    trigger: &str,
+) -> Result<String> {
+    let repo = &ctx.scheduled_tasks;
+    let run_id = run_id.to_string();
     let tz = cadence::task_tz(&task.timezone);
 
-    match execute(ctx, task, &run.id).await {
+    match execute(ctx, task, &run_id).await {
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&task.id, now);
@@ -178,7 +238,7 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
             let hash = report_hash(&out.report);
             let unchanged = task.notify_on_change
                 && repo
-                    .last_ok_report_hash(&task.id, &run.id)
+                    .last_ok_report_hash(&task.id, &run_id)
                     .await
                     .ok()
                     .flatten()
@@ -194,13 +254,13 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
 
             // --- attach proof pack ---
             let proof_pack_id = if task.attach_proof {
-                build_proof_pack(ctx, task, &run.id, &out).await
+                build_proof_pack(ctx, task, &run_id, &out).await
             } else {
                 None
             };
 
             repo.finish_run(
-                &run.id,
+                &run_id,
                 FinishRun {
                     status: "ok".into(),
                     summary: out.summary.clone(),
@@ -225,15 +285,15 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
                     .await;
             }
             prune(ctx, &task.id).await;
-            emit(ctx, task, &run.id, "ok");
-            Ok(run.id)
+            emit(ctx, task, &run_id, "ok");
+            Ok(run_id)
         }
         Err(e) => {
             let msg = e.to_string();
             warn!(task = %task.id, "scheduled task run failed: {msg}");
             let _ = repo
                 .finish_run(
-                    &run.id,
+                    &run_id,
                     FinishRun {
                         status: "error".into(),
                         error: Some(msg),
@@ -248,8 +308,8 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
                     .set_runtime(&task.id, Some(&now.to_rfc3339()), "error", next.as_deref())
                     .await;
             }
-            emit(ctx, task, &run.id, "error");
-            Ok(run.id)
+            emit(ctx, task, &run_id, "error");
+            Ok(run_id)
         }
     }
 }
@@ -538,20 +598,7 @@ async fn run_shell_with_retry(
     let mut last: Option<Result<std::process::Output>> = None;
     for i in 0..max_attempts {
         attempts += 1;
-        let res = match tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(cwd)
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(e)) => Err(Error::Internal(format!("spawn shell: {e}"))),
-            Err(_) => Err(Error::Internal("shell command timed out".into())),
-        };
+        let res = run_shell_once(cmd, cwd, timeout).await;
         let success = matches!(&res, Ok(out) if out.status.success());
         last = Some(res);
         if success {
@@ -574,6 +621,53 @@ async fn run_shell_with_retry(
     )
 }
 
+/// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
+/// On timeout the whole group is killed: the old `timeout(…, output())` only
+/// dropped the future, and tokio does not kill a child on drop by default —
+/// every timed-out attempt left its shell (and whatever it started: `ssh`, a
+/// test run stuck on a prompt) running, each retry added another copy, and the
+/// released permit let the next scheduled occurrence stack more on top.
+async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::process::Output> {
+    let mut spec = tokio::process::Command::new("/bin/sh");
+    spec.arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    spec.process_group(0);
+    let child = spec
+        .spawn()
+        .map_err(|e| Error::Internal(format!("spawn shell: {e}")))?;
+    let pid = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(Error::Internal(format!("shell: {e}"))),
+        Err(_) => {
+            // The shell itself died with the dropped future (kill_on_drop);
+            // take its children with it.
+            kill_process_group(pid);
+            Err(Error::Internal(format!(
+                "shell command timed out after {}s (killed)",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
+/// SIGKILL the process group led by `pid` (see [`run_shell_once`]).
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pg) = pid.and_then(|id| rustix::process::Pid::from_raw(id as i32)) {
+        let _ = rustix::process::kill_process_group(pg, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: Option<u32>) {}
+
 /// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
 /// reach a terminal state, and summarise the node statuses as the report.
 async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecOutcome> {
@@ -590,6 +684,17 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         return Err(Error::Invalid(
             "workflow belongs to a different workspace".into(),
         ));
+    }
+    // Overlap guard (the workflow schedule-trigger scheduler has the same one):
+    // this path stops waiting after WORKFLOW_WAIT and releases the task's
+    // in-flight guard, so a 40-minute workflow on a 15-minute cadence used to
+    // get a second — then third — concurrent run, each with its own worktrees
+    // and agents.
+    if repo.has_active_run(&workflow.id).await? {
+        return Err(Error::Conflict(format!(
+            "skipped: a run of workflow \"{}\" is still in progress",
+            workflow.name
+        )));
     }
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
@@ -1039,6 +1144,30 @@ mod tests {
         let (_res, attempts) =
             run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
         assert_eq!(attempts, 1);
+    }
+
+    /// F3: a timed-out command is killed WITH its children — the old timeout
+    /// only dropped the future, leaving the shell and everything it started
+    /// running (one more orphan per retry).
+    #[tokio::test]
+    async fn shell_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let started = std::time::Instant::now();
+        let res = run_shell_once(
+            "(sleep 1; touch orphan-ran) & sleep 30",
+            &cwd,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(res.is_err(), "timed out");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Past the point the backgrounded child would have written its marker.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !dir.path().join("orphan-ran").exists(),
+            "the timed-out command's child must not survive"
+        );
     }
 
     #[tokio::test]

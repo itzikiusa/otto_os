@@ -1265,6 +1265,46 @@ impl SwarmRepo {
         self.get_task(id).await
     }
 
+    /// Atomically claim a `todo` task for a turn: flip it to `in_progress` (and
+    /// assign `assignee` when the task has no assignee yet) ONLY if it is still
+    /// `todo`. Returns whether this caller won the claim — the coordinator's
+    /// old check-then-act (`agent_has_active_run` → bump → unconditional
+    /// `update_task`) let two overlapping ticks (a restarted coordinator whose
+    /// old loop was mid-tick) dispatch the same task twice.
+    pub async fn claim_task(&self, id: &Id, assignee: Option<&Id>) -> Result<bool> {
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "UPDATE swarm_tasks
+             SET status = 'in_progress',
+                 assignee_agent_id = COALESCE(assignee_agent_id, ?),
+                 updated_at = ?
+             WHERE id = ? AND status = 'todo'",
+        )
+        .bind(assignee.map(|a| a.as_str()))
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim task"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Give back one attempt (never below 0) — for a turn that was cut short
+    /// by a swarm PAUSE, which must not count against `max_attempts` (pausing
+    /// twice used to move a task to `blocked`).
+    pub async fn refund_task_attempt(&self, id: &Id) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarm_tasks SET attempts = MAX(attempts - 1, 0), updated_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("refund task attempt"))?;
+        Ok(())
+    }
+
     pub async fn delete_task(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM swarm_tasks WHERE id = ?")
             .bind(id)
@@ -1423,6 +1463,64 @@ impl SwarmRepo {
         self.get_run(id).await
     }
 
+    /// [`update_run`] as a compare-and-set: applies only while the run's
+    /// status is one of `expected`, returning `None` (nothing written)
+    /// otherwise. A turn that finishes after the operator stopped it (or a
+    /// pause cut it) must not overwrite `stopped` with `done` — nor a Stop
+    /// clobber a run that already finished.
+    pub async fn update_run_if_status(
+        &self,
+        id: &Id,
+        expected: &[&str],
+        p: RunPatch,
+    ) -> Result<Option<SwarmRun>> {
+        let cur = self.get_run(id).await?;
+        if !expected.contains(&cur.status.as_str()) {
+            return Ok(None);
+        }
+        let session_id = p.session_id.unwrap_or(cur.session_id);
+        let status = p.status.unwrap_or(cur.status);
+        let attempt = p.attempt.unwrap_or(cur.attempt);
+        let summary = p.summary.unwrap_or(cur.summary);
+        let result = p.result.unwrap_or(cur.result).map(|v| v.to_string());
+        let error = p.error.unwrap_or(cur.error);
+        let tokens_input = p.tokens_input.unwrap_or(cur.tokens_input);
+        let tokens_output = p.tokens_output.unwrap_or(cur.tokens_output);
+        let cost_usd = p.cost_usd.unwrap_or(cur.cost_usd);
+        let started_at = p.started_at.unwrap_or(cur.started_at).map(fmt);
+        let finished_at = p.finished_at.unwrap_or(cur.finished_at).map(fmt);
+        let placeholders = vec!["?"; expected.len()].join(",");
+        let sql = format!(
+            "UPDATE swarm_runs SET session_id = ?, status = ?, attempt = ?, summary = ?,
+                result_json = ?, error = ?, tokens_input = ?, tokens_output = ?, cost_usd = ?,
+                started_at = ?, finished_at = ? WHERE id = ? AND status IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql)
+            .bind(&session_id)
+            .bind(&status)
+            .bind(attempt)
+            .bind(&summary)
+            .bind(&result)
+            .bind(&error)
+            .bind(tokens_input)
+            .bind(tokens_output)
+            .bind(cost_usd)
+            .bind(&started_at)
+            .bind(&finished_at)
+            .bind(id);
+        for st in expected {
+            q = q.bind(*st);
+        }
+        let res = q
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update run (guarded)"))?;
+        if res.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_run(id).await.map(Some)
+    }
+
     pub async fn running_count(&self, swarm_id: &Id) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS n FROM swarm_runs WHERE swarm_id = ? AND status IN ('running','waiting')",
@@ -1545,6 +1643,13 @@ impl SwarmRepo {
     /// Mark non-terminal runs as `stopped` (NOT `error`) on a daemon restart —
     /// they were interrupted by the restart, not a real agent failure, and the
     /// coordinator re-runs the task. The note is kept in `error` for context.
+    ///
+    /// The turn's `route_result` died with the process too, so its task would
+    /// sit `in_progress` forever (`ready_tasks` only selects `todo`) — the
+    /// promised re-run never happened and its dependants stayed blocked. Tasks
+    /// left `in_progress` with no active run go back to `todo`; a delegated
+    /// parent with children still open is legitimately `in_progress` and
+    /// stays.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
         let now = fmt(Utc::now());
         let res = sqlx::query(
@@ -1556,7 +1661,57 @@ impl SwarmRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("fail running swarm runs"))?;
+        let reset = sqlx::query(
+            "UPDATE swarm_tasks SET status = 'todo', updated_at = ?
+             WHERE status = 'in_progress'
+               AND NOT EXISTS (SELECT 1 FROM swarm_runs r
+                               WHERE r.task_id = swarm_tasks.id
+                                 AND r.status IN ('queued','running','waiting'))
+               AND NOT EXISTS (SELECT 1 FROM swarm_tasks c
+                               WHERE c.parent_task_id = swarm_tasks.id
+                                 AND c.status NOT IN ('done','cancelled'))",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("reset stranded swarm tasks"))?;
+        if reset.rows_affected() > 0 {
+            tracing::info!(
+                "swarm recovery: {} task(s) left in_progress by the restart are back in todo",
+                reset.rows_affected()
+            );
+        }
         Ok(res.rows_affected())
+    }
+
+    /// Stop every in-flight run of a swarm with `reason` in `error` (a pause
+    /// writes "paused" so the task routing knows the turn was cut short on
+    /// purpose, not failed). Returns the stopped run ids.
+    pub async fn stop_active_runs_with_reason(
+        &self,
+        swarm_id: &Id,
+        reason: &str,
+    ) -> Result<Vec<Id>> {
+        let rows = sqlx::query(
+            "SELECT id FROM swarm_runs WHERE swarm_id = ? AND status IN ('queued','running','waiting')",
+        )
+        .bind(swarm_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("select active runs"))?;
+        let ids: Vec<Id> = rows.iter().map(|r| r.get::<Id, _>("id")).collect();
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarm_runs SET status = 'stopped', error = ?, finished_at = ?
+             WHERE swarm_id = ? AND status IN ('queued','running','waiting')",
+        )
+        .bind(reason)
+        .bind(&now)
+        .bind(swarm_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("stop active runs"))?;
+        Ok(ids)
     }
 
     /// Mark all non-terminal runs of a swarm as stopped (abort).
@@ -2332,5 +2487,139 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, otto_core::Error::Conflict(_)), "got {err:?}");
+    }
+
+    /// S5: the claim is atomic — only the first caller moves a `todo` task to
+    /// `in_progress`; a racing tick sees `false` and must not dispatch it.
+    #[tokio::test]
+    async fn claim_task_is_first_writer_wins_and_keeps_an_assignee() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let agent = new_id();
+        let task = repo.create_task(new_task(&swarm, "todo")).await.unwrap();
+        assert!(repo.claim_task(&task.id, Some(&agent)).await.unwrap());
+        assert!(!repo.claim_task(&task.id, Some(&new_id())).await.unwrap());
+        let t = repo.get_task(&task.id).await.unwrap();
+        assert_eq!(t.status, "in_progress");
+        assert_eq!(t.assignee_agent_id.as_deref(), Some(agent.as_str()));
+        // An existing assignee is never overwritten by the claim.
+        let mut nt = new_task(&swarm, "todo");
+        let owner = new_id();
+        nt.assignee_agent_id = Some(owner.clone());
+        let owned = repo.create_task(nt).await.unwrap();
+        assert!(repo.claim_task(&owned.id, Some(&agent)).await.unwrap());
+        assert_eq!(
+            repo.get_task(&owned.id).await.unwrap().assignee_agent_id,
+            Some(owner)
+        );
+        // Not todo → never claimed.
+        let blocked = repo.create_task(new_task(&swarm, "blocked")).await.unwrap();
+        assert!(!repo.claim_task(&blocked.id, Some(&agent)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn refund_task_attempt_never_goes_negative() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let task = repo.create_task(new_task(&new_id(), "todo")).await.unwrap();
+        repo.bump_task_attempt(&task.id).await.unwrap();
+        repo.refund_task_attempt(&task.id).await.unwrap();
+        repo.refund_task_attempt(&task.id).await.unwrap();
+        assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 0);
+    }
+
+    /// S1: a stop never clobbers a finished run, and a late finish never
+    /// overwrites `stopped`.
+    #[tokio::test]
+    async fn update_run_if_status_is_a_compare_and_set() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let run = repo.create_run(new_run(&new_id())).await.unwrap();
+        let stopped = repo
+            .update_run_if_status(
+                &run.id,
+                &["queued", "running", "waiting"],
+                RunPatch {
+                    status: Some("stopped".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped.map(|r| r.status).as_deref(), Some("stopped"));
+        let late_done = repo
+            .update_run_if_status(
+                &run.id,
+                &["queued", "running", "waiting"],
+                RunPatch {
+                    status: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(late_done.is_none());
+        assert_eq!(repo.get_run(&run.id).await.unwrap().status, "stopped");
+    }
+
+    /// S2: a pause stops in-flight runs with the "paused" reason.
+    #[tokio::test]
+    async fn stop_active_runs_with_reason_marks_only_in_flight_runs() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let live = repo.create_run(new_run(&swarm)).await.unwrap();
+        let done = repo.create_run(new_run(&swarm)).await.unwrap();
+        repo.update_run(
+            &done.id,
+            RunPatch {
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ids = repo
+            .stop_active_runs_with_reason(&swarm, "paused")
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![live.id.clone()]);
+        let r = repo.get_run(&live.id).await.unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.error.as_deref()),
+            ("stopped", Some("paused"))
+        );
+        assert_eq!(repo.get_run(&done.id).await.unwrap().status, "done");
+    }
+
+    /// S4: a restart re-queues tasks its dead turns left `in_progress`, but a
+    /// delegated parent whose children are still open stays in progress.
+    #[tokio::test]
+    async fn fail_running_requeues_stranded_in_progress_tasks() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let stranded = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let parent = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let mut child = new_task(&swarm, "todo");
+        child.parent_task_id = Some(parent.id.clone());
+        repo.create_task(child).await.unwrap();
+        let mut nr = new_run(&swarm);
+        nr.task_id = Some(stranded.id.clone());
+        repo.create_run(nr).await.unwrap(); // queued — killed by the restart
+
+        repo.fail_running("interrupted").await.unwrap();
+        assert_eq!(repo.get_task(&stranded.id).await.unwrap().status, "todo");
+        assert_eq!(
+            repo.get_task(&parent.id).await.unwrap().status,
+            "in_progress"
+        );
     }
 }

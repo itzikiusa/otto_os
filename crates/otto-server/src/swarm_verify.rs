@@ -823,6 +823,7 @@ async fn run_controller(
                 )
                 .await?;
                 crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
+                crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
                 return Ok(());
             }
         };
@@ -838,6 +839,7 @@ async fn run_controller(
         )
         .await?;
         crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
+        crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
         return Ok(());
     }
 
@@ -884,6 +886,12 @@ async fn run_controller(
     )
     .await?;
     crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
+    // A verified subtask may be the last open child of a delegated parent —
+    // complete it (only `route_result`'s plain `done` path did, so a parent
+    // whose last child finished through verification stayed in_progress).
+    if final_status == "done" {
+        crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
+    }
 
     let passed = summary
         .results

@@ -216,10 +216,10 @@ workspace from the row.
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
-| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun |
+| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
 | 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status= | ws viewer | — | `SwarmRun[]` |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
-| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun |
+| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
 | 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph |
 | 84 | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/start\|pause\|abort\|resume | ws editor | — | Swarm |
 | 85 | GET /api/v1/swarm/swarms/{sid}/board?project_id=&task_id= | ws viewer | — | `SwarmMessage[]` |
@@ -1727,7 +1727,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
-| POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
+| POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active; `400` on a bad target |
 | GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
@@ -1822,6 +1822,10 @@ trigger, chat, scheduled task) shares the gate. A run beyond the cap stays
 `workflow_runs` row **is** the queue entry, so the queue is persistent: on
 daemon restart, queued runs re-enqueue in creation order. `POST
 /workflow-runs/{id}/cancel` on a queued run is honored — it never starts.
+A run parked at a `human_approval` step gives its slot back while it waits
+and re-queues (FIFO) for one after the decision. The run's 10-hour budget is
+per execution (a retry or restart resume starts a fresh one) and excludes
+time parked at an approval.
 
 **Restart resume (0108).** A daemon restart no longer hard-fails executing
 runs. On startup a reconciler classifies every run left in flight
@@ -2817,7 +2821,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
-| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status |
+| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
 product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
@@ -3262,7 +3266,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun (the manual run; poll for status) |
+| 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
 | 144 | POST /api/v1/scheduled-tasks/{id}/convert-to-workflow | scheduled_tasks edit + ws editor | `ConvertTaskReq {disable_task?}` | `ConvertTaskResp {workflow_id, trigger_id?}` |
@@ -3306,7 +3310,7 @@ writes) + the workspace-role axis on the agent's workspace.
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun (manual fire; poll runs) |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent is already in progress |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |

@@ -614,25 +614,22 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             .set_iter_evaluation(&iter.id, &eval)
             .await;
         let progress = eval.progress_pct.min(100);
-        let _ = ctx
+        let applied = ctx
             .goal_loops_repo
-            .update_runtime(
+            .update_running_runtime(&loop_id, GoalLoopPhase::Evaluating, idx, progress)
+            .await
+            .unwrap_or(false);
+        if applied {
+            emit(
+                &ctx,
+                &ws,
                 &loop_id,
                 GoalLoopStatus::Running,
                 GoalLoopPhase::Evaluating,
                 idx,
                 progress,
-            )
-            .await;
-        emit(
-            &ctx,
-            &ws,
-            &loop_id,
-            GoalLoopStatus::Running,
-            GoalLoopPhase::Evaluating,
-            idx,
-            progress,
-        );
+            );
+        }
 
         // ---- DIGEST ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Digesting, idx).await;
@@ -804,25 +801,34 @@ fn deregister(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) {
 }
 
 async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPhase, idx: u32) {
-    let _ = ctx
+    // Progress comes from the ROW: `loop_` is the snapshot read at the top of
+    // the iteration, and re-writing its `progress_pct` here clobbered the
+    // evaluation's fresh value every iteration (the list bar jumped back, and
+    // a succeeded loop was stored and shown as 0%).
+    let progress = ctx
         .goal_loops_repo
-        .update_runtime(
+        .get(&loop_.id)
+        .await
+        .map(|l| l.progress_pct)
+        .unwrap_or(loop_.progress_pct);
+    // Conditional on `running`: never resurrects a loop paused/stopped since
+    // the controller's last stop check.
+    let applied = ctx
+        .goal_loops_repo
+        .update_running_runtime(&loop_.id, phase, idx, progress)
+        .await
+        .unwrap_or(false);
+    if applied {
+        emit(
+            ctx,
+            ws,
             &loop_.id,
             GoalLoopStatus::Running,
             phase,
             idx,
-            loop_.progress_pct,
-        )
-        .await;
-    emit(
-        ctx,
-        ws,
-        &loop_.id,
-        GoalLoopStatus::Running,
-        phase,
-        idx,
-        loop_.progress_pct,
-    );
+            progress,
+        );
+    }
 }
 
 /// Bank the final active window, mark the loop terminal, preserve working files

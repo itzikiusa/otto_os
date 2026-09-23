@@ -476,10 +476,12 @@ async fn run_now(
         }
         None => None,
     };
-    let run_id = personal_agents_engine::run_agent(&ctx, &agent, schedule.as_ref(), "manual")
+    // Background run: the `running` row comes back at once (completion arrives
+    // as a run-updated event); 409 while one is already in progress.
+    personal_agents_engine::spawn_agent_run(&ctx, &agent, schedule.as_ref(), "manual")
         .await
-        .map_err(ApiError)?;
-    repo.get_run(&run_id).await.map(Json).map_err(ApiError)
+        .map(Json)
+        .map_err(ApiError)
 }
 
 /// `GET /personal-agents/{id}/runs`

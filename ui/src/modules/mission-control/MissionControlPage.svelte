@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
@@ -44,7 +45,12 @@
     new Set(graph.nodes.filter((n) => n.needs_approval).map((n) => n.id)),
   );
 
+  // Monotonic request token: a slower, OLDER response must never overwrite a
+  // newer one (live ticks fire reloads back to back).
+  let reqSeq = 0;
+
   async function reload(id: string): Promise<void> {
+    const seq = ++reqSeq;
     loading = true;
     err = '';
     const f: MissionFilterQuery = {
@@ -60,22 +66,48 @@
         missionControlApi.items(id, f),
         missionControlApi.graph(id, f),
       ]);
+      if (seq !== reqSeq) return;
       summary = s;
       items = its;
       graph = g;
     } catch (e) {
+      if (seq !== reqSeq) return;
       err = e instanceof ApiError ? e.message : 'Failed to load Mission Control';
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
 
-  // Load on workspace change, filter change, and each live work_graph_updated tick.
+  // Load on workspace change and filter change.
   $effect(() => {
     const id = ws.currentId;
     // establish dependencies so the effect re-runs when these change
-    void [kindF, statusF, riskF, debouncedQ, missionControlBus.tick];
+    void [kindF, statusF, riskF, debouncedQ];
     if (id) void reload(id);
+  });
+
+  // Live work_graph_updated ticks: only THIS workspace's (or a reconnect
+  // resync, which carries none), debounced. Every tick from every workspace
+  // used to refetch summary + 300 items + the graph, once per item transition.
+  const LIVE_DEBOUNCE_MS = 500;
+  let liveTimer: ReturnType<typeof setTimeout> | null = null;
+  let seenTick = untrack(() => missionControlBus.tick);
+  $effect(() => {
+    const tick = missionControlBus.tick;
+    const evWs = missionControlBus.workspaceId;
+    if (tick === seenTick) return;
+    seenTick = tick;
+    const id = untrack(() => ws.currentId);
+    if (!id || (evWs !== '' && evWs !== id)) return;
+    if (liveTimer) clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => {
+      liveTimer = null;
+      const cur = ws.currentId;
+      if (cur) void reload(cur);
+    }, LIVE_DEBOUNCE_MS);
+  });
+  onDestroy(() => {
+    if (liveTimer) clearTimeout(liveTimer);
   });
 
   async function runBackfill(): Promise<void> {
