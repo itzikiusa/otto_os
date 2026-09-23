@@ -289,6 +289,17 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
         CancelStatus::NotRunning
     );
 
+    // `cancel` looks the query up under the same key the run path registers
+    // it with: `<user>:<id>` on an access-enforced connection, else `<id>`.
+    let enforced = service.is_enforced(&conn).await.unwrap();
+    let in_flight_key = |id: &str| {
+        if enforced {
+            format!("{user}:{id}")
+        } else {
+            id.to_string()
+        }
+    };
+
     let dropped = Arc::new(AtomicUsize::new(0));
     let held = DropCount(dropped.clone());
     let task = tokio::spawn(async move {
@@ -296,7 +307,7 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
         std::future::pending::<()>().await;
     });
     service.in_flight.lock().unwrap().insert(
-        "script".into(),
+        in_flight_key("script"),
         InFlightQuery {
             conn_id: conn.clone(),
             user_id: user.clone(),
@@ -317,7 +328,7 @@ async fn cancel_without_native_handle_aborts_the_task_and_reports_it() {
     // Inline execution without a native handle: nothing can stop it from
     // here, and the caller is told so.
     service.in_flight.lock().unwrap().insert(
-        "inline".into(),
+        in_flight_key("inline"),
         InFlightQuery {
             conn_id: conn.clone(),
             user_id: user.clone(),

@@ -773,6 +773,10 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_pins_vetted_address_and_honours_allow_local() {
+        // `grpcs://` builds a TLS config, which needs the process-level rustls
+        // provider that `ottod`'s main installs at startup; a test binary must
+        // install it itself (idempotent — `Err` just means it's already set).
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Guarded: a loopback target is refused (reflection included).
         assert!(grpc_endpoint("grpc://127.0.0.1:50051", false).await.is_err());
         assert!(grpc_endpoint("http://[::1]:50051", false).await.is_err());
