@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -109,12 +109,33 @@ pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {
     }
 }
 
+/// One tick at a time per swarm. `start_coordinator` spawns the new loop
+/// while the old one may be mid-tick (it only reads `cancel` between ticks),
+/// and two overlapping ticks could read the same `todo` task / free agent and
+/// dispatch it twice.
+fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(swarm_id.to_string())
+        .or_default()
+        .clone()
+}
+
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
     loop {
         if handle.cancel.load(Ordering::Relaxed) {
             return;
         }
         if !handle.paused.load(Ordering::Relaxed) {
+            let lock = tick_lock(&swarm_id);
+            let _ticking = lock.lock().await;
+            // Replaced (or stopped) while waiting for the previous loop's tick.
+            if handle.cancel.load(Ordering::Relaxed) {
+                return;
+            }
             if let Err(e) = tick(&ctx, &swarm_id).await {
                 tracing::warn!(swarm = %swarm_id, "swarm coordinator tick: {e}");
             }
@@ -192,27 +213,23 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         if crate::swarm_verify::agent_under_verification(&agent.id) {
             continue;
         }
+        // Claim: move the task to in_progress so it isn't re-selected next tick
+        // — atomically (only from `todo`), so a racing tick / manual run that
+        // already took it makes this one skip it. Persist the picked agent on a
+        // previously-unassigned task — the board must always show WHO owns the
+        // work, not an unassigned card mid-run.
+        match repo.claim_task(&task.id, Some(&agent.id)).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(task = %task.id, "swarm: claim failed: {e}");
+                continue;
+            }
+        }
         // Count this scheduled turn against the task's attempt ceiling. The
         // ceiling itself is enforced in `route_result` once the turn returns a
         // non-terminal status, so the work still happens this tick.
         let _ = repo.bump_task_attempt(&task.id).await;
-        // Claim: move the task to in_progress so it isn't re-selected next tick.
-        // Persist the picked agent on a previously-unassigned task — the board
-        // must always show WHO owns the work, not an unassigned card mid-run.
-        let claim_assignee = task
-            .assignee_agent_id
-            .is_none()
-            .then(|| Some(agent.id.clone()));
-        let _ = repo
-            .update_task(
-                &task.id,
-                TaskPatch {
-                    status: Some("in_progress".into()),
-                    assignee_agent_id: claim_assignee,
-                    ..Default::default()
-                },
-            )
-            .await;
         emit_task(ctx, &task.id).await;
 
         let is_leader = has_reports(ctx, &swarm.id, &agent.id).await;
@@ -2016,9 +2033,42 @@ async fn run_task(
         .get_swarm(&task.swarm_id)
         .await
         .map_err(ApiError)?;
+    // The same gates the coordinator applies: a manual (or manager-agent
+    // `swarm_run_task`) run must not start a second turn for a task already
+    // running, run on a paused/aborted swarm, or bypass the budget pause.
+    if !matches!(task.status.as_str(), "todo" | "blocked" | "backlog") {
+        return Err(ApiError(Error::Conflict(format!(
+            "task is {} — only a todo, blocked or backlog task can be run",
+            task.status
+        ))));
+    }
+    if swarm.status != "active" {
+        return Err(ApiError(Error::Conflict(format!(
+            "swarm is {} — resume it to run tasks",
+            swarm.status
+        ))));
+    }
+    if let Some(reason) = budget_exceeded(&ctx, &swarm).await {
+        return Err(ApiError(Error::Conflict(format!(
+            "swarm budget exhausted: {reason}"
+        ))));
+    }
     let agent = pick_agent(&ctx, &swarm, &task)
         .await
         .ok_or_else(|| ApiError(Error::Invalid("no active agent to run this task".into())))?;
+    if ctx
+        .swarm_repo
+        .agent_has_active_run(&agent.id)
+        .await
+        .unwrap_or(false)
+        || crate::swarm_verify::agent_under_verification(&agent.id)
+    {
+        return Err(ApiError(Error::Conflict(format!(
+            "{} is busy with another turn — try again when it finishes",
+            agent.name
+        ))));
+    }
+    let _ = ctx.swarm_repo.bump_task_attempt(&tid).await;
     let is_leader = has_reports(&ctx, &swarm.id, &agent.id).await;
     let kind = if is_leader && !task.delegated {
         "planning"

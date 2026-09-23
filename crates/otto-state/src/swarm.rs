@@ -1265,6 +1265,30 @@ impl SwarmRepo {
         self.get_task(id).await
     }
 
+    /// Atomically claim a `todo` task for a turn: flip it to `in_progress` (and
+    /// assign `assignee` when the task has no assignee yet) ONLY if it is still
+    /// `todo`. Returns whether this caller won the claim — the coordinator's
+    /// old check-then-act (`agent_has_active_run` → bump → unconditional
+    /// `update_task`) let two overlapping ticks (a restarted coordinator whose
+    /// old loop was mid-tick) dispatch the same task twice.
+    pub async fn claim_task(&self, id: &Id, assignee: Option<&Id>) -> Result<bool> {
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "UPDATE swarm_tasks
+             SET status = 'in_progress',
+                 assignee_agent_id = COALESCE(assignee_agent_id, ?),
+                 updated_at = ?
+             WHERE id = ? AND status = 'todo'",
+        )
+        .bind(assignee.map(|a| a.as_str()))
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim task"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Give back one attempt (never below 0) — for a turn that was cut short
     /// by a swarm PAUSE, which must not count against `max_attempts` (pausing
     /// twice used to move a task to `blocked`).
@@ -2463,6 +2487,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, otto_core::Error::Conflict(_)), "got {err:?}");
+    }
+
+    /// S5: the claim is atomic — only the first caller moves a `todo` task to
+    /// `in_progress`; a racing tick sees `false` and must not dispatch it.
+    #[tokio::test]
+    async fn claim_task_is_first_writer_wins_and_keeps_an_assignee() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let agent = new_id();
+        let task = repo.create_task(new_task(&swarm, "todo")).await.unwrap();
+        assert!(repo.claim_task(&task.id, Some(&agent)).await.unwrap());
+        assert!(!repo.claim_task(&task.id, Some(&new_id())).await.unwrap());
+        let t = repo.get_task(&task.id).await.unwrap();
+        assert_eq!(t.status, "in_progress");
+        assert_eq!(t.assignee_agent_id.as_deref(), Some(agent.as_str()));
+        // An existing assignee is never overwritten by the claim.
+        let mut nt = new_task(&swarm, "todo");
+        let owner = new_id();
+        nt.assignee_agent_id = Some(owner.clone());
+        let owned = repo.create_task(nt).await.unwrap();
+        assert!(repo.claim_task(&owned.id, Some(&agent)).await.unwrap());
+        assert_eq!(
+            repo.get_task(&owned.id).await.unwrap().assignee_agent_id,
+            Some(owner)
+        );
+        // Not todo → never claimed.
+        let blocked = repo.create_task(new_task(&swarm, "blocked")).await.unwrap();
+        assert!(!repo.claim_task(&blocked.id, Some(&agent)).await.unwrap());
     }
 
     #[tokio::test]
