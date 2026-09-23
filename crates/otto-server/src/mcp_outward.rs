@@ -83,6 +83,11 @@ const DEFAULT_ENABLED: &[&str] = &[
     "vault_tags",
     "vault_graph",
     "vault_okf_validate",
+    // Design Hall — the artifact graph (reads: find + cite earlier work)
+    "design_list",
+    "design_get",
+    "design_links",
+    "design_search",
     // Sessions
     "list_sessions",
     "get_session",
@@ -468,6 +473,38 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Soft-delete a note into the vault's .trash/ (never destroys files). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
                 "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+        // ================= Design Hall (artifact graph) =================
+        // Read-only: find and cite earlier design work (the References drawer's
+        // library). The design library is global; `workspace_id` only narrows.
+        json!({"name":"otto.design_list","mutating":false,"category":"Design",
+            "description":"List Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) with id, title, studio, format, status and head version. Optional filters: project_id, studio, format, status, story_id (artifacts implementing a product story). Read-only.",
+            "inputSchema":{"type":"object","required":[],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — the design library is global; narrows to one workspace."},
+                "project_id":{"type":"string"},
+                "studio":{"type":"string","description":"frames | graphics | site | 3d | whiteboard | brand | spatial"},
+                "format":{"type":"string"},
+                "status":{"type":"string","description":"draft | review | approved | shipped | archived"},
+                "story_id":{"type":"string"},
+                "limit":{"type":"integer"}}}}),
+        json!({"name":"otto.design_get","mutating":false,"category":"Design",
+            "description":"One design artifact: metadata, head + approved versions, link counts, the working-copy and thumbnail file paths, and (text formats) its source — the head's, or `version` (`v3` or a version id). Cite it as otto://design/<id>@v<seq>. Read-only.",
+            "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
+                "artifact_id":{"type":"string"},
+                "version":{"type":"string","description":"Optional `v<seq>` or version id; default the head."},
+                "include_content":{"type":"boolean","description":"Default true — inline the (≤ 256 KiB) text source."}}}}),
+        json!({"name":"otto.design_links","mutating":false,"category":"Design",
+            "description":"A design artifact's links: what it uses (embeds, components, brand tokens, stories it implements, what it was derived from) and where it is used, with the linked artifacts' titles. Broken references are flagged. Read-only.",
+            "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
+                "artifact_id":{"type":"string"},
+                "dir":{"type":"string","description":"out | in | both (default)"}}}}),
+        json!({"name":"otto.design_search","mutating":false,"category":"Design",
+            "description":"Full-text search over the design library (titles, tags, extracted copy/layer/token names, linked story keys, project names) — shipped work first. Use it to find references to build on and cite. Read-only.",
+            "inputSchema":{"type":"object","required":["query"],"properties":{
+                "query":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional — narrows the global library to one workspace."},
+                "studio":{"type":"string"},"format":{"type":"string"},"status":{"type":"string"},
+                "story_id":{"type":"string"},"project_id":{"type":"string"},
+                "limit":{"type":"integer"}}}}),
         // ================= Sessions =================
         json!({"name":"otto.list_sessions","mutating":false,"category":"Sessions",
             "description":"List a workspace's agent/terminal sessions (id, title, kind, status). Read-only.",
@@ -2330,6 +2367,76 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 ),
                 json!({}),
             )
+        }
+        // ---- Design Hall (global library; `workspace_id` only narrows) ----
+        "design_list" => {
+            let q = opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("project_id", "project_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("limit", "limit"),
+                ],
+            );
+            SelfCall::get(if q.is_empty() {
+                "/api/v1/design/artifacts".to_string()
+            } else {
+                format!("/api/v1/design/artifacts?{q}")
+            })
+        }
+        "design_get" => {
+            let id = arg_str(args, "artifact_id")?;
+            let content = args
+                .get("include_content")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let mut path = format!("/api/v1/design/artifacts/{}?content={content}", seg(&id));
+            if let Some(v) = args
+                .get("version")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                path.push_str(&format!("&version={}", seg(v)));
+            }
+            SelfCall::get(path)
+        }
+        "design_links" => {
+            let id = arg_str(args, "artifact_id")?;
+            let dir = args
+                .get("dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("both");
+            SelfCall::get(format!(
+                "/api/v1/design/artifacts/{}/links?dir={}",
+                seg(&id),
+                seg(dir)
+            ))
+        }
+        "design_search" => {
+            let query = arg_str(args, "query")?;
+            let mut path = format!("/api/v1/design/search?q={}", seg(&query));
+            let q = opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("project_id", "project_id"),
+                    ("limit", "limit"),
+                ],
+            );
+            if !q.is_empty() {
+                path.push('&');
+                path.push_str(&q);
+            }
+            SelfCall::get(path)
         }
         "vault_write" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -4567,6 +4674,53 @@ mod tests {
             "/api/v1/issue/confluence/pages/12345/comments?account_id=acc1"
         );
         assert_eq!(cmt.body.unwrap()["body_md"], json!("answer"));
+    }
+
+    #[test]
+    fn design_tools_are_default_on_reads_and_route_to_the_design_api() {
+        const READS: &[&str] = &["design_list", "design_get", "design_links", "design_search"];
+        let specs = otto_tool_specs();
+        for r in READS {
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{r}"))
+                .unwrap_or_else(|| panic!("missing spec otto.{r}"));
+            assert_eq!(spec["category"], json!("Design"));
+            assert_eq!(spec["mutating"], json!(false));
+            assert!(DEFAULT_ENABLED.contains(r), "{r} must be default-enabled");
+            assert!(!DANGEROUS.contains(r), "{r} must not be DANGEROUS");
+            assert!(!tool_is_mutating(r));
+            // The library is global: no design tool requires a workspace.
+            let reqd = spec["inputSchema"]["required"].as_array().unwrap();
+            assert!(!reqd.iter().any(|x| x == "workspace_id"), "{r}");
+        }
+        assert_eq!(
+            route_for("design_list", &json!({})).unwrap().path,
+            "/api/v1/design/artifacts"
+        );
+        assert_eq!(
+            route_for("design_list", &json!({"studio": "3d", "limit": 5}))
+                .unwrap()
+                .path,
+            "/api/v1/design/artifacts?studio=3d&limit=5"
+        );
+        assert_eq!(
+            route_for("design_get", &json!({"artifact_id": "A1", "version": "v3"}))
+                .unwrap()
+                .path,
+            "/api/v1/design/artifacts/A1?content=true&version=v3"
+        );
+        assert_eq!(
+            route_for("design_links", &json!({"artifact_id": "A1"}))
+                .unwrap()
+                .path,
+            "/api/v1/design/artifacts/A1/links?dir=both"
+        );
+        let c = route_for("design_search", &json!({"query": "hero card", "studio": "site"})).unwrap();
+        assert_eq!(c.method, Method::Get);
+        assert_eq!(c.path, "/api/v1/design/search?q=hero%20card&studio=site");
+        assert!(route_for("design_get", &json!({})).is_err());
+        assert!(route_for("design_search", &json!({})).is_err());
     }
 
     #[test]

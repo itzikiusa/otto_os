@@ -706,6 +706,65 @@ fn tool_catalog() -> Value {
                 }
             },
             {
+                "name": "design_list",
+                "description": "Read-only: list Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) — id, title, studio, format, status, head version. The library is global; filter by project_id / studio / format / status / story_id. Use design_search to find references by content.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": { "type": "string", "description": "Optional — narrows the global library to one workspace." },
+                        "project_id": { "type": "string", "description": "Optional design project id." },
+                        "studio": { "type": "string", "description": "frames | graphics | site | 3d | whiteboard | brand | spatial" },
+                        "format": { "type": "string", "description": "html | mermaid | d2 | excalidraw | scene3d | otto-canvas | otto-site | png | glb | …" },
+                        "status": { "type": "string", "description": "draft | review | approved | shipped | archived" },
+                        "story_id": { "type": "string", "description": "Only artifacts that implement this product story." },
+                        "limit": { "type": "integer", "description": "Max rows (default 100, cap 500)." }
+                    }
+                }
+            },
+            {
+                "name": "design_get",
+                "description": "Read-only: one design artifact — metadata, head + approved versions, link counts, its working-copy and thumbnail file paths, and (text formats) its source, from the head or `version` (`v3` or a version id). Cite what you borrow as otto://design/<id>@v<seq>.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Design artifact id." },
+                        "version": { "type": "string", "description": "Optional `v<seq>` or version id (default: head)." },
+                        "include_content": { "type": "boolean", "description": "Inline the ≤ 256 KiB text source (default true)." }
+                    },
+                    "required": ["artifact_id"]
+                }
+            },
+            {
+                "name": "design_links",
+                "description": "Read-only: a design artifact's links — what it uses (embeds, components, brand tokens, the stories it implements, what it was derived from) and where it is used — with the linked artifacts' titles; broken references are flagged.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Design artifact id." },
+                        "dir": { "type": "string", "description": "out | in | both (default)." }
+                    },
+                    "required": ["artifact_id"]
+                }
+            },
+            {
+                "name": "design_search",
+                "description": "Read-only: full-text search over the design library (titles, tags, extracted copy / layer / token names, linked story keys, project names), shipped work first. Use it to find earlier work to build on and cite.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search text." },
+                        "workspace_id": { "type": "string", "description": "Optional — narrows to one workspace." },
+                        "studio": { "type": "string" },
+                        "format": { "type": "string" },
+                        "status": { "type": "string" },
+                        "story_id": { "type": "string" },
+                        "project_id": { "type": "string" },
+                        "limit": { "type": "integer", "description": "Max hits (default 50)." }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "otto_list_workflows",
                 "description": "Read-only: list this session's workspace's workflows (visual node-graph automations) — id, name, status.",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -1196,6 +1255,11 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("get_usage_summary", "otto_usage_summary"),
     ("get_product_story", "otto_product_story"),
     ("query_db_readonly", "otto_db_query"),
+    // Design Hall reads are served natively under their bare names.
+    ("design_list", "design_list"),
+    ("design_get", "design_get"),
+    ("design_links", "design_links"),
+    ("design_search", "design_search"),
 ];
 
 /// How long a governed call waits for a human decision before returning
@@ -1361,6 +1425,11 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_vault_tags",
     "otto_vault_graph",
     "otto_vault_okf_validate",
+    // Design Hall reads (the global design library; find + cite earlier work).
+    "design_list",
+    "design_get",
+    "design_links",
+    "design_search",
     // AWS console reads (`aws_sqs_peek` is the one read-only POST: a
     // receive-message with visibility timeout 0, graded View by the policy table).
     "aws_list_accounts",
@@ -1857,6 +1926,63 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             "/k8s/clusters/{}/metrics?{}",
             seg(&arg_str(args, "cluster_id")?),
             opt_query(args, &[("ns", "namespace")]).trim_start_matches('&')
+        )),
+        // ---- Design Hall (global library; `workspace_id` only narrows) ----
+        "design_list" => {
+            let q = opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("project_id", "project_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("limit", "limit"),
+                ],
+            );
+            let q = q.trim_start_matches('&');
+            ReadCall::get(if q.is_empty() {
+                "/design/artifacts".to_string()
+            } else {
+                format!("/design/artifacts?{q}")
+            })
+        }
+        "design_get" => {
+            let content = args
+                .get("include_content")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            ReadCall::get(format!(
+                "/design/artifacts/{}?content={content}{}",
+                seg(&arg_str(args, "artifact_id")?),
+                opt_query(args, &[("version", "version")])
+            ))
+        }
+        "design_links" => ReadCall::get(format!(
+            "/design/artifacts/{}/links?dir={}",
+            seg(&arg_str(args, "artifact_id")?),
+            seg(args
+                .get("dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("both"))
+        )),
+        "design_search" => ReadCall::get(format!(
+            "/design/search?q={}{}",
+            seg(&arg_str(args, "query")?),
+            opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("project_id", "project_id"),
+                    ("limit", "limit"),
+                ],
+            )
         )),
         other => return Err(format!("unknown feature read tool `{other}`")),
     })
@@ -3887,6 +4013,66 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    #[test]
+    fn design_reads_are_native_read_only_and_route_to_the_design_api() {
+        let cat = tool_catalog();
+        let tools = cat["tools"].as_array().unwrap();
+        for t in ["design_list", "design_get", "design_links", "design_search"] {
+            let tool = tools
+                .iter()
+                .find(|x| x["name"] == t)
+                .unwrap_or_else(|| panic!("catalog missing design tool {t}"));
+            assert!(
+                tool["description"].as_str().unwrap().starts_with("Read-only"),
+                "{t} must advertise itself as read-only"
+            );
+            assert!(FEATURE_READ_TOOLS.contains(&t), "{t} must be a feature read");
+            // Served natively — never re-advertised through the governed path.
+            assert!(governed_tool_for_stdio_name(t).is_none(), "{t}");
+            assert!(
+                governed_tool_for_stdio_name(&format!("otto_{t}")).is_none(),
+                "{t}"
+            );
+        }
+        let ws = Some("ws1");
+        assert_eq!(
+            read_route("design_list", &json!({}), ws).unwrap().path,
+            "/design/artifacts"
+        );
+        assert_eq!(
+            read_route("design_list", &json!({"studio": "3d"}), ws)
+                .unwrap()
+                .path,
+            "/design/artifacts?studio=3d"
+        );
+        let c = read_route(
+            "design_get",
+            &json!({"artifact_id": "A1", "version": "v2"}),
+            ws,
+        )
+        .unwrap();
+        assert!(!c.post);
+        assert_eq!(c.path, "/design/artifacts/A1?content=true&version=v2");
+        assert_eq!(
+            read_route("design_links", &json!({"artifact_id": "A1", "dir": "in"}), ws)
+                .unwrap()
+                .path,
+            "/design/artifacts/A1/links?dir=in"
+        );
+        assert_eq!(
+            read_route(
+                "design_search",
+                &json!({"query": "hero card", "status": "shipped"}),
+                None
+            )
+            .unwrap()
+            .path,
+            "/design/search?q=hero%20card&status=shipped"
+        );
+        assert!(read_route("design_get", &json!({}), ws).is_err());
+        assert!(read_route("design_search", &json!({}), ws).is_err());
     }
 
     #[test]
