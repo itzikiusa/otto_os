@@ -1275,7 +1275,11 @@ export of a validated `scene3d` document (§ Blender bridge), never an upload.
 The upload allow-list gains the four design mimes; `sniff_ok` checks the `glTF`
 magic header and a `{`-after-whitespace JSON case; a `scene3d` payload is also
 schema-validated (`design_scene3d::validate`: known `type`s only, finite
-numbers, ≤ 2 000 objects, `attachment_id` a safe id component).
+numbers, ≤ 2 000 objects, `attachment_id` a safe id component; `version` 1 or
+2 — v2 adds material presets, `token:color.<name>` colours (v2 only), a
+`brand` / gltf `src` `otto://design` URI, `environment`, `cameras` ≤ 32,
+`states` ≤ 32 with overrides of known objects, `turntable`, box `radius`; see
+`docs/features/design-hall.md` §10.1).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -3118,7 +3122,9 @@ to (`dst_kind: "story"` — `implements` — links), sorted;
 (`src_node` = the tag's `id`); mermaid/d2 → `describes` (node from
 `click Node …` / `node.link:`); scene3d `gltf.attachment_id` → `embeds`
 (resolved to the artifact imported from that attachment, else kept as a
-`dst_kind:"attachment"` edge); JSON formats (excalidraw, otto-canvas incl. its
+`dst_kind:"attachment"` edge), scene3d v2 `gltf.src` → `embeds` and `brand` →
+`uses_tokens` (a scene3d `#node` may also be `view:<camera id>` or
+`state:<state id>`; `token:color.<name>` names are indexed for search); JSON formats (excalidraw, otto-canvas incl. its
 inner source, otto-site/-layout/-brand/-exhibit, gltf) → rel by key (`src`
 embeds, `component` uses_component, `brand`/`tokens` uses_tokens,
 `derived_from` …, whiteboards default `describes`, others `references`),

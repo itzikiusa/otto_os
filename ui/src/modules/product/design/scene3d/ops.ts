@@ -5,18 +5,25 @@
 // caller can diff, debounce and autosave (Track B owns the 600 ms debounce +
 // dirty/conflict state; we just emit `onchange(newDoc)` undebounced).
 import type {
+  Easing,
   GizmoMode,
   LightType,
+  MaterialPresetId,
   PrimitiveType,
   Scene3dCamera,
+  Scene3dCameraPreset,
   Scene3dDoc,
+  Scene3dEnvironment,
   Scene3dGroup,
   Scene3dLight,
   Scene3dMaterial,
   Scene3dNodeKind,
   Scene3dObject,
+  Scene3dStateOverride,
+  Scene3dTurntable,
   Vec3,
 } from './types';
+import { applyMaterialPreset } from './presets';
 
 // JSON round-trip rather than `structuredClone`: the doc is pure JSON, and the
 // caller may hand us a Svelte `$state` proxy, which structuredClone refuses to clone.
@@ -248,6 +255,11 @@ export function remove(doc: Scene3dDoc, id: string): Scene3dDoc {
   next.lights = next.lights.filter((l) => !doomed.has(l.id));
   next.groups = next.groups.filter((g) => !doomed.has(g.id));
   for (const g of next.groups) g.children = g.children.filter((c) => !doomed.has(c));
+  // v2: a deleted object's state overrides go with it.
+  for (const st of next.states ?? []) {
+    if (!st.overrides) continue;
+    for (const d of doomed) delete st.overrides[d];
+  }
   return next;
 }
 
@@ -469,4 +481,193 @@ export function summarize(doc: Scene3dDoc): string {
   const parts = [`${o} object${o === 1 ? '' : 's'}`, `${l} light${l === 1 ? '' : 's'}`];
   if (g) parts.push(`${g} group${g === 1 ? '' : 's'}`);
   return parts.join(' · ');
+}
+
+// ── v2: physical materials, environment, brand, cameras, states, turntable ────
+
+/** Apply (or with `null` remove) a physical material preset — see `presets.ts`. */
+export function setMaterialPreset(doc: Scene3dDoc, id: string, preset: MaterialPresetId | null): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const n = findNode(next, id);
+  if (!n || n.kind !== 'object' || n.node.type === 'gltf') return doc;
+  const m = applyMaterialPreset(n.node.material, preset);
+  if (Object.keys(m).length) n.node.material = m;
+  else delete n.node.material;
+  return next;
+}
+
+/** Rounded corners for a box (0 removes the field). */
+export function setRadius(doc: Scene3dDoc, id: string, radius: number): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const n = findNode(next, id);
+  if (!n || n.kind !== 'object' || n.node.type !== 'box' || !Number.isFinite(radius)) return doc;
+  const r = Math.min(0.5, Math.max(0, round(radius, 3)));
+  if (r > 0) n.node.radius = r;
+  else delete n.node.radius;
+  return next;
+}
+
+/** Merge environment fields; `null` removes the environment (lights only). */
+export function setEnvironment(doc: Scene3dDoc, patch: Partial<Scene3dEnvironment> | null): Scene3dDoc {
+  const next = cloneDoc(doc);
+  if (patch === null) {
+    delete next.environment;
+    return next;
+  }
+  const env: Scene3dEnvironment = { preset: 'studio-soft', ...(next.environment ?? {}), ...patch };
+  for (const [k, v] of Object.entries(env)) if (v === undefined) delete (env as unknown as Record<string, unknown>)[k];
+  next.environment = env;
+  return next;
+}
+
+/** The brand kit `token:` colours resolve against (`otto://design/<id>@approved`), or `null`. */
+export function setBrand(doc: Scene3dDoc, uri: string | null): Scene3dDoc {
+  const next = cloneDoc(doc);
+  if (uri) next.brand = uri;
+  else delete next.brand;
+  return next;
+}
+
+export function setTurntable(doc: Scene3dDoc, patch: Partial<Scene3dTurntable>): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const tt: Scene3dTurntable = { ...(next.turntable ?? {}), ...patch };
+  if (tt.speed !== undefined) tt.speed = Math.min(360, Math.max(-360, round(tt.speed, 2)));
+  next.turntable = tt;
+  return next;
+}
+
+/** Add a `gltf` object that points at a Design Hall model (`otto://design/<id>@approved`). */
+export function addGltfSrc(doc: Scene3dDoc, src: string, opts: AddOptions = {}): { doc: Scene3dDoc; id: string } {
+  const next = cloneDoc(doc);
+  const name = uniqueName(next, opts.name ?? 'Model');
+  const id = uniqueId(next, name);
+  next.objects.push({ id, name, type: 'gltf', src, position: opts.position ?? [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
+  attachToGroup(next, id, opts.groupId);
+  return { doc: next, id };
+}
+
+/** Slug unique within one list (cameras and states are their own id spaces). */
+function uniqueIn(ids: string[], base: string): string {
+  const slug =
+    base
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'item';
+  if (!ids.includes(slug)) return slug;
+  for (let i = 2; ; i++) if (!ids.includes(`${slug}-${i}`)) return `${slug}-${i}`;
+}
+
+/** Store a named camera ("Hero angle") — embeds use it as `#view:<id>`. */
+export function addCameraPreset(doc: Scene3dDoc, name: string, cam: Scene3dCamera): { doc: Scene3dDoc; id: string } {
+  const next = cloneDoc(doc);
+  const list = next.cameras ?? [];
+  const label = name.trim().slice(0, 200) || 'View';
+  const id = uniqueIn(list.map((c) => c.id), label);
+  list.push({ id, name: label, position: roundVec(cam.position), target: roundVec(cam.target), fov: round(cam.fov, 2) });
+  next.cameras = list;
+  return { doc: next, id };
+}
+
+export function updateCameraPreset(doc: Scene3dDoc, id: string, patch: Partial<Omit<Scene3dCameraPreset, 'id'>>): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const c = next.cameras?.find((x) => x.id === id);
+  if (!c) return doc;
+  if (patch.name !== undefined) c.name = patch.name.trim().slice(0, 200) || c.name;
+  if (finiteVec(patch.position)) c.position = roundVec(patch.position);
+  if (finiteVec(patch.target)) c.target = roundVec(patch.target);
+  if (patch.fov !== undefined && Number.isFinite(patch.fov)) c.fov = Math.min(179, Math.max(1, round(patch.fov, 2)));
+  return next;
+}
+
+export function removeCameraPreset(doc: Scene3dDoc, id: string): Scene3dDoc {
+  const next = cloneDoc(doc);
+  next.cameras = (next.cameras ?? []).filter((c) => c.id !== id);
+  if (!next.cameras.length) delete next.cameras;
+  return next;
+}
+
+/** Add a state; `copyFrom` duplicates another state's overrides. */
+export function addState(doc: Scene3dDoc, name: string, copyFrom?: string | null): { doc: Scene3dDoc; id: string } {
+  const next = cloneDoc(doc);
+  const list = next.states ?? [];
+  const label = name.trim().slice(0, 200) || 'State';
+  const id = uniqueIn(list.map((s) => s.id), label);
+  const src = copyFrom ? list.find((s) => s.id === copyFrom) : undefined;
+  list.push({ id, name: label, duration_ms: src?.duration_ms ?? 400, easing: src?.easing ?? 'ease-in-out', overrides: clone(src?.overrides ?? {}) });
+  next.states = list;
+  if (!next.default_state) next.default_state = list[0].id;
+  return { doc: next, id };
+}
+
+export function renameState(doc: Scene3dDoc, id: string, name: string): Scene3dDoc {
+  const t = name.trim().slice(0, 200);
+  if (!t) return doc;
+  const next = cloneDoc(doc);
+  const st = next.states?.find((s) => s.id === id);
+  if (!st) return doc;
+  st.name = t;
+  return next;
+}
+
+export function removeState(doc: Scene3dDoc, id: string): Scene3dDoc {
+  const next = cloneDoc(doc);
+  next.states = (next.states ?? []).filter((s) => s.id !== id);
+  if (next.default_state === id) {
+    if (next.states.length) next.default_state = next.states[0].id;
+    else delete next.default_state;
+  }
+  if (!next.states.length) delete next.states;
+  return next;
+}
+
+export function setDefaultState(doc: Scene3dDoc, id: string): Scene3dDoc {
+  if (!doc.states?.some((s) => s.id === id)) return doc;
+  const next = cloneDoc(doc);
+  next.default_state = id;
+  return next;
+}
+
+export function setStateTiming(doc: Scene3dDoc, id: string, patch: { duration_ms?: number; easing?: Easing }): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const st = next.states?.find((s) => s.id === id);
+  if (!st) return doc;
+  if (patch.duration_ms !== undefined && Number.isFinite(patch.duration_ms)) st.duration_ms = Math.min(10_000, Math.max(0, Math.round(patch.duration_ms)));
+  if (patch.easing) st.easing = patch.easing;
+  return next;
+}
+
+/**
+ * Merge an object's override in a state (`undefined` deletes a field; an
+ * empty override is removed). Transforms are rounded like `setTransform`.
+ */
+export function setStateOverride(doc: Scene3dDoc, stateId: string, objectId: string, patch: Partial<Scene3dStateOverride>): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const st = next.states?.find((s) => s.id === stateId);
+  if (!st || !next.objects.some((o) => o.id === objectId)) return doc;
+  const ovs = st.overrides ?? {};
+  const cur: Scene3dStateOverride = { ...(ovs[objectId] ?? {}) };
+  for (const [k, v] of Object.entries(patch) as [keyof Scene3dStateOverride, unknown][]) {
+    if (v === undefined || v === null || v === '') delete cur[k];
+    else if (Array.isArray(v)) {
+      if (finiteVec(v as Vec3)) (cur as Record<string, unknown>)[k] = roundVec(v as Vec3);
+    } else (cur as Record<string, unknown>)[k] = v;
+  }
+  if (Object.keys(cur).length) ovs[objectId] = cur;
+  else delete ovs[objectId];
+  st.overrides = ovs;
+  return next;
+}
+
+export function clearStateOverride(doc: Scene3dDoc, stateId: string, objectId: string): Scene3dDoc {
+  const next = cloneDoc(doc);
+  const st = next.states?.find((s) => s.id === stateId);
+  if (!st?.overrides?.[objectId]) return doc;
+  delete st.overrides[objectId];
+  return next;
+}
+
+/** Objects + lights + (v2) states line for the viewport stats pill. */
+export function sceneStats(doc: Scene3dDoc): { objects: number; lights: number; states: number; cameras: number } {
+  return { objects: doc.objects.length, lights: doc.lights.length, states: doc.states?.length ?? 0, cameras: doc.cameras?.length ?? 0 };
 }

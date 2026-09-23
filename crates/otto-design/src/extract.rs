@@ -6,7 +6,7 @@
 //! |--------------------------------|----------------------------------------------------|---------------------------------|
 //! | `html` / `svg`                 | `otto://` in `src=` (embeds) / other attrs (refs)  | visible text (tags/scripts cut) |
 //! | `mermaid` / `d2`               | `otto://` anywhere (describes); node from `click X` / `X.link` | the source            |
-//! | `scene3d`                      | `gltf` objects' `attachment_id` (embeds) + `otto://` strings | names, text, notes    |
+//! | `scene3d`                      | `gltf` objects' `attachment_id` / v2 `src` (embeds), v2 `brand` (uses_tokens) + `otto://` strings | names, text, notes, `token:` names |
 //! | `excalidraw` / `otto-canvas`   | `otto://` strings (describes) incl. inner source   | element text                    |
 //! | `otto-site`/`-layout`/`-brand`/`-exhibit`, `gltf` | `otto://` strings, rel by key (see [`rel_for_key`]) | copy-ish string values (+ token names for brand) |
 //! | binaries                       | —                                                  | —                               |
@@ -382,6 +382,11 @@ fn walk(
         Value::String(s) => {
             if s.contains(crate::uri::PREFIX) {
                 scan_into(s, rel_for_key(format, key), node, out);
+            } else if format == "scene3d" && s.starts_with("token:") {
+                // scene3d v2 brand colours (`token:color.violet`): the token
+                // NAME is searchable ("which scenes use brand violet?"); the
+                // kit itself is linked by the top-level `brand` URI (uses_tokens).
+                out.push_text(&s["token:".len()..]);
             } else if TEXT_KEYS.contains(&key) {
                 out.push_text(s);
             }
@@ -430,6 +435,18 @@ pub fn node_ids(format: &str, bytes: &[u8]) -> Option<HashSet<String>> {
             let v: Value = serde_json::from_str(text).ok()?;
             let mut ids = HashSet::new();
             collect_ids(&v, 0, &mut ids, MAX_IDS);
+            if format == "scene3d" {
+                // scene3d v2: embeds address a named camera as `#view:<id>`
+                // and a state as `#state:<id>`.
+                for (list, prefix) in [("cameras", "view:"), ("states", "state:")] {
+                    let items = v.get(list).and_then(Value::as_array);
+                    for item in items.into_iter().flatten() {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            ids.insert(format!("{prefix}{id}"));
+                        }
+                    }
+                }
+            }
             Some(ids)
         }
     }
@@ -525,6 +542,37 @@ mod tests {
             }]
         );
         assert!(ex.text.contains("Floor") && ex.text.contains("gift box"));
+    }
+
+    #[test]
+    fn scene3d_v2_links_models_and_brand_and_indexes_tokens_and_views() {
+        let doc = serde_json::json!({
+            "type": "otto-scene3d", "version": 2,
+            "brand": "otto://design/BRAND@approved",
+            "cameras": [{ "id": "hero", "name": "Hero angle", "position": [1, 1, 1] }],
+            "states": [{ "id": "flipped", "name": "Flipped" }],
+            "objects": [
+                { "id": "card", "type": "box", "material": { "color": "token:color.violet" } },
+                { "id": "gift", "type": "gltf", "src": "otto://design/GIFT@v3" }
+            ]
+        });
+        let bytes = doc.to_string();
+        let ex = extract("scene3d", bytes.as_bytes());
+        let refs = uri_ids(&ex);
+        assert!(
+            refs.contains(&("BRAND".into(), "uses_tokens", None)),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&("GIFT".into(), "embeds", Some("gift".into()))),
+            "{refs:?}"
+        );
+        assert!(ex.text.contains("color.violet"), "{}", ex.text);
+        assert!(ex.text.contains("Hero angle") && ex.text.contains("Flipped"));
+        // Embeds may address `#view:<camera>` / `#state:<state>`.
+        let ids = node_ids("scene3d", bytes.as_bytes()).unwrap();
+        assert!(ids.contains("view:hero") && ids.contains("state:flipped"));
+        assert!(ids.contains("card") && !ids.contains("view:card"));
     }
 
     #[test]

@@ -2,9 +2,11 @@
   // One design, open (canvas/studio archetype):
   //
   //   PageHeader: Design Hall › Project › Title · status ▾ · vN      Compare  ⋯  [Save]
-  //   ┌ (3D: hierarchy) ┬ stage toolbar + ArtifactStage ──────────┬ Links | References ┐
-  //   │                 │  existing viewers/editors per format      │ (3D: Inspector)    │
-  //   └─────────────────┴───────────────────────────────────────────┴───────────────────┘
+  //   ┌ stage toolbar + ArtifactStage ────────────────────────────┬ Otto | Links | References ┐
+  //   │  existing viewers/editors per format                      │                          │
+  //   └───────────────────────────────────────────────────────────┴──────────────────────────┘
+  //   (a `scene3d` design opens the 3D Studio layout instead — studio3d/Studio3D.svelte —
+  //    over the same working copy, save path and Otto/Links/References panels)
   //   version strip: v1 · v2 (Otto) · v3 (you, current) …                  Compare
   //
   // This view owns the working copy of the source, the base version it was
@@ -42,13 +44,14 @@
     DesignVersion,
   } from '../../lib/api/types';
   import { DEVICES, type DeviceKind } from '../product/design/DeviceFrame.svelte';
-  import { Hierarchy, Inspector, parseScene, serializeScene, type Scene3dDoc } from '../product/design/scene3d';
+  import Studio3D from './studio3d/Studio3D.svelte';
   import ArtifactStage from './ArtifactStage.svelte';
   import VersionStrip from './VersionStrip.svelte';
   import CompareModal, { type CompareSide } from './CompareModal.svelte';
   import LinksPanel from './LinksPanel.svelte';
   import ReferencesPanel from './ReferencesPanel.svelte';
   import OttoPanel from './assist/OttoPanel.svelte';
+  import type { AssistSelection } from './assist/model';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
   import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
@@ -82,10 +85,9 @@
 
   let selected = $state<string[]>([]);
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
-  let rightTab = $state<'inspector' | 'otto' | 'links' | 'references'>('links');
+  let rightTab = $state<'otto' | 'links' | 'references'>('links');
   let showSource = $state(false);
   let device = $state<DeviceKind>('none');
-  let sceneSel = $state<string | null>(null);
 
   const artifact = $derived<DesignArtifact | null>(detail?.artifact ?? null);
   const kind = $derived(artifact ? renderKind(artifact.format) : 'other');
@@ -144,7 +146,6 @@
         }
         setBlob(c.blobUrl);
       }
-      const first = detail?.artifact.id !== d.artifact.id;
       detail = d;
       source = text;
       baseSource = text;
@@ -152,7 +153,6 @@
       newerHead = null;
       phase = 'ready';
       loadError = null;
-      if (first && renderKind(d.artifact.format) === 'scene3d' && rightTab !== 'otto') rightTab = 'inspector';
     } catch (e) {
       if (my !== loadSeq) return;
       if (e instanceof ApiError && e.status === 404) phase = 'gone';
@@ -240,7 +240,6 @@
       versions = [];
       selected = [];
       compare = null;
-      sceneSel = null;
       // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
       rightTab = router.parts[3] === 'otto' ? 'otto' : 'links';
       phase = 'loading';
@@ -482,7 +481,13 @@
     try {
       const a = await api.approveArtifact(id, head.id);
       if (detail) detail = { ...detail, artifact: a, approved: head };
-      toasts.success(`Approved v${head.seq}`);
+      const follow = split.usedIn.filter((r) => r.link.policy === 'follow_approved').map((r) => r.label);
+      const pinned = split.usedIn.filter((r) => r.link.policy === 'pinned').map((r) => r.label);
+      const parts = [
+        follow.length ? `${follow.join(', ')} follow${follow.length === 1 ? 's' : ''} Approved → now shows v${head.seq}` : '',
+        pinned.length ? `${pinned.join(', ')} pin${pinned.length === 1 ? 's' : ''} an older version (update available)` : '',
+      ].filter(Boolean);
+      toasts.success(`Approved v${head.seq}`, parts.join(' · ') || undefined);
     } catch (e) {
       toasts.error('Couldn’t approve', e instanceof Error ? e.message : String(e));
     }
@@ -606,19 +611,9 @@
     compare = { left: { artifact: target, versionId: pinned }, right: { artifact: target, versionId: target.head_version_id } };
   }
 
-  // ── 3D: hierarchy + inspector share the stage's parsed document ──────────
-  const sceneDoc = $derived.by<Scene3dDoc | null>(() => {
-    if (kind !== 'scene3d' || source === null) return null;
-    const r = parseScene(source);
-    return r.ok ? r.doc : null;
-  });
-  // What the Otto tab focuses a turn on: the selected 3D object today (Site
-  // Studio's section selection plugs in here when it lands).
-  const assistSelection = $derived.by(() => {
-    if (kind !== 'scene3d' || !sceneSel || !sceneDoc) return null;
-    const o = sceneDoc.objects.find((x) => x.id === sceneSel);
-    return { node_id: sceneSel, label: o?.name || sceneSel };
-  });
+  // What the Otto tab focuses a turn on: the 3D Studio passes its selected
+  // object (the `ottoPanel` snippet's argument); Site Studio's section
+  // selection plugs in the same way when it lands.
   const assistBlocked = $derived(
     !canEdit
       ? 'You can view this design, but asking Otto to change it needs edit access.'
@@ -628,9 +623,6 @@
           ? 'Otto edits text and JSON designs. Images, PDFs and 3D models can’t be changed by an agent.'
           : null,
   );
-  function onScene(d: Scene3dDoc): void {
-    if (!readonly) source = serializeScene(d);
-  }
 
   // ── ⌘K commands (only while a design is open) ─────────────────────────────
   $effect(() => {
@@ -735,12 +727,56 @@
         <button class="btn small" onclick={() => void load(id)}>Retry</button>
       </div>
     {:else}
-      <div class="studio" class:has-left={kind === 'scene3d' && !!sceneDoc} class:wide-right={rightTab === 'otto'}>
-        {#if kind === 'scene3d' && sceneDoc}
-          <aside class="left" aria-label="Scene hierarchy">
-            <Hierarchy doc={sceneDoc} bind:selectedId={sceneSel} onchange={onScene} {readonly} />
-          </aside>
+      {#snippet notices()}
+        {#if newerHead}
+          <span class="notice warnc" role="status">
+            <Icon name="info" size={12} /> A newer version was saved.
+            <button class="linkbtn" onclick={() => void discard()}>Load it (discard mine)</button>
+          </span>
         {/if}
+        {#if imported}
+          <span class="notice">
+            <Icon name="info" size={12} /> Mirrored from {artifact.source_kind === 'canvas_scene' ? 'Canvas' : 'Product'} — edit it there, or make a copy here.
+            {#if origin}<button class="linkbtn" onclick={origin.open}>{origin.label}</button>{/if}
+            <button class="linkbtn" onclick={() => void duplicateHere()}>Make an editable copy</button>
+          </span>
+        {:else if !canEdit}
+          <span class="notice"><Icon name="lock" size={12} /> Read-only</span>
+        {/if}
+      {/snippet}
+      {#snippet ottoPanel(selection: AssistSelection | null)}
+        <OttoPanel {artifact} {versions} {head} uses={split.uses} {dirty} {selection}
+          readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
+      {/snippet}
+      {#snippet linksPanel()}
+        <LinksPanel {artifact} uses={split.uses} usedIn={split.usedIn} loading={linksLoading} error={linksError}
+          readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} />
+      {/snippet}
+      {#snippet referencesPanel()}
+        <ReferencesPanel {artifact} uses={split.uses} readonly={!canEdit} {seqOf} onreload={() => void loadLinks()}
+          oncompare={compareWithRef} />
+      {/snippet}
+      {#if kind === 'scene3d'}
+        {#key artifact.id}
+          <Studio3D
+            {artifact}
+            {source}
+            {readonly}
+            {dirty}
+            {head}
+            usedIn={split.usedIn}
+            linkCount={split.uses.length + split.usedIn.length}
+            {seqOf}
+            openOtto={rightTab === 'otto'}
+            onchange={(s) => (source = s)}
+            otto={ottoPanel}
+            links={linksPanel}
+            references={referencesPanel}
+            {notices}
+          />
+        {/key}
+      {:else}
+      <div class="studio" class:wide-right={rightTab === 'otto'}>
         <section class="center" aria-label="Design">
           <div class="toolbar">
             {#if kind === 'html'}
@@ -757,21 +793,7 @@
             {/if}
             <span class="fmt">{formatLabel(artifact.format)} · {studioInfo(artifact.studio).name}</span>
             <span class="grow"></span>
-            {#if newerHead}
-              <span class="notice warnc" role="status">
-                <Icon name="info" size={12} /> A newer version was saved.
-                <button class="linkbtn" onclick={() => void discard()}>Load it (discard mine)</button>
-              </span>
-            {/if}
-            {#if imported}
-              <span class="notice">
-                <Icon name="info" size={12} /> Mirrored from {artifact.source_kind === 'canvas_scene' ? 'Canvas' : 'Product'} — edit it there, or make a copy here.
-                {#if origin}<button class="linkbtn" onclick={origin.open}>{origin.label}</button>{/if}
-                <button class="linkbtn" onclick={() => void duplicateHere()}>Make an editable copy</button>
-              </span>
-            {:else if !canEdit}
-              <span class="notice"><Icon name="lock" size={12} /> Read-only</span>
-            {/if}
+            {@render notices()}
           </div>
           <div class="stage-host">
             {#key artifact.id}
@@ -782,7 +804,6 @@
                 {readonly}
                 {showSource}
                 {device}
-                bind:selectedId={sceneSel}
                 onchange={(s) => (source = s)}
               />
             {/key}
@@ -790,9 +811,6 @@
         </section>
         <aside class="right" aria-label="Design details">
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            {#if kind === 'scene3d'}
-              <button role="tab" aria-selected={rightTab === 'inspector'} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')}>Inspector</button>
-            {/if}
             <button role="tab" aria-selected={rightTab === 'otto'} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
               Otto
             </button>
@@ -804,31 +822,23 @@
             </button>
           </div>
           <div class="panel" role="tabpanel">
-            {#if brief && rightTab !== 'inspector' && rightTab !== 'otto'}
+            {#if brief && rightTab !== 'otto'}
               <div class="brief">
                 <span class="k"><Icon name="sparkle" size={12} /> Brief</span>
                 <p>{brief}</p>
               </div>
             {/if}
-            {#if rightTab === 'inspector' && kind === 'scene3d'}
-              {#if sceneDoc}
-                <Inspector doc={sceneDoc} bind:selectedId={sceneSel} onchange={onScene} {readonly} />
-              {:else}
-                <p class="dim pad">Fix the scene document to inspect it.</p>
-              {/if}
-            {:else if rightTab === 'otto'}
-              <OttoPanel {artifact} {versions} {head} uses={split.uses} {dirty} selection={assistSelection}
-                readonlyReason={assistBlocked} oncompare={(left, right) => (compare = { left, right })} />
+            {#if rightTab === 'otto'}
+              {@render ottoPanel(null)}
             {:else if rightTab === 'links'}
-              <LinksPanel {artifact} uses={split.uses} usedIn={split.usedIn} loading={linksLoading} error={linksError}
-                readonly={!canEdit} {seqOf} onreload={() => void loadLinks()} oncompare={comparePinned} />
+              {@render linksPanel()}
             {:else}
-              <ReferencesPanel {artifact} uses={split.uses} readonly={!canEdit} {seqOf} onreload={() => void loadLinks()}
-                oncompare={compareWithRef} />
+              {@render referencesPanel()}
             {/if}
           </div>
         </aside>
       </div>
+      {/if}
       <VersionStrip
         {versions}
         headId={head?.id ?? null}
@@ -902,21 +912,9 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) 320px;
   }
-  .studio.has-left {
-    grid-template-columns: 240px minmax(0, 1fr) 320px;
-  }
   /* The Otto tab holds a conversation and a variants tray: a little wider. */
   .studio.wide-right {
     grid-template-columns: minmax(0, 1fr) 360px;
-  }
-  .studio.has-left.wide-right {
-    grid-template-columns: 240px minmax(0, 1fr) 360px;
-  }
-  .left {
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
-    overflow: auto;
-    min-height: 0;
   }
   .center {
     min-width: 0;
@@ -1023,15 +1021,10 @@
   }
   @container (max-width: 900px) {
     .studio,
-    .studio.has-left,
-    .studio.wide-right,
-    .studio.has-left.wide-right {
+    .studio.wide-right {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(360px, 1fr) auto;
       overflow-y: auto;
-    }
-    .left {
-      display: none;
     }
     .right {
       border-inline-start: 0;
