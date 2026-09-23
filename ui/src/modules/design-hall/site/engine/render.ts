@@ -24,6 +24,8 @@ export interface EmbedInfo {
   /** A poster image URL (the 3D artifact's thumbnail), if any. */
   poster: string | null;
   broken?: boolean;
+  /** Canvas only: a live 3D scene is mounted over this embed (hide the stand-in). */
+  live?: boolean;
 }
 
 export interface RenderCtx {
@@ -230,7 +232,8 @@ export function embed3d(r: R, b: SiteBlock): string {
     badge = `<span class="os-edit-badge${!src || info?.broken || !info ? ' os-edit-badge--warn' : ''}" aria-hidden="true">${esc(text)}</span>`;
   }
   const cap = textEl(r, 'figcaption', 'os-caption', b.props, 'caption');
-  return `<figure class="${cls.join(' ')}"${r.blk(b)}><div class="os-embed-3d__stage">${stage}</div>${cap}${badge}</figure>`;
+  const live = r.ctx.editable && info?.live ? ' data-live="1"' : '';
+  return `<figure class="${cls.join(' ')}"${r.blk(b)}${live}><div class="os-embed-3d__stage">${stage}</div>${cap}${badge}</figure>`;
 }
 
 function imageFigure(r: R, b: SiteBlock, cls = 'os-embed os-embed-img', i?: number): string {

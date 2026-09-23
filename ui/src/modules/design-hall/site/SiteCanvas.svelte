@@ -16,7 +16,7 @@
   // in an overlay measured from the DOM (clamped into the canvas, never off it).
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { renderSection, type EmbedInfo } from './engine/render';
+  import { flag, renderSection, str, type EmbedInfo } from './engine/render';
   import { themeStyle, type Theme } from './engine/theme';
   import { sectionLabel } from './engine/catalog';
   import type { SiteDoc, SitePage } from './engine/types';
@@ -33,6 +33,8 @@
     selectedSection: string | null;
     selectedBlock: string | null;
     readonly: boolean;
+    /** Mount live 3D (the 3D Studio embed runtime) over 3D embeds. */
+    live3d?: boolean;
     domain: string;
     embed: (uri: string) => EmbedInfo | null;
     asset: (uri: string) => string | null;
@@ -53,6 +55,7 @@
     selectedSection,
     selectedBlock,
     readonly,
+    live3d = true,
     domain,
     embed,
     asset,
@@ -76,13 +79,21 @@
   });
 
   // ── Rendering ──────────────────────────────────────────────────────────────
-  const ctx = $derived({
-    theme,
-    editable: true,
-    homeHref: '#',
-    pageHref: () => '#',
-    embed,
-    asset,
+  /** Sources with a live 3D scene up (the renderer then hides their stand-in). */
+  let liveSrcs = $state<ReadonlySet<string>>(new Set());
+  const ctx = $derived.by(() => {
+    const on = liveSrcs;
+    return {
+      theme,
+      editable: true,
+      homeHref: '#',
+      pageHref: () => '#',
+      embed: (uri: string): EmbedInfo | null => {
+        const i = embed(uri);
+        return i && on.has(uri.trim()) ? { ...i, live: true } : i;
+      },
+      asset,
+    };
   });
   const html = $derived(new Map(page.sections.map((s) => [s.id, renderSection(s, ctx)])));
   const style = $derived(themeStyle(theme));
@@ -280,8 +291,101 @@
       selBox = boxOf(sectionEl(selectedSection));
       blockBox = selectedBlock ? boxOf(blockEl(selectedBlock)) : null;
       hoverBox = hover && (hover.section !== selectedSection || hover.block) ? boxOf(hover.block && hover.section === selectedSection ? blockEl(hover.block) : sectionEl(hover.section)) : null;
+      syncLive();
     });
   }
+
+  // ── Live 3D ────────────────────────────────────────────────────────────────
+  // Each 3D embed with a source gets the 3D Studio's embed runtime, mounted in
+  // a layer INSIDE the scaled frame but OUTSIDE the {@html} sections — so a
+  // re-render of the section (every edit) never tears the WebGL scene down —
+  // and positioned over the embed's stage. It is transparent (the stand-in
+  // orb stays behind the model) and click-through (selection still works).
+  // The stand-in card / poster hide once the first frame is up; on failure the
+  // stand-in simply stays.
+  interface Live {
+    key: string;
+    src: string;
+    host: HTMLDivElement;
+    ready: boolean;
+    handle: { destroy(): void } | null;
+  }
+  /** Publish which sources have a scene up (only when that changes — it re-renders). */
+  function refreshLiveSrcs(): void {
+    const next = new Set([...lives.values()].filter((l) => l.ready).map((l) => l.src));
+    if (next.size === liveSrcs.size && [...next].every((s) => liveSrcs.has(s))) return;
+    liveSrcs = next;
+  }
+  const lives = new Map<string, Live>();
+  let frameEl = $state<HTMLDivElement | null>(null);
+  let liveLayer = $state<HTMLDivElement | null>(null);
+
+  function syncLive(): void {
+    if (!live3d || !siteEl || !frameEl || !liveLayer) return;
+    const frame = frameEl.getBoundingClientRect();
+    const seen = new Set<string>();
+    for (const fig of Array.from(siteEl.querySelectorAll<HTMLElement>('figure.os-embed-3d[data-os-block]'))) {
+      const id = fig.dataset.osBlock ?? '';
+      const b = page.sections.flatMap((s) => s.blocks ?? []).find((x) => x.id === id);
+      const src = b ? str(b.props, 'src').trim() : '';
+      const stage = fig.querySelector<HTMLElement>('.os-embed-3d__stage');
+      if (!b || !src.startsWith('otto://design/') || !stage) continue;
+      seen.add(id);
+      const key = `${src}|${flag(b.props, 'auto_rotate', true)}`;
+      let l = lives.get(id);
+      if (l && l.key !== key) {
+        l.handle?.destroy();
+        l.host.remove();
+        lives.delete(id);
+        l = undefined;
+      }
+      if (!l) {
+        const host = document.createElement('div');
+        host.className = 'live3d';
+        liveLayer.appendChild(host);
+        const entry: Live = { key, src, host, ready: false, handle: null };
+        lives.set(id, entry);
+        const label = str(b.props, 'alt') || '3D model';
+        void import('../studio3d/embed')
+          .then((m) => m.mountScene3dEmbed(host, { src, autoRotate: flag(b.props, 'auto_rotate', true), drag: false, tiltOnHover: false, background: 'transparent', label }))
+          .then(async (h) => {
+            if (lives.get(id) !== entry) return h.destroy();
+            entry.handle = h;
+            await h.ready;
+            if (lives.get(id) !== entry) return;
+            entry.ready = true;
+            refreshLiveSrcs();
+            measure();
+          })
+          .catch(() => {
+            // The stand-in stays; don't retry this key.
+            host.remove();
+            entry.handle = { destroy() {} };
+          });
+        l = entry;
+      }
+      const r = stage.getBoundingClientRect();
+      l.host.style.left = `${(r.left - frame.left) / z}px`;
+      l.host.style.top = `${(r.top - frame.top) / z}px`;
+      l.host.style.width = `${r.width / z}px`;
+      l.host.style.height = `${r.height / z}px`;
+      l.host.style.display = r.width > 0 ? '' : 'none';
+    }
+    for (const [id, l] of lives) {
+      if (seen.has(id)) continue;
+      l.handle?.destroy();
+      l.host.remove();
+      lives.delete(id);
+    }
+    refreshLiveSrcs();
+  }
+  $effect(() => () => {
+    for (const l of lives.values()) {
+      l.handle?.destroy();
+      l.host.remove();
+    }
+    lives.clear();
+  });
   $effect(() => {
     // Re-measure on anything that moves the page.
     void html;
@@ -370,7 +474,7 @@
     role="presentation"
   >
     <div class="stage" style:width={`${Math.ceil(W * z)}px`} style:height={`${Math.ceil(frameH * z)}px`}>
-      <div class="frame" class:mobile={device === 'mobile'} style:width={`${W}px`} style:transform={`scale(${z})`} bind:offsetHeight={frameH}>
+      <div class="frame" class:mobile={device === 'mobile'} style:width={`${W}px`} style:transform={`scale(${z})`} bind:offsetHeight={frameH} bind:this={frameEl}>
         <div class="chrome" aria-hidden="true">
           <span class="dots"><i></i><i></i><i></i></span>
           <span class="url"><Icon name="lock" size={12} /> {url}</span>
@@ -385,6 +489,7 @@
             </div>
           {/each}
         </div>
+        <div class="live-layer" bind:this={liveLayer} aria-hidden="true"></div>
       </div>
     </div>
   </div>
@@ -613,6 +718,26 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     pointer-events: none;
+  }
+
+  .live-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .live-layer :global(.live3d) {
+    position: absolute;
+    pointer-events: none;
+  }
+  .live-layer :global(.live3d canvas) {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  /* Once the live scene renders, the stand-in card / poster step aside (the orb stays). */
+  .os-edit :global(figure[data-live] .os-card3d),
+  .os-edit :global(figure[data-live] .os-embed-3d__poster) {
+    visibility: hidden;
   }
 
   /* Editor-only affordances on the rendered site (never exported). */

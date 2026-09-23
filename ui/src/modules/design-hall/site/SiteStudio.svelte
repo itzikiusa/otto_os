@@ -526,6 +526,7 @@
         selectedSection={null}
         selectedBlock={null}
         readonly={true}
+        live3d={false}
         {domain}
         embed={embedFn}
         asset={assetFn}
