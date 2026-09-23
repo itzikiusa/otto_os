@@ -5,6 +5,7 @@
   // (e.g. "Ronaldo", "Messi") and manage your own custom name lists (family
   // names, …). Per-user; backed by /name-themes.
   import { api } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
     NameThemesResp,
@@ -82,7 +83,7 @@
   }
 
   async function deleteTheme(t: NameThemeInfo): Promise<void> {
-    if (!confirm(`Delete custom theme “${t.label}”?`)) return;
+    if (!(await confirmer.ask(`Delete custom theme “${t.label}”?`, { title: 'Delete theme' }))) return;
     try {
       await api.del(`/name-themes/${t.id}`);
       await load();
@@ -246,8 +247,8 @@
     border-color: var(--accent);
   }
   .theme-card.active {
-    border-color: #7ee787;
-    background: color-mix(in srgb, #7ee787 12%, var(--surface));
+    border-color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, var(--surface));
   }
   .theme-head {
     display: flex;
@@ -313,7 +314,7 @@
   .link-danger {
     background: none;
     border: none;
-    color: var(--danger, #f97583);
+    color: var(--danger);
     cursor: pointer;
     font-size: 11.5px;
   }
@@ -334,7 +335,7 @@
   }
   .names-area {
     resize: vertical;
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     line-height: 1.5;
   }
 </style>

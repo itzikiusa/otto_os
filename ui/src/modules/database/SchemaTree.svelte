@@ -3,7 +3,7 @@
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
   // opens its Structure; right-click offers "Explain with agent".
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -73,7 +73,7 @@
     'key',
   ]);
 
-  function iconFor(kind: DbNodeKind): string {
+  function iconFor(kind: DbNodeKind): IconName {
     switch (kind) {
       case 'database':
       case 'schema':

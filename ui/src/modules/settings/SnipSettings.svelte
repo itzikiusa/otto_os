@@ -243,7 +243,7 @@
   }
   .error {
     margin-top: 10px;
-    color: #e5484d;
+    color: var(--danger);
     font-size: 12px;
   }
   .mono {

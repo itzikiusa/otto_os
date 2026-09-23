@@ -5,7 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import './product.css';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { untrack } from 'svelte';
@@ -285,7 +285,7 @@
   // `icon` is purely cosmetic (the merged header band renders it beside the
   // group label) — `id`/`label`/`subs` stay byte-for-byte what they were: the
   // sub `id`s ARE the `product.tab` values that E2E + deep links depend on.
-  type Group = { id: string; label: string; icon: string; subs: Sub[] };
+  type Group = { id: string; label: string; icon: IconName; subs: Sub[] };
   const GROUPS: Group[] = [
     {
       id: 'story',
@@ -363,7 +363,7 @@
     }
   }
 
-  function sourceIcon(kind: string): string {
+  function sourceIcon(kind: string): IconName {
     switch (kind) {
       case 'jira': return 'ticket';
       case 'confluence': return 'globe';
@@ -930,8 +930,8 @@
     color: var(--text-dim);
   }
   .delete-btn:hover {
-    background: color-mix(in srgb, #ef4444 15%, transparent) !important;
-    color: #ef4444 !important;
+    background: color-mix(in srgb, var(--danger) 15%, transparent) !important;
+    color: var(--danger) !important;
   }
   /* ── Epic tree rows ─────────────────────────────────────────── */
   .row-menu-btn {
@@ -1122,8 +1122,8 @@
     color: var(--text-dim);
   }
   .stage-review {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .stage-approved {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);

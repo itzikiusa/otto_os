@@ -3921,7 +3921,7 @@
     /* High-contrast active highlight (light-green + black), readable on dark. */
     background: #7ee787;
     color: #000;
-    border-color: #7ee787;
+    border-color: var(--success);
   }
   /* Full-screen click-catcher: any outside click closes the popover. */
   .ref-pop-backdrop {
@@ -4060,7 +4060,7 @@
   /* worktree/submodule row accents (share the stash-row base) */
   .wt-dirty {
     flex-shrink: 0;
-    color: #febc2e;
+    color: var(--warning);
     font-size: 8px;
     line-height: 1;
   }
@@ -4070,7 +4070,7 @@
     color: var(--text-dim);
   }
   .wt-flag.sub-warn {
-    color: #febc2e;
+    color: var(--warning);
   }
   .wt-prune {
     width: 100%;

@@ -1715,7 +1715,7 @@
     padding: 3px 8px;
     font-size: 10px;
     color: var(--text-dim);
-    font-family: var(--font-sans, sans-serif);
+    font-family: var(--font-ui);
     text-align: center;
     border-top: 1px solid var(--border);
   }

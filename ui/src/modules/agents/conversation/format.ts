@@ -2,6 +2,7 @@
 // unified-patch → `DiffResp` (so `git/DiffViewer` renders edit results), and
 // the turn → render-item grouping that turns the parser's flat `Turn[]` into
 // the app-style "user bubble / assistant response" rhythm.
+import type { IconName } from '../../../lib/components/Icon.svelte';
 import type { Block, DiffLine, DiffResp, FileDiff, Hunk, ToolKind, Turn, SystemNote } from '../../../lib/api/types';
 
 /** "21m 17s" / "4.2s" / "850ms". */
@@ -45,7 +46,7 @@ export function fmtClock(ts: string | null): string {
 }
 
 /** Icon name (lib/components/Icon) + label per tool kind. */
-export const TOOL_CHROME: Record<ToolKind, { icon: string; label: string }> = {
+export const TOOL_CHROME: Record<ToolKind, { icon: IconName; label: string }> = {
   shell: { icon: 'terminal', label: 'Ran' },
   read: { icon: 'eye', label: 'Read' },
   edit: { icon: 'edit', label: 'Edited' },

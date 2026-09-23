@@ -1667,13 +1667,13 @@
     gap: 4px;
     padding: 3px 9px;
     border-radius: 5px;
-    border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 50%, transparent);
-    background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-    color: var(--danger, #e5484d);
+    border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
     cursor: pointer;
   }
   .sel-del:hover {
-    background: color-mix(in srgb, var(--danger, #e5484d) 24%, transparent);
+    background: color-mix(in srgb, var(--danger) 24%, transparent);
   }
   /* Generate-SQL-from-selection actions (0003b) — neutral chips next to Delete. */
   .sel-gen {

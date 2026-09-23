@@ -311,14 +311,14 @@
     flex-shrink: 0;
   }
   .badge.verified {
-    color: #22c55e;
-    border-color: color-mix(in srgb, #22c55e 35%, transparent);
-    background: color-mix(in srgb, #22c55e 10%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, transparent);
   }
   .badge.unverified {
-    color: #f59e0b;
-    border-color: color-mix(in srgb, #f59e0b 35%, transparent);
-    background: color-mix(in srgb, #f59e0b 10%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .badge.none {
     color: var(--text-dim);
@@ -380,8 +380,8 @@
     margin-top: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-s, 5px);
-    background: color-mix(in srgb, #ef4444 10%, transparent);
-    border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
     color: var(--text);
     font-size: 12.5px;
     line-height: 1.5;

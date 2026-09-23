@@ -625,7 +625,7 @@
     color: var(--text-dim);
   }
   .logs .warn-line {
-    color: var(--warn, #c27c0e);
+    color: var(--warning);
   }
   .logs .ok-line {
     color: var(--status-working, #28c840);

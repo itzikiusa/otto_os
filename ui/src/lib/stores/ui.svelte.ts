@@ -1,6 +1,8 @@
 // Shell UI state: rail, right panel, palette, theme, zoom. Persisted bits go
 // to localStorage.
 
+import { accentFill } from '../accent';
+
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
@@ -652,8 +654,16 @@ class UiStore {
       this.media = window.matchMedia('(prefers-color-scheme: dark)');
       this.media.addEventListener('change', () => this.applyTheme());
     }
+    // Pro Dark is always dark: resolve it that way so scheme-aware consumers
+    // (terminal palette, CodeMirror, D2/Excalidraw, [data-scheme] CSS) match.
     const resolved: 'light' | 'dark' =
-      this.scheme === 'auto' ? (this.media.matches ? 'dark' : 'light') : this.scheme;
+      this.theme === 'pro-dark'
+        ? 'dark'
+        : this.scheme === 'auto'
+          ? this.media.matches
+            ? 'dark'
+            : 'light'
+          : this.scheme;
     this.resolvedScheme = resolved;
     const el = document.documentElement;
     el.setAttribute('data-theme', this.theme);
@@ -661,8 +671,17 @@ class UiStore {
     // Document direction (RTL support). CSS uses logical properties so the
     // layout mirrors automatically when this flips to 'rtl'.
     el.dir = this.direction;
+    const fill = this.accent ? accentFill(this.accent) : null;
     if (this.accent) el.style.setProperty('--accent', this.accent);
     else el.style.removeProperty('--accent');
+    // A custom accent carries its own contrast-checked button fill/text pair.
+    for (const [prop, v] of [
+      ['--accent-solid', fill?.solid],
+      ['--accent-contrast', fill?.contrast],
+    ] as const) {
+      if (v) el.style.setProperty(prop, v);
+      else el.style.removeProperty(prop);
+    }
   }
 }
 

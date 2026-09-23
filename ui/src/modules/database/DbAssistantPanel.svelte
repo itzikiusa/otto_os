@@ -267,11 +267,11 @@
   /* Stop sits beside "working…", not pushed to the far end like Summarize. */
   .da-act.da-stop {
     margin-inline-start: 0;
-    color: var(--danger, #e5534b);
-    border-color: color-mix(in srgb, var(--danger, #e5534b) 45%, var(--border));
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   }
   .da-act.da-stop:hover {
-    border-color: var(--danger, #e5534b);
+    border-color: var(--danger);
   }
   .da-empty .sub.warn {
     color: var(--status-warn, #d9a03f);

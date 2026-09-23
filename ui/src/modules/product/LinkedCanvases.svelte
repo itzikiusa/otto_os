@@ -2,7 +2,7 @@
   // Canvases linked to this story (canvas scenes whose story_id == this story).
   // Lists them with a click-to-open deep-link into the Canvas module, and a
   // "New canvas" action that creates one already linked to the story.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { router } from '../../lib/router.svelte';
@@ -102,7 +102,7 @@
   }
 
   /** Icon + short label for a scene's source format. */
-  function formatMeta(f: CanvasFormat): { icon: string; label: string } {
+  function formatMeta(f: CanvasFormat): { icon: IconName; label: string } {
     switch (f) {
       case 'excalidraw': return { icon: 'shapes', label: 'Excalidraw' };
       case 'd2': return { icon: 'layers', label: 'D2' };

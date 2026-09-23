@@ -11,14 +11,14 @@
   // `children` is an escape hatch for a secondary link/hint under the CTA —
   // keep it quiet (a `.btn ghost` or dim text), never a second primary.
   import type { Snippet } from 'svelte';
-  import Icon from './Icon.svelte';
+  import Icon, { type IconName } from './Icon.svelte';
 
   interface Props {
-    icon?: string;
+    icon?: IconName;
     title: string;
     body?: string;
     actionLabel?: string;
-    actionIcon?: string;
+    actionIcon?: IconName;
     onaction?: () => void;
     variant?: 'page' | 'panel';
     children?: Snippet;
@@ -70,16 +70,16 @@
   }
   h3 {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .page h3 {
-    font-size: 15px;
+    font-size: var(--fs-l);
   }
   p {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     max-width: 380px;
     line-height: 1.5;
   }

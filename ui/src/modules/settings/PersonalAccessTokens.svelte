@@ -252,8 +252,8 @@
     margin-bottom: 18px;
     padding: 12px 14px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, #22c55e 10%, var(--surface));
-    border: 1px solid color-mix(in srgb, #22c55e 30%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -348,7 +348,7 @@
   }
 
   .warn {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 500;
   }
 

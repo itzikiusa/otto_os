@@ -37,7 +37,7 @@
   // omits it.
   import type { Snippet } from 'svelte';
   import { onMount } from 'svelte';
-  import Icon from './Icon.svelte';
+  import Icon, { type IconName } from './Icon.svelte';
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { startWindowDrag } from '../windowDrag';
@@ -46,7 +46,7 @@
   interface Props {
     title: string;
     /** Optional Icon name drawn dim before the title. */
-    icon?: string;
+    icon?: IconName;
     /** One short line under the title (truncated with an ellipsis). */
     subtitle?: string;
     /** Status pill / count next to the title. */
@@ -357,7 +357,7 @@
   }
   .ph-title {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     line-height: 20px;
     letter-spacing: -0.01em;
@@ -377,7 +377,7 @@
     cursor: pointer;
   }
   .ph-crumb:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ph-sep {
     color: var(--text-dim);
@@ -390,12 +390,12 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .ph-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     line-height: 15px;
     color: var(--text-dim);
     white-space: nowrap;
@@ -455,7 +455,7 @@
     height: 28px;
   }
   .ph-more-glyph {
-    font-size: 16px;
+    font-size: var(--fs-l);
     line-height: 1;
     font-weight: 700;
     letter-spacing: 0.02em;

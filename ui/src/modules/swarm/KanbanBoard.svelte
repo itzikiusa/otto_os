@@ -665,8 +665,8 @@
   }
   .vchip {
     font-size: 10px;
-    color: #0a84ff;
-    border: 1px solid color-mix(in srgb, #0a84ff 40%, transparent);
+    color: var(--accent-text);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
     animation: kb-pulse 1.2s ease-in-out infinite;
@@ -695,7 +695,7 @@
   .gchip.all-passed {
     background: #7ee787;
     color: #0a0a0a;
-    border-color: #7ee787;
+    border-color: var(--success);
     font-weight: 600;
   }
 </style>

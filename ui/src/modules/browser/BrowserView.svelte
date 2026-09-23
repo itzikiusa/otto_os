@@ -704,6 +704,7 @@
     justify-content: center;
     width: 30px;
     height: 30px;
+    padding: 0;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);

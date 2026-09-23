@@ -336,7 +336,7 @@
     color: var(--text-dim);
   }
   .expiry.expired {
-    color: #d9534f;
+    color: var(--danger);
     font-weight: 600;
   }
   .expiry-badge {
@@ -348,12 +348,12 @@
     text-transform: uppercase;
   }
   .expiry-badge-expired {
-    background: color-mix(in srgb, #d9534f 15%, transparent);
-    color: #d9534f;
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
   }
   .expiry-badge-soon {
-    background: color-mix(in srgb, #e0a000 15%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
+    color: var(--warning);
     text-transform: none;
   }
 </style>

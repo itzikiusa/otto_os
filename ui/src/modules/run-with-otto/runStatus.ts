@@ -2,6 +2,7 @@
 // and the detail panel. Kept rune-free (a plain .ts) so it's trivially testable
 // and importable from any .svelte file.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import type { RunStatus } from '../../lib/api/types';
 
 /** Tone buckets that map onto the page's status-pill CSS classes. */
@@ -56,7 +57,7 @@ export interface StageStep {
   key: string;
   label: string;
   /** Icon.svelte name. */
-  icon: string;
+  icon: IconName;
   /** The RunStatus values that mean "this step is running right now". */
   statuses: readonly string[];
   /** One-line tooltip explaining the step. */
@@ -93,7 +94,7 @@ export function stageIndex(status: RunStatus | string): number {
 export interface SourceMeta {
   kind: string;
   label: string;
-  icon: string;
+  icon: IconName;
   /** Accent color (chips/badges tint via color-mix, so mid-tones work on both schemes). */
   color: string;
   /** Text inserted into the launcher input when the chip is clicked. */

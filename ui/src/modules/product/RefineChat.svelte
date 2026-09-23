@@ -222,7 +222,7 @@
     padding: 24px 0;
   }
   .error-msg {
-    color: #ef4444;
+    color: var(--danger);
     font-size: 13px;
     padding: 8px 0;
   }

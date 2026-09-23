@@ -376,7 +376,7 @@
   }
   .otp-error {
     font-size: 12px;
-    color: #ef4444;
+    color: var(--danger);
     margin: 0;
   }
   .otp-extend-row {

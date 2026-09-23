@@ -179,7 +179,7 @@
   }
   .warn-note {
     font-size: 11.5px;
-    color: #b8860b;
+    color: var(--warning);
     margin: 6px 0 12px;
     opacity: 0;
     transition: opacity 150ms ease-out;

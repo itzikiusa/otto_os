@@ -168,7 +168,7 @@
     color: var(--text);
   }
   .mono {
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
   }
 </style>

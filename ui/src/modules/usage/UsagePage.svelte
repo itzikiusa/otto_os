@@ -1316,7 +1316,7 @@
     stroke: var(--accent);
   }
   .spark-mem {
-    stroke: #10b981;
+    stroke: var(--success);
   }
 
   /* Sessions leaderboard: fixed column header + VirtualList rows ----------- */
@@ -1401,8 +1401,8 @@
     color: var(--text-dim);
   }
   .kind-review {
-    background: color-mix(in srgb, #f59e0b 20%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
   .kind-product {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -1417,7 +1417,7 @@
     color: #8b5cf6;
   }
   .kind-swarm {
-    background: color-mix(in srgb, #10b981 22%, transparent);
+    background: color-mix(in srgb, var(--success) 22%, transparent);
     color: #0f9d6e;
   }
   .kind-connection {
@@ -1562,7 +1562,7 @@
     text-decoration: underline;
   }
   .link-btn.danger {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
   .budget-rows {
     display: flex;
@@ -1592,18 +1592,18 @@
     white-space: nowrap;
   }
   .budget-row.warn .bar-fill {
-    background: var(--warn, #d08a18);
+    background: var(--warning);
   }
   .budget-row.over .bar-fill {
-    background: var(--danger, #c0392b);
+    background: var(--danger);
   }
   .warn-tag {
-    color: var(--warn, #d08a18);
+    color: var(--warning);
     font-weight: 600;
     margin-inline-start: 4px;
   }
   .over-tag {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
     font-weight: 600;
     margin-inline-start: 4px;
     text-transform: uppercase;
@@ -1616,14 +1616,14 @@
     padding: 8px 12px;
     margin: 0 0 8px;
     border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
     font-size: 12.5px;
   }
   .budget-banner.recovered {
-    background: color-mix(in srgb, var(--success, #27ae60) 12%, transparent);
-    border-color: color-mix(in srgb, var(--success, #27ae60) 40%, transparent);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--success) 40%, transparent);
   }
   .budget-banner span {
     flex: 1;
@@ -1644,8 +1644,8 @@
     margin-top: 10px;
     padding: 8px 10px;
     border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
     font-size: 12px;
   }
@@ -1812,8 +1812,8 @@
     padding: 1px 4px;
     border-radius: 3px;
     margin-inline-start: 4px;
-    background: color-mix(in srgb, #f59e0b 22%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
     vertical-align: middle;
   }
 

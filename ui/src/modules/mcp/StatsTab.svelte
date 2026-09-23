@@ -143,7 +143,7 @@
     color: var(--status-working, #28c840);
   }
   .num.warn {
-    color: #e0a000;
+    color: var(--warning);
   }
   .num.bad {
     color: var(--status-exited, #ff5f57);

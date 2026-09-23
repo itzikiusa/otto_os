@@ -232,7 +232,7 @@
     font-weight: 600;
   }
   .pair.cmd {
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -263,16 +263,16 @@
     color: var(--text-dim);
   }
   .status.verifying {
-    background: color-mix(in srgb, #0a84ff 22%, transparent);
-    color: #0a84ff;
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .status.passed {
     background: #7ee787;
     color: #0a0a0a;
   }
   .status.warned {
-    background: color-mix(in srgb, #e3b341 26%, transparent);
-    color: #e3b341;
+    background: color-mix(in srgb, var(--warning) 26%, transparent);
+    color: var(--warning);
   }
   .status.unmet,
   .status.error {

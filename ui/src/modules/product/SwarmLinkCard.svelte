@@ -91,7 +91,7 @@
       {/if}
       {#if link.prs.length > 0}
         <span class="stat">
-          <Icon name="git-pull-request" size={11} />
+          <Icon name="pr" size={11} />
           {link.prs.length} PR{link.prs.length === 1 ? '' : 's'}
         </span>
       {/if}
@@ -188,8 +188,8 @@
     white-space: nowrap;
   }
   .task-pill.done {
-    background: color-mix(in srgb, var(--status-done, green) 15%, transparent);
-    color: var(--status-done, green);
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    color: var(--success);
     text-decoration: line-through;
     opacity: 0.75;
   }

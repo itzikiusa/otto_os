@@ -1930,8 +1930,8 @@
     letter-spacing: 0.03em;
     padding: 1px 5px;
     border-radius: 999px;
-    color: var(--text-3);
-    background: color-mix(in srgb, var(--text-3) 12%, transparent);
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   /* Type-filter chips under the tree search. */
   .type-chips {
@@ -1939,19 +1939,19 @@
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 8px 6px;
-    border-bottom: 1px solid var(--border-1);
+    border-bottom: 1px solid var(--border);
   }
   .type-chip {
     font-size: 10px;
     padding: 2px 8px;
     border-radius: 999px;
-    border: 1px solid var(--border-1);
+    border: 1px solid var(--border);
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-dim);
     cursor: pointer;
   }
   .type-chip:hover {
-    background: var(--bg-2);
+    background: var(--surface-2);
   }
   .type-chip.on {
     color: var(--accent);
@@ -2176,7 +2176,7 @@
     white-space: nowrap;
   }
   .health-lat {
-    color: var(--text-faint, var(--text-dim));
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }

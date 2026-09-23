@@ -4,6 +4,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { authedText } from '../../lib/api/client';
@@ -268,7 +269,7 @@
   }
 
   async function remove(t: ScheduledTask): Promise<void> {
-    if (!confirm(`Delete scheduled task "${t.name}"?`)) return;
+    if (!(await confirmer.ask(`Delete scheduled task "${t.name}"?`, { title: 'Delete scheduled task' }))) return;
     try {
       await scheduledTasks.remove(t.id);
     } catch (e) {

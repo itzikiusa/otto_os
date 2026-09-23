@@ -1101,13 +1101,13 @@
     margin-bottom: 4px;
   }
   .pr-report-head .ok {
-    color: #7ee787;
+    color: var(--success);
   }
   .pr-report-head .warn {
-    color: #e3b341;
+    color: var(--warning);
   }
   .pr-report-head .bad {
-    color: #ff7b72;
+    color: var(--danger);
   }
   .pr-checks {
     list-style: none;
@@ -1126,10 +1126,10 @@
     flex: none;
   }
   .pr-checks li.ok .tick {
-    color: #7ee787;
+    color: var(--success);
   }
   .pr-checks li.miss .tick {
-    color: #ff7b72;
+    color: var(--danger);
   }
   .pr-checks .lbl {
     flex: none;

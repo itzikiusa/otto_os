@@ -387,8 +387,8 @@
     margin-inline-start: 8px;
     font-size: 9px;
     text-transform: uppercase;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -397,8 +397,8 @@
     justify-content: flex-end;
   }
   .token-once {
-    border: 1px solid color-mix(in srgb, #e0a000 45%, transparent);
-    background: color-mix(in srgb, #e0a000 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
     border-radius: var(--radius-m, 8px);
     padding: 10px 12px;
     display: flex;
@@ -483,7 +483,7 @@
     padding: 3px 8px;
   }
   .btn.danger {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
 
   @media (max-width: 640px) {

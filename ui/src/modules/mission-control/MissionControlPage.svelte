@@ -288,8 +288,8 @@
     gap: 2px;
   }
   .tile.warn {
-    border-color: #ffd33d;
-    background: color-mix(in srgb, #ffd33d 8%, var(--surface));
+    border-color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 8%, var(--surface));
   }
   .t-val {
     font-size: 22px;
@@ -356,9 +356,9 @@
     color: #0a0a0a;
   }
   .banner-err {
-    background: color-mix(in srgb, #ff5f57 14%, transparent);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
     border: 1px solid #ff5f5766;
-    color: #ff5f57;
+    color: var(--danger);
     border-radius: 6px;
     padding: 7px 10px;
     font-size: 12.5px;

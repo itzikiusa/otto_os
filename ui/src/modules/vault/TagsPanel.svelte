@@ -62,7 +62,7 @@
     cursor: pointer;
   }
   .tag-row:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .tag {
     color: var(--accent, #9ab4ff);

@@ -238,7 +238,7 @@
   .picker-select,
   .picker-input {
     width: 100%;
-    background: var(--input-bg, var(--surface-raised));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);

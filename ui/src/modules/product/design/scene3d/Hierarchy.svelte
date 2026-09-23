@@ -6,7 +6,7 @@
   // primitives, lights, a group and "Import GLB…" (the upload itself is the
   // arena's — `onimportGlb`). Every edit is an `ops.ts` call → `onchange(newDoc)`.
   import { ctxMenu, type MenuItem } from '../../../../lib/contextmenu.svelte';
-  import Icon from '../../../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../../../lib/components/Icon.svelte';
   import { LIGHT_TYPES, PRIMITIVE_TYPES, type LightType, type PrimitiveType, type Scene3dDoc } from './types';
   import {
     addGroup,
@@ -77,7 +77,7 @@
   const visibleRows = $derived(q ? rows.filter((r) => (r.node.node.name ?? r.id).toLowerCase().includes(q)) : rows);
   const visibleLights = $derived(q ? lights.filter((l) => (l.name ?? l.id).toLowerCase().includes(q)) : lights);
 
-  function iconFor(n: Scene3dNode): string {
+  function iconFor(n: Scene3dNode): IconName {
     if (n.kind === 'group') return 'folder';
     if (n.kind === 'light') return 'zap';
     switch (n.node.type) {

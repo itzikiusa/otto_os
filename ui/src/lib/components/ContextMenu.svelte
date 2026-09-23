@@ -1,6 +1,6 @@
 <script lang="ts">
   // Global context menu overlay — mount once in App.svelte.
-  import Icon from './Icon.svelte';
+  import Icon, { asIcon } from './Icon.svelte';
   import { ctxMenu } from '../contextmenu.svelte';
 
   // DOM reference for clamping
@@ -153,7 +153,7 @@
           onclick={() => clickItem(item)}
         >
           {#if item.icon}
-            <span class="ctx-icon"><Icon name={item.icon} size={13} /></span>
+            <span class="ctx-icon"><Icon name={asIcon(item.icon)} size={13} /></span>
           {:else}
             <span class="ctx-icon-gap"></span>
           {/if}

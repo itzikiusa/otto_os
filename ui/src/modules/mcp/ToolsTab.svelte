@@ -561,7 +561,7 @@
   .pending {
     margin: 0;
     font-size: 13px;
-    color: #e0a000;
+    color: var(--warning);
   }
   .warn {
     margin: 0;

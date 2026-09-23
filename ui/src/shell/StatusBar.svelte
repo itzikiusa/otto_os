@@ -113,7 +113,7 @@
     background: var(--status-working);
   }
   .conn-dot.connecting {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   @keyframes pulse {
     0%,

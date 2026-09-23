@@ -250,7 +250,7 @@
   }
   tr.op-set td.rd-val:last-child,
   tr.op-cell td.rd-val:last-child {
-    color: var(--ok, #3fb950);
+    color: var(--success);
   }
   .review-sql {
     width: 100%;

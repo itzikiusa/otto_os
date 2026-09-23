@@ -7,6 +7,7 @@
   // auto-enabled — each server is off until you flip it on, and it's only written
   // to `.mcp.json` the next time a session spawns in the workspace.
   import { auth } from '../../lib/stores/auth.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mcpApi } from '../../lib/api/mcp';
   import { api } from '../../lib/api/client';
@@ -228,7 +229,7 @@
 
   async function remove(s: McpServer): Promise<void> {
     if (!wsId) return;
-    if (!confirm(`Remove MCP server "${s.name}"?`)) return;
+    if (!(await confirmer.ask(`Remove MCP server "${s.name}"?`, { title: 'Remove MCP server', confirmLabel: 'Remove' }))) return;
     busyId = s.id;
     try {
       await mcpApi.remove(s.id);
@@ -453,7 +454,7 @@
   .card {
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
-    background: var(--surface-1, var(--surface-2));
+    background: var(--surface);
     padding: 14px 16px;
   }
   .otto {
@@ -552,12 +553,12 @@
     cursor: pointer;
   }
   .btn:hover {
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-3);
   }
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: var(--accent-fg, #fff);
+    color: var(--accent-contrast);
   }
   .btn.small {
     height: 24px;
@@ -565,8 +566,8 @@
     font-size: 11.5px;
   }
   .btn.danger:hover {
-    border-color: var(--danger, #c0392b);
-    color: var(--danger, #c0392b);
+    border-color: var(--danger);
+    color: var(--danger);
   }
   .btn:disabled {
     opacity: 0.5;

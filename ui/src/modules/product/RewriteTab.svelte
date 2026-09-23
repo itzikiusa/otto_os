@@ -345,7 +345,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* ── Generate panel ──────────────────────────────────────────── */
@@ -414,13 +414,13 @@
     background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .action-btn.danger {
-    border-color: #ef4444;
-    color: #b91c1c;
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
     font-weight: 600;
   }
   .action-btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 20%, transparent);
+    background: color-mix(in srgb, var(--danger) 20%, transparent);
   }
 
   /* ── Version metadata card ───────────────────────────────────── */
@@ -474,7 +474,7 @@
   }
   .confirm-text {
     font-size: 12px;
-    color: #b45309;
+    color: var(--warning);
   }
 
   /* ── View toggle row ─────────────────────────────────────────── */
@@ -526,7 +526,7 @@
     justify-content: space-between;
     padding: 8px 14px 7px;
     border-bottom: 1px solid var(--border);
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .pane-header {
     display: flex;
@@ -534,7 +534,7 @@
     gap: 8px;
     padding: 8px 12px 7px;
     border-bottom: 1px solid var(--border);
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     flex-shrink: 0;
   }
   .pane-label {
@@ -611,7 +611,7 @@
     border-radius: 3px;
   }
   .md-body :global(pre) {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;

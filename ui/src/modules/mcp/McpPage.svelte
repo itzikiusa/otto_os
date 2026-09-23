@@ -215,7 +215,7 @@
     min-width: 16px;
     padding: 1px 5px;
     border-radius: 999px;
-    background: var(--danger, #c0392b);
+    background: var(--danger-solid);
     color: white;
     font-size: 10px;
     line-height: 14px;

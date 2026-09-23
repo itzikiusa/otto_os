@@ -250,7 +250,7 @@
       <span class="count">{filtered.length} topic{filtered.length === 1 ? '' : 's'}</span>
       {#if hasStatErrors}
         <button class="btn small" onclick={retryStats} title="Retry failed message-count fetches">
-          <Icon name="refreshCw" size={12} /> Retry counts
+          <Icon name="refresh" size={12} /> Retry counts
         </button>
       {/if}
       <button class="btn small" onclick={() => (creating = !creating)} title="New topic">

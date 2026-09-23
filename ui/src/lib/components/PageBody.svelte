@@ -29,6 +29,9 @@
 
 <style>
   .page-body {
+    /* The one readable-column width; inherited by anything inside the body
+       that caps its own column (e.g. MCP's Otto-server panel). */
+    --page-readable: 1200px;
     flex: 1;
     min-height: 0;
     min-width: 0;
@@ -60,7 +63,7 @@
   }
   .page-body-inner.readable {
     width: 100%;
-    max-width: var(--page-readable, 1200px);
+    max-width: var(--page-readable);
   }
   @media (max-width: 640px) {
     .page-body.padded {

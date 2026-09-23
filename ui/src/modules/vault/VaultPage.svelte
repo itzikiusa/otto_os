@@ -8,6 +8,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
@@ -119,8 +120,8 @@
               label: 'Unregister vault (keeps files)',
               icon: 'trash',
               danger: true,
-              action: () => {
-                if (confirm(`Unregister "${vault.current?.name}"? Files on disk are untouched.`)) {
+              action: async () => {
+                if (await confirmer.ask(`Unregister "${vault.current?.name}"? Files on disk are untouched.`, { title: 'Unregister vault', confirmLabel: 'Unregister' }) && vault.current) {
                   void vault.unregister(vault.current!.id);
                 }
               },
@@ -568,7 +569,7 @@
     cursor: pointer;
   }
   .tool:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .tool.active {
     border-color: var(--accent, #7a9cff);
@@ -602,7 +603,7 @@
     cursor: pointer;
   }
   .left-modes button:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .left-modes button.active {
     color: var(--accent, #9ab4ff);
@@ -655,7 +656,7 @@
     max-width: 220px;
   }
   .vtab:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .vtab.active {
     color: var(--text);
@@ -683,7 +684,7 @@
     padding: 0;
   }
   .vtab-close:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.2));
+    background: var(--hover);
     color: var(--text);
   }
   .center-empty {
