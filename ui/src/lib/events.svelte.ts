@@ -206,7 +206,9 @@ export const budgetBus = new BudgetBus();
 
 /** Incremented each time a `work_graph_updated` WS event arrives. The Mission
  *  Control page subscribes and re-fetches the workspace summary/list when the
- *  event's workspace matches the open one — replacing any polling. */
+ *  event's workspace matches the open one — replacing any polling. A tick with
+ *  an EMPTY `workspaceId` is a resync (events were lost while the socket was
+ *  down) that every open view honours. */
 export class MissionControlBus {
   tick: number = $state(0);
   workspaceId: string = $state('');
@@ -218,6 +220,11 @@ export class MissionControlBus {
     this.itemId = itemId;
     this.status = status;
     this.tick += 1;
+  }
+
+  /** Events were missed (WS reconnect): every open Mission Control view reloads. */
+  resync(): void {
+    this.apply('', '', '');
   }
 }
 
@@ -337,6 +344,7 @@ class EventsClient {
       if (reconnected) {
         void swarm.resync();
         transcript.resyncVisible();
+        missionControlBus.resync();
       }
     };
     this.sock.onmessage = (ev: MessageEvent) => {
