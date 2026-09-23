@@ -759,9 +759,11 @@ async fn trust_token_write_grant(ctx: &ServerCtx) -> bool {
         .unwrap_or(true)
 }
 
-/// Short tool names exempted from the DANGEROUS approval gate — set via the
+/// Short tool names exempted from the DANGEROUS approval gate — the
 /// `mcp_approval_exempt_tools` setting (a JSON array of short names, e.g.
-/// `["comment_pr"]`).
+/// `["comment_pr"]`), managed by `PATCH /mcp/otto-server
+/// {approval_exempt_tools}` (MCP Admin) — the MCP → Otto server "Ask before
+/// each call" toggle — and pruned to the enabled set on every change.
 ///
 /// WHY this exists: the gate was all-or-nothing. An operator who deliberately
 /// enabled ONE outward-facing tool (say, PR comments for the review workflow)
@@ -789,6 +791,52 @@ async fn approval_exempt_tools(ctx: &ServerCtx) -> Vec<String> {
             })
         })
         .unwrap_or_default()
+}
+
+/// Whether a governed `otto.*` call is subject to the human-approval gate
+/// (before the global `mcp_require_approval_dangerous` switch): a DANGEROUS
+/// tool, unless the operator exempted it (`mcp_approval_exempt_tools` — the
+/// MCP → Otto server "Ask before each call" toggle) or the caller's
+/// `kind='mcp'` token carries a trusted write grant. Pure, so the decision
+/// table is unit-tested.
+fn approval_gated(dangerous: bool, exempt: bool, token_write_grant: bool) -> bool {
+    dangerous && !exempt && !token_write_grant
+}
+
+/// Validate + normalize a requested `mcp_approval_exempt_tools` list: bare
+/// names (an `otto.` prefix is accepted), each a known MUTATING tool — the gate
+/// only ever applies to those, so exempting a read would be a silent no-op —
+/// de-duplicated in request order.
+fn normalize_exempt_tools(requested: &[String]) -> Result<Vec<String>, Error> {
+    let mut out: Vec<String> = Vec::with_capacity(requested.len());
+    for t in requested {
+        let bare = t.trim().strip_prefix("otto.").unwrap_or(t.trim()).to_string();
+        if !DANGEROUS.contains(&bare.as_str()) {
+            let known = otto_tool_specs()
+                .iter()
+                .any(|s| s["name"].as_str() == Some(&format!("otto.{bare}")));
+            return Err(Error::Invalid(if known {
+                format!("'{t}' is not a mutating tool — only mutating tools ask for approval")
+            } else {
+                format!("unknown otto tool '{t}'")
+            }));
+        }
+        if !out.contains(&bare) {
+            out.push(bare);
+        }
+    }
+    Ok(out)
+}
+
+/// The exemptions that survive the enabled set: disabling a tool drops its
+/// "don't ask" so re-enabling it later starts from the secure default (gated)
+/// instead of silently inheriting an old skip.
+fn prune_exempt_tools(exempt: &[String], enabled: &[String]) -> Vec<String> {
+    exempt
+        .iter()
+        .filter(|t| enabled.contains(t))
+        .cloned()
+        .collect()
 }
 
 /// Build the human-facing approval detail. For scheduled-task create/update it
@@ -1127,8 +1175,8 @@ pub(crate) async fn governed_invoke(
         .as_ref()
         .is_some_and(|scope| scope.allow_writes)
         && trust_token_write_grant(ctx).await;
-    let needs_approval =
-        dangerous && !exempt && !token_write_grant && require_approval_dangerous(ctx).await;
+    let needs_approval = approval_gated(dangerous, exempt, token_write_grant)
+        && require_approval_dangerous(ctx).await;
     let args_hash = canonical_hash(arguments);
     let ws = arguments
         .get("workspace_id")
@@ -2963,6 +3011,7 @@ pub async fn otto_server_status(
 ) -> ApiResult<Json<Value>> {
     let enabled = outward_enabled(&ctx).await;
     let on = enabled_tools(&ctx).await;
+    let exempt = approval_exempt_tools(&ctx).await;
     let tools: Vec<Value> = otto_tool_specs()
         .into_iter()
         .map(|t| {
@@ -2974,6 +3023,9 @@ pub async fn otto_server_status(
                 "mutating": t["mutating"],
                 "category": t["category"],
                 "enabled": on.contains(&short),
+                // "Ask before each call" is OFF for this tool: an operator
+                // opted it out of the approval gate (calls stay audited).
+                "approval_exempt": exempt.contains(&short),
             })
         })
         .collect();
@@ -2981,11 +3033,16 @@ pub async fn otto_server_status(
         .mcp_token_prefix(&user.id)
         .await
         .map_err(ApiError)?;
+    let require_dangerous = require_approval_dangerous(&ctx).await;
     Ok(Json(json!({
         "enabled": enabled,
         "tools": tools,
         "has_token": prefix.is_some(),
         "token_prefix": prefix,
+        // The global switch the per-tool gate sits under: when false no
+        // otto.* call asks, whatever the per-tool setting says.
+        "require_approval_dangerous": require_dangerous,
+        "approval_exempt_tools": exempt,
     })))
 }
 
@@ -2993,6 +3050,10 @@ pub async fn otto_server_status(
 pub struct OttoServerConfigReq {
     pub enabled: Option<bool>,
     pub tools: Option<Vec<String>>,
+    /// The COMPLETE set of mutating tools that skip the per-call approval
+    /// (`mcp_approval_exempt_tools`); replaces the stored list. Bare or
+    /// `otto.`-prefixed names; non-mutating/unknown names are a 400.
+    pub approval_exempt_tools: Option<Vec<String>>,
     #[serde(default)]
     pub rotate_token: bool,
 }
@@ -3003,6 +3064,14 @@ pub async fn otto_server_config(
     Json(req): Json<OttoServerConfigReq>,
 ) -> ApiResult<Json<Value>> {
     let settings = SettingsRepo::new(ctx.pool.clone());
+    // Validate the exemption list BEFORE any write, so a bad name never
+    // leaves a half-applied config behind.
+    let requested_exempt = req
+        .approval_exempt_tools
+        .as_deref()
+        .map(normalize_exempt_tools)
+        .transpose()
+        .map_err(ApiError)?;
     if let Some(en) = req.enabled {
         settings
             .put("mcp_otto_server_enabled", &json!(en))
@@ -3033,6 +3102,30 @@ pub async fn otto_server_config(
             .put("mcp_otto_server_tools", &json!(normalized))
             .await
             .map_err(ApiError)?;
+    }
+    // Approval exemptions: an explicit list replaces the stored one (audited —
+    // it loosens the posture); either way the result is pruned to the enabled
+    // set, so turning a tool off also drops its "don't ask".
+    let current_exempt = approval_exempt_tools(&ctx).await;
+    if requested_exempt.is_some() || req.tools.is_some() {
+        let next = prune_exempt_tools(
+            requested_exempt.as_ref().unwrap_or(&current_exempt),
+            &enabled_tools(&ctx).await,
+        );
+        if next != current_exempt {
+            settings
+                .put("mcp_approval_exempt_tools", &json!(next))
+                .await
+                .map_err(ApiError)?;
+            ctx.audit(otto_state::NewAuditEntry {
+                user_id: Some(user.id.clone()),
+                action: "mcp.otto_server.approval_exempt".into(),
+                target: None,
+                detail: Some(json!({ "from": current_exempt, "to": next })),
+                ip: None,
+            })
+            .await;
+        }
     }
     let mut minted: Option<String> = None;
     if req.rotate_token {
@@ -3782,6 +3875,43 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("review_mode"));
+    }
+
+    /// "I enabled create_pr, why does it still ask?" — the per-tool exemption
+    /// is what skips the prompt; without it a mutating tool stays gated.
+    #[test]
+    fn approval_gate_honours_the_per_tool_exemption() {
+        assert!(DANGEROUS.contains(&"create_pr"));
+        // Enabled + mutating + not exempted → gated (the secure default).
+        assert!(approval_gated(true, false, false));
+        // "Ask before each call" off → no prompt.
+        assert!(!approval_gated(true, true, false));
+        // A trusted `kind='mcp'` write grant also clears it.
+        assert!(!approval_gated(true, false, true));
+        // Reads never ask.
+        assert!(!approval_gated(false, false, false));
+    }
+
+    #[test]
+    fn exempt_list_is_validated_normalized_and_pruned() {
+        let ok = normalize_exempt_tools(&[
+            "otto.create_pr".to_string(),
+            "comment_pr".to_string(),
+            "create_pr".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(ok, ["create_pr", "comment_pr"]);
+        let e = normalize_exempt_tools(&["list_repos".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not a mutating tool"), "{e}");
+        let e = normalize_exempt_tools(&["nope".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown otto tool"), "{e}");
+        // Disabling a tool drops its exemption (re-enabling starts gated).
+        let enabled = vec!["create_pr".to_string(), "list_repos".to_string()];
+        assert_eq!(prune_exempt_tools(&ok, &enabled), ["create_pr"]);
     }
 
     #[test]

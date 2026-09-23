@@ -142,8 +142,24 @@ started sessions in that workspace receive Otto's built-in MCP server. Toggle
 use from the **External tool catalog**, a filterable checklist grouped by feature
 category with per-group **All/None**.
 
-The outward checklist does **not** affect Otto sessions: session tools come from the
-separate inward `ottod mcp-tools` catalog. Open **Connect an external client** to see
+Session tools come from the inward `ottod mcp-tools` catalog, which **also** offers
+every tool enabled here that it doesn't serve natively (e.g. `otto_create_pr`),
+proxied through the same governed choke point — so the checklist, and the approval
+setting below, apply to Otto sessions as well as external clients.
+
+**Ask before each call.** Enabling a mutating tool makes it *callable*; each call
+still waits for a human approval by default. Under every **enabled mutating** tool
+the checklist shows an **Ask before each call** switch (on = gated, the default);
+each category with such tools also gets **Always ask / Don't ask**. Turning it off
+(after a confirm) stores the tool in `mcp_approval_exempt_tools`: its calls then run
+without a prompt but still pass the per-token scope, enable and RBAC gates and are
+**audited** like every other call. Disabling a tool drops its exemption, so
+re-enabling it starts gated again. If the global `mcp_require_approval_dangerous`
+switch is off, the page says so — nothing asks at all then. Policies and per-tool
+server rules (§7, **Servers → Tools**) govern registered external servers only; they
+never re-impose an approval on an `otto.*` tool.
+
+Open **Connect an external client** to see
 the HTTP URL, install commands, network-access controls, and **Access tokens**. A new
 restricted `kind='mcp'` token is shown **once**; only its 12-character prefix is shown
 thereafter. The disclosure includes this install snippet for an external agent's
@@ -343,9 +359,14 @@ path too.
 
 ## 4. The governance pipeline (`McpService::invoke`)
 
-Every governed `tools/call` — from the UI tester, the live-agent gateway, and the
-outward `otto.*` tools — funnels through one choke point. The stages run in this
-order; the **first** decisive stage wins:
+Every governed `tools/call` to a **registered server** — from the UI tester and the
+live-agent gateway — funnels through one choke point. (Otto's own `otto.*` tools use
+their own choke point, `governed_invoke`: per-token scope → enable → git repo
+resolution → approval (a mutating tool unless exempted via **Ask before each call**
+or cleared by a trusted token write grant, under the global
+`mcp_require_approval_dangerous` switch) → dry-run → execute → audit. Allowlists,
+policies and per-tool server rules below do not apply to them.) The stages run in
+this order; the **first** decisive stage wins:
 
 1. **Resolve** the server (must exist) and the tool. An **undiscovered/unknown tool
    fails closed** — treated as `dangerous` + `high` injection + disabled.
@@ -667,7 +688,11 @@ the workspace role.
 **Settings keys** (`settings` table, JSON): `otto_mcp_enabled` (per-workspace map;
 unlisted workspaces default on), `mcp_otto_server_enabled` (default
 `false`), `mcp_otto_server_tools` (default = read subset + the two scheduled-task
-reads), `mcp_require_approval_dangerous` (default `true`), `mcp_health_interval_secs`
+reads), `mcp_require_approval_dangerous` (default `true`),
+`mcp_approval_exempt_tools` (default `[]` — mutating `otto.*` tools whose
+"Ask before each call" is off; set via CP25 `approval_exempt_tools`),
+`mcp_trust_token_write_grant` (default `true` — a `kind='mcp'` token minted with
+`allow_writes` skips the per-call prompt), `mcp_health_interval_secs`
 (default `300`; `0` = off).
 
 ---
@@ -727,6 +752,17 @@ applies.
 require-approval). Approve it in **Activity → Approvals** (MCP Admin, and not the
 same user who requested it), then re-invoke — the approval is **single-use** and
 bound to the exact arguments, so changing the args invalidates it.
+
+**`otto_create_pr` still asks for approval although I enabled it.** Enabling a
+mutating `otto.*` tool only makes it callable; the per-call approval is a separate
+setting. Turn **Ask before each call** off under that tool in **MCP → Otto server**
+(MCP Admin). Calls stay audited.
+
+**An agent says a repo "doesn't exist" / asks you to search again.** Repos are
+registered in exactly one workspace. `otto_list_repos` now lists every workspace you
+can read, and git tools accept a repo name, path or `owner/repo`; an unknown one
+fails listing the closest matches. If the repo is in no list at all, it isn't
+registered — add it under **Git → Add repository**.
 
 **A tool is `denied`.** Walk the pipeline: is the server enabled + managed? Is there a
 workspace **deny** in the Allowlist (deny wins)? Is the per-tool **Enabled** switch

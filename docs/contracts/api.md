@@ -3121,8 +3121,8 @@ enforce the entity's workspace role.
 
 | # | Method + Path | Role | Body | Response |
 |---|---|---|---|---|
-| CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?}` |
-| CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, rotate_token?}` | status + `token?` (shown once) |
+| CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?, require_approval_dangerous, approval_exempt_tools}` — each tool `{name, description, mutating, category, enabled, approval_exempt}` |
+| CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, approval_exempt_tools?, rotate_token?}` | status + `token?` (shown once) |
 | CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
@@ -3137,6 +3137,8 @@ enforce the entity's workspace role.
 | CP37 | POST /api/v1/mcp/tokens/{id}/rotate | mcp:admin (in-handler) | — | `{token, info: McpTokenInfo, revoked_id}` (raw token shown once; 404 unknown id) |
 | CP38 | GET /api/v1/workspaces/{wid}/mcp/session-attach | mcp:view + ws viewer | — | `{workspace_id, attached}` |
 | CP39 | PATCH /api/v1/workspaces/{wid}/mcp/session-attach | mcp:admin (in-handler) + ws editor | `{enabled}` | `{workspace_id, attached}` — writes the per-workspace map form of `otto_mcp_enabled` |
+
+**Per-tool approval exemption (CP24/CP25).** A mutating (`DANGEROUS`) `otto.*` tool asks a human before each call by default. `approval_exempt_tools` (bare or `otto.`-prefixed names; stored bare in the `mcp_approval_exempt_tools` setting) is the COMPLETE set of mutating tools that skip that prompt — the MCP → Otto server "Ask before each call" toggle. The PATCH replaces the list; a non-mutating or unknown name is a 400 (validated before anything is written); the stored list is always pruned to the enabled tool set, so disabling a tool drops its exemption and re-enabling it starts gated again. A change is recorded in the audit log (`mcp.otto_server.approval_exempt`, `{from, to}`). Exempted calls still run every other gate (per-token scope, enable, RBAC) and are audited (`allowed`). `require_approval_dangerous` echoes the global `mcp_require_approval_dangerous` switch (read-only here): when false, nothing asks regardless. `mcp_policies` and per-tool `require_approval` (CP10) govern registered external servers only and never apply to `otto.*` tools.
 
 **Git tools take a friendly repo reference (CP26).** For `otto.git_status`, `otto.list_prs`, `otto.get_pr`, `otto.create_pr`, `otto.comment_pr`, `otto.start_pr_review` and `otto.open_pr_draft`, `repo_id` is optional and may be an id, name, local path or remote; the choke point resolves it with the `GET /git/repos/resolve` rules (omitted → the calling session's repo) **after** the per-token scope + enable gates, then rewrites the arguments to the canonical `repo_id` plus the repo's own `workspace_id`. Audit, the approval's workspace, the approval args-hash (a name and the id reuse one approval) and execution all see the resolved arguments, and the token's workspace pin is re-checked against the resolved repo's workspace. An unknown/ambiguous reference returns `{decision:"error", executed:false, is_error:true, content:{error}}` (audited `error`) listing the candidates. `otto.list_repos` takes an optional `workspace_id` and returns the `RepoDirectory` shape; a pinned token without one is narrowed to its pin.
 

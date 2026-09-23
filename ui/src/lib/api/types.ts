@@ -510,6 +510,10 @@ export interface McpOttoToolInfo {
   /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
    * for forward-compat with daemons that predate the categorised catalog. */
   category?: string | null;
+  /** True when an admin turned "Ask before each call" OFF for this (mutating)
+   *  tool: its calls skip the human approval (still audited). Optional for
+   *  forward-compat with daemons that predate the per-tool exemption. */
+  approval_exempt?: boolean;
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
@@ -520,12 +524,22 @@ export interface McpOttoServerStatus {
   token_prefix?: string | null;
   /** The freshly-minted token — returned ONCE on a mint/rotate, never again. */
   token?: string | null;
+  /** Global `mcp_require_approval_dangerous` (default true). When false no
+   *  otto.* call asks for approval, whatever the per-tool setting says. */
+  require_approval_dangerous?: boolean;
+  /** Bare names of the mutating tools that skip the per-call approval. */
+  approval_exempt_tools?: string[];
 }
 
 /** `PATCH /mcp/otto-server`. */
 export interface UpdateMcpOttoServerReq {
   enabled?: boolean;
   tools?: string[];
+  /** The COMPLETE set of mutating tools that skip the per-call approval
+   *  (replaces the stored list; bare or `otto.`-prefixed names; a read or
+   *  unknown name is a 400). Pruned to the enabled set — disabling a tool
+   *  also drops its exemption. */
+  approval_exempt_tools?: string[];
   rotate_token?: boolean;
 }
 
