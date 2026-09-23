@@ -377,7 +377,8 @@ impl JiraClient {
     /// forever ("Load more" appended duplicates). We keep the offset-based
     /// signature for callers and walk `nextPageToken` internally until the
     /// requested window is covered. The classic `/rest/api/3/search` fallback
-    /// (only reached when the new endpoint 4xx/5xxes) honors `startAt` directly.
+    /// (only reached when the new endpoint is missing — 404/405) honors
+    /// `startAt` directly.
     pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
         const PAGE: u32 = 25;
         // Hard cap on the token walk (40 pages = 1000 issues deep) — a runaway
@@ -404,9 +405,12 @@ impl JiraClient {
                 .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
 
             if !resp.status().is_success() {
-                // New endpoint unavailable: classic fallback (startAt works there).
-                // Only sensible on the first page — a mid-walk failure surfaces.
-                if page == 0 {
+                // New endpoint UNAVAILABLE (404/405 — older Server/DC): classic
+                // fallback (startAt works there). Only sensible on the first
+                // page — a mid-walk failure surfaces. Any other failure (a JQL
+                // 400, 401, 429, 5xx) is the real answer: falling back masked it
+                // behind the classic endpoint's "410 Gone" on Cloud.
+                if page == 0 && new_search_unavailable(resp.status()) {
                     return self.search_jql_classic(jql, start_at, fields).await;
                 }
                 let status = resp.status();
@@ -460,6 +464,13 @@ impl JiraClient {
             resp.json()
                 .await
                 .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
+        } else if !new_search_unavailable(resp.status()) {
+            // A real failure — surface it instead of the classic endpoint's 410.
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira my-work search failed ({status}): {body}"
+            )));
         } else {
             // Classic `/rest/api/3/search` fallback (same rule as search_jql).
             let resp = self
@@ -2107,8 +2118,22 @@ fn is_issue_key(s: &str) -> bool {
 }
 
 /// Escape double quotes in a JQL string value.
+/// Whether a `/rest/api/3/search/jql` failure means "this deployment has no
+/// such endpoint" (→ try the classic `/rest/api/3/search`) rather than a real
+/// error about the request.
+fn new_search_unavailable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 404 | 405)
+}
+
+/// Escape user text for a double-quoted JQL string literal. Backslashes FIRST
+/// (then quotes): escaping only `"` let `x\" OR …` close the literal early
+/// (JQL injection within the user's read scope), turned `C:\Users` into an
+/// invalid escape and left a trailing `\` unterminated. Line breaks become
+/// spaces — a search box never means a newline.
 fn escape_jql(s: &str) -> String {
-    s.replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r', '\t'], " ")
 }
 
 /// Read a string field, falling back through alternate keys, ending in `""`.
@@ -2392,6 +2417,34 @@ mod tests {
         let jql = build_jql("login issue", Some("PROJ"));
         assert!(jql.starts_with("project = \"PROJ\""), "{jql}");
         assert!(jql.contains("summary ~"), "{jql}");
+    }
+
+    #[test]
+    fn jql_escaping_cannot_break_out_of_the_literal() {
+        // Backslash is escaped BEFORE the quote, so `\"` can't close the string.
+        assert_eq!(
+            escape_jql(r#"x\" OR project = SECRET"#),
+            r#"x\\\" OR project = SECRET"#
+        );
+        assert_eq!(escape_jql(r"C:\Users"), r"C:\\Users");
+        assert_eq!(escape_jql("trailing\\"), "trailing\\\\");
+        assert_eq!(escape_jql("a\nb"), "a b");
+        let jql = build_jql(r#"x\" OR key = "Y-1"#, Some("PROJ"));
+        assert!(
+            jql.contains(r#"summary ~ "x\\\" OR key = \"Y-1*""#),
+            "{jql}"
+        );
+    }
+
+    #[test]
+    fn only_a_missing_endpoint_falls_back_to_classic_search() {
+        use reqwest::StatusCode;
+        assert!(new_search_unavailable(StatusCode::NOT_FOUND));
+        assert!(new_search_unavailable(StatusCode::METHOD_NOT_ALLOWED));
+        assert!(!new_search_unavailable(StatusCode::BAD_REQUEST));
+        assert!(!new_search_unavailable(StatusCode::UNAUTHORIZED));
+        assert!(!new_search_unavailable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!new_search_unavailable(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     // ── parse_editmeta tests ─────────────────────────────────────────────────
