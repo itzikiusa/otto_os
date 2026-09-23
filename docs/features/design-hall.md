@@ -1,10 +1,12 @@
 # Design Hall — the artifact graph
 
-> **Status: Phase 0 backend.** The graph, its REST/WS surface, the legacy
-> import and the read-only agent tools ship now; the Lobby UI, the unified
-> `design_assist` agent turn, variants, export/publish and learning are later
-> phases (see the proposal's roadmap). The existing Product → Design arena and
-> Canvas keep working unchanged meanwhile.
+> **Status: Phase 0 backend + the Phase 1 agent pipeline.** The graph, its
+> REST/WS surface, the legacy import, the unified `design_assist` agent turn
+> (every studio / format), variants, verified reference citations, the
+> suggest-only Learning v1 and the design MCP tools (reads + approval-gated
+> writes) ship now; the Lobby UI (built separately), export/publish and the
+> studios' own editors are later phases (see the proposal's roadmap). The
+> existing Product → Design arena and Canvas keep working unchanged meanwhile.
 
 Design Hall is the home for everything visual a product team makes — UI
 frames, marketing graphics, sites, 3D scenes, whiteboards and brand kits —
@@ -24,11 +26,15 @@ built on **one artifact graph**:
   sessions, PRs, URLs …), extracted from the documents themselves plus explicit
   links.
 - **Signals** — design decisions captured from day one (accepted/rejected
-  variants, edits after an agent draft, review comments, brand corrections,
-  a11y fixes, status changes, shipped). Nothing learns from them yet.
+  variants, agent drafts, edits after an agent draft, review comments, brand
+  corrections, a11y fixes, status changes, shipped). Learning v1 (§5.3) turns
+  repeated ones into team-rule proposals a person approves.
 
-Code: `crates/otto-design` (router, service, store, extractor, import),
-`crates/otto-server/src/design_hall.rs` (glue), migration `…_design_graph.sql`.
+Code: `crates/otto-design` (router, service, store, extractor, import,
+`variants`, `cite`, `learn`), `crates/otto-server/src/design_hall.rs` (glue),
+`crates/otto-server/src/design_assist.rs` (the agent pipeline),
+`crates/otto-improve/src/design.rs` (the `design` evidence source), migration
+`…_design_graph.sql` (no new migration for the pipeline).
 Contract: [`docs/contracts/api.md` § Design Hall](../contracts/api.md) and the
 `design_*` events in [`ws.md`](../contracts/ws.md).
 
@@ -163,8 +169,10 @@ shipped → approved → review → draft, then by relevance, each with a snippe
 `POST /design/signals {artifact_id, kind, version_id?, payload}` records a
 bounded signal (≤ 8 KB JSON object). Captured automatically:
 `edit_after_draft` (a human save within 2 h of an agent version — the payload
-is a structural summary, never the content), `status_change` and `shipped`.
-`GET /design/signals` reads the log.
+is a structural summary, never the content), `status_change`, `shipped`,
+`agent_draft` (every committed assist turn) and `variant_accepted` /
+`variant_rejected` (a variant accept). `GET /design/signals` reads the log;
+§5.3 turns repeated signals into team-rule proposals.
 
 ## 4. Legacy import
 
@@ -186,6 +194,97 @@ Idempotent, runs at startup and on `POST /design/admin/import`:
 
 ## 5. Agents
 
+### 5.1 One assist pipeline for every studio
+
+`POST /design/artifacts/{id}/assist {prompt, mode?, selection?, references?}`
+runs ONE agent turn on any text/JSON artifact — HTML screens, SVG, Mermaid,
+D2, Excalidraw boards, `scene3d`, whiteboards (`otto-canvas`: the agent edits
+the inner `source.mmd` / `source.d2` / `source.excalidraw.json`), and the
+`otto-site` / `-layout` / `-brand` / `-exhibit` JSON documents. Binaries
+(images, GLB, PDF) are refused.
+
+```
+<data>/design/<id>/work/
+  <file>            the working copy (materialized from the head) — the agent edits it in place
+  CONTEXT.md        the context brief (story + AC, links, brand kit, [R1..Rn], team rules, design memories)
+  refs/R1.json …    reference excerpts (+ R1.png thumbnails when the artifact has one)
+  render/current.png  the artifact's current thumbnail, when present
+  provenance.json   optional, written by the agent: {"refs":["R1"],"why":"…"}
+  findings.json     critique / a11y findings, written by the agent
+```
+
+1. The call answers **202** with the turn as soon as the agent session is
+   live (its `session_id` lets the UI attach the live terminal); the turn keeps
+   running and reports over WS (`design_assist_updated`). Each valid save the
+   agent makes is broadcast as `design_artifact_updated {change:"live"}`.
+2. At the end the file is validated for its format (and `scene3d` against its
+   schema); an invalid result commits nothing and the working copy is restored.
+3. A valid result becomes ONE new version: `kind: agent`, author `agent`, the
+   session id, the agent's one-line summary as the message, and a
+   `provenance` that records the references offered, the ones it cited
+   (verified — see 5.2), the brand-kit version, the team rules in force and a
+   prompt summary. An `agent_draft` signal is recorded.
+4. If someone saved while the agent worked, nothing is clobbered: the draft is
+   kept as the side version `variant/<turn>/1` (status `conflict`) and can be
+   compared and accepted later.
+
+Modes: `generate` (a fresh design), `refine` (default — change what was
+asked, keep the rest), `critique` (never edits; findings in the turn), `a11y`
+(fixes contrast / alt text / tap targets / heading order in place, and lists
+them). `selection` focuses the change on one node/section. A main turn resumes
+the artifact's assist session (`meta.assist`) when the provider matches.
+
+Costs stay bounded: one agent run per artifact at a time (409 otherwise), 20
+minutes per turn (the session is stopped past it), at most 4 variants.
+
+**Variants.** `POST …/variants {prompt, n ≤ 4, providers?, directions?}` runs
+n fresh turns in parallel, one direction each (`defaults` follows the team
+rules, `explore` deliberately ignores soft preferences, then `calm`, `story`),
+optionally across providers (`["claude","codex"]`). Each lands on
+`variant/<run>/<k>` — the head and the working copy never move.
+`design_variants_ready` fires when all are done; `GET …/variants` lists runs.
+`POST …/variants/{version}/accept` fast-forwards main to the pick (a new main
+version with `provenance.accepted_variant`; 409 if main moved meanwhile unless
+`force`) and records `variant_accepted` + a `variant_rejected` per sibling.
+
+`mockup_assist` (Product arena) and `canvas_assist` (Canvas) keep serving
+their legacy routes unchanged for this release: they write legacy storage and
+return legacy shapes, and the import mirrors their results into the graph as
+`sync` versions. Graph artifacts — including the imported ones — are assisted
+here.
+
+### 5.2 References and citations
+
+Every turn is offered up to 8 numbered references `[R1] <title> (<studio>,
+<status>, v12)`: the request's `references` first, then explicit
+`references` / `derived_from` links, then a library search in the artifact's
+workspace (its title, then the prompt's most salient terms — shipped work
+first). The agent names what it borrowed inline (`layout rhythm from [R1]`)
+or in `provenance.json`. The server VERIFIES each citation against the offered
+set: an unlisted label, an unknown artifact or a different version is dropped
+from the provenance (listed as `citations_unverified`). Each verified citation
+becomes a pinned `references` link, so "used as reference in N designs" grows.
+
+### 5.3 Learning v1 — suggest-only team rules
+
+A deterministic extractor (`otto_design::learn`) reads the workspace's last 90
+days of signals and proposes a rule when a pattern repeats ≥ 3 times across ≥ 2
+artifacts: a variant direction the team keeps picking, a reject reason, a
+property humans keep changing right after agent drafts, an accessibility fix
+they keep accepting. `POST /design/learned/extract {workspace_id}` (and every
+variant accept, in the background) hands the ready ones to otto-improve's
+`design` evidence source, which files each as a **pending** edit of the
+workspace skill `design-team-style` — one `- [rule:<key>] <text>` line, never
+auto-applied, never in a bundled skill. A person approves, rejects or rolls
+back each through the self-improvement edit flow (`/improvement/edits/{id}/…`);
+`GET /design/learned?workspace_id=` shows active rules with their evidence,
+the pending ones, the history and the current candidates. Approved rules are
+in every design turn's brief and prompt ("Applied your team rules: …"),
+together with matching memories from the `otto-memory` `design` collection.
+Set the workspace setting `design_learning` to `"off"` to stop proposals.
+
+### 5.4 MCP tools
+
 Four read-only tools let agents find and cite earlier work:
 
 | stdio (`ottod mcp-tools`) | governed (`otto.*`, default-enabled) | route |
@@ -199,7 +298,28 @@ Four read-only tools let agents find and cite earlier work:
 thumbnail's file path (a PNG in the blob store) so a multimodal agent can look
 at it. Agents should cite what they borrow as `otto://design/<id>@v<seq>`.
 
+Two write tools are governed and **approval-gated** (DANGEROUS, off by
+default; an operator may exempt one tool at a time in MCP → Otto server):
+
+| governed (`otto.*`) | stdio (bridge only) | route |
+|---|---|---|
+| `otto.design_assist` | `otto_design_assist` | `POST /design/artifacts/{id}/assist` |
+| `otto.design_link` | `otto_design_link` | `POST /design/artifacts/{id}/links` |
+
+Both are scoped to the target artifact's own workspace (a workspace-pinned
+token can't write elsewhere). No tool approves a version — approval stays
+with people.
+
 ## 6. Capabilities & limits
+
+- Assist turn state lives in memory (`GET …/assist`, the `turns` of `GET
+  …/variants`); after a daemon restart only the committed versions, signals and
+  sessions remain. Agents can't see a fresh render yet — only the thumbnail the
+  UI last stored (`render/current.png`); `design_render_request` is a later
+  phase.
+- Learning v1 only proposes; rules apply after a person approves them. A rule
+  approved after another pending one was approved re-appears as `conflict` and
+  is re-proposed on the next pass.
 
 - Phase 0 has no UI of its own yet; the Product Design tab and Canvas keep
   their own storage and routes. Edits made there reach the graph through the
@@ -218,6 +338,17 @@ at it. Agents should cite what they borrow as `otto://design/<id>@v<seq>`.
   inline in `design_get`.
 
 ## 7. Troubleshooting
+
+- **409 "an agent is already working on design artifact …"** — one assist turn
+  or variants run per artifact; wait for its `design_assist_updated` /
+  `design_variants_ready`.
+- **Turn `conflict`** — someone saved while the agent worked; the draft is the
+  side version in `version_id` (`GET …/variants` lists it) — accept it with
+  `force` or discard it.
+- **Turn `failed` with "invalid … document"** — the agent's file didn't pass
+  the format check; nothing was committed and the working copy was restored.
+- **A citation is missing from the provenance** — it wasn't one of the offered
+  `[R…]` references (see the turn's `unverified_citations`).
 
 - **409 on save** — the head moved since you loaded it; re-fetch
   `GET …/content` (its `X-Design-Version` header is the new base).

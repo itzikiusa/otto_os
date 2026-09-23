@@ -268,7 +268,7 @@ impl DesignService {
         self.data_dir.join(DESIGN_DIR)
     }
 
-    fn emit(&self, ev: Event) {
+    pub(crate) fn emit(&self, ev: Event) {
         if let Some(tx) = &self.events {
             let _ = tx.send(ev);
         }
@@ -1396,7 +1396,9 @@ impl DesignService {
         .await
     }
 
-    async fn record_signal_row(&self, s: NewSignal) -> Result<DesignSignal> {
+    /// Insert a signal row and emit `design_learning_update` (no validation —
+    /// server-recorded signals only; API input goes through [`Self::record_signal`]).
+    pub(crate) async fn record_signal_row(&self, s: NewSignal) -> Result<DesignSignal> {
         let sig = self.store.insert_signal(s).await?;
         self.emit(Event::DesignLearningUpdate {
             workspace_id: sig.workspace_id.clone(),

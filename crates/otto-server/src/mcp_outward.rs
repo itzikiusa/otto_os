@@ -173,6 +173,11 @@ const DANGEROUS: &[&str] = &[
     "vault_write",
     "vault_rename",
     "vault_delete",
+    // Design Hall writes — starting an agent turn (spawns a session + commits
+    // a version) and filing an explicit link. Approving a version stays
+    // human-only: there is deliberately no tool for it.
+    "design_assist",
+    "design_link",
     // AWS / Kubernetes console writers — a billed Athena scan, a produced SQS
     // message, and a kubectl rollout/scale/delete/Argo verb against a live
     // cluster. Each is also Edit-gated per feature by the self-call's RBAC.
@@ -505,6 +510,25 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "studio":{"type":"string"},"format":{"type":"string"},"status":{"type":"string"},
                 "story_id":{"type":"string"},"project_id":{"type":"string"},
                 "limit":{"type":"integer"}}}}),
+        // Writes — approval-gated (DANGEROUS) unless the operator exempts the
+        // tool. The artifact's own workspace scopes the call (see
+        // `fill_design_workspace`). No tool approves a version.
+        json!({"name":"otto.design_assist","mutating":true,"category":"Design",
+            "description":"Start a Design Hall agent turn on an artifact: the agent edits the artifact's working copy, the result is validated and committed as a new version (author agent) whose provenance records the references it was offered and the ones it cited. Returns the turn (turn_id, status, session_id); completion arrives as the design_assist_updated event. mode: generate | refine (default) | critique | a11y. DANGEROUS: spawns an agent session and writes a version — approval-gated.",
+            "inputSchema":{"type":"object","required":["artifact_id","prompt"],"properties":{
+                "artifact_id":{"type":"string"},
+                "prompt":{"type":"string","description":"What to design or change."},
+                "mode":{"type":"string","description":"generate | refine (default) | critique | a11y"},
+                "references":{"type":"array","items":{"type":"string"},"description":"Optional artifacts to build on (`<id>` or `<id>@v12`, ≤ 8) — offered to the agent as [R1] …"},
+                "selection":{"type":"object","description":"Optional focus, e.g. {\"node_id\":\"hero\"}."}}}}),
+        json!({"name":"otto.design_link","mutating":true,"category":"Design",
+            "description":"Create an explicit link from a design artifact — e.g. it `implements` a product story, `references` another artifact or a URL, `describes` frames, `embeds` a 3D model. rel: embeds | uses_component | uses_tokens | describes | derived_from | references | implements | variant_of | resized_from | created_in; dst_kind: artifact | story | session | swarm_project | vault_note | pr | url. Render links that would close a cycle are refused (409). DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["artifact_id","rel","dst_kind","dst_id"],"properties":{
+                "artifact_id":{"type":"string","description":"The link source artifact."},
+                "rel":{"type":"string"},"dst_kind":{"type":"string"},"dst_id":{"type":"string"},
+                "dst_node":{"type":"string"},"src_node":{"type":"string"},
+                "policy":{"type":"string","description":"follow_approved | follow_latest | pinned (default by rel)."},
+                "pinned_version_id":{"type":"string"}}}}),
         // ================= Sessions =================
         json!({"name":"otto.list_sessions","mutating":false,"category":"Sessions",
             "description":"List a workspace's agent/terminal sessions (id, title, kind, status). Read-only.",
@@ -1054,6 +1078,27 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
             args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
             args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
         ),
+        "design_assist" => {
+            let prompt: String = args
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect();
+            format!(
+                "Start a design agent turn ({}) on design artifact '{}' — it spawns an agent session and commits a new version: {prompt}",
+                args.get("mode").and_then(Value::as_str).unwrap_or("refine"),
+                args.get("artifact_id").and_then(Value::as_str).unwrap_or("?")
+            )
+        }
+        "design_link" => format!(
+            "Link design artifact '{}' {} {} '{}'",
+            args.get("artifact_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("rel").and_then(Value::as_str).unwrap_or("?"),
+            args.get("dst_kind").and_then(Value::as_str).unwrap_or("?"),
+            args.get("dst_id").and_then(Value::as_str).unwrap_or("?")
+        ),
         _ => format!("External agent requests the dangerous tool '{tool}'."),
     }
 }
@@ -1124,6 +1169,11 @@ pub(crate) async fn governed_invoke(
         .await
         .map_err(ApiError)?;
     let arguments = filled.as_ref().unwrap_or(arguments);
+    // Design writes carry the ARTIFACT's workspace (never a caller-supplied
+    // one), so a workspace-pinned token, the audit row and the approval scope
+    // all see where the write really lands.
+    let design_filled = fill_design_workspace(ctx, &short, arguments).await;
+    let arguments = design_filled.as_ref().unwrap_or(arguments);
     let mut audit = NewCallLog {
         tool: tool.to_string(),
         direction: "inbound".into(),
@@ -1428,6 +1478,29 @@ fn is_read_only_sql(stmt: &str) -> bool {
 /// write in when the tool mutates). Returns `None` when the args need no
 /// filling. Runs BEFORE the scope check so a pinned token's filled call still
 /// faces `McpScope::deny_reason` with the pin satisfied — never bypassed.
+/// `design_assist` / `design_link` arguments with `workspace_id` set to the
+/// target artifact's own workspace (overriding any caller value). `None` when
+/// the tool isn't a design write or the artifact doesn't resolve (the self-call
+/// then answers 404 under the caller's own RBAC).
+async fn fill_design_workspace(ctx: &ServerCtx, tool: &str, args: &Value) -> Option<Value> {
+    if !matches!(tool, "design_assist" | "design_link") || !args.is_object() {
+        return None;
+    }
+    let id = args
+        .get("artifact_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let a = crate::design_hall::service(ctx)
+        .store()
+        .get_artifact(id)
+        .await
+        .ok()
+        .flatten()?;
+    let mut filled = args.clone();
+    filled["workspace_id"] = json!(a.workspace_id);
+    Some(filled)
+}
+
 async fn fill_vault_workspace(
     ctx: &ServerCtx,
     auth: &AuthContext,
@@ -2437,6 +2510,40 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 path.push_str(&q);
             }
             SelfCall::get(path)
+        }
+        "design_assist" => {
+            let id = arg_str(args, "artifact_id")?;
+            let mut body = json!({ "prompt": arg_str(args, "prompt")? });
+            for k in ["mode", "references", "selection"] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body[k] = v.clone();
+                }
+            }
+            SelfCall::post(
+                format!("/api/v1/design/artifacts/{}/assist", seg(&id)),
+                body,
+            )
+        }
+        "design_link" => {
+            let id = arg_str(args, "artifact_id")?;
+            let mut body = json!({
+                "rel": arg_str(args, "rel")?,
+                "dst_kind": arg_str(args, "dst_kind")?,
+                "dst_id": arg_str(args, "dst_id")?,
+            });
+            for k in ["dst_node", "src_node", "policy", "pinned_version_id"] {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    body[k] = json!(v);
+                }
+            }
+            SelfCall::post(
+                format!("/api/v1/design/artifacts/{}/links", seg(&id)),
+                body,
+            )
         }
         "vault_write" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -4721,6 +4828,68 @@ mod tests {
         assert_eq!(c.path, "/api/v1/design/search?q=hero%20card&studio=site");
         assert!(route_for("design_get", &json!({})).is_err());
         assert!(route_for("design_search", &json!({})).is_err());
+    }
+
+    #[test]
+    fn design_writes_are_approval_gated_and_route_to_the_design_api() {
+        let specs = otto_tool_specs();
+        for w in ["design_assist", "design_link"] {
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{w}"))
+                .unwrap_or_else(|| panic!("missing spec otto.{w}"));
+            assert_eq!(spec["category"], json!("Design"));
+            assert_eq!(spec["mutating"], json!(true));
+            assert!(DANGEROUS.contains(&w), "{w} must be approval-gated");
+            assert!(!DEFAULT_ENABLED.contains(&w), "{w} must be off by default");
+            assert!(tool_is_mutating(w));
+            // The artifact carries the workspace — no design tool requires one.
+            let reqd = spec["inputSchema"]["required"].as_array().unwrap();
+            assert!(!reqd.iter().any(|x| x == "workspace_id"), "{w}");
+            assert!(
+                dangerous_detail(&format!("otto.{w}"), &json!({"artifact_id": "A1"}))
+                    .contains("A1"),
+                "{w}"
+            );
+            // Gated by default; the per-tool exemption is the only opt-out.
+            let exempt = normalize_exempt_tools(&[format!("otto.{w}")]).unwrap();
+            assert_eq!(exempt, vec![w.to_string()]);
+            assert!(approval_gated(DANGEROUS.contains(&w), false, false));
+            assert!(!approval_gated(DANGEROUS.contains(&w), true, false));
+        }
+        // Approving a version stays human-only: no design tool approves.
+        assert!(!specs.iter().any(|s| s["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("otto.design_") && n.contains("approve"))));
+
+        let c = route_for(
+            "design_assist",
+            &json!({"artifact_id": "A 1", "prompt": "bolder hero", "mode": "refine",
+                    "references": ["B2@v3"], "workspace_id": "ignored"}),
+        )
+        .unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/design/artifacts/A%201/assist");
+        let b = c.body.unwrap();
+        assert_eq!(b["prompt"], "bolder hero");
+        assert_eq!(b["mode"], "refine");
+        assert_eq!(b["references"][0], "B2@v3");
+        assert!(b.get("workspace_id").is_none());
+        let l = route_for(
+            "design_link",
+            &json!({"artifact_id": "A1", "rel": "implements", "dst_kind": "story",
+                    "dst_id": "S1", "policy": ""}),
+        )
+        .unwrap();
+        assert_eq!(l.method, Method::Post);
+        assert_eq!(l.path, "/api/v1/design/artifacts/A1/links");
+        let b = l.body.unwrap();
+        assert_eq!(b["rel"], "implements");
+        assert_eq!(b["dst_kind"], "story");
+        assert_eq!(b["dst_id"], "S1");
+        assert!(b.get("policy").is_none(), "empty optional args are dropped");
+        assert!(route_for("design_assist", &json!({"artifact_id": "A1"})).is_err());
+        assert!(route_for("design_link", &json!({"artifact_id": "A1", "rel": "embeds"})).is_err());
     }
 
     #[test]

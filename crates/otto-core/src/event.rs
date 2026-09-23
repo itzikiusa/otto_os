@@ -306,7 +306,9 @@ pub enum Event {
         artifact_id: Id,
         /// The artifact's format (`html` | `scene3d` | `otto-canvas` | `png` …).
         format: String,
-        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`.
+        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`,
+        /// or `live` — an UNCOMMITTED, validated edit a design-assist agent
+        /// just saved mid-turn (`version_id: null`; the turn's commit follows).
         change: String,
         /// The newly committed version, when the change created one.
         version_id: Option<Id>,
@@ -338,6 +340,43 @@ pub enum Event {
         kind: String,
         signal_id: Option<Id>,
         artifact_id: Option<Id>,
+    },
+    /// Design Hall: a unified design-assist agent turn (`POST
+    /// /design/artifacts/{id}/assist`, or one variant of `…/variants`) changed
+    /// state — `running` once its agent session is live (attach the shell),
+    /// then exactly one terminal state. A committed turn ALSO produces the
+    /// usual `design_artifact_updated` (main branch only; variants never touch
+    /// the head).
+    DesignAssistUpdated {
+        workspace_id: Id,
+        artifact_id: Id,
+        turn_id: Id,
+        /// `starting` (accepted, session not live yet) | `running` | `done` (a
+        /// version was committed) | `unchanged` (the agent changed nothing —
+        /// e.g. a critique) | `conflict` (the head moved meanwhile: the draft
+        /// was kept as a side version `variant/<turn>/1`) | `failed`.
+        status: String,
+        /// `generate` | `refine` | `critique` | `a11y` | `variant`.
+        mode: String,
+        /// `main`, or `variant/<run>/<k>` for a variant turn.
+        branch: String,
+        session_id: Option<Id>,
+        /// The version this turn committed, when it committed one.
+        version_id: Option<Id>,
+        error: Option<String>,
+    },
+    /// Design Hall: every turn of a variants run (`POST
+    /// /design/artifacts/{id}/variants`) finished. `version_ids` are the
+    /// committed variant versions (branch `variant/<run_id>/<k>`, head
+    /// untouched); `failed` turns produced nothing. Accept one with `POST
+    /// …/variants/{version}/accept`.
+    DesignVariantsReady {
+        workspace_id: Id,
+        artifact_id: Id,
+        run_id: Id,
+        base_version_id: Option<Id>,
+        version_ids: Vec<Id>,
+        failed: usize,
     },
     /// A mockup agent session just became live (at the START of a turn). Lets the
     /// Mockups Assistant panel attach the agent's shell/Terminal immediately,
@@ -643,5 +682,35 @@ mod tests {
         .unwrap();
         assert_eq!(v["type"], "design_learning_update");
         assert_eq!(v["kind"], "variant_chosen");
+
+        let v = serde_json::to_value(Event::DesignAssistUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            turn_id: "t1".into(),
+            status: "running".into(),
+            mode: "refine".into(),
+            branch: "main".into(),
+            session_id: Some("s1".into()),
+            version_id: None,
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_assist_updated");
+        assert_eq!(v["session_id"], "s1");
+        assert!(v.get("version_id").is_some_and(|c| c.is_null()));
+        assert!(v.get("error").is_some_and(|c| c.is_null()));
+
+        let v = serde_json::to_value(Event::DesignVariantsReady {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            run_id: "r1".into(),
+            base_version_id: Some("v1".into()),
+            version_ids: vec!["v2".into(), "v3".into()],
+            failed: 1,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_variants_ready");
+        assert_eq!(v["version_ids"][1], "v3");
+        assert_eq!(v["failed"], 1);
     }
 }

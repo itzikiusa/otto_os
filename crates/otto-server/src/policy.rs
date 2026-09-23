@@ -1245,6 +1245,13 @@ mod tests {
             pol(Method::GET, "/api/v1/design/artifacts/{id}/versions/{v}/content"),
             Require(Design, View)
         );
+        for path in [
+            "/api/v1/design/artifacts/{id}/assist",
+            "/api/v1/design/artifacts/{id}/variants",
+            "/api/v1/design/learned",
+        ] {
+            assert_eq!(pol(Method::GET, path), Require(Design, View), "{path}");
+        }
         for (m, path) in [
             (Method::POST, "/api/v1/design/projects"),
             (Method::PATCH, "/api/v1/design/projects/{id}"),
@@ -1254,6 +1261,14 @@ mod tests {
             (Method::POST, "/api/v1/design/artifacts/{id}/links"),
             (Method::DELETE, "/api/v1/design/artifacts/{id}/links/{link_id}"),
             (Method::POST, "/api/v1/design/signals"),
+            // design_assist.rs — agent turns, variants, learned rules.
+            (Method::POST, "/api/v1/design/artifacts/{id}/assist"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/variants"),
+            (
+                Method::POST,
+                "/api/v1/design/artifacts/{id}/variants/{version}/accept",
+            ),
+            (Method::POST, "/api/v1/design/learned/extract"),
         ] {
             assert_eq!(pol(m.clone(), path), Require(Design, Edit), "{m} {path}");
         }

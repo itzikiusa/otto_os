@@ -962,6 +962,120 @@ impl Store {
         rows.iter().map(row_version).collect()
     }
 
+    /// Insert a version on a SIDE branch (`variant/<run>/<k>`) WITHOUT moving
+    /// the head — variants never touch main until one is accepted. `parent` is
+    /// the main version the variant was generated from. The no-op artifact
+    /// UPDATE runs first so the transaction takes SQLite's write lock before it
+    /// reads `seq` (same reasoning as [`Self::commit_version`]); parallel
+    /// variant commits therefore serialize instead of colliding on `seq`.
+    pub async fn insert_side_version(
+        &self,
+        v: NewVersion,
+        parent: Option<&str>,
+    ) -> Result<DesignVersion> {
+        if v.branch == "main" || v.branch.is_empty() {
+            return Err(Error::Invalid(
+                "a side version needs a non-main branch".into(),
+            ));
+        }
+        let id = new_id();
+        let now_s = now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("design.side.begin"))?;
+        let upd = sqlx::query("UPDATE design_artifacts SET updated_at = updated_at WHERE id = ?")
+            .bind(&v.artifact_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("design.side.lock"))?;
+        if upd.rows_affected() == 0 {
+            return Err(Error::NotFound(format!(
+                "design artifact {}",
+                v.artifact_id
+            )));
+        }
+        let seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM design_versions WHERE artifact_id = ?",
+        )
+        .bind(&v.artifact_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(dberr("design.side.seq"))?;
+        let parent: Option<String> = parent.filter(|p| !p.is_empty()).map(str::to_string);
+        sqlx::query(
+            "INSERT INTO design_versions
+             (id, artifact_id, seq, parent_version_id, branch, blob_sha256, size_bytes, kind,
+              author_kind, author_id, session_id, message, provenance_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&v.artifact_id)
+        .bind(seq)
+        .bind(&parent)
+        .bind(&v.branch)
+        .bind(&v.blob_sha256)
+        .bind(v.size_bytes)
+        .bind(&v.kind)
+        .bind(&v.author_kind)
+        .bind(&v.author_id)
+        .bind(&v.session_id)
+        .bind(&v.message)
+        .bind(v.provenance.to_string())
+        .bind(&now_s)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if is_unique(&e) {
+                Error::Conflict(format!(
+                    "design artifact {} was saved concurrently; retry",
+                    v.artifact_id
+                ))
+            } else {
+                Error::Internal(format!("design.side.insert: {e}"))
+            }
+        })?;
+        tx.commit().await.map_err(dberr("design.side"))?;
+        Ok(DesignVersion {
+            id,
+            artifact_id: v.artifact_id,
+            seq,
+            parent_version_id: parent,
+            branch: v.branch,
+            blob_sha256: v.blob_sha256,
+            size_bytes: v.size_bytes,
+            kind: v.kind,
+            author_kind: v.author_kind,
+            author_id: v.author_id,
+            session_id: v.session_id,
+            message: v.message,
+            provenance: v.provenance,
+            created_at: ts(&now_s)?,
+        })
+    }
+
+    /// Versions of `artifact_id` whose branch starts with `prefix` (e.g.
+    /// `variant/<run>/`), oldest first. Prefix-compared with `substr` so no
+    /// LIKE escaping is needed.
+    pub async fn versions_on_branch_prefix(
+        &self,
+        artifact_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<DesignVersion>> {
+        let rows = sqlx::query(
+            "SELECT * FROM design_versions
+             WHERE artifact_id = ?1 AND substr(branch, 1, length(?2)) = ?2
+             ORDER BY seq LIMIT 1000",
+        )
+        .bind(artifact_id)
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("design.version.branch"))?;
+        rows.iter().map(row_version).collect()
+    }
+
     pub async fn version_infos(&self, artifact_id: &str) -> Result<Vec<VersionInfo>> {
         let rows = sqlx::query(
             "SELECT id, seq, kind, created_at FROM design_versions WHERE artifact_id = ?",

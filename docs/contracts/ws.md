@@ -820,15 +820,19 @@ startup/admin legacy import). They supersede `mockup_updated` /
 their own routes.
 
 ```json
-{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted", "version_id": "<Id>" | null, "content": "..." | null }
+{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted|live", "version_id": "<Id>" | null, "content": "..." | null }
 { "type": "design_link_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "link_id": "<Id>" | null, "target_artifact_id": "<Id>" | null, "target_version_id": "<Id>" | null, "reason": "created|deleted|extracted|target_approved|target_updated|target_deleted" }
-{ "type": "design_learning_update", "workspace_id": "<Id>", "kind": "variant_chosen|…|shipped", "signal_id": "<Id>" | null, "artifact_id": "<Id>" | null }
+{ "type": "design_learning_update", "workspace_id": "<Id>", "kind": "variant_chosen|…|shipped|rule_proposed", "signal_id": "<Id>" | null, "artifact_id": "<Id>" | null }
 ```
 
 - `design_artifact_updated` — one per committed version (`created`, `content`:
   PUT content, named commit, import `sync`) with `version_id` set, and one per
   metadata change (`meta`, `approved`, `archived`, `deleted`) with
-  `version_id: null` except `approved` (the approved version). `content` is the
+  `version_id: null` except `approved` (the approved version). `live`
+  (`version_id: null`) is an UNCOMMITTED mid-turn save by a design-assist agent
+  on the working copy — already validated for the format (an invalid,
+  half-written file is never broadcast); the turn's commit follows as
+  `content`. Variant turns never emit `live`. `content` is the
   UTF-8 source for text/JSON formats ≤ 4 MB; an explicit `null` (never omitted)
   for binaries, oversized payloads and metadata changes → clients re-fetch
   `GET /design/artifacts/{id}/content`.
@@ -841,14 +845,43 @@ their own routes.
   `target_deleted`: the target was hard-deleted (the link is now `broken`).
 - `design_learning_update` — a design signal was captured (`POST
   /design/signals`, or automatically: `edit_after_draft`, `status_change`,
-  `shipped`). Phase 0 only captures; later phases also emit it when a learned
-  rule is proposed.
+  `shipped`, `agent_draft`, `variant_accepted` / `variant_rejected`), or —
+  `kind: "rule_proposed"`, `signal_id`/`artifact_id` null — a learning pass
+  queued new team rules for approval (`GET /design/learned`).
 - Scope: `Workspace` (members with viewer+ on `workspace_id`), like the canvas /
   mockup events.
 - TypeScript types: the `design_artifact_updated` / `design_link_updated` /
   `design_learning_update` members of `OttoEvent` in `ui/src/lib/api/types.ts`
   (`DesignArtifactChange`, `DesignLinkUpdateReason`, `DesignSignalKind`). No UI
   routing yet (the Design Hall lobby lands separately).
+
+### `design_assist_updated` / `design_variants_ready`
+
+Workspace-scoped states of the unified design-assist pipeline
+(`crates/otto-server/src/design_assist.rs`).
+
+```json
+{ "type": "design_assist_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "turn_id": "<Id>", "status": "starting|running|done|unchanged|conflict|failed", "mode": "generate|refine|critique|a11y|variant", "branch": "main|variant/<run>/<k>", "session_id": "<Id>" | null, "version_id": "<Id>" | null, "error": "..." | null }
+{ "type": "design_variants_ready", "workspace_id": "<Id>", "artifact_id": "<Id>", "run_id": "<Id>", "base_version_id": "<Id>" | null, "version_ids": ["<Id>"], "failed": 0 }
+```
+
+- `design_assist_updated` — `starting` when `POST …/assist` / `…/variants`
+  accepted the turn, `running` the moment its agent session is live (attach
+  the shell by `session_id`), then exactly one terminal state: `done` (a
+  version was committed — `version_id`; a main turn also emits the usual
+  `design_artifact_updated {change:"content"}`), `unchanged` (no change; always
+  for `critique`), `conflict` (the head moved meanwhile — the draft was kept as
+  the side version `version_id` on `variant/<turn_id>/1`), `failed` (`error`).
+  The full turn (references offered, verified citations, findings, summary) is
+  `GET /design/artifacts/{artifact_id}/assist`. Optional ids travel as explicit
+  `null`.
+- `design_variants_ready` — every turn of a variants run finished;
+  `version_ids` are the committed variant versions (the head is untouched),
+  `failed` the turns that produced nothing. Accept one with `POST
+  /design/artifacts/{id}/variants/{version}/accept`.
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript types: the `design_assist_updated` / `design_variants_ready`
+  members of `OttoEvent` (`DesignAssistStatus`, `DesignAssistMode`).
 
 ### `canvas_refs_changed`
 

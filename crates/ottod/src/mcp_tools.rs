@@ -42,6 +42,12 @@
 //! (see `governed_tools_for`), so what the control plane shows as enabled is
 //! what a session can call, with no second hand-maintained list to drift.
 //!
+//! The Design Hall WRITES (`otto_design_assist` — start an agent turn that
+//! commits a version, `otto_design_link` — file an explicit link) are
+//! deliberately NOT native: they exist only as that governed bridge, so they
+//! stay approval-gated (DANGEROUS) unless the operator exempts them, and no
+//! tool approves a design version (humans only).
+//!
 //! Beyond Otto's own data, the DB tools (`otto_list_connections`,
 //! `otto_db_schema`/`_children`/`_object`, `otto_db_query`) expose the user's
 //! database **connections**: schema introspection and **read-only** queries.
@@ -3860,6 +3866,45 @@ mod tests {
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(!text.contains("unknown tool"), "got: {text}");
         assert!(text.contains("otto_create_pr"), "got: {text}");
+    }
+
+    #[test]
+    fn design_writes_are_bridged_through_the_governed_path_only() {
+        // `design_assist` / `design_link` have NO native twin: they are served
+        // only as the governed `otto_design_*` bridge, so every call goes
+        // through the control plane's allow-list → approval → audit (a native
+        // tool would bypass the approval gate). The native design tools stay
+        // the four reads.
+        let native = native_tool_names();
+        for w in ["design_assist", "design_link"] {
+            assert!(!native.iter().any(|n| n == w), "{w} must not be native");
+            assert!(!FEATURE_READ_TOOLS.contains(&w), "{w} is a write");
+            let stdio = format!("otto_{w}");
+            assert_eq!(
+                governed_tool_for_stdio_name(&stdio).as_deref(),
+                Some(format!("otto.{w}").as_str()),
+                "{stdio} must proxy to the governed tool"
+            );
+        }
+        // Advertised only when the operator enabled them.
+        let none: Vec<String> = vec![];
+        assert!(!governed_tools_for(&none)
+            .iter()
+            .any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("otto_design_"))));
+        let enabled = vec![
+            "otto.design_assist".to_string(),
+            "otto.design_link".to_string(),
+        ];
+        let names: Vec<String> = governed_tools_for(&enabled)
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(names, vec!["otto_design_assist", "otto_design_link"]);
+        // The artifact carries the workspace: no session workspace is injected.
+        let ctx = test_ctx();
+        let spec = governed_spec_for_stdio_name("otto_design_assist").unwrap();
+        let args = governed_invoke_args(&ctx, &spec, &json!({"artifact_id": "A1", "prompt": "x"}));
+        assert!(args.get("workspace_id").is_none());
     }
 
     #[test]
