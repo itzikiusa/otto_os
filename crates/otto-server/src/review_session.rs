@@ -697,7 +697,12 @@ pub async fn run_agent_session_with_recovery(
         } else {
             let files: Vec<(String, PathBuf)> = lens_slugs
                 .iter()
-                .map(|slug| (slug.clone(), lens_findings_path(review_id, agent_index, slug)))
+                .map(|slug| {
+                    (
+                        slug.clone(),
+                        lens_findings_path(review_id, agent_index, slug),
+                    )
+                })
                 .collect();
             merge_lens_files(&mut findings, &files)
         };
@@ -1118,7 +1123,9 @@ mod tests {
         let raw = b"\x1b[2m> \x1b[22mYou are a\x1b[1C Codex worker\x1b[0m on /repo (branch main)";
         let plain = crate::agent_tasks_nudge::strip_ansi(raw);
         assert!(screen_shows_paste(&normalize_ws(&plain), probe));
-        let placeholder = crate::agent_tasks_nudge::strip_ansi(b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m");
+        let placeholder = crate::agent_tasks_nudge::strip_ansi(
+            b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m",
+        );
         assert!(screen_shows_paste(&normalize_ws(&placeholder), probe));
     }
 

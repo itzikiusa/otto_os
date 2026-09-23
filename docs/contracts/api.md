@@ -1079,7 +1079,7 @@ viewer/editor.
 | POST /findings/{id}/jira | ws editor (Git) | `{project_key, issue_type?, account_id?}` | `Finding` (creates a Jira issue, stores `jira_key`/`jira_url`). **400 `{code:"invalid"}`** when no Jira account is configured. |
 | POST /findings/{id}/repo-rule | ws editor (Context) | `{title?, body?, glob?}` | `RepoRule` (generalizes the finding into a durable rule fed into the Context Engine; links `repo_rule_id`) |
 | POST /findings/{id}/fix | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns a fix agent; open\|accepted → accepted, then async → fixed on commit) |
-| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (verifies resolution; accepted\|fixed\|verified → verified on pass) |
+| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?, note?}` (verifies resolution; accepted\|fixed\|verified → verified on pass). Evidence-based: passes only when the finding's `linked_test` (a Rust test name or `.rs` file; `file.rs::name` accepted) runs in the fix worktree and executes ≥1 passing test. No linked test, zero tests run, a non-Rust test, or a failure leave the status unchanged. `note` = the evidence ("N tests passed") or why it was not verified |
 | POST /findings/{id}/regression-test | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns an agent to add a guard test; sets `linked_test`) |
 | GET /workspaces/{ws}/repo-rules | ws viewer (Context) | — | `RepoRule[]` (the workspace's repo rules) |
 | POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |

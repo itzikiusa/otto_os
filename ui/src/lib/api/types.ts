@@ -3446,6 +3446,9 @@ export interface FindingDetail {
 export interface FindingActionResp {
   finding: Finding;
   session_id?: Id | null;
+  /** Verify only: the evidence behind a pass ("3 tests passed") or why the
+   *  finding was NOT verified (no linked test, zero tests ran, …). */
+  note?: string | null;
 }
 
 /** A repo rule generalized from a finding, fed into the Context Engine. */
