@@ -3269,6 +3269,91 @@ consumers hear every save; `pinned` ones never move).
 | POST /api/v1/design/artifacts/{id}/brand/impact | design edit + ws viewer | `BrandImpactReq {content?}` — the PROPOSED kit (object or JSON text), validated as above (400); omitted = the head, unvalidated (a plain "used in" listing) | `BrandImpactResp {kit_id, base (approved\|head\|none), base_version_id, base_seq, changes: BrandTokenChange[] {token, change (changed\|added\|removed), before, after}, artifact_count, studio_count, by_studio, affected_count, affected_studio_count, affected_by_studio, consumers: BrandConsumer[] {artifact, policy, pinned_version_id, tokens, whole_kit, affected, scanned}, hidden_count, contrast, warnings}`. Compares the proposal with what consumers follow (the approved version, else the head). Consumers = non-archived artifacts with a `uses_tokens` link into the kit that the caller can view (others counted in `hidden_count`); each consumer's head (text formats ≤ 4 MB, first 300 consumers) is scanned for token references — a consumer naming no token (or not scannable) is `whole_kit` and sees every change. `contrast` = WCAG ratios of the proposed colours vs white, vs the kit's ink (`ink`, else `text`, else the darkest colour) and every pair (`AAA` ≥ 7, `AA` ≥ 4.5, `AA-large` ≥ 3, `fail`); `warnings` flag colours below 3:1 on both white and ink. Read-only — nothing is saved. 400 when the artifact isn't an `otto-brand` kit |
 | GET /api/v1/design/artifacts/{id}/brand/export | design view + ws viewer | `?format=css\|tailwind\|dtcg` (default `css`; `json` = `dtcg`) `&version=` (id / `v12` / `12` / `approved`; default the head) | the export as text: `css` → `:root { --brand-<group>-<name>: …; }` (`text/css`); `tailwind` → a Tailwind v4 `@theme { --color-* --font-* --text-* (+ --line-height / --font-weight) --radius-* --spacing-* }` block (`text/css`); `dtcg` → W3C Design Tokens JSON (typed groups `color` / `fontFamily` / `typography` / `dimension` as `{value, unit}`; logos, voice and imagery under `$extensions["dev.otto.brand"]`) (`application/json`). `Content-Disposition: attachment; filename="<kit-slug>.tokens.css\|.theme.css\|.tokens.json"`, `X-Design-Version`, `X-Design-Seq`. 400 unknown format / not a kit; 404 no content or no approved version |
 
+### Site Studio — `otto-site` v1: export, local preview, publishes
+
+A site is an artifact of format `otto-site` (studio `site`), saved, versioned
+and approved like any other (`PUT …/content` with `base_version`). Code:
+`crates/otto-design/src/site/` (schema, validator, indexer, theme, renderer,
+exporter, ZIP writer, routes) and `ui/src/modules/design-hall/site/` (the
+editor; `engine/` renders the canvas with the same markup and the same
+`site.css` — byte-identical copies, a unit test checks). Types: `DesignPublish`,
+`DesignPinnedRef`, `DesignSiteExportReq`, `DesignSiteLocalResp`,
+`DesignSitePage` in `ui/src/lib/api/types.ts` ("Site Studio"); the document
+itself is typed in `site/engine/types.ts`.
+
+**Document** (pages → sections → blocks; unknown top-level keys kept):
+
+```json
+{ "type": "otto-site", "version": 1, "title": "Rewards+ landing page",
+  "brand": "otto://design/<brand kit>",
+  "settings": { "domain": "rewardsplus.acme.example", "lang": "en", "description": "…" },
+  "pages": [ { "id": "home", "title": "Home", "slug": "", "description": "…",
+    "sections": [ {
+      "id": "hero", "block": "hero/split", "name": "Hero",
+      "props": { "eyebrow": "New · Rewards+", "headline": "Every purchase moves you up.",
+                 "primary_label": "Join free", "primary_href": "page:join" },
+      "style": { "background": "token:color.surface-alt", "spacing": "l", "align": "left",
+                 "motion": "fade-up", "min_height": "auto" },
+      "responsive": { "hide": ["mobile"], "stack": "media-first", "mobile_align": "center" },
+      "blocks": [ { "id": "card", "block": "embed/3d",
+                    "props": { "src": "otto://design/<3d artifact>@approved", "alt": "…" } } ],
+      "derived_from": "otto://design/<other site>@v12#faq",
+      "hidden": false } ] } ] }
+```
+
+- **Section blocks** (`<family>/<variant>`, 27): `nav/bar`; `hero/split`,
+  `hero/centered`, `hero/fullbleed`, `hero/stacked`; `features/grid`,
+  `features/alternating`, `features/bento`, `features/steps`,
+  `features/stats`; `social/logos`, `social/testimonials`, `social/quote`;
+  `pricing/tiers`, `pricing/compare`, `pricing/single`; `faq/accordion`,
+  `faq/grid`; `cta/band`, `cta/split`, `cta/card`; `content/text`;
+  `media/3d-embed`, `media/video`, `media/gallery`; `footer/columns`,
+  `footer/simple`. **Child blocks**: `item/link|feature|step|stat|logo|
+  testimonial|tier|faq|column`, `embed/3d`, `embed/image`.
+- **Style**: `background` = `token:color.<name>` (a brand-kit colour),
+  `gradient:soft|primary|ink|sunset`, or a raw `#hex` (allowed; the editor
+  flags it off-brand); `spacing` `s|m|l|xl`; `align` `left|center`; `motion`
+  `none|fade-up|scroll-reveal|parallax|tilt-hover` (pure CSS, off under
+  `prefers-reduced-motion`); `min_height` `auto|80vh|100vh`.
+- **Links**: `page:<page id>` (another page of the site), `http(s):`,
+  `mailto:`, `tel:`, relative paths and `#anchors`; anything else renders `#`.
+  Images: `otto://design/<image>` (a library image, exported into `assets/`),
+  `https:` or `data:image/(png|jpeg|gif|webp);base64,…`.
+
+**Validation** (every create / save / agent result, via `format::validate`;
+400 `otto-site: <path>: <problem>; …`, ≤ 20 problems): `type` is `otto-site`;
+`version`, when present, is `1`; page and node ids `[A-Za-z0-9_-]{1,64}`,
+unique (section + block ids share one namespace); slugs lower-case words
+joined by `-`, unique, never `index`; a `block` that is present must be one of
+the names above; style / responsive values from their enums; props are
+strings (≤ 20 000 chars), numbers, booleans or lists (≤ 100 strings or
+`{label, href}` links); `*href` / `form_action` / `image` / `poster` / `src`
+values may not use another scheme (`javascript:`, `data:` other than images,
+protocol-relative …); ≤ 50 pages, ≤ 200 sections per page, ≤ 100 blocks per
+section, ≤ 5 000 nodes.
+
+**Links extracted on save**: `brand` → `uses_tokens`; `src` / `image` /
+`poster` → `embeds` (a 3D embed's `@approved` / `@latest` / `@vN` is its
+version policy: follow approved (default), follow latest, pinned);
+`derived_from` → `derived_from` ("From your library" provenance); other
+`otto://` strings → `references`. `src_node` = the enclosing section / block
+id. Searchable text = titles, headlines, copy, questions and answers, tier
+names and perks, captions, alt text.
+
+**Theme.** The brand kit is the project's `brand_kit_id`, else the document's
+`brand`, else a `uses_tokens` link — at its approved version (else head). Its
+tokens become `--brand-<group>-<name>` custom properties (the Brand Kit's own
+names), bound to the stylesheet's slots (`--os-primary`, `--os-accent`,
+`--os-ink`, `--os-surface`, `--os-surface-alt`, fonts, radius); no kit → the
+default palette.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/export | design edit + ws editor | `DesignSiteExportReq {target: "zip"\|"local", version?}` (version id / `v12` / `12`; default the head) | **`zip`** → `application/zip` (`Content-Disposition: attachment; filename="<site-slug>-v<seq>.zip"`, `X-Design-Version`, `X-Design-Seq`, `X-Design-Publish`): `index.html` + `<slug>.html` per page (a page without a slug: `<id>.html`; hidden and unknown sections are omitted), ONE `site.css` (the brand-token `.os-site { --brand-…; --os-…; }` block first, then the shared stylesheet), `assets/` (library images `<id>-v<seq>.<ext>`, 3D posters from the artifact's thumbnail `<id>-v<seq>-poster.<ext>`), and `otto-publish.json` (the pinned set). No script anywhere; 3D embeds ship as a poster (or a CSS stand-in card) — no 3D runtime yet. **`local`** → `DesignSiteLocalResp {publish, url, pages: DesignSitePage[] {id, title, slug, file, url}, pinned, warnings}` — `url` = `/api/v1/design/artifacts/{id}/preview?publish=<publish id>` (loopback, bearer-authenticated). Both record a `design_publishes` row (`target` `zip` / `local`; `local` stores `url` = `…/preview?version=<version id>`) whose `pinned_set` is `DesignPinnedRef[] {role (site\|brand\|embed\|image), uri, artifact_id, version_id, seq, title, policy, missing}` — the site version first, then its kit, then every rendered 3D embed and image at the ONE version it rendered (a follow-approved embed pins the approved version at export time). The array shape keeps every pinned version out of the retention prune. References the caller can't view, missing ones and non-image "images" render as stand-ins / placeholders and are listed in `warnings` (`missing: true` in the set). 400 other targets (nothing is published outside this Mac), not a site, no pages; 404 no version; 413 an archive over 150 MB |
+| GET /api/v1/design/artifacts/{id}/preview | design view + ws viewer | `?version=` (id / `v12` / `12`) or `?publish=<publish id>` (re-renders exactly that publish's pinned set) | the home page as ONE self-contained `text/html` document: inline CSS, library images / posters as data URIs (≤ 12 MB per page), page links rewritten to `/api/v1/design/artifacts/{id}/preview/<slug or id>` with the same query. Headers `Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; media-src https:; font-src https: data:; base-uri 'none'; form-action 'none'`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `X-Design-Version`, `X-Design-Seq`. 404 unknown publish / version |
+| GET /api/v1/design/artifacts/{id}/preview/{page} | design view + ws viewer | `{page}` = a page's slug or id; same query | that page (same as above); 404 unknown page |
+| GET /api/v1/design/artifacts/{id}/publishes | design view + ws viewer | — | `DesignPublish[] {id, artifact_id, version_id, target, url, pinned_set, created_by, created_at}` (newest first; any format) |
+
 ## Discovery Chat
 
 A lightweight, interactive conversation with an agent attached to a product
