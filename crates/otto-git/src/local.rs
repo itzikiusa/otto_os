@@ -1540,7 +1540,14 @@ impl LocalGit {
                 self.run(&["checkout", "-b", branch]).await?;
             }
         } else {
-            self.run(&["checkout", "--end-of-options", branch]).await?;
+            // The trailing `--` makes `branch` a REVISION, never a path: a bare
+            // `checkout docs` with no branch `docs` but a directory `docs/`
+            // restored that directory from the index — exit 0, "Switched to
+            // docs" in the UI, the user's uncommitted edits gone. With `--` git
+            // refuses ("invalid reference: docs"). Tags/SHAs still detach and
+            // an origin-only name still DWIM-creates its tracking branch.
+            self.run(&["checkout", "--end-of-options", branch, "--"])
+                .await?;
         }
         Ok(())
     }
@@ -3165,7 +3172,7 @@ fn remote_ref_absent(stderr: &str) -> bool {
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
 pub(crate) fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 23] = [
+    const MARKERS: [&str; 24] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -3188,6 +3195,8 @@ pub(crate) fn local_refusal(msg: &str) -> bool {
         "no rebase in progress",
         // A bad/unknown ref is the caller's input, not a provider outage.
         "did not match any file",
+        // `checkout <name> --` of a name that is no revision.
+        "invalid reference",
         // Nothing to do — e.g. `commit` with an empty index.
         "nothing to commit",
         // A concurrent git process holds the index lock — transient, retryable.
@@ -3768,7 +3777,7 @@ mod tests {
         // A bad ref is the caller's input — a 409 with git's own message, never
         // the 502 that raises the provider-outage banner.
         match git.checkout("no-such-branch", false).await {
-            Err(Error::Conflict(msg)) => assert!(msg.contains("did not match")),
+            Err(Error::Conflict(msg)) => assert!(msg.contains("invalid reference"), "{msg}"),
             other => panic!("expected Conflict, got {other:?}"),
         }
     }
@@ -5619,6 +5628,34 @@ mod tests {
         git.write_resolution("sub/c.txt", "resolved\n").await.unwrap();
         assert!(git.conflicted_paths().await.unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(&conflicted).unwrap(), "resolved\n");
+    }
+
+    /// G-5: a name that is a DIRECTORY, not a branch, must never be read as a
+    /// path — `checkout docs` restored `docs/` from the index (exit 0) and the
+    /// user's uncommitted edits were gone.
+    #[tokio::test]
+    async fn checkout_of_a_directory_name_keeps_uncommitted_work() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        write(&dir, "docs/a.md", "committed\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "docs"]);
+        write(&dir, "docs/a.md", "committed\nUNCOMMITTED EDIT\n");
+        let git = LocalGit::new(&dir);
+        match git.checkout("docs", false).await {
+            Err(Error::Conflict(msg)) => assert!(msg.contains("invalid reference"), "{msg}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("docs/a.md")).unwrap(),
+            "committed\nUNCOMMITTED EDIT\n",
+            "the edit survives"
+        );
+        assert_eq!(git.current_branch().await.unwrap(), "main");
+        // A tag / SHA still checks out (detached) through the same path.
+        sh_git(&dir, &["stash", "push", "-m", "park"]);
+        sh_git(&dir, &["tag", "v1"]);
+        git.checkout("v1", false).await.unwrap();
+        git.checkout("main", false).await.unwrap();
     }
 
 }
