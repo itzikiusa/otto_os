@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Language Servers: shows LSP server availability and lets users
   // install missing servers via a spawned shell session.
   import { api } from '../../lib/api/client';
@@ -94,25 +96,18 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <div class="page-title">Language Servers</div>
-      <div class="page-subtitle">
-        Servers are detected on your PATH. The daemon promotes your shell PATH so
-        tools installed via <code>mise</code>, <code>asdf</code>, or shell rc files are found.
-      </div>
-    </div>
-    {#if missingWithInstall.length > 0}
-      <button
-        class="btn btn-primary"
-        disabled={installingAll}
-        onclick={installAll}
-      >
-        {installingAll ? 'Installing…' : `Install all missing (${missingWithInstall.length})`}
-      </button>
-    {/if}
-  </div>
+<div class="settings-section">
+  <PageHeader title="Language Servers" subtitle="Servers are detected on your PATH.">
+    {#snippet actions()}
+      {#if missingWithInstall.length > 0}
+        <button class="btn primary" disabled={installingAll} onclick={installAll}>
+          {installingAll ? 'Installing…' : `Install all missing (${missingWithInstall.length})`}
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
+  <p class="section-intro">The daemon promotes your shell PATH so tools installed via <code>mise</code>, <code>asdf</code>, or shell rc files are found.</p>
 
   {#if loading}
     <div class="skeleton-list">
@@ -170,37 +165,24 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    padding: 24px;
-    max-width: min(800px, 92vw);
-  }
-
-  .page-header {
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 20px;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-
-  .page-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-    margin-bottom: 4px;
-  }
-
-  .page-subtitle {
-    font-size: 12px;
-    color: var(--text-dim);
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
     line-height: 1.5;
-    max-width: 560px;
+    color: var(--text-dim);
   }
-
-  .page-subtitle code {
+  .section-intro :global(code) {
     font-family: var(--font-mono);
     font-size: 11px;
     background: var(--surface-2);
@@ -298,15 +280,6 @@
   .btn:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-
-  .btn-primary {
-    background: color-mix(in srgb, var(--accent) 80%, transparent);
-    color: white;
-    border-color: transparent;
-  }
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent);
   }
 
   .btn-sm {

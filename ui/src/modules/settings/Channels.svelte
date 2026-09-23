@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Channels settings page: per-workspace Slack + Telegram + Webhook integration config.
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -242,17 +244,9 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Channels</h1>
-      <div class="sub">
-        Configure Slack, Telegram and inbound Webhook integrations for this workspace.
-        Tokens and webhook keys are stored in the macOS Keychain.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Channels" subtitle="Configure Slack, Telegram and inbound Webhook integrations for this workspace. Tokens and webhook keys are stored in the macOS Keychain." />
+  <PageBody width="readable">
 
   {#if !wsId}
     <!-- No workspace selected -->
@@ -329,6 +323,7 @@
       {@render channelCard('webhook', webhook, 'globe', 'Webhook')}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <!-- Edit modal -->
@@ -515,6 +510,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .channel-list {
     display: flex;
     flex-direction: column;

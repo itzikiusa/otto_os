@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Insights: opt-in toggles for scheduled HTML insight reports.
   // All three are OFF by default. Runs are catch-up — if the app was closed at
   // the scheduled time, the report is generated the next time the app is open,
@@ -89,18 +91,10 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Insights</h1>
-      <div class="sub">
-        Scheduled HTML insight reports about your Otto activity. These are
-        <strong>opt-in</strong> and <strong>off by default</strong> — turn on only the cadences you
-        want. Runs are <strong>catch-up</strong>: if the app was closed at the scheduled time, the
-        report is generated the next time the app is open, so a scheduled report is never missed.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Insights" subtitle="Scheduled HTML insight reports about your Otto activity." />
+  <PageBody width="readable">
+  <p class="section-intro">These are <strong>opt-in</strong> and <strong>off by default</strong> — turn on only the cadences you want. Runs are <strong>catch-up</strong>: if the app was closed at the scheduled time, the report is generated the next time the app is open, so a scheduled report is never missed.</p>
 
   {#if loading && !cfg}
     <Skeleton rows={3} height={64} />
@@ -177,9 +171,30 @@
       can also run a report on demand.
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
   .toggles {
     display: flex;
     flex-direction: column;

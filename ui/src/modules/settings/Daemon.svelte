@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
   import { api } from '../../lib/api/client';
   import { router } from '../../lib/router.svelte';
@@ -82,13 +84,9 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Daemon</h1>
-      <div class="sub">ottod {auth.meta?.version ?? ''} · API v{auth.meta?.api_version ?? 1}</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Daemon" subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`} />
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={3} height={40} />
@@ -163,9 +161,17 @@
       <button class="btn" onclick={() => router.go('settings/logs')}>Open log viewer</button>
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 520px;

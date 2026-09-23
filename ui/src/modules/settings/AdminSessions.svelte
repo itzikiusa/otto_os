@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Admin active-sessions overview: list every session daemon-wide; terminate
   // (kill the PTY, keep the row) or remove (delete the row + history), one at a
   // time or in bulk. "Remove all exited" prunes the background/ephemeral
@@ -136,24 +138,19 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Sessions</h1>
-      <div class="sub">
-        All sessions across all users. <strong>Terminate</strong> keeps the row; <strong>Remove</strong>
-        deletes it (and its history).
-      </div>
-    </div>
-    <div class="header-actions">
+<div class="settings-section">
+  <PageHeader title="Sessions" subtitle="All sessions across all users.">
+    {#snippet actions()}
       {#if exitedCount > 0}
         <button class="btn small" onclick={removeExited} disabled={bulkBusy || loading}>
           Remove all exited ({exitedCount})
         </button>
       {/if}
       <button class="btn" onclick={load} disabled={loading || bulkBusy}>Refresh</button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
+  <p class="section-intro"><strong>Terminate</strong> keeps the row; <strong>Remove</strong> deletes it (and its history).</p>
 
   {#if selected.size > 0}
     <div class="bulk-bar">
@@ -230,19 +227,34 @@
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
   .empty {
     padding: 24px 0;
     text-align: center;
     font-size: 13px;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
 
   .bulk-bar {

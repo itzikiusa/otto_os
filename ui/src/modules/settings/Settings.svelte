@@ -85,6 +85,7 @@
         <Icon name="x" size={14} />
       </button>
     </div>
+    <div class="settings-nav-list">
     {#each items as it (it.id)}
       <button
         class="settings-nav-item"
@@ -97,6 +98,7 @@
         {it.label}
       </button>
     {/each}
+    </div>
   </nav>
 
   <div class="settings-body">
@@ -162,26 +164,40 @@
   .settings {
     display: flex;
     height: 100%;
+    min-height: 0;
   }
   .settings-nav {
     width: 180px;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
-    padding: 16px 10px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    min-height: 0;
   }
+  /* Same 46px bar + bottom border as the section's PageHeader, so the two
+     read as one toolbar row across the split. */
   .settings-nav-title {
+    height: 46px;
+    flex-shrink: 0;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 11px;
+    padding: 0 10px 0 18px;
+    border-bottom: 1px solid var(--border);
+    font-size: 15px;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-    padding: 0 8px 8px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+  .settings-nav-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px 10px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
   .settings-close {
     display: inline-flex;
@@ -219,10 +235,14 @@
     color: var(--accent);
     font-weight: 500;
   }
+  /* Each section owns its chrome (PageHeader) and scroll (PageBody). */
   .settings-body {
     flex: 1;
     min-width: 0;
-    overflow-y: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   @media (max-width: 640px) {
@@ -233,6 +253,8 @@
       width: 100%;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
+    }
+    .settings-nav-list {
       flex-direction: row;
       flex-wrap: wrap;
       gap: 4px;

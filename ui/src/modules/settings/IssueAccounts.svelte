@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Jira / issue-tracking accounts settings page.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -153,14 +155,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Jira Accounts</h1>
-      <div class="sub">Connect Jira to attach issues to sessions and track work in progress.</div>
-    </div>
-    <button class="btn primary" onclick={openAdd}>Add Account</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Jira Accounts" subtitle="Connect Jira to attach issues to sessions and track work in progress.">
+    {#snippet actions()}
+      <button class="btn primary" onclick={openAdd}>Add Account</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={2} height={48} />
@@ -211,6 +212,7 @@
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 {#if addOpen}
@@ -291,6 +293,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .acct-list {
     display: flex;
     flex-direction: column;

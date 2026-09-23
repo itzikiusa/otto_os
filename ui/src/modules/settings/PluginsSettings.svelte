@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Runtime custom-plugins management (root). Install from a local path or git
   // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
   // users is granted per-plugin in Settings → Users.
@@ -78,10 +80,10 @@
   }
 </script>
 
-<div class="page">
-  <h1>Plugins</h1>
+<div class="settings-section">
+  <PageHeader title="Plugins" subtitle="Custom plugins are external sidecar processes installed at runtime (no app rebuild)." />
+  <PageBody width="readable">
   <p class="lead">
-    Custom plugins are external sidecar processes installed at runtime (no app rebuild).
     Install from a local folder or a git URL, then enable to run it. Grant non-root users
     access to a plugin in <strong>Settings → Users</strong>.
   </p>
@@ -130,6 +132,7 @@
       </tbody>
     </table>
   {/if}
+  </PageBody>
 </div>
 
 {#if pickerOpen}
@@ -145,18 +148,18 @@
 {/if}
 
 <style>
-  .page {
-    padding: 20px 24px;
-    max-width: 900px;
-  }
-  h1 {
-    font-size: 20px;
-    margin: 0 0 6px;
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .lead {
     color: var(--text-dim);
-    font-size: 13px;
-    margin: 0 0 16px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 0 0 14px;
   }
   .install {
     display: flex;

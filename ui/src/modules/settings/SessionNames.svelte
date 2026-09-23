@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Session name themes: pick the theme new agent sessions are auto-named from
   // (e.g. "Ronaldo", "Messi") and manage your own custom name lists (family
   // names, …). Per-user; backed by /name-themes.
@@ -93,17 +95,10 @@
   const customs = $derived((resp?.themes ?? []).filter((t) => t.kind === 'custom'));
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Session Names</h1>
-      <div class="sub">
-        New agent sessions are auto-named from your active theme (e.g.
-        <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open
-        sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Session Names" subtitle="New agent sessions are auto-named from your active theme." />
+  <PageBody width="readable">
+  <p class="section-intro">New agent sessions are auto-named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</p>
 
   {#if loading}
     <div class="card pad dim">Loading…</div>
@@ -199,19 +194,34 @@
       </div>
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 640px;
     margin-bottom: 8px;
-  }
-  .sub code {
-    background: var(--surface-2);
-    border-radius: 4px;
-    padding: 0 4px;
-    font-size: 11px;
   }
   .theme-grid {
     display: grid;

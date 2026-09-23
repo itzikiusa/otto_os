@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
   // session provider. Stored in the `providers` settings key; the daemon
   // reloads its registry live on save.
@@ -353,23 +355,17 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div class="row between">
-      <div>
-        <h2>Providers</h2>
-        <p class="dim">
-          Agent CLIs Otto can spawn as sessions. Built-ins are always available;
-          add any other CLI (opencode, kilo, …) below. <code>{'{sid}'}</code> and
-          <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the
-          model flag template.
-        </p>
-      </div>
+<div class="settings-section">
+  <PageHeader title="Providers" subtitle="Agent CLIs Otto can spawn as sessions.">
+    {#snippet actions()}
       <button class="btn primary" onclick={updateAllCLIs} disabled={updating || loading}>
         {updating ? 'Updating…' : 'Update all CLIs'}
       </button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
+  <div class="providers-body">
+  <p class="section-intro">Built-ins are always available; add any other CLI (opencode, kilo, …) below. <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag template.</p>
 
   {#if loading}
     <Skeleton rows={4} />
@@ -616,19 +612,38 @@
       </div>
     {/if}
   {/if}
+  </div>
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    padding: 24px 28px;
-    max-width: min(640px, 92vw);
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .providers-body {
     display: flex;
     flex-direction: column;
     gap: 18px;
   }
-  .page-header h2 {
-    margin: 0 0 4px;
-    font-size: 17px;
+  .providers-body > .section-intro {
+    margin-bottom: 0;
   }
   .dim {
     color: var(--text-dim);
