@@ -835,11 +835,29 @@ impl ProductService {
 
         // 5. Create or update the Confluence page.
         let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+        // A REGENERATED run has no page of its own yet, but the story already
+        // has its "Test Cases — …" page from an earlier run: creating another
+        // page with that title failed with Confluence's duplicate-title 400.
+        // Update the story's page instead (falling back to a create only when
+        // that page no longer exists / can't be read).
+        let story_page = match (&run.confluence_page_id, &story.confluence_tests_page_id) {
+            (None, Some(pid)) => conf_client.get_page(pid).await.ok(),
+            _ => None,
+        };
         let page = if let Some(ref existing_pid) = run.confluence_page_id {
             // Update existing page.
             let existing_page = conf_client.get_page(existing_pid).await?;
             conf_client
                 .update_page(existing_pid, &page_title, &storage, existing_page.version)
+                .await?
+        } else if let Some(existing_page) = story_page {
+            conf_client
+                .update_page(
+                    &existing_page.id,
+                    &page_title,
+                    &storage,
+                    existing_page.version,
+                )
                 .await?
         } else {
             // Create a new page.
