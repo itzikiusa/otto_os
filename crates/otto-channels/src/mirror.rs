@@ -169,6 +169,11 @@ impl Mirror {
         );
         drop(guard);
 
+        // Transcript lines older than this attach belong to earlier turns — a
+        // tailer re-attached to a live session's existing transcript must not
+        // replay (and re-post) them. The bridge attaches BEFORE it submits the
+        // turn's input, so every line of this turn is stamped at or after it.
+        let since = chrono::Utc::now();
         let mirror = Arc::clone(self);
         tokio::spawn(async move {
             mirror
@@ -178,6 +183,7 @@ impl Mirror {
                     chat,
                     thread,
                     agent_reply,
+                    since,
                     cancel,
                     new_turn,
                     typing_active,
@@ -204,6 +210,7 @@ impl Mirror {
         chat: String,
         thread: Option<String>,
         agent_reply: bool,
+        since: chrono::DateTime<chrono::Utc>,
         cancel: Arc<AtomicBool>,
         new_turn: Arc<AtomicBool>,
         typing_active: Arc<AtomicBool>,
@@ -231,6 +238,7 @@ impl Mirror {
         tokio::spawn(async move {
             transcript::tail(
                 path,
+                Some(since),
                 move |evt| {
                     let _ = tx.send(evt);
                 },
@@ -442,8 +450,11 @@ impl Mirror {
             }
         }
 
-        // Tailer winding down — stop the typing task.
+        // Tailer winding down — stop the typing task, and the transcript poller
+        // (it only exits on `cancel`; a liveness-probe exit used to leave it
+        // polling forever, one leaked poller per re-attach).
         typing_stop.store(true, Ordering::Relaxed);
+        cancel.store(true, Ordering::Relaxed);
 
         self.sessions.lock().await.remove(&session_id);
         debug!(session = %session_id, "mirror: tailer finished");

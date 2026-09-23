@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// An event emitted by the tailer.
@@ -33,14 +34,33 @@ pub enum TranscriptEvent {
 /// Tail `path`, emitting events to `on_event` until `cancel` is set to `true`.
 ///
 /// Polls every 300 ms from a saved byte offset; lines that do not match the
-/// expected shapes are silently skipped.
+/// expected shapes are silently skipped. Only COMPLETE lines are consumed: a
+/// line claude is still writing (no trailing `\n` yet) is left for the next
+/// poll instead of being parsed half-written and lost for good.
+///
+/// `since` guards against replaying history: a tailer (re)attached to an
+/// existing transcript — after a daemon restart, a liveness-probe stop, or a
+/// map-miss recovery — would otherwise re-read it from byte 0 and re-emit
+/// every earlier turn's `Final`, re-posting old answers into the thread. Lines
+/// that already existed when the tailer started are emitted only when their
+/// `timestamp` is at or after `since` (the moment this turn was attached);
+/// lines appended afterwards are always emitted. `None` replays everything.
 pub async fn tail(
     path: PathBuf,
+    since: Option<DateTime<Utc>>,
     mut on_event: impl FnMut(TranscriptEvent),
     cancel: Arc<AtomicBool>,
 ) {
     let mut offset: u64 = 0;
     let poll = Duration::from_millis(300);
+    // Everything before this byte offset predates the tailer.
+    let history_end: u64 = match since {
+        Some(_) => tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0),
+        None => 0,
+    };
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -50,12 +70,12 @@ pub async fn tail(
         // Try to read any new bytes appended since the last poll.
         if let Ok(mut f) = tokio::fs::File::open(&path).await {
             if f.seek(std::io::SeekFrom::Start(offset)).await.is_ok() {
-                let mut buf = String::new();
-                if f.read_to_string(&mut buf).await.is_ok() && !buf.is_empty() {
-                    offset += buf.len() as u64;
-                    for line in buf.lines() {
-                        let line = line.trim();
-                        if line.is_empty() {
+                let mut buf: Vec<u8> = Vec::new();
+                if f.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
+                    let (consumed, lines) = complete_lines(&buf, offset);
+                    offset += consumed;
+                    for (line_start, line) in lines {
+                        if line_start < history_end && !line_at_or_after(line, since) {
                             continue;
                         }
                         if let Some(evt) = parse_line(line) {
@@ -68,6 +88,44 @@ pub async fn tail(
 
         tokio::time::sleep(poll).await;
     }
+}
+
+/// Split `buf` (bytes read from file offset `start`) into its complete,
+/// non-empty lines. Returns the number of bytes consumed (through the last
+/// `\n`; a trailing partial line is NOT consumed) and each line with the file
+/// offset it starts at. Invalid UTF-8 lines are skipped (their bytes still
+/// count as consumed).
+fn complete_lines(buf: &[u8], start: u64) -> (u64, Vec<(u64, &str)>) {
+    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+        return (0, Vec::new());
+    };
+    let mut out = Vec::new();
+    let mut pos = start;
+    for raw in buf[..last_nl].split(|&b| b == b'\n') {
+        let line_start = pos;
+        pos += raw.len() as u64 + 1;
+        if let Ok(line) = std::str::from_utf8(raw) {
+            let line = line.trim();
+            if !line.is_empty() {
+                out.push((line_start, line));
+            }
+        }
+    }
+    ((last_nl + 1) as u64, out)
+}
+
+/// True when the JSONL `line`'s `timestamp` is at or after `since` (or there
+/// is no cutoff). A line without a parseable timestamp counts as history.
+fn line_at_or_after(line: &str, since: Option<DateTime<Utc>>) -> bool {
+    let Some(since) = since else { return true };
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        })
+        .is_some_and(|ts| ts.with_timezone(&Utc) >= since)
 }
 
 /// Parse one JSONL line into a `TranscriptEvent`, if it matches. Reads the
@@ -433,6 +491,104 @@ mod tests {
                 code: None,
             }
         );
+    }
+
+    #[test]
+    fn complete_lines_leaves_a_partial_trailing_line_unconsumed() {
+        let buf = b"{\"a\":1}\n\n{\"b\":2}\n{\"c\":";
+        let (consumed, lines) = complete_lines(buf, 100);
+        // Consumed through the last newline only; `{"c":` waits for the next poll.
+        assert_eq!(consumed, 17);
+        assert_eq!(lines, vec![(100, "{\"a\":1}"), (109, "{\"b\":2}")]);
+        // No newline at all → nothing consumed.
+        assert_eq!(complete_lines(b"{\"half", 0), (0, Vec::new()));
+    }
+
+    #[test]
+    fn line_at_or_after_compares_the_jsonl_timestamp() {
+        let since = DateTime::parse_from_rfc3339("2026-09-07T10:59:22Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let old = r#"{"timestamp":"2026-09-07T10:51:00.123Z","message":{}}"#;
+        let new = r#"{"timestamp":"2026-09-07T10:59:25.000Z","message":{}}"#;
+        let none = r#"{"message":{}}"#;
+        assert!(!line_at_or_after(old, Some(since)));
+        assert!(line_at_or_after(new, Some(since)));
+        assert!(
+            !line_at_or_after(none, Some(since)),
+            "no timestamp = history"
+        );
+        assert!(line_at_or_after(old, None), "no cutoff replays everything");
+    }
+
+    /// A re-attached tailer must not re-post earlier turns' answers (CH-1),
+    /// and must pick up a line that was half-written on the previous poll.
+    #[tokio::test]
+    async fn reattached_tail_skips_history_and_waits_for_whole_lines() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "otto-tail-test-{}-{}.jsonl",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let final_line = |ts: &str, text: &str| {
+            json!({
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "stop_reason": "end_turn",
+                    "content": [{ "type": "text", "text": text }],
+                }
+            })
+            .to_string()
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", final_line("2026-01-01T00:00:00Z", "old answer")),
+        )
+        .unwrap();
+
+        let since = chrono::Utc::now();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(tail(
+            path.clone(),
+            Some(since),
+            move |e| {
+                let _ = tx.send(e);
+            },
+            Arc::clone(&cancel),
+        ));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Write the new turn's final in two halves across a poll.
+        let new = final_line(&chrono::Utc::now().to_rfc3339(), "new answer");
+        let (a, b) = new.split_at(new.len() / 2);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(a.as_bytes()).unwrap();
+        f.flush().unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        f.write_all(b.as_bytes()).unwrap();
+        f.write_all(b"\n").unwrap();
+        f.flush().unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("new final emitted")
+            .expect("channel open");
+        assert_eq!(
+            got,
+            TranscriptEvent::Final {
+                text: "new answer".into()
+            }
+        );
+        cancel.store(true, Ordering::Relaxed);
+        let _ = task.await;
+        assert!(rx.try_recv().is_err(), "the old answer was never replayed");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
