@@ -1431,6 +1431,43 @@ fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
     false
 }
 
+/// True when a user SQL statement can leave state on its SESSION — a default
+/// database or `search_path`, session variables, an open transaction, locks,
+/// temporary tables, prepared statements, a changed role. The MySQL and
+/// PostgreSQL drivers run on POOLED connections, so a session that ran such a
+/// statement is closed instead of being returned to the pool, where the next
+/// (unrelated) request — another tab, a widget, an agent — would inherit it.
+/// Conservative: routines (`CALL`, `DO`) may do any of these.
+pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
+    let kw = sql_first_keyword(statement);
+    if matches!(
+        kw.as_str(),
+        "SET"
+            | "USE"
+            | "BEGIN"
+            | "START"
+            | "LOCK"
+            | "UNLOCK"
+            | "XA"
+            | "SAVEPOINT"
+            | "PREPARE"
+            | "HANDLER"
+            | "DECLARE"
+            | "CALL"
+            | "DO"
+            | "LISTEN"
+            | "DISCARD"
+            | "RESET"
+    ) {
+        return true;
+    }
+    let upper = statement.to_ascii_uppercase();
+    (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
+        || upper.contains("GET_LOCK(")
+        || upper.contains("PG_ADVISORY_LOCK")
+        || upper.contains("SET_CONFIG(")
+}
+
 /// True when a single SQL statement's first keyword is a known row-returning
 /// read (mirrors the per-driver `is_read_statement`, kept conservative).
 ///

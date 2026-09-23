@@ -577,7 +577,7 @@ impl Driver for MysqlDriver {
             .and_then(Value::as_bool)
             == Some(true)
         {
-            return governed_read(&self.pool(cfg).await?, req, token).await;
+            return governed_read(&self.pool(cfg).await?, cfg, req, token).await;
         }
         let text = req.statement.trim();
         if text.is_empty() {
@@ -586,10 +586,12 @@ impl Driver for MysqlDriver {
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         let pool = self.pool(cfg).await?;
 
-        // The active database (if the user selected one) scopes unqualified
-        // table names: we `USE` it on the connection before running the query.
+        // The active database (if the user selected one, else the profile
+        // default) scopes unqualified table names: we `USE` it on the
+        // connection before running the query — ALWAYS explicitly, since a
+        // pooled session may still be in another request's database.
         let scope_db = req.scope_database();
-        let active_db = scope_db.as_deref();
+        let active_db = effective_db(scope_db.as_deref(), cfg);
 
         // Split with MySQL's lexical rules (backticks, `#` comments, backslash
         // escapes). A true batch (>1 statement) runs every statement in order on
@@ -675,17 +677,12 @@ impl Driver for MysqlDriver {
             return Err(types::invalid("empty statement"));
         }
         let pool = self.pool(cfg).await?;
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let node = node.map(str::trim).filter(|s| !s.is_empty());
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
             .map_err(types::upstream)?;
-        if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            (&mut *conn)
-                .execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
-        }
         let row = sqlx::query(&format!("EXPLAIN FORMAT=JSON {stmt}"))
             .fetch_one(&mut *conn)
             .await
@@ -754,17 +751,12 @@ impl Driver for MysqlDriver {
         }
 
         let pool = self.pool(cfg).await?;
-        let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let node = node.map(str::trim).filter(|s| !s.is_empty());
+        let mut conn = acquire_scoped(&pool, effective_db(node, cfg)).await?;
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
             .map_err(types::upstream)?;
-        if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
-            (&mut *conn)
-                .execute(sqlx::raw_sql(&use_db_sql(db)))
-                .await
-                .map_err(types::upstream)?;
-        }
 
         // A real cursor over the wire: each `try_next().await` fetches the next
         // row; nothing buffers the whole result.
@@ -1694,6 +1686,50 @@ async fn capture_conn_id(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, tok
     }
 }
 
+/// The database a request runs in: the selected one, else the profile default
+/// (what a FRESH session starts in — `build_pool` connects with it).
+fn effective_db<'a>(active_db: Option<&'a str>, cfg: &'a ResolvedConfig) -> Option<&'a str> {
+    active_db.or_else(|| cfg.database.as_deref().filter(|s| !s.is_empty()))
+}
+
+/// Acquire a pooled session and set its default database EXPLICITLY for this
+/// request. Pooled sessions keep whatever an earlier request left — its `USE`
+/// (ours, or one the user typed) — so a request without a selected database
+/// used to run in whichever database the connection it happened to get had
+/// last been switched to. Every user-SQL path acquires through here:
+///
+/// - `db` (the selected database, else the profile default) → `USE` it;
+/// - neither → the session must have NO default database, like a fresh one.
+///   MySQL cannot unselect one, so a session still carrying one is closed and
+///   another taken (bounded by the pool size: each pass retires one).
+async fn acquire_scoped(
+    pool: &sqlx::MySqlPool,
+    db: Option<&str>,
+) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>> {
+    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    if let Some(db) = db {
+        (&mut *conn)
+            .execute(sqlx::raw_sql(&use_db_sql(db)))
+            .await
+            .map_err(types::upstream)?;
+        return Ok(conn);
+    }
+    for _ in 0..=POOL_MAX_CONNECTIONS {
+        let current: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(types::upstream)?;
+        if current.is_none() {
+            return Ok(conn);
+        }
+        let _ = conn.close().await;
+        conn = pool.acquire().await.map_err(types::upstream)?;
+    }
+    Err(types::upstream(
+        "mysql: could not obtain a session without a default database",
+    ))
+}
+
 async fn run_read(
     pool: &sqlx::MySqlPool,
     statement: &str,
@@ -1701,18 +1737,16 @@ async fn run_read(
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    // Acquire a single connection so the optional `USE <db>` and the statement
-    // share the same session — the default schema must apply to the query.
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    // Acquire a single connection so the `USE <db>` and the statement share
+    // the same session — the default schema must apply to the query.
+    let mut conn = acquire_scoped(pool, active_db).await?;
     // Capture this connection's backend id so a concurrent cancel can
     // `KILL QUERY <id>` it. Best-effort — a query with no captured id simply
     // can't be server-cancelled.
     capture_conn_id(&mut conn, token).await;
-    if let Some(db) = active_db {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
-            .await
-            .map_err(types::upstream)?;
+    // Reads leave no session state, except the explicit lock functions.
+    if types::sql_leaves_session_state(statement) {
+        conn.close_on_drop();
     }
     exec_read_conn(&mut conn, statement, max_rows).await
 }
@@ -1724,13 +1758,12 @@ async fn run_write(
     token: &CancelToken,
 ) -> Result<QueryResult> {
     // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let mut conn = acquire_scoped(pool, active_db).await?;
     capture_conn_id(&mut conn, token).await;
-    if let Some(db) = active_db {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
-            .await
-            .map_err(types::upstream)?;
+    // A `SET`/`BEGIN`/`LOCK`/… would outlive this request on a pooled session:
+    // close it afterwards instead of returning it to the pool.
+    if types::sql_leaves_session_state(statement) {
+        conn.close_on_drop();
     }
     exec_write_conn(&mut conn, statement).await
 }
@@ -1750,13 +1783,13 @@ async fn run_batch(
     active_db: Option<&str>,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let mut conn = acquire_scoped(pool, active_db).await?;
     capture_conn_id(&mut conn, token).await;
-    if let Some(db) = active_db {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(db)))
-            .await
-            .map_err(types::upstream)?;
+    if spans
+        .iter()
+        .any(|span| types::sql_leaves_session_state(&span.text))
+    {
+        conn.close_on_drop();
     }
     let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -2235,17 +2268,13 @@ const FUNCTIONS: &[(&str, &str)] = &[
 /// expression. RAII rollback also cleans up cancelled or failed reads.
 async fn governed_read(
     pool: &sqlx::MySqlPool,
+    cfg: &ResolvedConfig,
     req: &QueryRequest,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let mut conn = pool.acquire().await.map_err(types::upstream)?;
+    let scope_db = req.scope_database();
+    let mut conn = acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg)).await?;
     capture_conn_id(&mut conn, token).await;
-    if let Some(db) = req.scope_database() {
-        (&mut *conn)
-            .execute(sqlx::raw_sql(&use_db_sql(&db)))
-            .await
-            .map_err(types::upstream)?;
-    }
     let mut tx = conn
         .begin_with("START TRANSACTION READ ONLY")
         .await
@@ -2388,6 +2417,54 @@ mod tests {
 mod cache_isolation_tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A request without a selected database runs in the PROFILE default —
+    /// set explicitly with `USE`, never whatever a pooled session was last
+    /// switched to — and a selection always wins.
+    #[test]
+    fn effective_db_is_selection_then_profile_default() {
+        let mut cfg = ResolvedConfig {
+            lifecycle: None,
+            engine: Engine::Mysql,
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: None,
+            password: None,
+            database: Some("shop".into()),
+            tls: Default::default(),
+            params: serde_json::json!({}),
+        };
+        assert_eq!(effective_db(Some("analytics"), &cfg), Some("analytics"));
+        assert_eq!(effective_db(None, &cfg), Some("shop"));
+        cfg.database = Some(String::new());
+        assert_eq!(effective_db(None, &cfg), None);
+        cfg.database = None;
+        assert_eq!(effective_db(None, &cfg), None);
+    }
+
+    #[test]
+    fn session_changing_statements_retire_the_pooled_session() {
+        for sql in [
+            "USE other",
+            "SET autocommit = 0",
+            "SET sql_safe_updates = 0",
+            "START TRANSACTION",
+            "BEGIN",
+            "LOCK TABLES t WRITE",
+            "CREATE TEMPORARY TABLE t (id INT)",
+            "SELECT GET_LOCK('x', 10)",
+            "CALL refresh_stats()",
+        ] {
+            assert!(types::sql_leaves_session_state(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM t",
+            "DELETE FROM t WHERE id = 1",
+            "SHOW TABLES",
+        ] {
+            assert!(!types::sql_leaves_session_state(sql), "{sql}");
+        }
+    }
 
     #[tokio::test]
     async fn cache_warm_mysql_pool_does_not_wait_for_other_handshake() {
