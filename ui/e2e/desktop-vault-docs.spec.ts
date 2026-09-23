@@ -277,7 +277,7 @@ test('ui: OKF panel validates and reports', async ({ page }) => {
   await expect(page.locator('.okf-chip')).toBeVisible();
   await page.locator('.right .hdr', { hasText: 'OKF' }).click();
   await page.locator('.okf-actions .mini', { hasText: 'Validate' }).click();
-  await expect(page.locator('.right')).toContainText('OKF v0.1 conformant');
+  await expect(page.locator('.right')).toContainText('✓ OKF conformant (');
   // Broken-link warning surfaces as W2.
   await expect(page.locator('.finding.warn .t', { hasText: 'W2' }).first()).toBeVisible();
 });
