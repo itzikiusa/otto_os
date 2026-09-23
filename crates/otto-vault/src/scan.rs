@@ -61,6 +61,13 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
             if name.starts_with('.') {
                 continue;
             }
+            // `DirEntry::metadata` is an lstat on unix: a symlink (or a FIFO,
+            // socket, …) is not a regular file. Symlinked notes are never
+            // readable through the NOFOLLOW preparation path, so listing them
+            // failed every scan forever (and blocked all pruning).
+            if !meta.is_file() {
+                continue;
+            }
             let Ok(rel) = path.strip_prefix(root) else {
                 continue;
             };
@@ -91,6 +98,42 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
         notes,
         files,
     })
+}
+
+/// True only when `rel` names a regular file whose every path component
+/// matches a directory entry byte-for-byte. `symlink_metadata` alone is not
+/// enough: on case-insensitive APFS `note.md` still stats after a rename to
+/// `Note.md`, and a symlink stats although the walk skips it — both left a
+/// removed index row "present" forever. Blocking — call from `spawn_blocking`.
+pub fn exact_regular_file(root: &Path, rel: &str) -> std::io::Result<bool> {
+    let mut dir = root.to_path_buf();
+    let mut parts = rel.split('/').peekable();
+    while let Some(part) = parts.next() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let mut found = None;
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name().as_os_str() == std::ffi::OsStr::new(part) {
+                found = Some(entry.file_type()?);
+                break;
+            }
+        }
+        let Some(kind) = found else {
+            return Ok(false);
+        };
+        if parts.peek().is_none() {
+            return Ok(kind.is_file());
+        }
+        if !kind.is_dir() {
+            return Ok(false);
+        }
+        dir.push(part);
+    }
+    Ok(false)
 }
 
 /// Diff a walk against the indexed signatures → (added_or_changed, removed).
@@ -141,6 +184,39 @@ mod tests {
             w.files.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
             vec!["sub/pic.png"]
         );
+    }
+
+    #[test]
+    fn walk_skips_symlinks() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        std::fs::create_dir_all(r.join("docs")).unwrap();
+        std::fs::write(r.join("README.md"), "x").unwrap();
+        std::os::unix::fs::symlink("../README.md", r.join("docs/README.md")).unwrap();
+        std::os::unix::fs::symlink("README.md", r.join("link.png")).unwrap();
+        let w = walk(r).unwrap();
+        assert!(w.complete);
+        assert_eq!(
+            w.notes.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
+            vec!["README.md"]
+        );
+        assert!(w.files.is_empty());
+    }
+
+    #[test]
+    fn exact_regular_file_matches_bytes_not_case_or_symlinks() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        std::fs::create_dir_all(r.join("Docs")).unwrap();
+        std::fs::write(r.join("Docs/Note.md"), "x").unwrap();
+        std::os::unix::fs::symlink("Docs/Note.md", r.join("link.md")).unwrap();
+        assert!(exact_regular_file(r, "Docs/Note.md").unwrap());
+        // On case-insensitive APFS these stat fine, yet are not the entry.
+        assert!(!exact_regular_file(r, "Docs/note.md").unwrap());
+        assert!(!exact_regular_file(r, "docs/Note.md").unwrap());
+        assert!(!exact_regular_file(r, "link.md").unwrap());
+        assert!(!exact_regular_file(r, "Docs").unwrap());
+        assert!(!exact_regular_file(r, "missing/x.md").unwrap());
     }
 
     #[test]

@@ -31,6 +31,7 @@
   let loading = $state(true);
   let error = $state('');
   let booted = false;
+  let seq = 0;
 
   async function load(): Promise<boolean> {
     if (!booted) {
@@ -42,15 +43,21 @@
       loading = false;
       return true;
     }
+    // Request token: a window change restarts the poller while the old
+    // overview fetch may still be in flight — only the newest may land.
+    const mine = ++seq;
     try {
-      rows = await k8sApi.monitorOverview(win);
+      const next = await k8sApi.monitorOverview(win);
+      if (mine !== seq) return true;
+      rows = next;
       error = '';
       return true;
     } catch (e) {
+      if (mine !== seq) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 

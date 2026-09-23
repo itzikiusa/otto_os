@@ -23,6 +23,11 @@
   let sandboxEnabled = $state(false);
   let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
   let savingSandbox = $state(false);
+  // Latest full settings object (the PUT response). Saves send ONLY the keys
+  // they change: PUT /settings upserts exactly the keys in the body, so
+  // spreading this page-load snapshot reverted keys written since (auto-update
+  // last-run, MCP/PR-review settings, another window) and wrote false
+  // skip-permissions / network-listener audit entries on every save.
   let allSettings: Record<string, unknown> = $state({});
 
   $effect(() => {
@@ -51,7 +56,6 @@
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         network_listener: { enabled, port },
       });
       toasts.success('Daemon settings saved', enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
@@ -67,7 +71,6 @@
     savingSandbox = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         process_sandbox: { enabled: sandboxEnabled, network: sandboxNetwork },
       });
       toasts.success(

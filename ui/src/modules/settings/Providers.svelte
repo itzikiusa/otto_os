@@ -45,6 +45,11 @@
   let saving = $state(false);
   let updating = $state(false);
   let custom: Record<string, ProviderDef> = $state({});
+  // Latest full settings object (the PUT response). Saves send ONLY the keys
+  // they change: PUT /settings upserts exactly the keys in the body, so
+  // spreading this page-load snapshot reverted keys written since (auto-update
+  // last-run, MCP/PR-review settings, another window) and wrote false
+  // skip-permissions / network-listener audit entries on every save.
   let allSettings: Record<string, unknown> = $state({});
   let defaultProvider = $state('');
   /** Model for the PR / commit DRAFT turns (`pr_draft_model`). Deliberately
@@ -189,7 +194,6 @@
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         providers: next,
       });
       custom = (allSettings['providers'] as Record<string, ProviderDef>) ?? {};
@@ -207,7 +211,6 @@
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         pr_draft_model: draftModel,
       });
       draftModel = (allSettings['pr_draft_model'] as string | undefined) ?? '';
@@ -228,7 +231,6 @@
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         default_provider: defaultProvider,
       });
       defaultProvider = (allSettings['default_provider'] as string | undefined) ?? '';
@@ -254,7 +256,6 @@
     disabled = next;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         disabled_providers: [...next],
       });
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
@@ -283,7 +284,6 @@
     savingAuto = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         cli_auto_update: { ...autoUpdate },
       });
       autoUpdate = {
@@ -302,7 +302,6 @@
     savingSkip = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         agent_skip_permissions: skipPermissions,
       });
       skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;

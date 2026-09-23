@@ -13,6 +13,8 @@
   import ApiPanel from '../modules/api/ApiPanel.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { toasts } from '../lib/toast.svelte';
+  import { onDestroy, untrack } from 'svelte';
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
   // it then always renders the panel body, fills the drawer width (no fixed
@@ -75,29 +77,48 @@
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveState: 'idle' | 'saving' | 'saved' = $state('idle');
 
+  /** Text typed but not yet saved, bound to the workspace it was typed in:
+   *  the debounce used to save whatever workspace was current WHEN IT FIRED,
+   *  so switching within 600 ms wrote B's text back to B and lost A's edit. */
+  let pendingNotes: { wsId: string; text: string } | null = null;
+
   $effect(() => {
     // (re)load notes when workspace changes
     const w = ws.current;
     if (w && notesLoadedFor !== w.id) {
+      untrack(() => void flushNotes());
       notesLoadedFor = w.id;
       notes = typeof w.settings?.notes === 'string' ? (w.settings.notes as string) : '';
       saveState = 'idle';
     }
   });
 
-  function onNotesInput(): void {
+  async function flushNotes(): Promise<void> {
     if (saveTimer) clearTimeout(saveTimer);
-    saveState = 'saving';
-    saveTimer = setTimeout(async () => {
-      try {
-        await ws.saveNotes(notes);
-        saveState = 'saved';
-        setTimeout(() => (saveState = 'idle'), 1500);
-      } catch {
-        saveState = 'idle';
-      }
-    }, 600);
+    saveTimer = null;
+    const p = pendingNotes;
+    pendingNotes = null;
+    if (!p) return;
+    try {
+      await ws.saveNotes(p.text, p.wsId);
+      if (p.wsId !== notesLoadedFor) return;
+      saveState = 'saved';
+      setTimeout(() => (saveState = 'idle'), 1500);
+    } catch (e) {
+      if (p.wsId === notesLoadedFor) saveState = 'idle';
+      toasts.error('Notes not saved', e instanceof Error ? e.message : String(e));
+    }
   }
+
+  function onNotesInput(): void {
+    if (!notesLoadedFor) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    pendingNotes = { wsId: notesLoadedFor, text: notes };
+    saveState = 'saving';
+    saveTimer = setTimeout(() => void flushNotes(), 600);
+  }
+
+  onDestroy(() => void flushNotes());
 </script>
 
 {#if ui.rightOpen || forceOpen}

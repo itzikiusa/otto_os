@@ -117,25 +117,68 @@ pub fn parse_note(content: &str) -> ParsedNote {
     out
 }
 
+/// An open fenced code block: its fence character and run length.
+#[derive(Clone, Copy)]
+struct Fence {
+    ch: u8,
+    len: usize,
+}
+
+/// A fence opener (``` or ~~~, 3+ long, any info string) on a trimmed line.
+fn fence_open(trimmed: &str) -> Option<Fence> {
+    let ch = *trimmed.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let len = trimmed.bytes().take_while(|b| *b == ch).count();
+    (len >= 3).then_some(Fence { ch, len })
+}
+
+/// CommonMark closer: the SAME character, at least as long as the opener,
+/// and nothing after it. A ``` line inside a ```` fence is content.
+fn fence_closes(trimmed: &str, fence: Fence) -> bool {
+    let run = trimmed.bytes().take_while(|b| *b == fence.ch).count();
+    run >= fence.len && trimmed[run..].trim().is_empty()
+}
+
+/// For a backtick run starting at `i`, the byte index just past its matching
+/// closing run (same length), or `None` when unmatched — an unmatched run is
+/// literal text, not the start of a code span.
+fn code_span_end(b: &[u8], i: usize) -> Option<usize> {
+    let run = backtick_run(b, i);
+    let mut j = i + run;
+    while j < b.len() {
+        if b[j] == b'`' {
+            let close = backtick_run(b, j);
+            if close == run {
+                return Some(j + close);
+            }
+            j += close;
+        } else {
+            j += 1;
+        }
+    }
+    None
+}
+
+fn backtick_run(b: &[u8], i: usize) -> usize {
+    b[i..].iter().take_while(|c| **c == b'`').count()
+}
+
 /// Scan the body for headings, links and inline tags, honoring fenced code
 /// blocks and inline code spans.
 fn scan_body(body: &str, out: &mut ParsedNote) {
-    let mut in_fence: Option<char> = None; // Some('`') / Some('~')
+    let mut in_fence: Option<Fence> = None;
     for (line_no, line) in body.lines().enumerate() {
         let trimmed = line.trim_start();
-        // Fence open/close (``` or ~~~, any info string).
-        if let Some(fc) = in_fence {
-            if trimmed.starts_with(&fc.to_string().repeat(3)) {
+        if let Some(fence) = in_fence {
+            if fence_closes(trimmed, fence) {
                 in_fence = None;
             }
             continue;
         }
-        if trimmed.starts_with("```") {
-            in_fence = Some('`');
-            continue;
-        }
-        if trimmed.starts_with("~~~") {
-            in_fence = Some('~');
+        if let Some(fence) = fence_open(trimmed) {
+            in_fence = Some(fence);
             continue;
         }
         // Heading?
@@ -168,16 +211,11 @@ fn parse_heading(line: &str, line_no: u32) -> Option<Heading> {
 fn scan_line(line: &str, _line_no: u32, out: &mut ParsedNote) {
     let b = line.as_bytes();
     let mut i = 0usize;
-    let mut in_code = false;
     while i < b.len() {
         let c = b[i];
         if c == b'`' {
-            in_code = !in_code;
-            i += 1;
-            continue;
-        }
-        if in_code {
-            i += 1;
+            // Skip a whole code span; an unmatched run is literal backticks.
+            i = code_span_end(b, i).unwrap_or(i + backtick_run(b, i));
             continue;
         }
         // %%comment%% — skip to the closing marker (Obsidian comments).
@@ -372,7 +410,7 @@ pub fn rewrite_links(content: &str, mut f: impl FnMut(&str, &str) -> Option<Stri
         out.push_str(y);
         out.push_str("---\n");
     }
-    let mut in_fence: Option<char> = None;
+    let mut in_fence: Option<Fence> = None;
     for line in body.split_inclusive('\n') {
         let (text, nl) = match line.strip_suffix('\n') {
             Some(t) => (t, "\n"),
@@ -380,16 +418,13 @@ pub fn rewrite_links(content: &str, mut f: impl FnMut(&str, &str) -> Option<Stri
         };
         let trimmed = text.trim_start();
         let mut skip_line = false;
-        if let Some(fc) = in_fence {
-            if trimmed.starts_with(&fc.to_string().repeat(3)) {
+        if let Some(fence) = in_fence {
+            if fence_closes(trimmed, fence) {
                 in_fence = None;
             }
             skip_line = true;
-        } else if trimmed.starts_with("```") {
-            in_fence = Some('`');
-            skip_line = true;
-        } else if trimmed.starts_with("~~~") {
-            in_fence = Some('~');
+        } else if let Some(fence) = fence_open(trimmed) {
+            in_fence = Some(fence);
             skip_line = true;
         }
         if skip_line {
@@ -407,19 +442,13 @@ fn rewrite_line(line: &str, f: &mut impl FnMut(&str, &str) -> Option<String>) ->
     let b = line.as_bytes();
     let mut out = String::with_capacity(line.len() + 32);
     let mut i = 0usize;
-    let mut in_code = false;
     while i < b.len() {
         let c = b[i];
         if c == b'`' {
-            in_code = !in_code;
-            out.push('`');
-            i += 1;
-            continue;
-        }
-        if in_code {
-            let ch = line[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
+            // Copy a whole code span verbatim; an unmatched run is literal.
+            let end = code_span_end(b, i).unwrap_or(i + backtick_run(b, i));
+            out.push_str(&line[i..end]);
+            i = end;
             continue;
         }
         if c == b'%' && b.get(i + 1) == Some(&b'%') {
@@ -447,21 +476,20 @@ fn rewrite_line(line: &str, f: &mut impl FnMut(&str, &str) -> Option<String>) ->
                 let chunk = &line[i..i + consumed];
                 if let Some(link) = maybe {
                     if let Some(new_raw) = f("md", &link.raw_target) {
-                        // Rebuild `[text](new)` keeping text + anchor.
+                        // Splice ONLY the path bytes: text, `<…>`, anchor and
+                        // a `"title"` stay exactly as written.
                         let close = chunk[1..].find(']').unwrap() + 1;
-                        let text = &chunk[1..close];
-                        let enc = percent_encode_spaces(&new_raw);
-                        let anchor = link
-                            .anchor
-                            .as_deref()
-                            .map(|a| format!("#{a}"))
-                            .unwrap_or_default();
-                        out.push('[');
-                        out.push_str(text);
-                        out.push_str("](");
+                        let dest_start = close + 2;
+                        let dest = &chunk[dest_start..chunk.len() - 1];
+                        let (start, end, angle) = md_path_span(dest);
+                        let enc = if angle {
+                            new_raw
+                        } else {
+                            percent_encode_spaces(&new_raw)
+                        };
+                        out.push_str(&chunk[..dest_start + start]);
                         out.push_str(&enc);
-                        out.push_str(&anchor);
-                        out.push(')');
+                        out.push_str(&chunk[dest_start + end..]);
                         i += consumed;
                         continue;
                     }
@@ -476,6 +504,30 @@ fn rewrite_line(line: &str, f: &mut impl FnMut(&str, &str) -> Option<String>) ->
         i += ch.len_utf8();
     }
     out
+}
+
+/// Byte span of the path inside a markdown link destination `dest` (the text
+/// between `(` and `)`), mirroring `md_link`'s parse: optional `<…>`, then the
+/// path up to a `#anchor` or a ` "title"`. Returns `(start, end, angle)`.
+fn md_path_span(dest: &str) -> (usize, usize, bool) {
+    let lead = dest.len() - dest.trim_start().len();
+    let angle = dest[lead..].starts_with('<');
+    let start = lead + usize::from(angle);
+    let inner = &dest[start..];
+    let mut end = inner.trim_end().len();
+    if angle {
+        if let Some(p) = inner.find('>') {
+            end = end.min(p);
+        }
+    }
+    if let Some(p) = inner.find(" \"") {
+        end = end.min(p);
+    }
+    if let Some(p) = inner[..end].find('#') {
+        end = p;
+    }
+    let path_len = inner[..end].trim_end().len();
+    (start, start + path_len, angle)
 }
 
 fn rewrite_wikilink_inner(
@@ -671,6 +723,46 @@ mod tests {
         assert!(out.contains("`[[Old Note]]` untouched"), "{out}");
         assert!(out.contains("![[New Note]] embed"), "{out}");
         assert!(out.starts_with("---\ntitle: T\n---\n"), "{out}");
+    }
+
+    #[test]
+    fn rewrite_keeps_titles_angle_brackets_and_long_fences() {
+        let src = "[t](old.md \"Title\") and [a](<old.md>) and [h](old.md#sec \"T\")\n````\n```\n[[old]] and [x](old.md)\n```\n````\nafter `` a ` [[old]] `` and ``[[old]]`` then [[old]]\n";
+        let out = rewrite_links(src, |kind, raw| {
+            let hit = raw == "old" || raw == "old.md";
+            hit.then(|| {
+                if kind == "md" {
+                    "new dir/new.md".into()
+                } else {
+                    "new".into()
+                }
+            })
+        });
+        assert!(
+            out.starts_with(
+                "[t](new%20dir/new.md \"Title\") and [a](<new dir/new.md>) and [h](new%20dir/new.md#sec \"T\")\n"
+            ),
+            "{out}"
+        );
+        // A ``` line inside a ```` fence does not close it.
+        assert!(
+            out.contains("````\n```\n[[old]] and [x](old.md)\n```\n````\n"),
+            "{out}"
+        );
+        // Multi-backtick code spans (with a lone ` inside) are untouched.
+        assert!(
+            out.ends_with("after `` a ` [[old]] `` and ``[[old]]`` then [[new]]\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn extractor_matches_rewriter_code_rules() {
+        let n = parse_note(
+            "````\n```\n[[InFence]]\n```\n````\n`` a ` [[InSpan]] `` [[Real]] and a lone ` [[AlsoReal]]\n",
+        );
+        let targets: Vec<_> = n.links.iter().map(|l| l.raw_target.as_str()).collect();
+        assert_eq!(targets, vec!["Real", "AlsoReal"]);
     }
 
     #[test]

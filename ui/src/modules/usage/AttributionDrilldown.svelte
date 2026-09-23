@@ -28,20 +28,27 @@
   let loading = $state(false);
   let copiedRow: string | null = $state(null);
 
+  // Request token: switching dimension/window while a query is in flight must
+  // not let the older (often slower) response land under the new labels.
+  let seq = 0;
+
   async function load(): Promise<void> {
+    const mine = ++seq;
     loading = true;
     try {
-      rows = await api.get<AttributionRow[]>(
+      const next = await api.get<AttributionRow[]>(
         `/usage/attribution?by=${selectedDim}&days=${days}`,
       );
+      if (mine === seq) rows = next;
     } catch (e) {
+      if (mine !== seq) return;
       toasts.error(
         'Could not load attribution',
         e instanceof Error ? e.message : String(e),
       );
       rows = [];
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 

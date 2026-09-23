@@ -15,6 +15,7 @@ function workspace() {
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15 },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored };

@@ -21,6 +21,7 @@
 const _shareTokens: Map<string, string> = new Map();
 
 import { winKey } from './win';
+import { lsGet, lsSet } from './storage';
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
 // a fresh Tauri window loads with an empty hash, so restoring the saved route
@@ -44,7 +45,7 @@ function restoreLastRoute(): void {
   }
   const h = window.location.hash;
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
-  const saved = localStorage.getItem(winKey(LS_LAST_ROUTE));
+  const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
   if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/')) {
     history.replaceState(null, '', saved);
@@ -54,13 +55,24 @@ function restoreLastRoute(): void {
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
   if (hash.startsWith('#/s/')) return; // share tokens/views are never sticky
-  localStorage.setItem(winKey(LS_LAST_ROUTE), hash);
+  lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
 /** Retrieve the in-memory share token captured for a given session.
  *  Returns null if the URL didn't carry one or the token has been consumed. */
 export function getShareToken(sessionId: string): string | null {
   return _shareTokens.get(sessionId) ?? null;
+}
+
+/** decodeURIComponent that never throws: a malformed `%` escape in a pasted
+ *  or restored hash (`#/vault/100%`) threw from the Router constructor and
+ *  blanked the app at boot. Undecodable segments are kept verbatim. */
+function safeDecode(seg: string): string {
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
 }
 
 class Router {
@@ -89,7 +101,7 @@ class Router {
 
   private parse(): void {
     const raw = window.location.hash.replace(/^#\/?/, '');
-    this.parts = raw === '' ? [] : raw.split('/').map(decodeURIComponent);
+    this.parts = raw === '' ? [] : raw.split('/').map(safeDecode);
 
     // Task 3.1: share route `#/s/<sessionId>/<token>` — capture the token
     // into _shareTokens then strip it from the visible URL + history so it
@@ -105,7 +117,7 @@ class Router {
         history.replaceState(null, '', cleanHash);
         // Re-parse the now-clean URL so this.parts reflects the stripped form.
         const cleanRaw = cleanHash.replace(/^#\/?/, '');
-        this.parts = cleanRaw.split('/').map(decodeURIComponent);
+        this.parts = cleanRaw.split('/').map(safeDecode);
       }
     }
   }
@@ -154,15 +166,22 @@ class Router {
   back(): void {
     if (this.index <= 0) return;
     this.index -= 1;
-    this.navigating = true;
-    window.location.hash = this.stack[this.index];
+    this.moveTo(this.stack[this.index]);
   }
 
   forward(): void {
     if (this.index >= this.stack.length - 1) return;
     this.index += 1;
+    this.moveTo(this.stack[this.index]);
+  }
+
+  /** Internal back/forward. Setting the hash to its CURRENT value fires no
+   *  hashchange, which left `navigating` stuck true and made the next real
+   *  navigation skip its history push — only flag it when a change will fire. */
+  private moveTo(hash: string): void {
+    if (hash === this.currentHash()) return;
     this.navigating = true;
-    window.location.hash = this.stack[this.index];
+    window.location.hash = hash;
   }
 }
 

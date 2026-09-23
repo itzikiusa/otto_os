@@ -143,8 +143,9 @@
   const scanning = $derived(vault.status?.scan_state === 'scanning');
   const scanError = $derived(vault.status?.scan_state.startsWith('error') ?? false);
 
+  // The first load comes from the workspace effect below (it runs on mount
+  // too) — loading here as well fetched every vault request twice.
   onMount(() => {
-    void vault.load();
     vault.startPolling();
     return () => vault.stopPolling();
   });

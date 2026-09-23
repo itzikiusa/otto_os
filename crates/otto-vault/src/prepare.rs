@@ -88,11 +88,17 @@ impl Preparation {
         .map_err(|e| Error::Internal(format!("note preparation: {e}")))?
     }
 
+    /// Scan-side preparation. Unlike `bytes`, this WAITS for admission: the
+    /// scan is sequential and holds no buffer while queued, and failing fast
+    /// here marked the whole scan incomplete whenever interactive reads were
+    /// in flight (every mutation then reported failure after succeeding).
     pub async fn file(&self, path: PathBuf, rel: String) -> Result<PreparedNote> {
-        let admission =
-            self.admission.clone().try_acquire_owned().map_err(|_| {
-                Error::Conflict("Vault indexing is busy; retry the operation".into())
-            })?;
+        let admission = self
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Internal("Vault preparation closed".into()))?;
         let running = self
             .running
             .clone()
