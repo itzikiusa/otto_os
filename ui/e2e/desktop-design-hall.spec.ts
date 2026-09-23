@@ -76,9 +76,22 @@ test('the lobby shows every studio and its menus stay inside the viewport', asyn
   await expect(menu.getByRole('menuitem', { name: 'Frame screen (HTML)' })).toBeVisible();
   await page.keyboard.press('Escape');
 
-  // A planned studio opens an explanation, never a dead click.
-  await page.getByTestId('design-studio-spatial').click();
-  await expect(page.getByTestId('design-studio-note')).toContainText('v3');
+  // A studio still on its classic editor explains what opens today and when
+  // its own studio lands.
+  await page.getByTestId('design-studio-frames').click();
+  await expect(page.getByTestId('design-studio-note')).toContainText('planned for v2');
+  await openDesign(page);
+
+  // A planned studio says when it lands, and its tile is never a dead click.
+  // Spatial Hall (the one planned studio since Site Studio shipped) carries
+  // its roadmap tag and opens the room-layout preview with an explanation —
+  // it never routed to a studio page, so there is no `design-studio-note`.
+  const spatial = page.getByTestId('design-studio-spatial');
+  await expect(spatial.locator('.s-tag')).toHaveText('v3');
+  await expect(spatial.locator('.s-tag')).toHaveAttribute('title', 'Planned for v3');
+  await spatial.click();
+  await expect(page).toHaveURL(/#\/design\/spatial$/);
+  await expect(page.getByTestId('design-spatial').getByRole('note')).toContainText('showcases');
 });
 
 test('create → edit → new version → compare → restore', async ({ page }) => {

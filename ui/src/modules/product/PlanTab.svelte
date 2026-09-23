@@ -333,7 +333,7 @@
   // list so the user picks WHICH swarm (e.g. Platform Team) implements the story.
   let targetSwarmId = $state('');
   $effect(() => {
-    if (ws.currentId && swarm.swarms.length === 0) void swarm.loadSwarms(ws.currentId);
+    if (ws.currentId) void swarm.ensureSwarms(ws.currentId);
   });
 
   // Existing linked swarm project, if this story was already sent (drives the

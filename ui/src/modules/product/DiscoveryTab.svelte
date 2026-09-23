@@ -29,9 +29,7 @@
   // ── Swarms ────────────────────────────────────────────────────────────────
   $effect(() => {
     const wsId = ws.currentId;
-    if (wsId && swarm.swarms.length === 0) {
-      void swarm.loadSwarms(wsId);
-    }
+    if (wsId) void swarm.ensureSwarms(wsId);
   });
 
   // ── Load on mount / story change ──────────────────────────────────────────

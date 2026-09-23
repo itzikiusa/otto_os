@@ -1,6 +1,6 @@
 import { request, type FullConfig } from '@playwright/test';
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -44,6 +44,21 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
     throw new Error(`[e2e] ottod binary not found at ${OTTOD} (set OTTO_E2E_BIN or install Otto)`);
   }
   const dataDir = mkdtempSync(join(tmpdir(), 'otto-e2e-'));
+  // Harmless stand-ins for the agent CLIs, first on the test daemon's PATH.
+  // Sessions launch providers by bare name, so without these a spec that opens
+  // (or reviews through) a claude/codex session would start the user's REAL
+  // CLI — on their account, in their HOME. The stand-in prints one line and
+  // echoes input, so a session still looks alive to the UI.
+  const fakeBin = join(dataDir, 'fake-agent-bin');
+  mkdirSync(fakeBin, { recursive: true });
+  for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
+    const shim = join(fakeBin, cli);
+    writeFileSync(
+      shim,
+      `#!/bin/sh\necho "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,
+    );
+    chmodSync(shim, 0o755);
+  }
   // eslint-disable-next-line no-console
   console.log(`[e2e] launching test daemon: ${OTTOD}\n[e2e]   OTTO_DATA_DIR=${dataDir} OTTO_PORT=${PORT}`);
 
@@ -52,6 +67,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       ...process.env,
       OTTO_DATA_DIR: dataDir,
       OTTO_PORT: PORT,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
       // Keep the throwaway daemon lean / non-networked.
       OTTO_SELF_IMPROVE: '0',
       OTTO_CLI_UPDATE: '0', // isolated tests never update the host's agent CLIs
