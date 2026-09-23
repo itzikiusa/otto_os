@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use otto_channels::workflow_trigger::{WorkflowChatAck, WorkflowChatTrigger};
 use otto_core::event::Event;
-use otto_core::workflows::{NodeStatus, RunStatus, Workflow, WorkflowRun};
+use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
@@ -1052,19 +1052,12 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             }
             WfControl::Abort => {
                 // Same as the Cancel button (routes::workflows::cancel_run): flip
-                // the run to Canceled + emit. The engine's cancel poll then stops
-                // the in-flight node and kills the run's sessions.
-                match repo
-                    .update_run(
-                        &run.id,
-                        RunStatus::Canceled,
-                        &run.nodes,
-                        Some("canceled"),
-                        true,
-                    )
-                    .await
-                {
-                    Ok(rev) => {
+                // the run to Canceled (status only, conditional) + emit. The
+                // engine's cancel poll then stops the in-flight node and kills the
+                // run's sessions.
+                match repo.request_cancel(&run.id).await {
+                    Ok(None) => {}
+                    Ok(Some(rev)) => {
                         let _ = self.ctx.events.send(Event::WorkflowRunUpdated {
                             workspace_id: run.workspace_id.clone(),
                             run_id: run.id.clone(),
@@ -1077,7 +1070,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                             waiting_approval: false,
                         });
                     }
-                    Err(e) => tracing::warn!("workflow chat abort: update_run failed: {e}"),
+                    Err(e) => tracing::warn!("workflow chat abort: cancel failed: {e}"),
                 }
                 Some(WorkflowChatAck {
                     reply: format!("🛑 Aborting run `{short}` — stopping its agents."),

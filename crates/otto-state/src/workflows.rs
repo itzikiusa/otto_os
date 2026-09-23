@@ -194,7 +194,7 @@ impl WorkflowsRepo {
             .begin()
             .await
             .map_err(dberr("begin workflow retry"))?;
-        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
+        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, waiting_approval = 0, approval_node_id = NULL, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
             .bind(scope_json).bind(run_id).execute(&mut *tx).await.map_err(dberr("prepare workflow retry"))?.rows_affected();
         if changed == 0 {
             return Err(Error::Conflict("run is still active".into()));
@@ -844,6 +844,40 @@ impl WorkflowsRepo {
         error: Option<&str>,
         finished: bool,
     ) -> Result<i64> {
+        self.write_run(id, None, status, nodes, error, finished)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("workflow run {id}")))
+    }
+
+    /// [`update_run`] as a compare-and-set on the lifecycle: writes only while
+    /// the row's status is one of `expected`, returning `None` (nothing
+    /// written) otherwise. Every engine lifecycle transition goes through
+    /// this so a late writer can never undo a newer decision — e.g. the
+    /// Pending→Running start must not resurrect a run the user canceled while
+    /// it was provisioning worktrees, and a finishing run must not overwrite a
+    /// cancel that landed after its last node.
+    pub async fn update_run_if(
+        &self,
+        id: &Id,
+        expected: &[RunStatus],
+        status: RunStatus,
+        nodes: &[NodeRunState],
+        error: Option<&str>,
+        finished: bool,
+    ) -> Result<Option<i64>> {
+        self.write_run(id, Some(expected), status, nodes, error, finished)
+            .await
+    }
+
+    async fn write_run(
+        &self,
+        id: &Id,
+        expected: Option<&[RunStatus]>,
+        status: RunStatus,
+        nodes: &[NodeRunState],
+        error: Option<&str>,
+        finished: bool,
+    ) -> Result<Option<i64>> {
         let nodes_json =
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
         let finished_at = if finished {
@@ -851,38 +885,92 @@ impl WorkflowsRepo {
         } else {
             None
         };
+        // The status guard is built from `RunStatus::as_str` — fixed internal
+        // literals, never caller text.
+        let guard = match expected {
+            None => String::new(),
+            Some(list) => format!(
+                " AND status IN ({})",
+                list.iter()
+                    .map(|s| format!("'{}'", s.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        };
+        // A terminal write (finished) also clears the persisted re-entry scope
+        // — it only ever describes an IN-FLIGHT (re-)entry — and any approval
+        // pause: a canceled/failed run must not keep a live "waiting for
+        // approval" banner whose Approve button "resumes" a dead run, nor a
+        // stale `approval_node_id` that a later retry's restart-resume would
+        // mistake for its re-entry point.
+        let sql = format!(
+            "UPDATE workflow_runs
+             SET status = ?, nodes_json = ?, error = ?,
+                 finished_at = COALESCE(?, finished_at),
+                 resume_scope_json = CASE WHEN ? IS NULL
+                                          THEN resume_scope_json ELSE NULL END,
+                 waiting_approval = CASE WHEN ? IS NULL
+                                         THEN waiting_approval ELSE 0 END,
+                 approval_node_id = CASE WHEN ? IS NULL
+                                         THEN approval_node_id ELSE NULL END,
+                 rev = rev + 1
+             WHERE id = ?{guard}
+             RETURNING rev"
+        );
         let projection = crate::workflow_progress::nodes_projection(nodes)?;
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(dberr("begin workflow progress write"))?;
-        let rev: i64 = sqlx::query_scalar(
-            // A terminal write (finished) also clears the persisted re-entry
-            // scope — it only ever describes an IN-FLIGHT (re-)entry.
-            "UPDATE workflow_runs
-             SET status = ?, nodes_json = ?, error = ?,
-                 finished_at = COALESCE(?, finished_at),
-                 resume_scope_json = CASE WHEN ? IS NULL
-                                          THEN resume_scope_json ELSE NULL END,
-                 rev = rev + 1
-             WHERE id = ?
-             RETURNING rev",
-        )
-        .bind(status.as_str())
-        .bind(&nodes_json)
-        .bind(error)
-        .bind(&finished_at)
-        .bind(&finished_at)
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(dberr("update run"))?;
+        let rev: Option<i64> = sqlx::query_scalar(&sql)
+            .bind(status.as_str())
+            .bind(&nodes_json)
+            .bind(error)
+            .bind(&finished_at)
+            .bind(&finished_at)
+            .bind(&finished_at)
+            .bind(&finished_at)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(dberr("update run"))?;
+        let Some(rev) = rev else {
+            // Guard not met (or no such row): nothing written; the dropped
+            // transaction rolls back.
+            return Ok(None);
+        };
         crate::workflow_progress::publish_nodes(&mut tx, id, &projection).await?;
         tx.commit()
             .await
             .map_err(dberr("commit workflow progress write"))?;
-        Ok(rev)
+        Ok(Some(rev))
+    }
+
+    /// Request a cancel: flip an in-flight (`pending`/`running`) run to
+    /// `canceled` WITHOUT touching `nodes_json`. The API/chat cancel used to
+    /// write back the node snapshot it had read, so a run the engine finished
+    /// between that read and the write got its final node states replaced by
+    /// the stale snapshot (a dead step "running" forever) and its success
+    /// overwritten. The engine's cancel poll owns the node states: it stops
+    /// the in-flight node, marks the rest skipped and re-writes the run.
+    /// Returns the bumped `rev`, or `None` when the run had already settled.
+    pub async fn request_cancel(&self, id: &Id) -> Result<Option<i64>> {
+        sqlx::query_scalar(
+            "UPDATE workflow_runs
+             SET status = 'canceled', error = 'canceled',
+                 finished_at = ?,
+                 resume_scope_json = NULL,
+                 waiting_approval = 0, approval_node_id = NULL,
+                 rev = rev + 1
+             WHERE id = ? AND status IN ('pending','running')
+             RETURNING rev",
+        )
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("cancel run"))
     }
 
     /// Re-open a FINISHED run for a retry-a-step re-entry: back to `pending`
@@ -893,6 +981,7 @@ impl WorkflowsRepo {
     pub async fn reopen_run(&self, id: &Id) -> Result<()> {
         let n = sqlx::query(
             "UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL,
+             waiting_approval = 0, approval_node_id = NULL,
              rev = rev + 1, checkpoint_generation = checkpoint_generation + 1
              WHERE id = ? AND status IN ('success','error','canceled')",
         )
@@ -1462,5 +1551,152 @@ mod tests {
             (3, 3),
             "progress write still bumps + round-trips the monotonic rev"
         );
+    }
+
+    fn node(id: &str, status: &str) -> NodeRunState {
+        serde_json::from_value(serde_json::json!({ "node_id": id, "status": status })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cas_never_undoes_a_cancel() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+
+        // Cancel lands while the engine is still provisioning (run pending)…
+        assert!(repo.request_cancel(&run.id).await.unwrap().is_some());
+        // …so the engine's Pending→Running start must NOT apply.
+        let started = repo
+            .update_run_if(
+                &run.id,
+                &[RunStatus::Pending],
+                RunStatus::Running,
+                &[node("n1", "pending")],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(started.is_none(), "start must not resurrect a canceled run");
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.status, RunStatus::Canceled);
+        assert!(got.finished_at.is_some());
+        // A late Success finalize is refused too.
+        let fin = repo
+            .update_run_if(
+                &run.id,
+                &[RunStatus::Running],
+                RunStatus::Success,
+                &[],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(fin.is_none());
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().status,
+            RunStatus::Canceled
+        );
+        // A second cancel on a settled run is a no-op.
+        assert!(repo.request_cancel(&run.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn request_cancel_keeps_the_engines_node_states() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        repo.update_run(
+            &run.id,
+            RunStatus::Running,
+            &[node("n1", "success"), node("n2", "running")],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        // Parked at an approval when the cancel lands.
+        sqlx::query(
+            "UPDATE workflow_runs SET waiting_approval = 1, approval_node_id = 'n2' WHERE id = ?",
+        )
+        .bind(&run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        repo.request_cancel(&run.id).await.unwrap().unwrap();
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.status, RunStatus::Canceled);
+        assert_eq!(got.nodes.len(), 2, "cancel must not rewrite nodes_json");
+        assert!(!got.waiting_approval, "no phantom approval banner");
+        assert!(got.approval_node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_update_clears_a_stale_approval_pause() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE workflow_runs SET status = 'running', waiting_approval = 1, approval_node_id = 'gate' WHERE id = ?",
+        )
+        .bind(&run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A progress (non-terminal) write leaves the pause alone…
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false)
+            .await
+            .unwrap();
+        assert!(repo.get_run(&run.id).await.unwrap().waiting_approval);
+        // …a terminal one clears it.
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true)
+            .await
+            .unwrap();
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert!(!got.waiting_approval);
+        assert!(got.approval_node_id.is_none());
     }
 }

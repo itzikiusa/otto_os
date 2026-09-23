@@ -1774,24 +1774,43 @@ pub async fn run_workflow(
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
 
-    // Lifecycle transition Pending→Running (a real status write). Every LATER
-    // in-loop write uses `update_run_progress` (nodes only, no status) so a
-    // concurrent Cancel is never resurrected back to Running (see item 1).
-    let rev = repo
-        .update_run(&run_id, RunStatus::Running, &states, None, false)
+    // Lifecycle transition Pending→Running — a compare-and-set. Startup
+    // (repo resolution, `git worktree add` of a full tree) takes seconds; a
+    // Cancel that landed in that window already wrote `canceled`, and the old
+    // unconditional write flipped it back to `running` and executed the whole
+    // workflow the user saw canceled. Every LATER in-loop write uses
+    // `update_run_progress` (nodes only, no status) for the same reason.
+    match repo
+        .update_run_if(
+            &run_id,
+            &[RunStatus::Pending],
+            RunStatus::Running,
+            &states,
+            None,
+            false,
+        )
         .await
-        .unwrap_or(0);
-    emit_run_updated(
-        &ctx,
-        &workflow.workspace_id,
-        &run_id,
-        "running",
-        None,
-        rev,
-        None,
-        &states,
-        false,
-    );
+    {
+        Ok(Some(rev)) => emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "running",
+            None,
+            rev,
+            None,
+            &states,
+            false,
+        ),
+        Ok(None) => {
+            // Settled (canceled) before it started: execute nothing — the
+            // node loop's first iteration breaks straight to the canceled
+            // finalize, which reaps the worktrees just provisioned.
+            tracing::info!(%run_id, "workflow run canceled during startup — not executing");
+            canceled = true;
+        }
+        Err(e) => tracing::warn!(%run_id, "workflow run start write failed: {e}"),
+    }
 
     // Live progress: if this run was triggered from a chat thread, stream brief
     // per-step updates back to it. A single pump task posts them in order; manual
@@ -1803,7 +1822,7 @@ pub async fn run_workflow(
         }
         None => (ProgressSink::disabled(), None),
     };
-    if progress.enabled() {
+    if progress.enabled() && !canceled {
         let goals: Vec<String> = input
             .get("goals")
             .and_then(Value::as_array)
@@ -1840,6 +1859,10 @@ pub async fn run_workflow(
             .unwrap_or_else(|_| chrono::Duration::hours(10));
 
     for node_id in order {
+        // Canceled before it started (the Pending→Running CAS above lost).
+        if canceled {
+            break;
+        }
         // Honor a cancel request (the API flips the run status to Canceled).
         if let Ok(r) = repo.get_run(&run_id).await {
             if r.status == RunStatus::Canceled {
@@ -2362,64 +2385,7 @@ pub async fn run_workflow(
     }
 
     if canceled {
-        // Reviews can outlive an await:false step and spawn sessions after its
-        // polling loop ended. Cancel their work, not only the harvested PTYs.
-        for review_id in states.iter().flat_map(|s| s.review_ids.iter()) {
-            if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
-                crate::modules::cancel_running_review(&ctx, &review, &workflow.workspace_id).await;
-            }
-        }
-        // Stop every agent session this run spawned — a cancel must halt the live
-        // agents (each is a real claude/codex PTY that would otherwise keep working
-        // and burning tokens), not just flip the run row. Includes agent steps AND
-        // review reviewers/summarizer (their ids are harvested into `sessions`).
-        // Best-effort: a failure on one session is logged and never blocks the rest.
-        let session_ids: Vec<Id> = states
-            .iter()
-            .flat_map(|s| s.sessions.iter().cloned())
-            .collect();
-        for sid in session_ids {
-            if let Err(e) = ctx.manager.kill_session(&sid).await {
-                tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
-            }
-        }
-        for s in states.iter_mut() {
-            if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
-                s.status = NodeStatus::Skipped;
-            }
-        }
-        let rev = repo
-            .update_run(
-                &run_id,
-                RunStatus::Canceled,
-                &states,
-                Some("canceled"),
-                true,
-            )
-            .await
-            .unwrap_or(0);
-        deliver_run_result(
-            &ctx,
-            &workflow,
-            &states,
-            RunStatus::Canceled,
-            None,
-            &input,
-            None,
-        )
-        .await;
-        emit_run_updated(
-            &ctx,
-            &workflow.workspace_id,
-            &run_id,
-            "canceled",
-            None,
-            rev,
-            None,
-            &states,
-            false,
-        );
-        reap_run_worktrees(&ctx, &run_id).await;
+        finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
         return;
     }
 
@@ -2434,10 +2400,29 @@ pub async fn run_workflow(
             "run exceeded the {}-hour time limit",
             RUN_WALL_CLOCK_TIMEOUT.as_secs() / 3600
         );
-        let rev = repo
-            .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
+        // Terminal writes are CAS on in-flight: a cancel that landed after the
+        // last boundary check wins, and is finalized as a cancel.
+        let rev = match repo
+            .update_run_if(
+                &run_id,
+                &[RunStatus::Pending, RunStatus::Running],
+                RunStatus::Error,
+                &states,
+                Some(&msg),
+                true,
+            )
             .await
-            .unwrap_or(0);
+        {
+            Ok(Some(rev)) => rev,
+            Ok(None) => {
+                finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
+                0
+            }
+        };
         deliver_run_result(
             &ctx,
             &workflow,
@@ -2474,10 +2459,29 @@ pub async fn run_workflow(
     } else {
         None
     };
-    let rev = repo
-        .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
+    let rev = match repo
+        .update_run_if(
+            &run_id,
+            &[RunStatus::Pending, RunStatus::Running],
+            final_status,
+            &states,
+            err_msg.as_deref(),
+            true,
+        )
         .await
-        .unwrap_or(0);
+    {
+        Ok(Some(rev)) => rev,
+        // Canceled after the last node boundary: the cancel wins (it used to
+        // be silently overwritten with success).
+        Ok(None) => {
+            finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
+            0
+        }
+    };
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
@@ -2520,6 +2524,83 @@ pub async fn run_workflow(
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
     reap_run_worktrees(&ctx, &run_id).await;
+}
+
+/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
+/// every session it spawned, mark unfinished steps skipped, write the
+/// `canceled` terminal state (CAS — it never overwrites a run that settled
+/// otherwise), report back and reap the worktrees. Shared by the in-loop
+/// cancel, a cancel that landed during startup, and one that landed after the
+/// last node boundary (the success/error CAS lost).
+async fn finalize_canceled_run(
+    ctx: &ServerCtx,
+    repo: &WorkflowsRepo,
+    workflow: &Workflow,
+    run_id: &Id,
+    states: &mut [NodeRunState],
+    input: &Value,
+) {
+    // Reviews can outlive an await:false step and spawn sessions after its
+    // polling loop ended. Cancel their work, not only the harvested PTYs.
+    for review_id in states.iter().flat_map(|s| s.review_ids.iter()) {
+        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+            crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
+        }
+    }
+    // Stop every agent session this run spawned — a cancel must halt the live
+    // agents (each is a real claude/codex PTY that would otherwise keep working
+    // and burning tokens), not just flip the run row. Includes agent steps AND
+    // review reviewers/summarizer (their ids are harvested into `sessions`).
+    // Best-effort: a failure on one session is logged and never blocks the rest.
+    let session_ids: Vec<Id> = states
+        .iter()
+        .flat_map(|s| s.sessions.iter().cloned())
+        .collect();
+    for sid in session_ids {
+        if let Err(e) = ctx.manager.kill_session(&sid).await {
+            tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
+        }
+    }
+    for s in states.iter_mut() {
+        if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
+            s.status = NodeStatus::Skipped;
+        }
+    }
+    let rev = repo
+        .update_run_if(
+            run_id,
+            &[RunStatus::Pending, RunStatus::Running, RunStatus::Canceled],
+            RunStatus::Canceled,
+            states,
+            Some("canceled"),
+            true,
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    deliver_run_result(
+        ctx,
+        workflow,
+        states,
+        RunStatus::Canceled,
+        None,
+        input,
+        None,
+    )
+    .await;
+    emit_run_updated(
+        ctx,
+        &workflow.workspace_id,
+        run_id,
+        "canceled",
+        None,
+        rev,
+        None,
+        states,
+        false,
+    );
+    reap_run_worktrees(ctx, run_id).await;
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a

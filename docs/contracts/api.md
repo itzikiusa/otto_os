@@ -1699,7 +1699,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
-| POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
+| POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active; `400` on a bad target |
 | GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
@@ -2764,7 +2764,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
-| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status |
+| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
 product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
