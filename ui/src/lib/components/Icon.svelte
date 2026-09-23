@@ -17,6 +17,11 @@
     plug: 'M5.5 2v3M10.5 2v3M4 5h8v2.5a4 4 0 0 1-4 4 4 4 0 0 1-4-4V5ZM8 11.5V14',
     branch: 'M4.5 3.5a1.5 1.5 0 1 0 0 .01M4.5 12.5a1.5 1.5 0 1 0 0 .01M11.5 3.5a1.5 1.5 0 1 0 0 .01M4.5 5v6M11.5 5v1.5a3 3 0 0 1-3 3h-1',
     gear: 'M8 5.5A2.5 2.5 0 1 1 8 10.5 2.5 2.5 0 0 1 8 5.5Zm-5.5 2.5h1m9 0h1M8 2.5v1m0 9v1M4.1 4.1l.7.7m6.4 6.4.7.7m0-7.8-.7.7M4.8 11.2l-.7.7',
+    // sidebar modules that used to share a glyph (Vault, Browser, Scheduled Tasks, MCP)
+    book: 'M8 4.3C6.8 3.4 5 3 2.5 3v9.2c2.5 0 4.3.4 5.5 1.3 1.2-.9 3-1.3 5.5-1.3V3C11 3 9.2 3.4 8 4.3Zm0 0v9.2',
+    compass: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm2.4 3.1L9.1 9.1 5.6 10.4l1.3-3.5 3.5-1.3Z',
+    calendar: 'M3.5 3.5h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Zm-1 3h11M5.5 2v2.5M10.5 2v2.5M5.5 9.3h.01M8 9.3h.01m2.5 0h.01',
+    server: 'M3.5 2.5h9a1 1 0 0 1 1 1V6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Zm0 6.5h9a1 1 0 0 1 1 1v2.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1Zm1.8-4.25h.01m-.01 6.5h.01',
     // stored procedure — a runnable block (rounded card + play glyph)
     procedure: 'M3.5 3h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm2.3 2.7 3.4 2.3-3.4 2.3V5.7Z',
     // stored function — curly braces { } denoting a callable routine

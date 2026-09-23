@@ -10,9 +10,6 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
-  // Importing the History module here (not only from App's `#/history` branch)
-  // registers its palette command at boot, so "Go to History" works from any page.
-  import '../agents/history';
 
   const tiled = $derived(ws.viewMode === 'tiled');
   const mission = $derived(ws.viewMode === 'mission');

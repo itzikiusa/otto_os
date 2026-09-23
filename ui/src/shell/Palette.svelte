@@ -700,6 +700,7 @@
               onclick={() => run(item.cmd)}
             >
               <span class="pal-item-title">{item.cmd.title}</span>
+              {#if item.cmd.detail}<span class="pal-detail">{item.cmd.detail}</span>{/if}
               <span class="grow"></span>
               {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
               {#if item.cmd.shortcut}<kbd>{item.cmd.shortcut}</kbd>{/if}
@@ -882,6 +883,14 @@
   .pal-group {
     font-size: 10.5px;
     color: var(--text-dim);
+  }
+  .pal-detail {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   kbd {
     font-family: var(--font-ui);

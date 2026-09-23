@@ -14,7 +14,13 @@
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { availableModules, navIdForModule, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import {
+    availableModules,
+    groupModules,
+    activeNavId,
+    resolveOrder,
+    visibleOrder,
+  } from '../lib/sidebar';
 
   // How many primary tabs sit on the bar before everything spills into "More".
   const PRIMARY_COUNT = 4;
@@ -24,15 +30,20 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
+  // Flattened section by section, so the bar's order matches the sidebar's.
   const modules = $derived(
-    visibleOrder(
-      resolveOrder(
-        availableModules((f) => auth.can(f, 'view'), pluginEntries),
-        ui.sidebarOrder,
+    groupModules(
+      visibleOrder(
+        resolveOrder(
+          availableModules((f) => auth.can(f, 'view'), pluginEntries),
+          ui.sidebarOrder,
+        ),
+        ui.sidebarHidden,
       ),
-      ui.sidebarHidden,
-    ),
+    ).flatMap((s) => s.modules),
   );
+  // The entry the current route highlights (plugin slug, '' → Agents, …).
+  const current = $derived(activeNavId(router.parts));
   const primary = $derived(modules.slice(0, PRIMARY_COUNT));
   const overflow = $derived(modules.slice(PRIMARY_COUNT));
 
@@ -46,13 +57,13 @@
   // "More" is active when the current module lives in the overflow set (or
   // Settings), so the bar reflects where you are even for spilled modules.
   const moreActive = $derived(
-    router.module === 'settings' || overflow.some((m) => m.id === navIdForModule(router.module)),
+    router.module === 'settings' || overflow.some((m) => m.id === current),
   );
 </script>
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={current === m.id} onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
         {#if m.id === 'agents' && ws.workingCount > 0}
@@ -80,7 +91,7 @@
     <div class="sheet-grip"></div>
     <div class="sheet-grid">
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
+        <button class="sheet-item" class:active={current === m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
         </button>
