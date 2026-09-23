@@ -2311,6 +2311,9 @@ export interface UpdateConfluencePageReq {
   body_md?: string | null;
   /** Replacement body in Confluence storage XHTML. Wins over body_md. */
   body_html?: string | null;
+  /** The page `version` this edit was based on; the server answers 409 when
+   *  the page has changed since (instead of overwriting the newer edit). */
+  base_version?: number | null;
 }
 
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
@@ -3492,6 +3495,9 @@ export interface FindingDetail {
 export interface FindingActionResp {
   finding: Finding;
   session_id?: Id | null;
+  /** Verify only: the evidence behind a pass ("3 tests passed") or why the
+   *  finding was NOT verified (no linked test, zero tests ran, …). */
+  note?: string | null;
 }
 
 /** A repo rule generalized from a finding, fed into the Context Engine. */

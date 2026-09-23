@@ -500,8 +500,11 @@ async fn create_page_cf<S: IssuesCtx>(
 /// `PUT /issue/confluence/pages/{page_id}?account_id=`
 ///
 /// Reads the page first to resolve its current version and (when the request
-/// omits a title) preserve the existing one — callers never pass a version, so a
-/// stale number can't silently clobber someone else's edit.
+/// omits a title) preserve the existing one. Writing on top of whatever the
+/// current version is would silently discard an edit made after the caller
+/// read the page, so a caller that passes `base_version` (the version it read)
+/// gets 409 when the page has moved on; Confluence's own 409 on a racing write
+/// is surfaced the same way (see `ConfluenceClient::update_page`).
 async fn update_page_cf<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -511,6 +514,16 @@ async fn update_page_cf<S: IssuesCtx>(
 ) -> ApiResult<Json<ConfluencePageResp>> {
     let client = confluence_client_for(&s, &params, &user).await?;
     let current = client.get_page(&page_id).await?;
+    if let Some(base) = req.base_version {
+        if base != current.version {
+            return Err(Error::Conflict(format!(
+                "page {page_id} changed since version {base} (now version {}) — re-read it and \
+                 re-apply the edit",
+                current.version
+            ))
+            .into());
+        }
+    }
     let title = req
         .title
         .as_deref()

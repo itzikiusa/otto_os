@@ -85,45 +85,162 @@ pub fn detect_new_test(before: &HashSet<String>, worktree: &Path) -> Option<Stri
     now.difference(before).min().cloned()
 }
 
-/// Whether a verify run should pass. Deterministic under `OTTO_E2E` (true) so the
-/// hermetic E2E can reach `verified`; otherwise runs the finding's linked test if
-/// present (pass on exit 0); with no linked test, optimistically true (a verify
-/// agent session is spawned alongside for the user to inspect).
-pub fn judge_verify(finding: &Finding, repo_path: &Path) -> bool {
+/// Upper bound on a verify run's linked-test execution (compile included).
+const VERIFY_TEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Whether a verify run passes: `Ok(evidence)` or `Err(why not)`.
+///
+/// Verification needs EVIDENCE. It used to pass with no linked test at all
+/// (Fix → Verify went green before the fix agent had done anything), and with
+/// a linked test *file* it ran `cargo test <file path>` in the user's checkout
+/// — a filter no test name matches, so zero tests ran, cargo exited 0, and the
+/// finding was "verified". Now: no linked test → not verified; the test runs
+/// in `worktree` (the fix branch — where the fix actually is); and a run that
+/// executed zero tests is not a pass. Deterministic under `OTTO_E2E` (pass) so
+/// the hermetic E2E can reach `verified`.
+pub async fn judge_verify(finding: &Finding, worktree: Option<&Path>) -> Result<String, String> {
     if e2e_mode() {
-        return true;
+        return Ok("e2e".to_string());
     }
-    if let Some(test) = finding
+    let Some(worktree) = worktree else {
+        return Err("fix worktree unavailable — cannot run the linked test".to_string());
+    };
+    let Some(test) = finding
         .linked_test
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
-    {
-        return run_linked_test(repo_path, test);
-    }
-    true
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(
+            "no linked test — nothing substantiates the fix; add a regression test first"
+                .to_string(),
+        );
+    };
+    run_linked_test(worktree, test).await
 }
 
 fn e2e_mode() -> bool {
     matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true"))
 }
 
-/// Best-effort: run a linked test by name. Tries `cargo test <name>` for Rust,
-/// otherwise treats the entry as a shell-runnable spec path. Returns the exit
-/// success; any spawn failure is treated as "not verified".
-fn run_linked_test(repo_path: &Path, test: &str) -> bool {
-    // Rust: `cargo test <fn-or-path>`; JS/TS specs: rely on the repo's runner via
-    // `npx playwright test <path>` is too specific, so default to cargo for `.rs`.
-    let cmd = if test.contains(".rs") || !test.contains('.') {
-        Command::new("cargo")
-            .arg("test")
-            .arg(test.split("::").last().unwrap_or(test))
-            .current_dir(repo_path)
-            .output()
-    } else {
-        // Unknown runner — don't claim a pass we can't substantiate.
-        return false;
+/// How to run a linked test with cargo: `(manifest_path, args)` relative to
+/// the worktree. A linked test is either a test NAME (`mod::name` / `name`)
+/// or a test FILE (what the regression watcher records):
+/// - `<pkg>/tests/<stem>.rs` → `--manifest-path <pkg>/Cargo.toml --test <stem>`
+///   (that integration-test target, every test in it);
+/// - any other `.rs` file → the nearest package's tests filtered by the file
+///   stem (unit-test names carry their module path, e.g. `foo::tests::…`);
+/// - `<file>.rs::name` → the file's plan, filtered to `name`;
+/// - a name → `cargo test <last :: segment>` at the root.
+///
+/// `None` for a non-Rust test — there is no runner Otto can vouch for.
+pub(crate) fn cargo_test_plan(
+    worktree: &Path,
+    test: &str,
+) -> Option<(Option<String>, Vec<String>)> {
+    // `path/to/file.rs::test_name` — a file plus a name filter.
+    let (file, name_filter) = match test.split_once(".rs::") {
+        Some((f, n)) if !n.trim().is_empty() => (
+            format!("{f}.rs"),
+            Some(n.rsplit("::").next().unwrap_or(n).to_string()),
+        ),
+        _ => (test.to_string(), None),
     };
-    matches!(cmd, Ok(o) if o.status.success())
+    if !file.ends_with(".rs") {
+        if file.contains('/') || file.contains('.') {
+            return None;
+        }
+        let name = file.rsplit("::").next().unwrap_or(&file).to_string();
+        return Some((None, vec![name]));
+    }
+    let rel = Path::new(&file);
+    let stem = rel.file_stem()?.to_string_lossy().into_owned();
+    // Nearest ancestor directory holding a Cargo.toml (within the worktree).
+    let mut pkg: Option<&Path> = None;
+    let mut cur = rel.parent();
+    while let Some(dir) = cur {
+        if worktree.join(dir).join("Cargo.toml").is_file() {
+            pkg = Some(dir);
+            break;
+        }
+        cur = dir.parent();
+    }
+    let pkg_dir = pkg.unwrap_or(Path::new(""));
+    let manifest = if pkg_dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(pkg_dir.join("Cargo.toml").to_string_lossy().into_owned())
+    };
+    let tests_dir = pkg_dir.join("tests");
+    let in_tests_dir = rel.parent() == Some(tests_dir.as_path());
+    let mut args = if in_tests_dir {
+        vec!["--test".to_string(), stem]
+    } else {
+        vec![name_filter.clone().unwrap_or(stem)]
+    };
+    if in_tests_dir {
+        if let Some(n) = name_filter {
+            args.push(n);
+        }
+    }
+    Some((manifest, args))
+}
+
+/// Total tests cargo reports as passed, summed over every `test result:` line
+/// (one per test binary; a filter that matches nothing yields `0 passed`).
+pub(crate) fn cargo_tests_passed(output: &str) -> u64 {
+    output
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("test result: "))
+        .filter_map(|rest| {
+            let idx = rest.find(" passed")?;
+            rest[..idx]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .sum()
+}
+
+/// Run a linked test in `worktree` (async — never blocks the runtime) and
+/// require it to have actually executed at least one passing test.
+async fn run_linked_test(worktree: &Path, test: &str) -> Result<String, String> {
+    let Some((manifest, args)) = cargo_test_plan(worktree, test) else {
+        return Err(format!(
+            "no runner for linked test `{test}` — only Rust (cargo) tests can be verified automatically"
+        ));
+    };
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.arg("test");
+    if let Some(m) = &manifest {
+        cmd.arg("--manifest-path").arg(m);
+    }
+    cmd.args(&args).current_dir(worktree).kill_on_drop(true);
+    let out = match tokio::time::timeout(VERIFY_TEST_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("could not run cargo test: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "linked test timed out after {}m",
+                VERIFY_TEST_TIMEOUT.as_secs() / 60
+            ))
+        }
+    };
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        return Err(format!("linked test `{test}` failed"));
+    }
+    match cargo_tests_passed(&text) {
+        0 => Err(format!(
+            "linked test `{test}` matched no tests (0 run) — not evidence of a fix"
+        )),
+        n => Ok(format!("{n} test{} passed", if n == 1 { "" } else { "s" })),
+    }
 }
 
 /// Provision an isolated worktree off the repo HEAD on `otto/fix/<finding_id>`.
@@ -143,11 +260,17 @@ pub async fn provision_worktree(
         .join(format!("otto-fix-{finding_id}"))
         .to_string_lossy()
         .into_owned();
-    if git.branch_exists(&branch).await {
-        git.worktree_attach(&wt, &branch).await?;
-    } else {
-        git.worktree_add(&wt, &branch, &base).await?;
-    }
+    // Reuse the finding's worktree when a previous action (Fix → Verify /
+    // Regression) already created it: re-running `worktree add --force` onto
+    // the existing, non-empty path failed, so every follow-up action silently
+    // got no session. Never resets the fix branch (no `-B` on an existing one).
+    git.worktree_add_if_absent(&wt, &branch, &base).await?;
+    // The watchers stamp a fix as "HEAD advanced past base", so base must be
+    // the WORKTREE's head — a re-attached fix branch is ahead of the repo's.
+    let base = otto_git::LocalGit::new(&wt)
+        .rev_parse("HEAD")
+        .await
+        .unwrap_or(base);
     Ok((wt, base))
 }
 
@@ -192,16 +315,18 @@ pub async fn spawn_session(
         }
     };
     let sid = session.id.clone();
-    // Inject the prompt once the session has settled (handoff pattern: a short
-    // delay then a bracketed-paste + Enter).
+    // Inject the prompt through the shared submit path: wait for the TUI to
+    // draw, paste, confirm the paste echoed, then Enter. A blind paste 1.5 s
+    // after spawn landed before a cold CLI had drawn its input box, so the
+    // fix/verify/regression agent sat idle with no prompt.
     let manager = ctx.manager.clone();
     let sid_for_task = sid.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let payload = format!("\u{1b}[200~{prompt}\u{1b}[201~");
-        let _ = manager.input(&sid_for_task, payload.as_bytes()).await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let _ = manager.input(&sid_for_task, b"\r").await;
+        if !crate::review_session::submit_prompt(&manager, &sid_for_task, &prompt).await {
+            tracing::warn!(
+                "finding agent: session {sid_for_task} never drew its TUI; prompt not sent"
+            );
+        }
     });
     Some(sid)
 }
@@ -265,6 +390,59 @@ mod tests {
         git(repo.path(), &["commit", "-qm", "add test"]);
         let found = detect_new_test(&before, repo.path());
         assert_eq!(found.as_deref(), Some("tests/regress_test.rs"));
+    }
+
+    #[test]
+    fn cargo_plan_maps_files_and_names_to_real_filters() {
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(wt.path().join("crates/foo/tests")).unwrap();
+        std::fs::create_dir_all(wt.path().join("crates/foo/src")).unwrap();
+        std::fs::write(wt.path().join("crates/foo/Cargo.toml"), "").unwrap();
+        std::fs::write(wt.path().join("Cargo.toml"), "").unwrap();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // Integration-test file → that --test target (the old code passed the
+        // whole path as a name filter, which matched nothing and "passed").
+        assert_eq!(
+            cargo_test_plan(wt.path(), "crates/foo/tests/regress_test.rs"),
+            Some((
+                Some("crates/foo/Cargo.toml".to_string()),
+                s(&["--test", "regress_test"])
+            ))
+        );
+        // …plus a name filter.
+        assert_eq!(
+            cargo_test_plan(wt.path(), "crates/foo/tests/db_test.rs::no_injection"),
+            Some((
+                Some("crates/foo/Cargo.toml".to_string()),
+                s(&["--test", "db_test", "no_injection"])
+            ))
+        );
+        // A src file → filtered by its module stem.
+        assert_eq!(
+            cargo_test_plan(wt.path(), "crates/foo/src/parser.rs"),
+            Some((Some("crates/foo/Cargo.toml".to_string()), s(&["parser"])))
+        );
+        // Root-package tests dir → no manifest override.
+        assert_eq!(
+            cargo_test_plan(wt.path(), "tests/top.rs"),
+            Some((None, s(&["--test", "top"])))
+        );
+        // A bare test name.
+        assert_eq!(
+            cargo_test_plan(wt.path(), "db::tests::no_injection"),
+            Some((None, s(&["no_injection"])))
+        );
+        // Non-Rust tests have no runner Otto can vouch for.
+        assert_eq!(cargo_test_plan(wt.path(), "ui/e2e/login.spec.ts"), None);
+    }
+
+    #[test]
+    fn zero_tests_run_is_not_a_pass() {
+        let none = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s\n";
+        assert_eq!(cargo_tests_passed(none), 0);
+        let some = "test result: ok. 2 passed; 0 failed; 0 ignored\n   Doc-tests x\ntest result: ok. 1 passed; 0 failed\n";
+        assert_eq!(cargo_tests_passed(some), 3);
     }
 
     #[test]

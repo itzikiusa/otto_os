@@ -388,6 +388,35 @@ fn jira_description_md(f: &Finding) -> String {
 
 /// `POST /findings/{id}/jira` — file the finding as a Jira issue. Idempotent: if
 /// already filed, returns the finding unchanged. 400 if no Jira account exists.
+/// Process-wide set of findings with a Jira create in flight; the claim is
+/// released on drop (success, error or a dropped request alike).
+struct JiraCreateClaim(String);
+
+impl JiraCreateClaim {
+    fn inflight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+        static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        SET.get_or_init(Default::default)
+    }
+
+    fn take(finding_id: &str) -> Option<Self> {
+        let mut set = Self::inflight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.insert(finding_id.to_string())
+            .then(|| Self(finding_id.to_string()))
+    }
+}
+
+impl Drop for JiraCreateClaim {
+    fn drop(&mut self) {
+        let mut set = Self::inflight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.remove(&self.0);
+    }
+}
+
 async fn to_jira(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -397,6 +426,18 @@ async fn to_jira(
     let f = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     if f.jira_key.is_some() {
         return Ok(Json(f)); // already filed
+    }
+    // Check-then-create had no lock: a double click filed TWO Jira issues.
+    // Hold a per-finding in-flight claim across the create, then re-check
+    // (a request that just finished may have filed it).
+    let Some(_claim) = JiraCreateClaim::take(&id) else {
+        return Err(ApiError(Error::Conflict(
+            "a Jira issue is already being created for this finding".to_string(),
+        )));
+    };
+    let f = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
+    if f.jira_key.is_some() {
+        return Ok(Json(f));
     }
     let account = match &body.account_id {
         Some(aid) => ctx.issues_store.get_account(aid).await.map_err(ApiError)?,
@@ -748,6 +789,7 @@ async fn fix(
     Ok(Json(FindingActionResp {
         finding,
         session_id,
+        note: None,
     }))
 }
 
@@ -780,10 +822,12 @@ async fn verify(
         .await
         .map_err(ApiError)?;
     let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
-    // Spawn an openable verify agent (best-effort) for the user to watch.
-    let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
+    // Spawn an openable verify agent (best-effort) for the user to watch. The
+    // worktree is the finding's fix branch — where the linked test must run.
+    let (session_id, worktree) = match finding_agent::provision_worktree(&repo.path, &cur.id).await
+    {
         Ok((wt, _)) => {
-            finding_agent::spawn_session(
+            let sid = finding_agent::spawn_session(
                 &ctx,
                 &cur.workspace_id,
                 &user.id,
@@ -793,9 +837,13 @@ async fn verify(
                 "verify",
                 verify_prompt(&cur),
             )
-            .await
+            .await;
+            (sid, Some(wt))
         }
-        Err(_) => None,
+        Err(e) => {
+            tracing::warn!("verify worktree provision failed: {e}");
+            (None, None)
+        }
     };
     let _ = ctx.events.send(Event::FindingActionStarted {
         workspace_id: cur.workspace_id.clone(),
@@ -805,10 +853,14 @@ async fn verify(
         session_id: session_id.clone(),
     });
 
-    let pass = finding_agent::judge_verify(&cur, std::path::Path::new(&repo.path));
-    let finding = if pass {
+    // Evidence-based: no linked test, a test that ran zero tests, or no fix
+    // worktree to run it in is NOT a pass (see `judge_verify`).
+    let verdict =
+        finding_agent::judge_verify(&cur, worktree.as_deref().map(std::path::Path::new)).await;
+    let finding = if let Ok(evidence) = &verdict {
         if cur.linked_commit.is_none() {
-            if let Some(head) = finding_agent::head_of(std::path::Path::new(&repo.path)) {
+            let head_dir = worktree.as_deref().unwrap_or(repo.path.as_str());
+            if let Some(head) = finding_agent::head_of(std::path::Path::new(head_dir)) {
                 let _ = ctx
                     .findings_store
                     .set_fields(
@@ -833,13 +885,14 @@ async fn verify(
             &who,
             Some(cur.status.as_str()),
             Some("verified"),
-            serde_json::json!({ "commit": f.linked_commit }),
+            serde_json::json!({ "commit": f.linked_commit, "evidence": evidence }),
         )
         .await;
         emit_updated(&ctx, &f);
         f
     } else {
         let f = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
+        let reason = verdict.as_ref().err().cloned().unwrap_or_default();
         audit(
             &ctx,
             &f,
@@ -847,15 +900,20 @@ async fn verify(
             &who,
             None,
             None,
-            serde_json::json!({}),
+            serde_json::json!({ "reason": reason }),
         )
         .await;
         emit_updated(&ctx, &f);
         f
     };
+    let note = Some(match verdict {
+        Ok(evidence) => evidence,
+        Err(reason) => reason,
+    });
     Ok(Json(FindingActionResp {
         finding,
         session_id,
+        note,
     }))
 }
 
@@ -917,6 +975,7 @@ async fn regression_test(
     Ok(Json(FindingActionResp {
         finding,
         session_id,
+        note: None,
     }))
 }
 
@@ -1145,4 +1204,21 @@ async fn e2e_seed(
         f = drive_to_status(&ctx, &f.id, s, &who).await?;
     }
     Ok(Json(f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JiraCreateClaim;
+
+    #[test]
+    fn jira_create_claim_is_exclusive_until_dropped() {
+        let first = JiraCreateClaim::take("f-claim-test");
+        assert!(first.is_some());
+        // A concurrent (double-click) request is refused while the first runs.
+        assert!(JiraCreateClaim::take("f-claim-test").is_none());
+        // Other findings are independent.
+        assert!(JiraCreateClaim::take("f-claim-other").is_some());
+        drop(first);
+        assert!(JiraCreateClaim::take("f-claim-test").is_some());
+    }
 }

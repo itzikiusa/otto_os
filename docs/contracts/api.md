@@ -1033,8 +1033,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /repos/{id}/local-review | ws editor | LocalReviewReq | Review (review the working diff) |
 | GET /repos/{id}/local-review | ws viewer | — | latest local Review |
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
-| POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
-| POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
+| POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
+| POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
@@ -1092,7 +1092,7 @@ viewer/editor.
 | POST /findings/{id}/jira | ws editor (Git) | `{project_key, issue_type?, account_id?}` | `Finding` (creates a Jira issue, stores `jira_key`/`jira_url`). **400 `{code:"invalid"}`** when no Jira account is configured. |
 | POST /findings/{id}/repo-rule | ws editor (Context) | `{title?, body?, glob?}` | `RepoRule` (generalizes the finding into a durable rule fed into the Context Engine; links `repo_rule_id`) |
 | POST /findings/{id}/fix | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns a fix agent; open\|accepted → accepted, then async → fixed on commit) |
-| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (verifies resolution; accepted\|fixed\|verified → verified on pass) |
+| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?, note?}` (verifies resolution; accepted\|fixed\|verified → verified on pass). Evidence-based: passes only when the finding's `linked_test` (a Rust test name or `.rs` file; `file.rs::name` accepted) runs in the fix worktree and executes ≥1 passing test. No linked test, zero tests run, a non-Rust test, or a failure leave the status unchanged. `note` = the evidence ("N tests passed") or why it was not verified |
 | POST /findings/{id}/regression-test | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns an agent to add a guard test; sets `linked_test`) |
 | GET /workspaces/{ws}/repo-rules | ws viewer (Context) | — | `RepoRule[]` (the workspace's repo rules) |
 | POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |
@@ -1177,7 +1177,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | POST /product/stories/{sid}/refresh | ws editor | — | re-pull the source story |
 | GET /product/stories/{sid}/versions | ws viewer | — | `Version[]` |
 | GET /product/versions/{vid} | ws viewer | — | Version |
-| POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source |
+| POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source. **409** (Confluence) when the page changed since Otto last synced it (refresh the story first), or when the page holds content the Markdown round-trip would delete (images, links, mentions, task lists, unsupported macros); **409** (Jira) under the description rule above |
 | GET /product/stories/{sid}/analyses | ws viewer | — | `Analysis[]` |
 | GET /product/stories/{sid}/linked-canvases | ws viewer | — | `CanvasSceneSummary[]` — Canvas scenes linked to this story (via `story_id`) |
 | GET /product/analyses/{aid} | ws viewer | — | Analysis (with per-agent state) |
@@ -1351,7 +1351,7 @@ configured Jira/Confluence account.
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
 | POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |
-| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq (`body_md` **or** `body_html`; version resolved server-side) | `ConfluencePageResp` (updated) |
+| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq (`body_md` **or** `body_html`; optional `base_version` = the page `version` the edit was based on) | `ConfluencePageResp` (updated). **409** when `base_version` is given and the page has moved on since, or when Confluence reports a racing write — re-read and re-apply. Without `base_version` the write goes on top of the current version (last writer wins). |
 | GET /issue/confluence/pages/{page_id}/comments?account_id= | member | — | `PageComment[]` |
 | POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq (`body_md` **or** `body_html`) | `CommentRef` |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
@@ -1365,7 +1365,7 @@ configured Jira/Confluence account.
 | POST /issue/{account_id}/{key}/comment | member | AddCommentReq | add a comment |
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
 | PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
-| PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update) |
+| PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update). **409** when the current description holds content the Markdown round-trip can't carry (media/screenshots, mentions, smart links, status, dates, emoji, extensions) — the save would delete it, so it is refused. |
 | GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project |
 
 Fields body shape: `{ "fields": { <jiraFieldId>: <jiraShapedValue>, … } }` — values are sent

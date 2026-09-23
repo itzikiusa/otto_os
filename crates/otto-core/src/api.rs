@@ -1133,6 +1133,12 @@ pub struct UpdateConfluencePageReq {
     /// `body_md` when both are present.
     #[serde(default)]
     pub body_html: Option<String>,
+    /// The page `version` this edit was based on (from the page read). When
+    /// present and the page has moved on since, the update is refused with 409
+    /// instead of silently overwriting the newer (e.g. human) edit. Absent →
+    /// last-writer-wins against the current version (legacy behaviour).
+    #[serde(default)]
+    pub base_version: Option<i64>,
 }
 
 /// `POST /api/v1/issue/confluence/pages/{page_id}/comments?account_id=`
