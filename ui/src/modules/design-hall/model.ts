@@ -102,7 +102,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     blurb: 'Colours, type and logos every studio uses',
     icon: 'palette',
     phase: 'ready',
-    note: 'A brand kit is a versioned token document. Token editing with an impact preview lands in Phase 1.',
+    note: 'A brand kit is a versioned token document every studio reads by name. Edit it with live contrast and see which designs a change reaches before you save.',
     roadmap: null,
     formats: ['otto-brand'],
   },
@@ -487,8 +487,9 @@ export function versionAuthor(v: DesignVersion, meId: string | null | undefined)
   if (v.author_kind === 'agent') return 'Otto';
   if (v.author_kind === 'system') return v.kind === 'sync' ? 'sync' : 'import';
   if (meId && v.author_id === meId) return 'you';
-  // Other people: user ids are opaque ULIDs — never show them as a name.
-  return 'teammate';
+  // Other people: the daemon resolves `author_name`; user ids are opaque
+  // ULIDs — never show them as a name.
+  return v.author_name?.trim() || 'teammate';
 }
 
 /** Version strip order: oldest → newest (the strip reads left to right). */
@@ -734,7 +735,11 @@ export type DesignRoute =
   | { view: 'studio'; id: DesignStudio }
   | { view: 'story'; id: string }
   | { view: 'brand' }
-  | { view: 'learned'; tab: 'signals' | 'rules' | 'memory' };
+  | { view: 'learned'; tab: LearnedTab };
+
+/** The "What Otto learned" tabs; `#/design/learned` opens on Pending. */
+export type LearnedTab = 'pending' | 'rules' | 'memory' | 'signals' | 'settings';
+const LEARNED_TABS: LearnedTab[] = ['pending', 'rules', 'memory', 'signals', 'settings'];
 
 /** `router.parts` (with parts[0] === 'design') → the Design Hall view. */
 export function parseDesignRoute(parts: string[]): DesignRoute {
@@ -757,7 +762,7 @@ export function parseDesignRoute(parts: string[]): DesignRoute {
     case 'brand':
       return { view: 'brand' };
     case 'learned':
-      return { view: 'learned', tab: b === 'rules' || b === 'memory' ? b : 'signals' };
+      return { view: 'learned', tab: LEARNED_TABS.includes(b as LearnedTab) ? (b as LearnedTab) : 'pending' };
     default:
       return { view: 'lobby' };
   }
@@ -773,24 +778,30 @@ export function titleFromPrompt(prompt: string): string {
   return t.length > 60 ? `${t.slice(0, 59).trimEnd()}…` : t;
 }
 
-/** The starter brand-kit document (DTCG-style token groups). */
+/** A minimal `otto-brand/1` kit (the Brand Kit page offers richer starter kits
+ *  in brand/starters.ts; this one backs the generic "New → Brand kit" row). */
 export function brandStarter(name: string): Record<string, unknown> {
   return {
-    type: 'otto-brand',
-    version: 1,
+    $schema: 'otto-brand/1',
     name,
     color: {
-      primary: { $type: 'color', $value: '#4F46E5' },
-      accent: { $type: 'color', $value: '#F59E0B' },
-      ink: { $type: 'color', $value: '#111827' },
-      surface: { $type: 'color', $value: '#FFFFFF' },
-      success: { $type: 'color', $value: '#15803D' },
+      primary: { $value: '#4F46E5' },
+      accent: { $value: '#F59E0B' },
+      ink: { $value: '#111827' },
+      surface: { $value: '#FFFFFF' },
+      success: { $value: '#15803D' },
     },
-    typography: {
-      display: { $type: 'typography', $value: { fontFamily: 'system-ui', fontSize: '64px', fontWeight: 800, lineHeight: '72px' } },
-      body: { $type: 'typography', $value: { fontFamily: 'system-ui', fontSize: '17px', fontWeight: 400, lineHeight: '28px' } },
+    font: {
+      display: { $value: '-apple-system, system-ui, sans-serif', weights: [700, 800] },
+      body: { $value: '-apple-system, system-ui, sans-serif', weights: [400, 600] },
     },
-    radius: { card: { $type: 'dimension', $value: '14px' } },
+    type: {
+      display: { size: 64, line: 72, weight: 800 },
+      body: { size: 17, line: 28, weight: 400 },
+    },
+    radius: { card: { $value: 14 } },
+    space: { sm: { $value: 8 }, md: { $value: 16 }, lg: { $value: 32 } },
+    logos: [],
     voice: { summary: 'Warm, confident, never salesy.' },
   };
 }

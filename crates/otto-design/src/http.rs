@@ -284,6 +284,7 @@ pub fn router<S: DesignCtx>() -> Router<S> {
         )
         .route("/design/admin/import", post(run_import::<S>))
         .route("/design/admin/prune", post(prune::<S>))
+        .merge(crate::brand::http::routes::<S>())
 }
 
 // ---------------------------------------------------------------------------

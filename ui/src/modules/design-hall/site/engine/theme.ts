@@ -11,6 +11,7 @@
 // Mirrored by crates/otto-design/src/site/theme.rs — keep the slot rules,
 // defaults and sanitizing identical.
 
+import { brandCssVars, cssIdent, cssIndex } from '../../brand/tokens';
 import type { SiteSection } from './types';
 
 /** Defaults when no brand kit is linked (a violet + amber launch palette). */
@@ -105,8 +106,39 @@ function scalar(v: unknown): string | null {
   return null;
 }
 
-/** Flatten a brand document into tokens (document order, bounded). */
+/**
+ * Flatten a brand document into tokens. An `otto-brand/1` kit goes through the
+ * Brand Kit's own helpers (`brandCssVars` / `cssIndex`, the same names the
+ * server's CSS export uses: `color.primary` → `--brand-color-primary`, radii
+ * and spacing in px, type styles as `-size` / `-line` / `-weight`); anything
+ * those don't cover (a pre-v1 kit's `typography.*.fontFamily`, string radii)
+ * is picked up by the lenient walker below.
+ */
 export function flattenBrand(doc: unknown): BrandToken[] {
+  const out: BrandToken[] = [];
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return out;
+  const seen = new Set<string>();
+  const index = cssIndex(doc);
+  for (const [name, raw] of Object.entries(brandCssVars(doc))) {
+    const key = index[name];
+    if (!key) continue;
+    const sub = key.startsWith('type.') ? /-(size|line|weight)$/.exec(name)?.[1] : undefined;
+    const path = sub ? `${key}.${sub}` : key;
+    const value = cssValue(raw);
+    if (!value || seen.has(path) || out.length >= MAX_TOKENS) continue;
+    seen.add(path);
+    out.push({ path, cssVar: name, value });
+  }
+  for (const t of legacyTokens(doc)) {
+    if (seen.has(t.path) || out.some((k) => k.cssVar === t.cssVar) || out.length >= MAX_TOKENS) continue;
+    seen.add(t.path);
+    out.push(t);
+  }
+  return out;
+}
+
+/** The lenient walker for kits that predate `otto-brand/1`. */
+function legacyTokens(doc: unknown): BrandToken[] {
   const out: BrandToken[] = [];
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return out;
   const seen = new Set<string>();
@@ -217,10 +249,16 @@ export function buildTheme(brandDoc: unknown, kitName: string | null = null): Th
   const slotPath = {} as Record<SlotName, string | null>;
   const slotCss = {} as Record<SlotName, string>;
   const pick = (slot: SlotName, fallback: string, firstOf?: string): string => {
-    let path = SLOT_SOURCES[slot].find((p) => byPath[p] != null) ?? null;
-    if (!path && firstOf) path = tokens.find((t) => t.path.startsWith(firstOf + '.'))?.path ?? null;
+    // A slot matches a token by key (`color.surface-alt`) or by its CSS name
+    // (`surfaceAlt` → `--brand-color-surface-alt`).
+    let tok: BrandToken | undefined;
+    for (const p of SLOT_SOURCES[slot]) {
+      tok = tokens.find((t) => t.path === p || t.cssVar === `--brand-${p.replace('.', '-')}`);
+      if (tok) break;
+    }
+    if (!tok && firstOf) tok = tokens.find((t) => t.path.startsWith(firstOf + '.'));
+    const path = tok?.path ?? null;
     slotPath[slot] = path;
-    const tok = path ? tokens.find((t) => t.path === path) : undefined;
     slotCss[slot] = tok ? cssVar(tok.cssVar) : fallback;
     return tok ? tok.value : fallback;
   };
@@ -328,7 +366,8 @@ export function resolveBackground(bg: string | undefined, t: Theme): ResolvedBac
   if (!v) return base(t.surface, null);
   if (v.startsWith('token:')) {
     const path = v.slice(6).trim();
-    const tok = t.tokens.find((k) => k.path === path);
+    const [group, name = ''] = path.split('.');
+    const tok = t.tokens.find((k) => k.path === path) ?? t.tokens.find((k) => k.cssVar === `--brand-${group}-${cssIdent(name)}`);
     if (tok) return base(parseColor(tok.value) ? tok.value : t.surface, cssVar(tok.cssVar));
     // Slot aliases work without a kit: token:color.primary etc.
     const alias: Record<string, [string, string]> = {

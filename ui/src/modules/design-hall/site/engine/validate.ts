@@ -28,7 +28,8 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const URI_RE = /^otto:\/\/design\/[A-Za-z0-9_-]{1,64}(?:@(?:approved|latest|v[1-9][0-9]*))?(?:#[A-Za-z0-9_:.-]{1,128})?$/;
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
-const TOKEN_RE = /^token:[a-z0-9-]+(?:\.[a-z0-9-]+){1,3}$/;
+/** A brand colour token (`token:color.<name>`, Brand Kit token names). */
+const TOKEN_RE = /^token:color\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 
 /** Keys that hold a link / an image / a video (checked for unsafe schemes). */

@@ -311,6 +311,38 @@ export class DesignBus {
 
 export const designBus = new DesignBus();
 
+// design_assist_updated / design_variants_ready — the design-assist pipeline
+// (agent turns + variant runs). Same sequenced-log shape as `designBus`, kept
+// separate so graph views don't refresh on every turn state change; the Otto
+// panel and the lobby hand-off read it.
+export type DesignAssistBusEvent = Extract<
+  OttoEvent,
+  { type: 'design_assist_updated' } | { type: 'design_variants_ready' }
+>;
+
+export class DesignAssistBus {
+  seq: number = $state(0);
+  resyncTick: number = $state(0);
+  private log: { seq: number; ev: DesignAssistBusEvent }[] = [];
+
+  apply(ev: DesignAssistBusEvent): void {
+    const seq = this.seq + 1;
+    this.log.push({ seq, ev });
+    if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+    this.seq = seq;
+  }
+
+  since(after: number): DesignAssistBusEvent[] {
+    return this.log.filter((e) => e.seq > after).map((e) => e.ev);
+  }
+
+  resync(): void {
+    this.resyncTick += 1;
+  }
+}
+
+export const designAssistBus = new DesignAssistBus();
+
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
 class EventsClient {
@@ -372,6 +404,7 @@ class EventsClient {
     transcript.resyncVisible();
     missionControlBus.resync();
     designBus.resync();
+    designAssistBus.resync();
     void ws.refreshSessions().catch(() => {
       /* transient — the next reconnect or workspace switch retries */
     });
@@ -535,6 +568,9 @@ class EventsClient {
           // Design Hall graph: the lobby, the open artifact, its Links panel and
           // the learning log each re-fetch what the event touches.
           designBus.apply(parsed);
+        } else if (parsed.type === 'design_assist_updated' || parsed.type === 'design_variants_ready') {
+          // Design assist: the Otto panel's turn states + the variants tray.
+          designAssistBus.apply(parsed);
         } else if (parsed.type === 'mockup_session_started') {
           // The mockup agent session is live (turn start) → attach its shell.
           mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id);

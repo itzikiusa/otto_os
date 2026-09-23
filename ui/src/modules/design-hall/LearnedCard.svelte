@@ -1,27 +1,37 @@
 <script lang="ts">
-  // Lobby rail: "What Otto learned". Phase 0 only CAPTURES design signals —
-  // nothing is learned from them yet — so the card shows the latest signals and
-  // says honestly that rules come later. No invented rules.
+  // Lobby rail: "What Otto learned from your team". The real pending rule
+  // proposals for this workspace (Learning v1, suggest-only) with Keep
+  // (approve), Dismiss (reject) and Details — each decision asks first — plus
+  // the active-rule count and how many patterns are still forming. When
+  // nothing is pending it says how rules appear; no invented rules.
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { rel } from '../../lib/stores/now.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { designBus } from '../../lib/events.svelte';
-  import { listSignals } from '../../lib/api/design';
-  import type { DesignSignal } from '../../lib/api/types';
-  import { library } from './library.svelte';
-  import { signalLabel, signalSummary, signalTone } from './model';
+  import type { DesignLearnedEdit, DesignLearnedResp } from '../../lib/api/types';
+  import { getLearned } from './assist/api';
+  import { editHeadline } from './assist/model';
+  import { approveRule, rejectRule } from './assist/ruleActions';
 
-  let signals = $state<DesignSignal[]>([]);
+  let learned = $state<DesignLearnedResp | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let busy = $state<string | null>(null);
   let seq = 0;
 
   async function load(): Promise<void> {
+    const w = ws.currentId;
+    if (!w) {
+      loading = false;
+      return;
+    }
     const my = ++seq;
     try {
-      const s = await listSignals({ limit: 5 });
+      const l = await getLearned(w);
       if (my !== seq) return;
-      signals = s;
+      learned = l;
       error = null;
     } catch (e) {
       if (my === seq) error = e instanceof Error ? e.message : String(e);
@@ -31,6 +41,7 @@
   }
 
   $effect(() => {
+    void ws.currentId;
     void designBus.resyncTick;
     untrack(() => void load());
   });
@@ -41,45 +52,72 @@
     untrack(() => {
       const evs = designBus.since(seen);
       seen = now;
-      if (evs.some((e) => e.type === 'design_learning_update')) void load();
+      if (evs.some((e) => e.type === 'design_learning_update' && e.workspace_id === ws.currentId)) void load();
     });
   });
 
-  const titleOf = (id: string) => library.hitOf(id)?.artifact.title ?? 'A design';
+  const pending = $derived(learned?.pending ?? []);
+  const forming = $derived((learned?.candidates ?? []).filter((c) => !c.ready).length);
+  const canEdit = $derived(auth.can('design', 'edit'));
+
+  async function keep(e: DesignLearnedEdit): Promise<void> {
+    busy = e.edit_id;
+    if (await approveRule(e, learned?.skill)) await load();
+    busy = null;
+  }
+  async function dismiss(e: DesignLearnedEdit): Promise<void> {
+    busy = e.edit_id;
+    if (await rejectRule(e)) await load();
+    busy = null;
+  }
+  const details = (e: DesignLearnedEdit) => router.go(`design/learned/pending/${encodeURIComponent(e.edit_id)}`);
 </script>
 
 <section class="card rail-card" aria-labelledby="dh-learned-h" data-testid="design-learned-card">
   <header>
     <span class="ico"><Icon name="bulb" size={14} /></span>
-    <h2 id="dh-learned-h">What Otto learned</h2>
+    <h2 id="dh-learned-h">What Otto learned from your team</h2>
   </header>
-  <p class="lead">
-    Every approve, restore and edit after an agent draft is captured as a signal. Otto starts proposing team
-    rules once enough signals exist — nothing is applied without your approval.
-  </p>
   {#if loading}
-    <p class="dim small" role="status">Loading signals…</p>
+    <p class="dim small" role="status">Loading…</p>
   {:else if error}
     <div class="err">
       <Icon name="warning" size={14} />
-      <span>Couldn’t load signals.</span>
+      <span>Couldn’t load team rules.</span>
       <button class="btn small ghost" onclick={() => void load()}>Retry</button>
     </div>
-  {:else if signals.length === 0}
-    <p class="dim small">No signals yet. They appear as you review and approve designs.</p>
-  {:else}
-    <ul class="sigs">
-      {#each signals as s (s.id)}
-        <li>
-          <span class="kind tone-{signalTone(s.kind)}">{signalLabel(s.kind)}</span>
-          <a class="what" href={`#/design/a/${encodeURIComponent(s.artifact_id)}`}>{titleOf(s.artifact_id)}</a>
-          <span class="sum">{signalSummary(s)}</span>
-          <span class="when" title={new Date(s.created_at).toLocaleString()}>{rel(s.created_at)}</span>
-        </li>
-      {/each}
-    </ul>
+  {:else if learned}
+    <p class="counts">
+      {#if pending.length}<span class="chip new">{pending.length} new</span>{/if}
+      <span class="dim">{learned.active.length} active rule{learned.active.length === 1 ? '' : 's'}</span>
+      {#if learned.mode === 'off'}<span class="dim">· learning off</span>{/if}
+    </p>
+    {#if pending.length === 0}
+      <p class="dim small">
+        No rules waiting. Otto proposes one when the same choice repeats 3 times across 2 designs{forming ? ` — ${forming} pattern${forming === 1 ? ' is' : 's are'} forming` : ''}.
+      </p>
+    {:else}
+      <ul class="props">
+        {#each pending.slice(0, 3) as e (e.edit_id)}
+          <li data-testid="design-learned-proposal">
+            <p class="rule">{editHeadline(e)}</p>
+            {#if e.rationale}<p class="why"><Icon name="clock" size={11} /> {e.rationale}</p>{/if}
+            <div class="acts">
+              <button class="btn small" disabled={!canEdit || busy === e.edit_id} onclick={() => void keep(e)} data-testid="design-learned-keep">
+                <Icon name="check" size={11} /> Keep
+              </button>
+              <button class="btn small ghost" disabled={!canEdit || busy === e.edit_id} onclick={() => void dismiss(e)} data-testid="design-learned-dismiss">Dismiss</button>
+              <span class="grow"></span>
+              <button class="linkbtn" onclick={() => details(e)}>Details</button>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   {/if}
-  <a class="more" href="#/design/learned">Open the learning log <Icon name="chevronRight" size={12} /></a>
+  <a class="more" href={pending.length ? '#/design/learned/pending' : '#/design/learned/rules'}>
+    {pending.length ? 'Review all' : 'See team rules'} <Icon name="chevronRight" size={12} />
+  </a>
 </section>
 
 <style>
@@ -108,11 +146,19 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .lead {
+  .counts {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 0;
     font-size: var(--fs-s);
+  }
+  .new {
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .dim {
     color: var(--text-dim);
-    line-height: 1.45;
   }
   .small {
     margin: 0;
@@ -127,70 +173,57 @@
   .err :global(svg) {
     color: var(--danger);
   }
-  .sigs {
+  .props {
     list-style: none;
     margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
+    gap: 8px;
   }
-  .sigs li {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    grid-template-areas: 'kind what when' 'sum sum sum';
-    gap: 2px 8px;
-    padding: 8px 0;
-    border-block-start: 1px solid var(--border);
-    align-items: center;
+  .props li {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
-  .kind {
-    grid-area: kind;
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .tone-ok {
-    color: var(--success);
-    background: var(--success-soft);
-  }
-  .tone-bad {
-    color: var(--danger);
-    background: var(--danger-soft);
-  }
-  .tone-warn {
-    color: var(--warning);
-    background: var(--warning-soft);
-  }
-  .tone-info {
-    color: var(--info);
-    background: var(--info-soft);
-  }
-  .what {
-    grid-area: what;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-    text-decoration: none;
+  .rule {
+    margin: 0;
     font-size: var(--fs-s);
-    font-weight: 500;
+    font-weight: 600;
+    line-height: 1.35;
   }
-  .what:hover {
+  .why {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .why :global(svg) {
+    vertical-align: -2px;
+  }
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 2px;
+  }
+  .grow {
+    flex: 1;
+  }
+  .linkbtn {
+    border: 0;
+    background: none;
+    padding: 0;
     color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-s);
+    cursor: pointer;
   }
-  .sum {
-    grid-area: sum;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .when {
-    grid-area: when;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
+  .linkbtn:hover {
+    text-decoration: underline;
   }
   .more {
     display: inline-flex;

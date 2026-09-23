@@ -131,8 +131,9 @@ test('brand kits (otto-brand/1 and the legacy typography shape) become --brand-*
     $schema: 'otto-brand/1',
     color: { primary: { $value: '#0F766E' }, accent: { $value: '#F59E0B' }, ink: { $value: '#0B1220' }, surface: { $value: '#FFFFFF' }, surfaceAlt: { $value: '#ECFDF5' } },
     font: { display: { $value: '"Clash Display", system-ui' }, body: { $value: 'Inter, system-ui' } },
-    radius: { card: { $value: '20px' } },
-    space: { m: { $value: '16px' } },
+    radius: { card: { $value: '20px' }, md: { $value: 14 } },
+    space: { m: { $value: 16 } },
+    type: { display: { size: 64, line: 72, weight: 800 } },
     logos: [{ src: 'x' }],
     voice: { summary: 'Warm' },
   };
@@ -141,7 +142,10 @@ test('brand kits (otto-brand/1 and the legacy typography shape) become --brand-*
   assert.equal(byVar['--brand-color-primary'], '#0F766E');
   assert.equal(byVar['--brand-color-surface-alt'], '#ECFDF5', 'camelCase names become kebab-case');
   assert.equal(byVar['--brand-font-display'], '"Clash Display", system-ui');
-  assert.equal(byVar['--brand-radius-card'], '20px');
+  assert.equal(byVar['--brand-radius-card'], '20px', 'a pre-v1 string radius still reads');
+  assert.equal(byVar['--brand-radius-md'], '14px', 'v1 radii are px numbers (Brand Kit brandCssVars)');
+  assert.equal(byVar['--brand-space-m'], '16px');
+  assert.equal(byVar['--brand-type-display-size'], '64px');
   assert.ok(!Object.keys(byVar).some((k) => k.startsWith('--brand-logos') || k.startsWith('--brand-voice')));
   assert.equal(t.slotCss.primary, 'var(--brand-color-primary)');
   assert.equal(t.slotCss['surface-alt'], 'var(--brand-color-surface-alt)');
