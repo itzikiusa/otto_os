@@ -69,6 +69,26 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall deadline for file-download requests, which can carry large payloads
 /// and so are given a more generous budget than ordinary API calls.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Largest inbound Slack attachment Otto downloads for the agent (bytes).
+const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// Deadline for one Socket Mode frame write (ping, pong, envelope ack). Like
+/// the dial, `sink.send` has no timeout of its own: on a half-dead TCP path
+/// with a full send buffer it parks the read loop forever, and with it every
+/// recovery path (watchdog, cancel check, reconnect).
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Write one frame to the Socket Mode socket, bounded by [`WS_SEND_TIMEOUT`].
+async fn send_frame<S>(sink: &mut S, msg: Message) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("timed out after {}s", WS_SEND_TIMEOUT.as_secs())),
+    }
+}
 
 /// Build an HTTP client for Slack Web API calls (connect + overall timeouts).
 /// Falls back to a default client if the builder fails.
@@ -448,7 +468,7 @@ pub async fn run(
             }
             if last_ping.elapsed() >= CLIENT_PING_INTERVAL {
                 last_ping = std::time::Instant::now();
-                if let Err(e) = sink.send(Message::Ping(Default::default())).await {
+                if let Err(e) = send_frame(&mut sink, Message::Ping(Default::default())).await {
                     warn!("slack: probe ping failed ({e}), reconnecting");
                     break 'inner;
                 }
@@ -469,8 +489,12 @@ pub async fn run(
             let raw = match maybe_msg {
                 Some(Ok(Message::Text(text))) => text,
                 Some(Ok(Message::Ping(data))) => {
-                    // Respond to WebSocket-level pings.
-                    let _ = sink.send(Message::Pong(data)).await;
+                    // Respond to WebSocket-level pings. A pong that can't
+                    // be written means the socket is gone — reconnect.
+                    if let Err(e) = send_frame(&mut sink, Message::Pong(data)).await {
+                        warn!("slack: pong failed ({e}), reconnecting");
+                        break 'inner;
+                    }
                     continue 'inner;
                 }
                 Some(Ok(Message::Close(_))) => {
@@ -478,16 +502,14 @@ pub async fn run(
                     break 'inner;
                 }
                 Some(Ok(_)) => continue 'inner, // binary / pong frames
+                // The backoff pause is taken ONCE, after the inner loop —
+                // sleeping here too doubled every reconnect delay.
                 Some(Err(e)) => {
                     error!("slack: websocket error: {e}, reconnecting");
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                     break 'inner;
                 }
                 None => {
                     info!("slack: stream ended, reconnecting");
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                     break 'inner;
                 }
             };
@@ -516,7 +538,7 @@ pub async fn run(
                     let envelope_id = val["envelope_id"].as_str().unwrap_or("").to_string();
                     if !envelope_id.is_empty() {
                         let ack = format!(r#"{{"envelope_id":"{envelope_id}"}}"#);
-                        if let Err(e) = sink.send(Message::Text(ack)).await {
+                        if let Err(e) = send_frame(&mut sink, Message::Text(ack)).await {
                             error!("slack: failed to send ack: {e}");
                             break 'inner;
                         }
@@ -559,7 +581,10 @@ pub async fn run(
                     if let Some(eid) = val["envelope_id"].as_str() {
                         if !eid.is_empty() {
                             let ack = format!(r#"{{"envelope_id":"{eid}"}}"#);
-                            let _ = sink.send(Message::Text(ack)).await;
+                            if let Err(e) = send_frame(&mut sink, Message::Text(ack)).await {
+                                error!("slack: failed to send ack: {e}");
+                                break 'inner;
+                            }
                         }
                     }
                     debug!("slack: unhandled envelope type '{other}', ignored");
@@ -792,7 +817,7 @@ async fn download_slack_file(
     id: &str,
     name: &str,
 ) -> anyhow::Result<String> {
-    let resp = client
+    let mut resp = client
         .get(url)
         .header("Authorization", format!("Bearer {bot_token}"))
         .send()
@@ -800,18 +825,42 @@ async fn download_slack_file(
     if !resp.status().is_success() {
         anyhow::bail!("http {}", resp.status());
     }
-    let bytes = resp.bytes().await?;
-    let safe_name: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = std::env::temp_dir().join(format!("otto-slack-{id}-{safe_name}"));
+    // Bounded read: a huge upload must not be buffered whole in daemon memory.
+    // Refuse up front on a declared oversize, and stop streaming past the cap
+    // when the length is absent/understated.
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_DOWNLOAD_BYTES)
+    {
+        anyhow::bail!(
+            "file is larger than the {} MB limit",
+            MAX_DOWNLOAD_BYTES >> 20
+        );
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if (bytes.len() + chunk.len()) as u64 > MAX_DOWNLOAD_BYTES {
+            anyhow::bail!(
+                "file is larger than the {} MB limit",
+                MAX_DOWNLOAD_BYTES >> 20
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    let safe_name = sanitize(name);
+    let safe_id = sanitize(id);
+    let path = std::env::temp_dir().join(format!("otto-slack-{safe_id}-{safe_name}"));
     tokio::fs::write(&path, &bytes).await?;
     Ok(path.to_string_lossy().to_string())
 }

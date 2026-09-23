@@ -19,22 +19,25 @@
   // Local key/value rows for the env being edited. A `secret` row's value
   // lives in the macOS Keychain: it renders masked, `touched` marks a newly
   // typed replacement value (the only case where a value is sent on save).
-  interface VarRow { key: string; value: string; secret: boolean; touched: boolean; }
+  // `storedKey` is the name the secret is stored under in the Keychain (null
+  // for new rows) — renaming the row sends `secret_renames` so the stored
+  // value follows the new name instead of being deleted.
+  interface VarRow { key: string; value: string; secret: boolean; touched: boolean; storedKey: string | null; }
   let rows: VarRow[] = $state([]);
 
   function startEdit(env: ApiEnvironment): void {
     editing = editing === env.id ? null : env.id;
     if (editing) {
       rows = [
-        ...Object.entries(env.variables).map(([key, value]) => ({ key, value, secret: false, touched: false })),
+        ...Object.entries(env.variables).map(([key, value]) => ({ key, value, secret: false, touched: false, storedKey: null })),
         // Secret keys carry no value in the row — masked placeholder instead.
-        ...env.secret_keys.map((key) => ({ key, value: '', secret: true, touched: false })),
+        ...env.secret_keys.map((key) => ({ key, value: '', secret: true, touched: false, storedKey: key })),
       ];
     }
   }
 
   function addRow(): void {
-    rows = [...rows, { key: '', value: '', secret: false, touched: false }];
+    rows = [...rows, { key: '', value: '', secret: false, touched: false, storedKey: null }];
   }
   function updateRow(i: number, patch: Partial<VarRow>): void {
     rows = rows.map((r, idx) => (idx === i ? { ...r, ...patch, ...(patch.value !== undefined ? { touched: true } : {}) } : r));
@@ -44,8 +47,18 @@
   }
   /** Toggle the lock: marking secret hides the value from the row on save;
    * unmarking turns it back into a plain variable (value must be re-typed
-   * unless it was just entered). */
-  function toggleSecret(i: number): void {
+   * unless it was just entered). Unmarking a STORED secret nobody retyped
+   * deletes its Keychain value on save — ask first. */
+  async function toggleSecret(i: number): Promise<void> {
+    const row = rows[i];
+    if (!row) return;
+    if (row.secret && row.storedKey !== null && !(row.touched && row.value !== '')) {
+      const ok = await confirmer.ask(
+        `“${row.key || row.storedKey}” is stored in the Keychain and can't be shown. Making it a plain variable deletes the stored value when you save — type the value again to keep it.`,
+        { title: 'Make variable plain?', confirmLabel: 'Make plain' },
+      );
+      if (!ok) return;
+    }
     rows = rows.map((r, idx) => (idx === i ? { ...r, secret: !r.secret } : r));
   }
 
@@ -53,6 +66,7 @@
     const variables: Record<string, string> = {};
     const secret_keys: string[] = [];
     const secret_values: Record<string, string> = {};
+    const secret_renames: Record<string, string> = {};
     for (const r of rows) {
       const key = r.key.trim();
       if (key === '') continue;
@@ -60,12 +74,14 @@
         secret_keys.push(key);
         // Only new/changed values travel; untouched secrets keep their stored value.
         if (r.touched && r.value !== '') secret_values[key] = r.value;
+        // A renamed stored secret: its Keychain value moves to the new name.
+        else if (r.storedKey !== null && r.storedKey !== key) secret_renames[r.storedKey] = key;
       } else {
         variables[key] = r.value;
       }
     }
     const saved = await apiClient.saveEnvironment(
-      { name: env.name, variables, secret_keys, secret_values }, env.id,
+      { name: env.name, variables, secret_keys, secret_values, secret_renames }, env.id,
     );
     if (saved) editing = null;
   }
@@ -156,7 +172,7 @@
                     value={row.value}
                     oninput={(e) => updateRow(i, { value: (e.currentTarget as HTMLInputElement).value })}
                   />
-                  <button class="icon-btn" class:lock-on={row.secret} title={row.secret ? 'Secret (value in Keychain) — click to make plain' : 'Mark secret (move value to Keychain on save)'} aria-label="Toggle secret" onclick={() => toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
+                  <button class="icon-btn" class:lock-on={row.secret} title={row.secret ? 'Secret (value in Keychain) — click to make plain' : 'Mark secret (move value to Keychain on save)'} aria-label="Toggle secret" onclick={() => void toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
                   <button class="icon-btn" title="Remove" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
                 </div>
               {/each}

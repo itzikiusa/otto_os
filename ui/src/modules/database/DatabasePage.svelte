@@ -4,6 +4,7 @@
   // Structure / Dashboards) over the active view.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
   import QueryBuilder from './QueryBuilder.svelte';
@@ -759,6 +760,25 @@
   }
 </script>
 
+<div class="db-root">
+<!-- One header for the Connections hub. "New connection" is the page's primary
+     (it used to be a bare "+" in the side-tab strip); while there is nothing
+     to open, the empty state owns that CTA instead. Phone keeps its accordion
+     head buttons, so the header stays action-free there. -->
+<PageHeader title="Connections">
+  {#snippet actions()}
+    {#if !viewport.isPhone}
+      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster">
+        <Icon name="arrowDown" size={12} /> Import
+      </button>
+      {#if database.connections.length > 0 || brokers.clusters.length > 0}
+        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)">
+          <Icon name="plus" size={12} /> New connection
+        </button>
+      {/if}
+    {/if}
+  {/snippet}
+</PageHeader>
 <div class="db-page">
   {#if !viewport.isPhone && database.sidebarCollapsed}
     <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
@@ -829,9 +849,6 @@
         <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
         <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
         <span class="grow"></span>
-        <!-- Persistent "New connection" — visible on every side tab, not only
-             inside the Connections tab body. -->
-        <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)" aria-label="New connection"><Icon name="plus" size={12} /></button>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
@@ -880,14 +897,22 @@
     {#if !hasAnyTab}
       <!-- Always actionable: create the first connection, or surface the picker
            (which may be hidden behind a collapsed rail / another side tab). -->
+      <!-- One CTA, and only when it does something: create the first
+           connection, or reveal a picker that is hidden (collapsed rail /
+           another side tab). With the list already on screen there is no
+           button — "Show connections" next to the visible list was noise. -->
       <EmptyState
+        variant="page"
         icon="db"
         title="Open a connection"
         body={database.connections.length === 0 && brokers.clusters.length === 0
           ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
           : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
-        actionLabel={database.connections.length === 0 && auth.isRoot ? 'New connection' : 'Show connections'}
-        onaction={database.connections.length === 0 && auth.isRoot ? newConnection : showConnections}
+        actionLabel={database.connections.length === 0 && brokers.clusters.length === 0
+          ? auth.isRoot ? 'New connection' : undefined
+          : database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
+        actionIcon={database.connections.length === 0 && brokers.clusters.length === 0 ? 'plus' : undefined}
+        onaction={database.connections.length === 0 && brokers.clusters.length === 0 ? newConnection : showConnections}
       />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -1059,6 +1084,7 @@
       {/if}
     {/if}
   </div>
+</div>
 </div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
@@ -1423,8 +1449,15 @@
 {/if}
 
 <style>
-  .db-page {
+  .db-root {
     height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+  .db-page {
+    flex: 1;
     display: flex;
     min-height: 0;
     /* Let the page shrink inside its (flex) content pane instead of forcing its
@@ -2283,7 +2316,6 @@
        overflow:hidden and fixed-height — we can't change that from here). */
     .db-page {
       flex-direction: column;
-      height: 100%;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }

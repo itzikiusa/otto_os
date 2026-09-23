@@ -55,6 +55,9 @@ class BrowserStore {
    *  react (focus + hint) without the dock having to diff the list. */
   markTick = $state(0);
   private wsId = '';
+  /** Request token for page loads: a slow fetch (up to 30 s) for tab A must
+   *  not land over tab B's page — or another workspace's — after a switch. */
+  private pageSeq = 0;
 
   get activeTab(): BrowserTab | null {
     return this.tabs.find((t) => t.id === this.activeId) ?? null;
@@ -64,15 +67,25 @@ class BrowserStore {
     if (this.wsId !== workspaceId) {
       this.wsId = workspaceId;
       this.agentSessionId = lsGet(agentKey(workspaceId));
+      // A workspace switch must not keep showing the previous workspace's
+      // open page / marks (or let its in-flight page load land).
+      this.pageSeq++;
+      this.activeId = null;
+      this.page = null;
+      this.pageError = '';
+      this.annotations = [];
+      this.loadingPage = false;
     }
     this.loadingTabs = true;
     try {
-      this.tabs = await browserApi.listTabs(workspaceId);
+      const tabs = await browserApi.listTabs(workspaceId);
+      if (this.wsId !== workspaceId) return;
+      this.tabs = tabs;
       if (!this.activeId && this.tabs.length) this.activeId = this.tabs[0].id;
     } catch {
-      this.tabs = [];
+      if (this.wsId === workspaceId) this.tabs = [];
     } finally {
-      this.loadingTabs = false;
+      if (this.wsId === workspaceId) this.loadingTabs = false;
     }
   }
 
@@ -93,6 +106,7 @@ class BrowserStore {
   /** Deselect the active tab (the URL bar clears for a fresh "new tab" entry;
    *  nothing is closed or navigated until the user submits a URL). */
   deselect(): void {
+    this.pageSeq++; // an in-flight reader load must not repopulate the blank tab
     this.activeId = null;
     this.page = null;
     this.annotations = [];
@@ -106,6 +120,7 @@ class BrowserStore {
     if (tab && !isNativeLive(tab)) {
       void this.loadPage(tab.url);
     } else {
+      this.pageSeq++;
       this.page = null;
       this.pageError = '';
     }
@@ -195,25 +210,35 @@ class BrowserStore {
   }
 
   async loadPage(url: string): Promise<void> {
+    const mine = ++this.pageSeq;
+    const ws = this.wsId;
+    const current = () => mine === this.pageSeq && ws === this.wsId;
     this.loadingPage = true;
     this.pageError = '';
     try {
-      this.page = await browserApi.getPage(this.wsId, url);
-      await this.loadAnnotations(url);
+      const page = await browserApi.getPage(ws, url);
+      const annotations = await browserApi.listAnnotations(ws, url).catch(() => [] as BrowserAnnotation[]);
+      if (!current()) return;
+      this.page = page;
+      this.annotations = annotations;
     } catch (e) {
+      if (!current()) return;
       this.page = null;
       this.pageError = e instanceof Error ? e.message : 'Failed to load page';
     } finally {
-      this.loadingPage = false;
+      if (current()) this.loadingPage = false;
     }
   }
 
   async loadAnnotations(url: string): Promise<void> {
+    const ws = this.wsId;
+    let next: BrowserAnnotation[];
     try {
-      this.annotations = await browserApi.listAnnotations(this.wsId, url);
+      next = await browserApi.listAnnotations(ws, url);
     } catch {
-      this.annotations = [];
+      next = [];
     }
+    if (ws === this.wsId) this.annotations = next;
   }
 
   async summarize(url: string) {
@@ -278,9 +303,13 @@ class BrowserStore {
     if (this.wsId && ev.workspace_id !== this.wsId) return;
     if (ev.type === 'browser_tab_updated') {
       const tab = ev.tab as BrowserTab;
-      const exists = this.tabs.some((t) => t.id === tab.id);
-      this.tabs = exists ? this.tabs.map((t) => (t.id === tab.id ? tab : t)) : [...this.tabs, tab];
-      if (tab.id === this.activeId && !isNativeLive(tab)) void this.loadPage(tab.url);
+      const prev = this.tabs.find((t) => t.id === tab.id);
+      this.tabs = prev ? this.tabs.map((t) => (t.id === tab.id ? tab : t)) : [...this.tabs, tab];
+      // Re-fetch only when the URL actually changed: this client's own
+      // navigate already loaded it, and the echo re-fetched the remote page.
+      if (tab.id === this.activeId && !isNativeLive(tab) && prev?.url !== tab.url) {
+        void this.loadPage(tab.url);
+      }
     } else {
       const ann = ev.annotation as BrowserAnnotation;
       if (this.activeTab && ann.url === this.activeTab.url) {

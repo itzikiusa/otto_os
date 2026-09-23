@@ -6,11 +6,12 @@
   import { baseUrl } from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
-  import { apiClient, HTTP_METHODS, defaultSettings, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
+  import { apiClient, HTTP_METHODS, defaultSettings, confirmNewHost, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
-  import { api } from '../../lib/api/client';
+  import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { marked } from 'marked';
+  import { sanitizeHtml } from '../../lib/sanitize';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
   import { isSecretRef } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -353,8 +354,11 @@
   function setField<K extends keyof ApiDraft>(k: K, v: ApiDraft[K]): void {
     apiClient.draft = { ...draft, [k]: v };
   }
+  // Request docs arrive from Postman imports, git-pulled collections and agent
+  // upserts — untrusted markdown. marked passes raw HTML through, so the output
+  // MUST go through the allowlist sanitizer before the `{@html}` sink.
   const docsHtml = $derived.by(() => {
-    try { return marked.parse(draft.docs ?? '', { async: false, gfm: true, breaks: true }) as string; }
+    try { return sanitizeHtml(marked.parse(draft.docs ?? '', { async: false, gfm: true, breaks: true }) as string); }
     catch { return ''; }
   });
   const settings = $derived(draft.settings ?? defaultSettings());
@@ -423,10 +427,19 @@
         }
         return;
       }
-      const res = await api.post<{ access_token: string; token_type?: string; refresh_token?: string; expires_in?: number }>(
-        `/workspaces/${wid}/api-client/oauth2/token`,
-        { grant: a.grant, token_url: a.token_url, client_id: a.client_id, client_secret: a.client_secret, scope: a.scope, username: a.username, password: a.password, refresh_token: a.refresh_token },
-      );
+      type TokenResp = { access_token: string; token_type?: string; refresh_token?: string; expires_in?: number };
+      const tokenReq = { grant: a.grant, token_url: a.token_url, client_id: a.client_id, client_secret: a.client_secret, scope: a.scope, username: a.username, password: a.password, refresh_token: a.refresh_token };
+      let res: TokenResp;
+      try {
+        res = await api.post<TokenResp>(`/workspaces/${wid}/api-client/oauth2/token`, tokenReq);
+      } catch (e) {
+        // A stored secret would go to a token endpoint other than the saved
+        // one — the daemon waits for a person's confirmation.
+        const host = newHostConfirmHost(e);
+        if (host === null || !(await confirmNewHost(host))) throw e;
+        if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
+        res = await api.post<TokenResp>(`/workspaces/${wid}/api-client/oauth2/token`, { ...tokenReq, confirm_new_host: true });
+      }
       if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
       setAuth({ access_token: res.access_token, token_type: res.token_type || 'Bearer', refresh_token: res.refresh_token || a.refresh_token });
       toasts.success('Token acquired', `${res.token_type || 'Bearer'} · expires in ${res.expires_in ?? '?'}s`);

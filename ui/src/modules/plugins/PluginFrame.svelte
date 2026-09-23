@@ -9,6 +9,8 @@
   // synthetic window keydowns so the shell's shortcut handlers fire normally.
   import { baseUrl, getToken } from '../../lib/api/client';
   import { agentProviders } from '../../lib/providers';
+  import { plugins } from '../../lib/stores/plugins.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
 
   let { slug }: { slug: string } = $props();
 
@@ -69,18 +71,30 @@
 
 <svelte:window onmessage={onMessage} />
 
-<iframe
-  bind:this={frame}
-  title={slug}
-  {src}
-  onload={onload}
-  allow="clipboard-write"
-></iframe>
+<!-- Same chrome as every built-in module: the plugin's name in the shared
+     header bar, its own UI below. -->
+<div class="plugin-page">
+  <PageHeader title={plugins.get(slug)?.name ?? slug} />
+  <iframe
+    bind:this={frame}
+    title={slug}
+    {src}
+    onload={onload}
+    allow="clipboard-write"
+  ></iframe>
+</div>
 
 <style>
-  iframe {
-    width: 100%;
+  .plugin-page {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  iframe {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
     border: 0;
     display: block;
     background: var(--bg);

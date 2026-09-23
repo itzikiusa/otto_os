@@ -79,9 +79,31 @@
     }
   }
   let codeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The code-pane text a pending debounce has not saved yet. */
+  let pendingCode: string | null = null;
   function onCode(value: string): void {
     if (codeTimer) clearTimeout(codeTimer);
-    codeTimer = setTimeout(() => void saveD2(value), 500);
+    pendingCode = value;
+    // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
+    if (canvas.currentId === sceneId) canvas.dirty = true;
+    codeTimer = setTimeout(() => {
+      codeTimer = null;
+      pendingCode = null;
+      void saveD2(value);
+    }, 500);
+  }
+  /** Unmount (scene switch / navigation) inside the debounce window: PUT the
+   *  last typed text straight to THIS scene — `saveD2` would drop it, since
+   *  currentId already points at the next scene. */
+  function flushPendingCode(): void {
+    if (codeTimer) clearTimeout(codeTimer);
+    codeTimer = null;
+    if (pendingCode === null || !sceneId) return;
+    const doc = { type: 'otto-canvas', version: 1, format: 'd2' as CanvasFormat, source: pendingCode, sketch };
+    pendingCode = null;
+    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
+    );
   }
   function toggleSketch(): void {
     sketch = !sketch;
@@ -236,21 +258,28 @@
     if (!p || generating) return;
     generating = true;
     userAdjusted = false;
-    canvas.pushConvo('user', p);
+    // The result belongs to THIS scene even if the user switches away while
+    // the agent works (the server commits it there).
+    const sceneId = canvas.currentId;
+    canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
       const src = res.d2 ?? '';
       if (!src.trim()) {
-        canvas.pushConvo('assistant', res.note || 'No diagram was produced.');
+        canvas.pushConvo('assistant', res.note || 'No diagram was produced.', sceneId);
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
       }
-      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch });
-      canvas.pushConvo('assistant', res.note || 'Updated the canvas.');
+      if (canvas.currentId !== sceneId) {
+        toasts.success('Ask AI finished', 'The diagram was saved to the scene you asked from.');
+        return;
+      }
+      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch }, sceneId);
+      canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {
-      canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`);
+      canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
       toasts.error('Ask AI failed', e instanceof Error ? e.message : String(e));
     } finally {
       generating = false;
@@ -284,7 +313,7 @@
     liveId = canvas.currentId;
   });
   onDestroy(() => {
-    if (codeTimer) clearTimeout(codeTimer);
+    flushPendingCode();
     if (liveId === canvas.currentId) liveId = null;
   });
 </script>

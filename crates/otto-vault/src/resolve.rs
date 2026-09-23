@@ -86,9 +86,15 @@ impl ResolveIndex {
         if raw.is_empty() {
             return None;
         }
-        let has_ext = raw.rsplit('/').next().is_some_and(|b| b.contains('.'));
-        let candidates: &[String] = &if has_ext {
+        // A dot does not make an extension: `[[Release 1.2]]` names
+        // `Release 1.2.md`. Only an explicit `.md` skips the implied suffix;
+        // other dotted names try the exact file first (attachments), then
+        // the note.
+        let base = raw.rsplit('/').next().unwrap_or(raw);
+        let candidates: &[String] = &if base.to_ascii_lowercase().ends_with(".md") {
             vec![raw.to_string()]
+        } else if base.contains('.') {
+            vec![raw.to_string(), format!("{raw}.md")]
         } else {
             vec![format!("{raw}.md"), raw.to_string()]
         };
@@ -211,6 +217,27 @@ mod tests {
     #[test]
     fn ambiguous_basename_unresolved() {
         assert_eq!(ix().resolve("index.md", "dup"), None);
+    }
+
+    #[test]
+    fn dotted_note_names_resolve() {
+        let ix = ResolveIndex::new(
+            ["releases/Release 1.2.md", "assets/v1.2.png"]
+                .into_iter()
+                .map(String::from),
+        );
+        assert_eq!(
+            ix.resolve("index.md", "Release 1.2"),
+            Some("releases/Release 1.2.md".into())
+        );
+        assert_eq!(
+            ix.resolve("index.md", "releases/Release 1.2"),
+            Some("releases/Release 1.2.md".into())
+        );
+        assert_eq!(
+            ix.resolve("index.md", "v1.2.png"),
+            Some("assets/v1.2.png".into())
+        );
     }
 
     #[test]

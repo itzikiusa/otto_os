@@ -172,6 +172,116 @@ async fn kill_group(pid: libc::pid_t) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The one git command builder for FILE paths and PARSED output
+// ---------------------------------------------------------------------------
+
+/// Output-format flags every `diff` / `show` whose text Otto PARSES (or hands
+/// to `git apply`) carries. Without them the user's own config leaks in:
+/// `diff.external` (difftastic) prints no `diff --git` headers at all (the
+/// Changes view goes empty), `diff.noprefix` / `diff.mnemonicPrefix` change
+/// the `a/`/`b/` prefixes the path matchers key on (every hunk op 404s/409s),
+/// and a textconv filter renders something that is not the blob.
+pub(crate) const DIFF_FORMAT: [&str; 5] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
+
+/// One git invocation — argv, per-spawn env and spawn class. Every call that
+/// names FILES, or whose output is parsed as file names/diffs, is built here:
+///
+/// * [`GitCmd::paths`] appends `-- <paths…>` and sets `GIT_LITERAL_PATHSPECS=1`
+///   for THAT spawn. After `--` git still reads `[ ] * ?` and a leading `:` as
+///   pathspec magic, so discarding `app/[id]/page.tsx` also reverted
+///   `app/d/page.tsx` and `clean`ed an untracked `app/i/page.tsx` — every
+///   Next.js/SvelteKit route folder is shaped like that. The env var (not the
+///   global `--literal-pathspecs` flag) keeps `argv[0]` the subcommand for
+///   [`verb_of`] and the test shims keyed on `$1`. Never process-wide:
+///   [`LocalGit::commit_all_if_dirty`] relies on `:(exclude)` magic.
+/// * [`GitCmd::diff`] fixes the output format ([`DIFF_FORMAT`], raw UTF-8
+///   names via `core.quotePath=false`).
+/// * [`GitCmd::read`] spawns are `LocalRead`, which [`LocalGit::spawn_output`]
+///   runs with `GIT_OPTIONAL_LOCKS=0`: a background status refresh must never
+///   take `index.lock` out from under an agent's `git commit`.
+///
+/// Name lists are requested with `-z` at the call site and split on NUL.
+#[derive(Debug, Clone)]
+pub(crate) struct GitCmd {
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    class: SpawnClass,
+}
+
+impl GitCmd {
+    /// A read-only command: cancelled with the request, no optional locks.
+    pub(crate) fn read(args: &[&str]) -> Self {
+        Self::with_class(args, SpawnClass::LocalRead)
+    }
+
+    /// An index/worktree-writing command: detached from the request.
+    pub(crate) fn write(args: &[&str]) -> Self {
+        Self::with_class(args, SpawnClass::LocalWrite)
+    }
+
+    /// `git -c core.quotePath=false <sub> <DIFF_FORMAT…>` — a read whose
+    /// output is parsed. `sub` is `diff` or `show`.
+    pub(crate) fn diff(sub: &str) -> Self {
+        Self::read(&["-c", "core.quotePath=false", sub]).args(DIFF_FORMAT)
+    }
+
+    fn with_class(args: &[&str], class: SpawnClass) -> Self {
+        Self {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            envs: Vec::new(),
+            class,
+        }
+    }
+
+    pub(crate) fn args<I, S>(mut self, extra: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(extra.into_iter().map(Into::into));
+        self
+    }
+
+    /// `-- <paths…>`, each a LITERAL file name (see the type docs).
+    pub(crate) fn paths<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.push("--".to_string());
+        self.args.extend(paths.into_iter().map(Into::into));
+        if !self.envs.iter().any(|(k, _)| k == "GIT_LITERAL_PATHSPECS") {
+            self.envs
+                .push(("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string()));
+        }
+        self
+    }
+
+    /// [`Self::paths`] when `path` is `Some`, unchanged otherwise.
+    pub(crate) fn maybe_path(self, path: Option<&str>) -> Self {
+        match path {
+            Some(p) => self.paths([p]),
+            None => self,
+        }
+    }
+
+    fn argv(&self) -> Vec<&str> {
+        self.args.iter().map(String::as_str).collect()
+    }
+}
+
+/// Split `-z` output into its non-empty NUL-terminated records.
+pub(crate) fn nul_records(out: &str) -> impl Iterator<Item = &str> {
+    out.split('\0').filter(|r| !r.is_empty())
+}
+
 /// A handle on one local repository; every method spawns `git -C <path> …`.
 pub struct LocalGit {
     repo_path: PathBuf,
@@ -392,6 +502,74 @@ impl LocalGit {
         Ok((out.status.success(), stdout, stderr, out.status.code()))
     }
 
+    /// Spawn a [`GitCmd`] without judging its exit: `(success, stdout BYTES,
+    /// stderr, code)`. Bytes, because a diff that `git apply` will read back
+    /// must not pass through a lossy UTF-8 decode (a Latin-1 `\xE9` came back
+    /// as `\xEF\xBF\xBD` and was staged that way).
+    pub(crate) async fn exec(
+        &self,
+        c: &GitCmd,
+        stdin: Option<&[u8]>,
+    ) -> Result<(bool, Vec<u8>, String, Option<i32>)> {
+        self.check_repo().await?;
+        let argv = c.argv();
+        let mut cmd = self.base_cmd();
+        cmd.args(&argv);
+        for (k, v) in &c.envs {
+            cmd.env(k, v);
+        }
+        let out = self.spawn_output(cmd, c.class, verb_of(&argv), stdin).await?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        Ok((out.status.success(), out.stdout, stderr, out.status.code()))
+    }
+
+    /// [`Self::exec`] where a non-zero exit is an error, classified exactly
+    /// like [`Self::run`]. Returns stdout as raw bytes.
+    pub(crate) async fn exec_bytes(&self, c: &GitCmd) -> Result<Vec<u8>> {
+        let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+        if !ok {
+            let err = upstream_err(&stderr, &String::from_utf8_lossy(&stdout), code);
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?c.args,
+                code = code,
+                "git failed: {err}"
+            );
+            return Err(err);
+        }
+        Ok(stdout)
+    }
+
+    /// [`Self::exec_bytes`], stdout decoded (lossily) as text.
+    pub(crate) async fn exec_text(&self, c: &GitCmd) -> Result<String> {
+        let out = self.exec_bytes(c).await?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// [`Self::exec_bytes`] for an index-writing command, with the same
+    /// bounded `index.lock` retry as [`Self::run_locked`].
+    pub(crate) async fn exec_locked(&self, c: &GitCmd) -> Result<()> {
+        for attempt in 1u64..=3 {
+            let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+            if ok {
+                return Ok(());
+            }
+            if attempt < 3 && stderr.contains("index.lock") {
+                tokio::time::sleep(std::time::Duration::from_millis(300 * attempt)).await;
+                continue;
+            }
+            let err = upstream_err(&stderr, &String::from_utf8_lossy(&stdout), code);
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?c.args,
+                code = code,
+                "git failed: {err}"
+            );
+            return Err(err);
+        }
+        unreachable!("loop returns on its final attempt")
+    }
+
     /// The one place a git process is created. Every spawn gets its own process
     /// GROUP (`setpgid(0,0)`) so a timeout can signal git AND the `ssh` /
     /// `git-remote-https` helpers it forked with a single `kill(-pid)`.
@@ -408,6 +586,13 @@ impl LocalGit {
         stdin: Option<&[u8]>,
     ) -> Result<std::process::Output> {
         cmd.process_group(0).kill_on_drop(true);
+        if class == SpawnClass::LocalRead {
+            // A read must never take `index.lock`: `git status` otherwise
+            // refreshes the index opportunistically, and an agent's concurrent
+            // `git commit`/`git add` (which do NOT retry) dies with "index.lock
+            // exists". Covers every status refresh and the worktree probe.
+            cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        }
         if stdin.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -480,13 +665,19 @@ impl LocalGit {
         // of collapsing an entirely-new directory (e.g. `.claude/skills/` with
         // 80+ files) into a single entry — so the Changes view can show/stage
         // them per-file. Gitignored paths are still excluded.
+        //
+        // `-z`: without it git C-quotes any name with a non-ASCII byte, `"` or
+        // `\` (`"caf\303\251.txt"`), and that quoted form is what came back
+        // to stage/discard — `add` then failed "did not match", and `clean`
+        // exited 0 having deleted NOTHING while the UI said "Discarded".
         let out = self
-            .run_read(&[
+            .exec_text(&GitCmd::read(&[
                 "status",
                 "--porcelain=v2",
                 "--branch",
+                "-z",
                 "--untracked-files=all",
-            ])
+            ]))
             .await?;
         let mut st = crate::parse::parse_status(&out);
         st.op_in_progress = self.op_in_progress().await.map(str::to_string);
@@ -537,7 +728,7 @@ impl LocalGit {
     }
 
     /// True when a `merge --squash` left its staged result pending (the state
-    /// `merge_abort` may discard with `reset --hard`). SQUASH_MSG is the only
+    /// `merge_abort` may discard with `reset --merge`). SQUASH_MSG is the only
     /// marker git leaves for it.
     async fn squash_pending(&self) -> bool {
         match self.git_dir().await {
@@ -556,11 +747,35 @@ impl LocalGit {
         Ok(crate::parse::parse_branches(&out))
     }
 
+    /// The checked-out branch name; `"HEAD"` when detached. `symbolic-ref`
+    /// first: `rev-parse --abbrev-ref HEAD` dies on an UNBORN branch (a fresh
+    /// repo before its first commit), which broke branch delete and the push
+    /// `--set-upstream` fallback there.
     pub async fn current_branch(&self) -> Result<String> {
+        if let Some(name) = self.symbolic_head().await {
+            return Ok(name);
+        }
         let out = self
             .run_read(&["rev-parse", "--abbrev-ref", "HEAD"])
             .await?;
         Ok(out.trim().to_string())
+    }
+
+    /// The branch HEAD points at (born or unborn); `None` when detached.
+    /// Raw spawn: a detached HEAD exits 1, which is an answer, not a failure
+    /// worth a warning in the daemon log.
+    async fn symbolic_head(&self) -> Option<String> {
+        match self
+            .run_raw_class(
+                &["symbolic-ref", "-q", "--short", "HEAD"],
+                &[],
+                SpawnClass::LocalRead,
+            )
+            .await
+        {
+            Ok((true, out, _, _)) => Some(out.trim().to_string()).filter(|s| !s.is_empty()),
+            _ => None,
+        }
     }
 
     /// Resolve a ref (branch/sha/`HEAD`) to its full commit SHA. Used by Goal
@@ -577,13 +792,20 @@ impl LocalGit {
     pub async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
         Self::guard_ref(base)?;
         let range = format!("{base}...HEAD");
-        let out = self.run_read(&["diff", "--name-only", &range]).await?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect())
+        // `-z`: raw names — a C-quoted `"caf\303\251.rs"` never equals the
+        // path another agent's branch reports for the same file.
+        let out = self
+            .exec_text(&GitCmd::read(&[
+                "diff",
+                "--no-ext-diff",
+                "--name-only",
+                "-z",
+                "--end-of-options",
+                &range,
+                "--",
+            ]))
+            .await?;
+        Ok(nul_records(&out).map(str::to_string).collect())
     }
 
     /// True when a local branch already exists. Lets Goal Loops re-attach an
@@ -1158,48 +1380,39 @@ impl LocalGit {
     /// diff per untracked file — seconds of work on a large changeset). `None`
     /// returns the full diff (the "All changes" view, commit/range views).
     pub async fn diff(&self, target: DiffTarget, pathspec: Option<&str>) -> Result<DiffResp> {
-        // Trailing `-- <path>` appended to each command when a pathspec is given.
-        let path_args: Vec<&str> = match pathspec {
-            Some(p) if !p.is_empty() => vec!["--", p],
-            _ => Vec::new(),
+        let path = pathspec.filter(|p| !p.is_empty());
+        if let Some(p) = path {
+            Self::guard_path(p)?;
+        }
+        // Every call is a [`GitCmd::diff`] — fixed output format, raw UTF-8
+        // names (`core.quotePath=false`: the default octal-escaping broke
+        // feeding `ls-files` names back into `--no-index`) — scoped with a
+        // LITERAL `-- <path>` when one is given (`app/[id]/x.tsx` must not
+        // glob-match `app/d/x.tsx` into the same response). Bytes throughout:
+        // `parse_diff_bytes` fingerprints exactly what git printed.
+        let diff = |sub: &str, extra: &[&str]| -> GitCmd {
+            GitCmd::diff(sub)
+                .args(extra.iter().copied())
+                .maybe_path(path)
         };
-        let with_path = |base: &[&str]| -> Vec<String> {
-            // `core.quotePath=false` on every diff-family call: git's default
-            // quotePath octal-escapes non-ASCII names (`"caf\303\251.txt"`),
-            // which breaks feeding `ls-files` output back into `--no-index`
-            // (file never found → silently missing from Changes) and litters
-            // parsed headers with escapes. Raw UTF-8 round-trips cleanly.
-            ["-c", "core.quotePath=false"]
-                .iter()
-                .chain(base.iter())
-                .chain(path_args.iter())
-                .map(|s| s.to_string())
-                .collect()
-        };
-        let run_v = |args: Vec<String>| async move {
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.run_read(&refs).await
-        };
-        let run_raw_v = |args: Vec<String>| async move {
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.run_raw_class(&refs, &[], SpawnClass::LocalRead).await
-        };
-        let out = match &target {
-            DiffTarget::Worktree => run_v(with_path(&["diff", "--no-color", "-U3", "-M"])).await?,
+        let out: Vec<u8> = match &target {
+            DiffTarget::Worktree => self.exec_bytes(&diff("diff", &["-U3", "-M"])).await?,
             DiffTarget::Working => {
                 // Staged + unstaged tracked changes vs HEAD (a staged-new file
                 // shows as fully added). Falls back to cached+worktree when HEAD
                 // is unborn (no commits yet).
-                let (head_ok, head_out, _, _) =
-                    run_raw_v(with_path(&["diff", "--no-color", "-U3", "-M", "HEAD"])).await?;
+                let (head_ok, head_out, _, _) = self
+                    .exec(&diff("diff", &["-U3", "-M", "HEAD"]), None)
+                    .await?;
                 let mut out = if head_ok {
                     head_out
                 } else {
-                    let mut s = run_v(with_path(&["diff", "--no-color", "-U3", "-M", "--cached"]))
+                    let mut s = self
+                        .exec_bytes(&diff("diff", &["-U3", "-M", "--cached"]))
                         .await
                         .unwrap_or_default();
-                    s.push_str(
-                        &run_v(with_path(&["diff", "--no-color", "-U3", "-M"]))
+                    s.extend(
+                        self.exec_bytes(&diff("diff", &["-U3", "-M"]))
                             .await
                             .unwrap_or_default(),
                     );
@@ -1207,33 +1420,28 @@ impl LocalGit {
                 };
                 // Untracked files: render each as a fully-added diff. Scope the
                 // `ls-files` to the pathspec so a single-file request only checks
-                // that one path (and runs at most one `--no-index` diff).
-                let (_, untracked, _, _) =
-                    run_raw_v(with_path(&["ls-files", "--others", "--exclude-standard"])).await?;
-                for f in untracked.lines().filter(|l| !l.trim().is_empty()) {
+                // that one path (and runs at most one `--no-index` diff). `-z`:
+                // names arrive raw, never C-quoted.
+                let ls = GitCmd::read(&["ls-files", "-z", "--others", "--exclude-standard"])
+                    .maybe_path(path);
+                let (_, untracked, _, _) = self.exec(&ls, None).await?;
+                let untracked = String::from_utf8_lossy(&untracked).into_owned();
+                for f in nul_records(&untracked) {
                     let (_, stdout, _, _) = self
-                        .run_raw_class(
-                            &[
-                                "-c",
-                                "core.quotePath=false",
-                                "diff",
-                                "--no-color",
-                                "-U3",
-                                "--no-index",
-                                "--",
-                                "/dev/null",
-                                f,
-                            ],
-                            &[],
-                            SpawnClass::LocalRead,
+                        .exec(
+                            &GitCmd::diff("diff")
+                                .args(["-U3", "--no-index"])
+                                .paths(["/dev/null", f]),
+                            None,
                         )
                         .await?;
-                    out.push_str(&stdout);
+                    out.extend_from_slice(&stdout);
                 }
                 out
             }
             DiffTarget::Staged => {
-                run_v(with_path(&["diff", "--no-color", "-U3", "-M", "--cached"])).await?
+                self.exec_bytes(&diff("diff", &["-U3", "-M", "--cached"]))
+                    .await?
             }
             DiffTarget::Commit(sha) => {
                 // `-m --first-parent`: a merge commit's default `git show`
@@ -1242,52 +1450,53 @@ impl LocalGit {
                 // changes") and its `@@@` hunks don't parse. Diffing against
                 // the first parent yields the reviewable "what this merge
                 // brought in" diff; non-merge commits are unaffected.
-                run_v(with_path(&[
+                self.exec_bytes(&diff(
                     "show",
-                    "-m",
-                    "--first-parent",
-                    "--no-color",
-                    "-U3",
-                    "-M",
-                    "--format=",
-                    "--end-of-options",
-                    sha,
-                ]))
+                    &[
+                        "-m",
+                        "--first-parent",
+                        "-U3",
+                        "-M",
+                        "--format=",
+                        "--end-of-options",
+                        sha,
+                    ],
+                ))
                 .await?
             }
             DiffTarget::Range(a, b) => {
                 let range = format!("{a}..{b}");
-                run_v(with_path(&[
-                    "diff",
-                    "--no-color",
-                    "-U3",
-                    "-M",
-                    "--end-of-options",
-                    &range,
-                ]))
-                .await?
+                self.exec_bytes(&diff("diff", &["-U3", "-M", "--end-of-options", &range]))
+                    .await?
             }
         };
-        Ok(crate::parse::parse_diff(&out))
+        Ok(crate::parse::parse_diff_bytes(&out))
     }
 
     /// Run `git diff <base>` — diffs the working tree (staged + unstaged)
     /// against `base` and returns the raw unified diff text.
+    ///
+    /// These texts feed reviews and commit-message drafts, so they carry the
+    /// same fixed [`DIFF_FORMAT`] as the parsed diffs: a `diff.external` in the
+    /// user's config otherwise handed the reviewers an empty diff. The trailing
+    /// `--` pins `base` as a REVISION even when a file shares its name.
     pub async fn diff_text_against(&self, base: &str) -> Result<String> {
         Self::guard_ref(base)?;
-        self.run(&["diff", base]).await
+        self.exec_text(&GitCmd::diff("diff").args(["--end-of-options", base, "--"]))
+            .await
     }
 
     /// Raw unified diff of the staged changes (`git diff --cached`). Empty when
     /// nothing is staged.
     pub async fn staged_diff_text(&self) -> Result<String> {
-        self.run(&["diff", "--no-color", "-M", "--cached"]).await
+        self.exec_text(&GitCmd::diff("diff").args(["-M", "--cached"]))
+            .await
     }
 
     /// Raw unified diff of all unstaged tracked changes (`git diff`). Used as a
     /// fallback when nothing is staged.
     pub async fn working_diff_text(&self) -> Result<String> {
-        self.run(&["diff", "--no-color", "-M"]).await
+        self.exec_text(&GitCmd::diff("diff").args(["-M"])).await
     }
 
     /// `git remote get-url origin`, best-effort.
@@ -1331,7 +1540,14 @@ impl LocalGit {
                 self.run(&["checkout", "-b", branch]).await?;
             }
         } else {
-            self.run(&["checkout", "--end-of-options", branch]).await?;
+            // The trailing `--` makes `branch` a REVISION, never a path: a bare
+            // `checkout docs` with no branch `docs` but a directory `docs/`
+            // restored that directory from the index — exit 0, "Switched to
+            // docs" in the UI, the user's uncommitted edits gone. With `--` git
+            // refuses ("invalid reference: docs"). Tags/SHAs still detach and
+            // an origin-only name still DWIM-creates its tracking branch.
+            self.run(&["checkout", "--end-of-options", branch, "--"])
+                .await?;
         }
         Ok(())
     }
@@ -1377,18 +1593,27 @@ impl LocalGit {
                 dirty = false;
             }
         }
+        // Our entry's commit: every pop below addresses THIS stash by SHA,
+        // never `stash@{0}` — an agent in the same repo may push its own
+        // stash in between, and popping that one onto the user's tree is
+        // both a loss (theirs) and a corruption (ours).
+        let ours: Option<String> = if dirty {
+            Some(
+                self.run_read(&["rev-parse", "-q", "--verify", "refs/stash"])
+                    .await?
+                    .trim()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         if let Err(e) = self.checkout(branch, create).await {
-            if dirty {
+            if let Some(sha) = &ours {
                 // The pop rides the same `index.lock` retry as everything else
                 // here: a concurrent agent's lock must not be the reason the
-                // user's changes are left behind in the stash.
-                let (ok, out, _, _) = self.run_raw_retry_lock(&["stash", "pop"]).await.unwrap_or((
-                    false,
-                    String::new(),
-                    String::new(),
-                    None,
-                ));
-                if !ok && !out.contains("CONFLICT") {
+                // user's changes are left behind in the stash. A CONFLICTING
+                // pop is Ok (applied with markers, entry kept).
+                if self.pop_stash_sha(sha).await.is_err() {
                     return Err(match e {
                         Error::Conflict(m) => Error::Conflict(format!(
                             "{m} — your changes are kept in `git stash list`"
@@ -1399,10 +1624,11 @@ impl LocalGit {
             }
             return Err(e);
         }
-        if !dirty {
+        let Some(sha) = ours else {
             return Ok(CheckoutOutcome::default());
-        }
-        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop"]).await?;
+        };
+        let sel = self.resolve_stash_selector(&sha).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
         if ok {
             return Ok(CheckoutOutcome {
                 stashed: true,
@@ -1427,19 +1653,27 @@ impl LocalGit {
         )))
     }
 
+    /// Refuse an empty or control-character path in a caller's path list.
+    fn guard_paths(paths: &[String]) -> Result<()> {
+        paths.iter().try_for_each(|p| Self::guard_path(p))
+    }
+
+    /// Every path is a LITERAL file name ([`GitCmd::paths`]): staging
+    /// `app/[id]/page.tsx` must not also stage `app/d/page.tsx`.
     pub async fn stage(&self, paths: &[String]) -> Result<()> {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to stage".into()));
         }
-        let mut args = vec!["add", "--"];
-        args.extend(paths.iter().map(String::as_str));
-        self.run_locked(&args).await
+        Self::guard_paths(paths)?;
+        self.exec_locked(&GitCmd::write(&["add"]).paths(paths))
+            .await
     }
 
     pub async fn unstage(&self, paths: &[String]) -> Result<()> {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to unstage".into()));
         }
+        Self::guard_paths(paths)?;
         let mut expanded = paths.to_vec();
         for change in self.status().await?.changes {
             if paths.contains(&change.path) && change.kind == "renamed" {
@@ -1450,9 +1684,24 @@ impl LocalGit {
         }
         expanded.sort();
         expanded.dedup();
-        let mut args = vec!["restore", "--staged", "--"];
-        args.extend(expanded.iter().map(String::as_str));
-        self.run_locked(&args).await
+        // Before the first commit there is no HEAD to restore the index FROM
+        // (`restore --staged` dies "could not resolve 'HEAD'"); `reset` treats
+        // an unborn HEAD as the empty tree, i.e. un-adds the paths.
+        let cmd = if self.head_exists().await {
+            GitCmd::write(&["restore", "--staged"])
+        } else {
+            GitCmd::write(&["reset", "-q"])
+        };
+        self.exec_locked(&cmd.paths(&expanded)).await
+    }
+
+    /// True once HEAD resolves to a commit (false on an unborn branch).
+    async fn head_exists(&self) -> bool {
+        matches!(
+            self.exec(&GitCmd::read(&["rev-parse", "-q", "--verify", "HEAD^{commit}"]), None)
+                .await,
+            Ok((true, ..))
+        )
     }
 
     /// Discard all working-tree + staged changes for `paths`, reverting them to
@@ -1463,6 +1712,7 @@ impl LocalGit {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to discard".into()));
         }
+        Self::guard_paths(paths)?;
         let want: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
         // Classify each requested path by its current change kind.
         let status = self.status().await?;
@@ -1488,20 +1738,32 @@ impl LocalGit {
                 _ => restore.push(c.path.clone()),
             }
         }
+        if restore.is_empty() && remove.is_empty() {
+            // Nothing the caller named has a change any more (a stale list, or
+            // a name status never reported). Saying "Discarded" for a no-op is
+            // how a silently-failed discard used to look like success.
+            return Err(Error::Conflict(
+                "nothing to discard — none of these files has changes any more; refresh".into(),
+            ));
+        }
+        // Every path below is a LITERAL name ([`GitCmd::paths`]): as a
+        // pathspec, `app/[id]/page.tsx` also matched `app/d/page.tsx` (whose
+        // edits `restore` reverted) and `app/i/page.tsx` (which `clean` deleted).
         if !restore.is_empty() {
-            let mut args = vec!["restore", "--staged", "--worktree", "--source=HEAD", "--"];
-            args.extend(restore.iter().map(String::as_str));
-            self.run_locked(&args).await?;
+            self.exec_locked(
+                &GitCmd::write(&["restore", "--staged", "--worktree", "--source=HEAD"])
+                    .paths(&restore),
+            )
+            .await?;
         }
         if !remove.is_empty() {
             // Unstage first (a staged-new file → untracked), then `clean` removes
             // the untracked files/dirs. `reset` is a no-op for already-untracked.
-            let mut reset = vec!["reset", "-q", "--"];
-            reset.extend(remove.iter().map(String::as_str));
-            let _ = self.run_raw_retry_lock(&reset).await;
-            let mut clean = vec!["clean", "-fdq", "--"];
-            clean.extend(remove.iter().map(String::as_str));
-            self.run_locked(&clean).await?;
+            let _ = self
+                .exec_locked(&GitCmd::write(&["reset", "-q"]).paths(&remove))
+                .await;
+            self.exec_locked(&GitCmd::write(&["clean", "-fdq"]).paths(&remove))
+                .await?;
         }
         Ok(())
     }
@@ -1712,24 +1974,25 @@ impl LocalGit {
         if !dirty {
             return Ok((self.pull_outcome(token).await?, None));
         }
-        self.stash_save().await?;
+        let sha = self.stash_save_sha().await?;
         match self.pull_outcome(token).await {
             Ok(out) if out.conflicted_files.is_empty() => {
-                let note = self.pop_after_merge().await;
+                let note = self.pop_after_merge(&sha).await;
                 Ok((out, note))
             }
             Ok(out) => Ok((
                 out,
                 Some(
                     "The pull merged with conflicts. Your uncommitted changes stay stashed — \
-                     resolve the conflicts and commit, then run `git stash pop` to restore them."
+                     resolve the conflicts and commit, then restore them from `git stash list`."
                         .into(),
                 ),
             )),
             Err(e) => {
-                // The refused pull never touched the tree — restore it.
-                let _ = self.stash_pop().await;
-                Err(e)
+                // The refused pull never touched the tree — restore it (by
+                // SHA), or say where the changes are if that fails.
+                let origin = self.head_label().await.unwrap_or_default();
+                Err(self.restore_autostash(e, &sha, &origin).await)
             }
         }
     }
@@ -2109,16 +2372,101 @@ impl LocalGit {
     /// Pop the stash after a clean merge. Returns a human note: a confirmation on
     /// a clean pop, or a warning if the pop conflicted (git KEEPS the stash in
     /// that case, so the user's work is never lost).
-    pub(crate) async fn pop_after_merge(&self) -> Option<String> {
-        match self.stash_pop().await {
-            Ok(_) => Some("Your stashed changes were restored.".into()),
-            Err(_) => Some(
+    ///
+    /// `sha` is the auto-stash's own commit ([`Self::stash_save_sha`]): the pop
+    /// is addressed by it, never by `stash@{0}` — an agent in the same repo
+    /// may have pushed its own stash on top in the meantime.
+    pub(crate) async fn pop_after_merge(&self, sha: &str) -> Option<String> {
+        match self.pop_stash_sha(sha).await {
+            Ok(out) if !out.contains("CONFLICT") => {
+                Some("Your stashed changes were restored.".into())
+            }
+            _ => Some(
                 "Merge succeeded, but restoring your stashed changes hit a conflict — \
                  they're preserved in `git stash`; resolve the working tree and run \
                  `git stash pop` manually."
                     .into(),
             ),
         }
+    }
+
+    /// [`Self::stash_save`], returning the new entry's commit SHA so the
+    /// matching restore can address THIS stash rather than whatever is on top.
+    pub(crate) async fn stash_save_sha(&self) -> Result<String> {
+        self.stash_save().await?;
+        let sha = self
+            .run_read(&["rev-parse", "-q", "--verify", "refs/stash"])
+            .await?
+            .trim()
+            .to_string();
+        if sha.is_empty() {
+            return Err(Error::Internal("stash saved but refs/stash is unreadable".into()));
+        }
+        Ok(sha)
+    }
+
+    /// `git stash pop` of the entry whose commit is `sha`. A CONFLICTING pop
+    /// is Ok (the stash is applied with markers and git KEEPS the entry), as
+    /// in [`Self::stash_pop`].
+    pub(crate) async fn pop_stash_sha(&self, sha: &str) -> Result<String> {
+        let sel = self.resolve_stash_selector(sha).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
+        if ok || out.contains("CONFLICT") {
+            return Ok(out.trim().to_string());
+        }
+        Err(upstream_err(&err, &out, code))
+    }
+
+    /// Put the user back where an auto-stashing operation found them after it
+    /// FAILED: switch back to `origin` (the branch or detached SHA they were
+    /// on, when the failure left HEAD elsewhere) and pop the auto-stash `sha`
+    /// there. Returns `err`, annotated when the changes could not be
+    /// restored so the message says where they are instead of implying they
+    /// were lost.
+    pub(crate) async fn restore_autostash(&self, err: Error, sha: &str, origin: &str) -> Error {
+        let short = &sha[..sha.len().min(12)];
+        let here = self.head_label().await;
+        let mut back = true;
+        if here.as_deref() != Some(origin) {
+            back = self.checkout(origin, false).await.is_ok();
+        }
+        let popped = if back {
+            Some(self.pop_stash_sha(sha).await)
+        } else {
+            None
+        };
+        let kept = match popped {
+            Some(Ok(out)) if !out.contains("CONFLICT") => return err,
+            Some(Ok(_)) => format!(
+                "restoring your uncommitted changes conflicted: resolve the marked files; \
+                 the stash is kept in `git stash list` (stash {short})"
+            ),
+            _ => format!(
+                "your uncommitted changes are kept in `git stash list` (stash {short}) — \
+                 run `git stash apply {short}` on {origin} to restore them"
+            ),
+        };
+        match err {
+            Error::Conflict(m) => Error::Conflict(format!("{m} — {kept}")),
+            Error::Upstream(m) => Error::Upstream(format!("{m} — {kept}")),
+            Error::Invalid(m) => Error::Invalid(format!("{m} — {kept}")),
+            Error::NotFound(m) => Error::NotFound(format!("{m} — {kept}")),
+            Error::Internal(m) => Error::Internal(format!("{m} — {kept}")),
+            other => Error::Conflict(format!("{other} — {kept}")),
+        }
+    }
+
+    /// Where HEAD is, in a form `checkout` can return to: the branch name, or
+    /// the commit SHA when detached. `None` when HEAD can't be read.
+    pub(crate) async fn head_label(&self) -> Option<String> {
+        if let Some(b) = self.symbolic_head().await {
+            return Some(b);
+        }
+        self.run_read(&["rev-parse", "-q", "--verify", "HEAD"])
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Dry-run a merge of `source` into `target` via `git merge-tree --write-tree`
@@ -2135,9 +2483,20 @@ impl LocalGit {
                 up_to_date: true,
             });
         }
+        // `--no-messages -z`: without them the "Auto-merging x" / "CONFLICT
+        // (content): …" message block that follows the name list was read as
+        // more conflicted FILE names, and a quoted name never matched.
         let (ok, stdout, _stderr, code) = self
             .run_raw_class(
-                &["merge-tree", "--write-tree", "--name-only", target, source],
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    "--no-messages",
+                    "-z",
+                    target,
+                    source,
+                ],
                 &[],
                 SpawnClass::LocalRead,
             )
@@ -2159,14 +2518,13 @@ impl LocalGit {
                 up_to_date: false,
             });
         }
-        // Output: tree OID on line 1, then conflicted file names (--name-only).
-        let conflicted_files: Vec<String> = stdout
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(|l| l.to_string())
-            .collect();
+        // Output: the tree OID record, then one record per conflicted file.
+        let mut conflicted_files: Vec<String> = Vec::new();
+        for name in nul_records(&stdout).skip(1) {
+            if !conflicted_files.iter().any(|n| n == name) {
+                conflicted_files.push(name.to_string());
+            }
+        }
         Ok(MergePreview {
             conflicts: true,
             conflicted_files,
@@ -2199,18 +2557,44 @@ impl LocalGit {
         }
 
         // Dirty-tree handling: either auto-stash, or refuse.
-        let mut stashed = false;
-        if self.working_dirty().await? {
-            if auto_stash {
-                self.stash_save().await?;
-                stashed = true;
-            } else {
-                return Err(Error::Conflict(
-                    "working tree has uncommitted changes; commit or stash first".into(),
-                ));
-            }
+        if !self.working_dirty().await? {
+            return self.merge_branch_inner(source, target, strategy, None).await;
         }
+        if !auto_stash {
+            return Err(Error::Conflict(
+                "working tree has uncommitted changes; commit or stash first".into(),
+            ));
+        }
+        // Where the user is BEFORE the stash: any failure from here on puts
+        // them back there with their changes. The old code returned early when
+        // the switch to `target` failed (routine: `target` checked out in an
+        // agent's worktree) and every tracked + untracked change silently
+        // stayed in the stash, the error not even mentioning it.
+        let origin = self
+            .head_label()
+            .await
+            .ok_or_else(|| Error::Conflict("cannot read HEAD — nothing was stashed".into()))?;
+        let sha = self.stash_save_sha().await?;
+        match self
+            .merge_branch_inner(source, target, strategy, Some(&sha))
+            .await
+        {
+            Ok(r) => Ok(r),
+            Err(e) => Err(self.restore_autostash(e, &sha, &origin).await),
+        }
+    }
 
+    /// [`Self::merge_branch`] after the dirty-tree decision. `stash` is the
+    /// auto-stash taken for this merge: popped (by SHA) after a clean merge,
+    /// kept with a note on conflicts. An `Err` pops nothing — the caller
+    /// restores the stash on the original branch.
+    async fn merge_branch_inner(
+        &self,
+        source: &str,
+        target: &str,
+        strategy: LocalMergeStrategy,
+        stash: Option<&str>,
+    ) -> Result<MergeResult> {
         // Ensure the target branch is checked out.
         if self.current_branch().await? != target {
             self.checkout(target, false).await?;
@@ -2305,10 +2689,9 @@ impl LocalGit {
                 // Advance the checked-out target branch onto the new merge commit
                 // (it descends from target_head, so this is a clean fast-forward).
                 self.run(&["merge", "--ff-only", &new_commit]).await?;
-                let note = if stashed {
-                    self.pop_after_merge().await
-                } else {
-                    None
+                let note = match stash {
+                    Some(sha) => self.pop_after_merge(sha).await,
+                    None => None,
                 };
                 return Ok(MergeResult {
                     status: "merged".into(),
@@ -2326,10 +2709,9 @@ impl LocalGit {
                 Some(self.run(&["rev-parse", "HEAD"]).await?.trim().to_string())
             };
             // Merge landed cleanly — restore any auto-stashed work.
-            let note = if stashed {
-                self.pop_after_merge().await
-            } else {
-                None
+            let note = match stash {
+                Some(sha) => self.pop_after_merge(sha).await,
+                None => None,
             };
             return Ok(MergeResult {
                 status: if up_to_date { "up_to_date" } else { "merged" }.into(),
@@ -2349,16 +2731,14 @@ impl LocalGit {
         if is_conflict {
             // We auto-stashed and the merge conflicted: do NOT pop onto a
             // conflicted tree. Leave the stash saved and tell the user.
-            let note = if stashed {
-                Some(
+            let note = stash.map(|sha| {
+                let short = &sha[..sha.len().min(12)];
+                format!(
                     "Your uncommitted changes were stashed before the merge, which then \
-                     conflicted. Resolve the conflicts and commit, then run `git stash pop` \
-                     to restore your changes."
-                        .into(),
+                     conflicted. Resolve the conflicts and commit, then restore your changes \
+                     from `git stash list` (stash {short})."
                 )
-            } else {
-                None
-            };
+            });
             return Ok(MergeResult {
                 status: "conflicts".into(),
                 commit: None,
@@ -2367,11 +2747,8 @@ impl LocalGit {
                 note,
             });
         }
-        // Hard error — if we stashed, restore the user's work before surfacing it
-        // so nothing is stranded.
-        if stashed {
-            let _ = self.stash_pop().await;
-        }
+        // Hard error — the caller (`merge_branch`) switches back and restores
+        // any auto-stash before surfacing it, so nothing is stranded.
         Err(upstream_err(&stderr, &stdout, code))
     }
 
@@ -2436,12 +2813,25 @@ impl LocalGit {
     pub async fn conflict_file(&self, path: &str) -> Result<ConflictFile> {
         let abs = self.safe_join(path)?;
         let (ours_present, theirs_present) = self.conflict_sides(path).await?;
-        let (bytes, worktree_present) = match tokio::fs::read(&abs).await {
-            Ok(bytes) => (bytes, true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
-            Err(e) => return Err(Error::Internal(format!("read {path}: {e}"))),
+        // Read only a regular file confined to the tree (see
+        // `confined_worktree_file`): a conflicted SYMLINK would otherwise be
+        // read through to wherever it points and served to a Viewer. Such an
+        // entry is shown as binary — resolved by taking a side.
+        let readable = match self.confined_worktree_file(path, false).await {
+            Ok(_) => true,
+            Err(Error::Invalid(_)) => false,
+            Err(e) => return Err(e),
         };
-        let is_binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
+        let (bytes, worktree_present) = if !readable {
+            (Vec::new(), tokio::fs::symlink_metadata(&abs).await.is_ok())
+        } else {
+            match tokio::fs::read(&abs).await {
+                Ok(bytes) => (bytes, true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+                Err(e) => return Err(Error::Internal(format!("read {path}: {e}"))),
+            }
+        };
+        let is_binary = !readable || bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
         Ok(ConflictFile {
             path: path.to_string(),
             is_binary,
@@ -2459,21 +2849,26 @@ impl LocalGit {
 
     /// Index stages distinguish a deleted side from an empty file. Read them
     /// before taking a side so modify/delete and binary conflicts share one flow.
+    ///
+    /// Doubles as THE "is this exact path conflicted right now" gate for every
+    /// resolver write: only entries whose name equals `path` byte for byte
+    /// count (a literal pathspec, so `*` or a directory prefix can't borrow
+    /// another file's conflict).
     async fn conflict_sides(&self, path: &str) -> Result<(bool, bool)> {
         Self::guard_path(path)?;
         let entries = self
-            .run_read(&["ls-files", "--unmerged", "-z", "--", path])
+            .exec_text(&GitCmd::read(&["ls-files", "--unmerged", "-z"]).paths([path]))
             .await?;
-        if entries.is_empty() {
+        let stages: Vec<&str> = nul_records(&entries)
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter(|(_, name)| *name == path)
+            .filter_map(|(meta, _)| meta.split_whitespace().nth(2))
+            .collect();
+        if stages.is_empty() {
             return Err(Error::Conflict(
                 "this file is no longer conflicted — refresh first".into(),
             ));
         }
-        let stages: Vec<&str> = entries
-            .split('\0')
-            .filter_map(|entry| entry.split_once('\t'))
-            .filter_map(|(meta, _)| meta.split_whitespace().nth(2))
-            .collect();
         Ok((stages.contains(&"2"), stages.contains(&"3")))
     }
 
@@ -2493,39 +2888,111 @@ impl LocalGit {
             }
         };
         if delete {
-            self.run(&["rm", "--force", "--", path]).await?;
+            self.exec_locked(&GitCmd::write(&["rm", "--force"]).paths([path]))
+                .await?;
         } else {
             if side != "keep" {
-                self.run(&[
-                    "checkout",
-                    if side == "ours" { "--ours" } else { "--theirs" },
-                    "--",
-                    path,
-                ])
-                .await?;
+                let flag = if side == "ours" { "--ours" } else { "--theirs" };
+                self.exec_locked(&GitCmd::write(&["checkout", flag]).paths([path]))
+                    .await?;
             } else if !self.safe_join(path)?.exists() {
                 return Err(Error::Conflict(
                     "the working file is absent; choose Delete instead".into(),
                 ));
             }
-            self.run(&["add", "--", path]).await?;
+            self.exec_locked(&GitCmd::write(&["add"]).paths([path]))
+                .await?;
         }
         Ok(())
     }
 
     /// Write the fully-resolved content of `path` and stage it.
+    ///
+    /// Security boundary (the resolver is reachable by any Editor and by
+    /// agents through the local API): this writes ONLY a file that is
+    /// conflicted right now, and only INSIDE the working tree. Unchecked, a
+    /// `{path:".git/config"}` body planted `core.fsmonitor` — a command the
+    /// daemon's own next `git status` runs as the user. So: the exact path
+    /// must have unmerged index entries ([`Self::conflict_sides`]), and
+    /// [`Self::confined_worktree_file`] rejects `.git` components, `..`,
+    /// absolute paths, a symlinked final component and any parent that
+    /// resolves (symlinks followed) outside the tree or into the git dir.
     pub async fn write_resolution(&self, path: &str, content: &str) -> Result<()> {
-        let abs = self.safe_join(path)?;
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir for {path}: {e}")))?;
-        }
+        self.conflict_sides(path).await?;
+        let abs = self.confined_worktree_file(path, true).await?;
         tokio::fs::write(&abs, content)
             .await
             .map_err(|e| Error::Internal(format!("write {path}: {e}")))?;
-        self.run(&["add", "--", path]).await?;
+        self.exec_locked(&GitCmd::write(&["add"]).paths([path]))
+            .await?;
         Ok(())
+    }
+
+    /// The absolute location of repo-relative `rel`, proven to be a regular
+    /// file slot INSIDE this working tree and outside every git dir.
+    ///
+    /// Checked on the real filesystem, symlinks followed: the nearest existing
+    /// ancestor of `rel` is canonicalized and must stay under the canonical
+    /// work-tree root and out of the canonical `$GIT_DIR`; with `create_dirs`
+    /// the missing directories below it (plain names — they did not exist)
+    /// are then created. A final component that is a symlink is refused, as
+    /// a write or read would follow it wherever it points.
+    async fn confined_worktree_file(&self, rel: &str, create_dirs: bool) -> Result<PathBuf> {
+        let abs = self.safe_join(rel)?;
+        let refuse = |why: &str| Error::Invalid(format!("refusing path {rel}: {why}"));
+        if Path::new(rel)
+            .components()
+            .any(|c| matches!(c, std::path::Component::Normal(n) if is_git_dir_name(n)))
+        {
+            return Err(refuse("it is inside the git directory"));
+        }
+        let io = |e: std::io::Error| Error::Internal(format!("resolve {rel}: {e}"));
+        let root = tokio::fs::canonicalize(&self.repo_path).await.map_err(io)?;
+        let git_dir = match self.git_dir().await {
+            Some(gd) => tokio::fs::canonicalize(&gd).await.ok(),
+            None => None,
+        };
+        // Walk up to the nearest ancestor that exists and resolve it.
+        let parent = abs.parent().ok_or_else(|| refuse("no parent directory"))?;
+        let mut existing = parent.to_path_buf();
+        loop {
+            match tokio::fs::symlink_metadata(&existing).await {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if !existing.pop() {
+                        return Err(refuse("no existing ancestor"));
+                    }
+                }
+                Err(e) => return Err(io(e)),
+            }
+        }
+        let real = tokio::fs::canonicalize(&existing).await.map_err(io)?;
+        if !real.starts_with(&root) {
+            return Err(refuse("it resolves outside the working tree"));
+        }
+        if git_dir.as_ref().is_some_and(|gd| real.starts_with(gd)) {
+            return Err(refuse("it resolves into the git directory"));
+        }
+        if let Ok(inner) = real.strip_prefix(&root) {
+            if inner
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(n) if is_git_dir_name(n)))
+            {
+                return Err(refuse("it resolves into the git directory"));
+            }
+        }
+        if create_dirs && existing.as_path() != parent {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Internal(format!("mkdir for {rel}: {e}")))?;
+        }
+        match tokio::fs::symlink_metadata(&abs).await {
+            Ok(m) if m.file_type().is_symlink() => Err(refuse(
+                "it is a symlink — take a side instead of writing through it",
+            )),
+            Ok(m) if m.is_dir() => Err(refuse("it is a directory")),
+            _ => Ok(abs),
+        }
     }
 
     /// Conclude the in-progress operation: commit a merge, `--continue` a
@@ -2618,7 +3085,7 @@ impl LocalGit {
     }
 
     /// Abort the in-progress operation with its own abort verb (merge / rebase
-    /// / cherry-pick / revert), or discard a staged squash (`reset --hard`,
+    /// / cherry-pick / revert), or discard a staged squash (`reset --merge`,
     /// only when SQUASH_MSG proves a squash is actually pending). With NOTHING
     /// in progress this is a 409 — the old fallback hard-reset the working
     /// tree, so a stale "Abort" click could destroy all uncommitted work.
@@ -2638,7 +3105,10 @@ impl LocalGit {
             }
             _ => {
                 if self.squash_pending().await {
-                    self.run(&["reset", "--hard", "HEAD"]).await?;
+                    // `--merge`, not `--hard`: it drops the squash's staged
+                    // result (and any conflict markers) but KEEPS unrelated
+                    // uncommitted edits, which `--hard` silently wiped.
+                    self.run(&["reset", "--merge"]).await?;
                     // git leaves SQUASH_MSG behind; clear it so a SECOND abort
                     // can't take this destructive branch again.
                     if let Some(gd) = self.git_dir().await {
@@ -2675,6 +3145,12 @@ impl LocalGit {
         }
         Ok(self.repo_path.join(p))
     }
+}
+
+/// `.git` as a path component, compared the way the default case-insensitive
+/// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
+fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git"))
 }
 
 /// stderr lines that SSH/git emit as benign chatter — never the reason a command
@@ -2814,7 +3290,7 @@ fn remote_ref_absent(stderr: &str) -> bool {
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
 pub(crate) fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 23] = [
+    const MARKERS: [&str; 24] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -2837,6 +3313,8 @@ pub(crate) fn local_refusal(msg: &str) -> bool {
         "no rebase in progress",
         // A bad/unknown ref is the caller's input, not a provider outage.
         "did not match any file",
+        // `checkout <name> --` of a name that is no revision.
+        "invalid reference",
         // Nothing to do — e.g. `commit` with an empty index.
         "nothing to commit",
         // A concurrent git process holds the index lock — transient, retryable.
@@ -2997,7 +3475,11 @@ pub async fn clone_repo(
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Own process group (git + its `git-remote-https`/`ssh` helpers) so a
+        // stall can be killed as a whole; never outlive the caller either.
+        .process_group(0)
+        .kill_on_drop(true);
     if let Some(a) = &askpass {
         for (k, v) in a.envs() {
             cmd.env(k, v);
@@ -3016,11 +3498,25 @@ pub async fn clone_repo(
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut last_line = String::new();
+    // A clone may legitimately take long, but not SILENTLY: `--progress`
+    // reports every second or so. No output for this long (a dead VPN, a
+    // server that stopped sending) ends the clone instead of hanging the
+    // clone task forever — the one git spawn here that had no bound.
+    let idle = std::time::Duration::from_secs(env_secs("OTTO_GIT_CLONE_IDLE_SECS", 300));
     loop {
-        let n = stderr
-            .read(&mut chunk)
-            .await
-            .map_err(|e| Error::Internal(format!("clone read: {e}")))?;
+        let n = match tokio::time::timeout(idle, stderr.read(&mut chunk)).await {
+            Ok(read) => read.map_err(|e| Error::Internal(format!("clone read: {e}")))?,
+            Err(_) => {
+                if let Some(pid) = child.id() {
+                    kill_group(pid as libc::pid_t).await;
+                }
+                let _ = child.wait().await;
+                return Err(Error::Upstream(format!(
+                    "git clone stalled: no progress for {}s (last: {last_line})",
+                    idle.as_secs()
+                )));
+            }
+        };
         if n == 0 {
             break;
         }
@@ -3417,7 +3913,7 @@ mod tests {
         // A bad ref is the caller's input — a 409 with git's own message, never
         // the 502 that raises the provider-outage banner.
         match git.checkout("no-such-branch", false).await {
-            Err(Error::Conflict(msg)) => assert!(msg.contains("did not match")),
+            Err(Error::Conflict(msg)) => assert!(msg.contains("invalid reference"), "{msg}"),
             other => panic!("expected Conflict, got {other:?}"),
         }
     }
@@ -5100,5 +5596,254 @@ mod tests {
             .changes
             .iter()
             .any(|c| c.path == "staged.txt" && c.staged));
+    }
+
+    /// G-1: every path is a LITERAL name. As a pathspec `app/[id]/page.tsx`
+    /// also matched `app/d/page.tsx` (restore reverted its edits) and
+    /// `app/i/page.tsx` (clean deleted it) — silently, with a success reply.
+    #[tokio::test]
+    async fn discard_and_stage_treat_bracketed_paths_literally() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        write(&dir, "app/[id]/page.tsx", "id\n");
+        write(&dir, "app/d/page.tsx", "d\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "routes"]);
+        write(&dir, "app/[id]/page.tsx", "id EDIT\n");
+        write(&dir, "app/d/page.tsx", "d EDIT\n");
+        write(&dir, "app/i/page.tsx", "untracked\n");
+        let git = LocalGit::new(&dir);
+
+        git.discard(&["app/[id]/page.tsx".into()]).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("app/[id]/page.tsx")).unwrap(),
+            "id\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("app/d/page.tsx")).unwrap(),
+            "d EDIT\n",
+            "a glob match must not revert a sibling"
+        );
+        assert!(dir.join("app/i/page.tsx").exists(), "…nor clean one");
+
+        write(&dir, "app/[id]/page.tsx", "id EDIT\n");
+        git.stage(&["app/[id]/page.tsx".into()]).await.unwrap();
+        let staged = git.run(&["diff", "--cached", "--name-only"]).await.unwrap();
+        assert_eq!(staged.trim(), "app/[id]/page.tsx");
+    }
+
+    /// G-3: status is read with `-z`, so a non-ASCII or `"`-carrying name is
+    /// the REAL name — stage/unstage/discard find the file, and a discard
+    /// with nothing left to do is a 409 instead of a silent "Discarded".
+    #[tokio::test]
+    async fn quoted_and_non_ascii_names_stage_and_discard() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        write(&dir, "caf\u{e9}.txt", "accent\n");
+        write(&dir, "q\"uote.txt", "quote\n");
+        let git = LocalGit::new(&dir);
+        let st = git.status().await.unwrap();
+        let names: Vec<&str> = st.changes.iter().map(|c| c.path.as_str()).collect();
+        assert!(names.contains(&"caf\u{e9}.txt"), "{names:?}");
+        assert!(names.contains(&"q\"uote.txt"), "{names:?}");
+
+        let both: Vec<String> = vec!["caf\u{e9}.txt".into(), "q\"uote.txt".into()];
+        git.stage(&both).await.unwrap();
+        let st = git.status().await.unwrap();
+        assert!(st.changes.iter().all(|c| c.staged), "{:?}", st.changes);
+        git.unstage(&both).await.unwrap();
+
+        git.discard(&["caf\u{e9}.txt".into()]).await.unwrap();
+        assert!(!dir.join("caf\u{e9}.txt").exists(), "the untracked file is gone");
+        assert!(dir.join("q\"uote.txt").exists());
+        assert!(matches!(
+            git.discard(&["caf\u{e9}.txt".into()]).await,
+            Err(Error::Conflict(_))
+        ));
+    }
+
+    /// G-9: before the first commit there is no HEAD to restore the index
+    /// from; unstage still works and the branch name still reads.
+    #[tokio::test]
+    async fn unstage_and_branch_name_before_the_first_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", "main"]);
+        write(&dir, "a.txt", "new\n");
+        sh_git(&dir, &["add", "a.txt"]);
+        let git = LocalGit::new(&dir);
+        assert_eq!(git.current_branch().await.unwrap(), "main");
+        git.unstage(&["a.txt".into()]).await.unwrap();
+        let st = git.status().await.unwrap();
+        assert_eq!(st.changes.len(), 1);
+        assert_eq!(st.changes[0].kind, "untracked");
+    }
+
+    /// The preview lists conflicted FILES only — not merge-tree's
+    /// "Auto-merging …" / "CONFLICT (content): …" message lines.
+    #[tokio::test]
+    async fn merge_preview_lists_only_conflicted_file_names() {
+        let (_tmp, dir) = conflicted_fixture("c.txt");
+        let git = LocalGit::new(&dir);
+        let p = git.merge_preview("side", "main").await.unwrap();
+        assert!(p.conflicts);
+        assert_eq!(p.conflicted_files, vec!["c.txt".to_string()]);
+    }
+
+    /// Two branches that change the same line of `rel` → `merge side`
+    /// conflicts on it. Returns (tmp, repo).
+    fn conflicted_fixture(rel: &str) -> (tempfile::TempDir, PathBuf) {
+        let (tmp, dir) = fixture_on_branch("main");
+        write(&dir, rel, "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "base"]);
+        sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+        write(&dir, rel, "side\n");
+        sh_git(&dir, &["commit", "-qam", "side"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, rel, "main\n");
+        sh_git(&dir, &["commit", "-qam", "main"]);
+        (tmp, dir)
+    }
+
+    /// G-4: the resolver writes ONLY a currently-conflicted file, inside the
+    /// working tree — never `.git/config` (fsmonitor = code execution), never
+    /// through a symlink or a symlinked parent.
+    #[tokio::test]
+    async fn write_resolution_is_confined_to_conflicted_worktree_files() {
+        let (tmp, dir) = conflicted_fixture("sub/c.txt");
+        let git = LocalGit::new(&dir);
+        let _ = git.run(&["merge", "side"]).await;
+        assert_eq!(git.conflicted_paths().await.unwrap(), vec!["sub/c.txt"]);
+
+        let config_before = std::fs::read(dir.join(".git/config")).unwrap();
+        let payload = "[core]\n\tfsmonitor = /tmp/otto-pwn.sh\n";
+        for bad in [
+            ".git/config",
+            ".GIT/config",
+            "a.txt",
+            "sub",
+            "sub/*",
+            "../outside.txt",
+            "/etc/hosts",
+        ] {
+            assert!(git.write_resolution(bad, payload).await.is_err(), "{bad}");
+        }
+        assert_eq!(std::fs::read(dir.join(".git/config")).unwrap(), config_before);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello\n");
+
+        // The conflicted file itself swapped for a symlink to a file outside.
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "keep\n").unwrap();
+        let conflicted = dir.join("sub/c.txt");
+        let marked = std::fs::read(&conflicted).unwrap();
+        std::fs::remove_file(&conflicted).unwrap();
+        std::os::unix::fs::symlink(&outside, &conflicted).unwrap();
+        assert!(matches!(
+            git.write_resolution("sub/c.txt", "pwned\n").await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep\n");
+        std::fs::remove_file(&conflicted).unwrap();
+
+        // …and a symlinked PARENT directory that leads out of the tree.
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("c.txt"), "keep\n").unwrap();
+        std::fs::rename(dir.join("sub"), tmp.path().join("sub_parked")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, dir.join("sub")).unwrap();
+        assert!(git.write_resolution("sub/c.txt", "pwned\n").await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside_dir.join("c.txt")).unwrap(),
+            "keep\n"
+        );
+        std::fs::remove_file(dir.join("sub")).unwrap();
+        std::fs::rename(tmp.path().join("sub_parked"), dir.join("sub")).unwrap();
+        std::fs::write(&conflicted, marked).unwrap();
+
+        // The legitimate write still resolves and stages the file.
+        git.write_resolution("sub/c.txt", "resolved\n").await.unwrap();
+        assert!(git.conflicted_paths().await.unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&conflicted).unwrap(), "resolved\n");
+    }
+
+    /// G-5: a name that is a DIRECTORY, not a branch, must never be read as a
+    /// path — `checkout docs` restored `docs/` from the index (exit 0) and the
+    /// user's uncommitted edits were gone.
+    #[tokio::test]
+    async fn checkout_of_a_directory_name_keeps_uncommitted_work() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        write(&dir, "docs/a.md", "committed\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "docs"]);
+        write(&dir, "docs/a.md", "committed\nUNCOMMITTED EDIT\n");
+        let git = LocalGit::new(&dir);
+        match git.checkout("docs", false).await {
+            Err(Error::Conflict(msg)) => assert!(msg.contains("invalid reference"), "{msg}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("docs/a.md")).unwrap(),
+            "committed\nUNCOMMITTED EDIT\n",
+            "the edit survives"
+        );
+        assert_eq!(git.current_branch().await.unwrap(), "main");
+        // A tag / SHA still checks out (detached) through the same path.
+        sh_git(&dir, &["stash", "push", "-m", "park"]);
+        sh_git(&dir, &["tag", "v1"]);
+        git.checkout("v1", false).await.unwrap();
+        git.checkout("main", false).await.unwrap();
+    }
+
+    /// G-6: when the switch to `target` fails after the auto-stash (target is
+    /// checked out in an agent's worktree), the user's tracked AND untracked
+    /// changes come back on the branch they were on — nothing is stranded.
+    #[tokio::test]
+    async fn merge_autostash_restores_changes_when_the_switch_fails() {
+        let (tmp, dir) = fixture_on_branch("main");
+        sh_git(&dir, &["branch", "develop"]);
+        sh_git(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "f.txt", "feature\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "feature"]);
+        let wt = tmp.path().join("wt");
+        sh_git(&dir, &["worktree", "add", wt.to_str().unwrap(), "develop"]);
+        write(&dir, "a.txt", "hello\nDIRTY\n");
+        write(&dir, "new.txt", "untracked\n");
+
+        let git = LocalGit::new(&dir);
+        let err = git
+            .merge_branch("feature", "develop", LocalMergeStrategy::MergeCommit, true)
+            .await
+            .unwrap_err();
+        assert_eq!(git.current_branch().await.unwrap(), "feature", "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\nDIRTY\n"
+        );
+        assert!(dir.join("new.txt").exists(), "untracked file restored");
+        assert!(git.stash_list().await.unwrap().is_empty(), "{err:?}");
+    }
+
+    /// `merge --squash` abort drops the squash but KEEPS unrelated edits
+    /// (`reset --merge`); `reset --hard` wiped them.
+    #[tokio::test]
+    async fn squash_abort_keeps_unrelated_uncommitted_edits() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+        write(&dir, "s.txt", "side\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "side"]);
+        sh_git(&dir, &["checkout", "-q", "main"]);
+        let git = LocalGit::new(&dir);
+        git.merge_branch("side", "main", LocalMergeStrategy::Squash, false)
+            .await
+            .unwrap();
+        write(&dir, "a.txt", "hello\nUNRELATED\n");
+        git.merge_abort().await.unwrap();
+        assert!(!dir.join("s.txt").exists(), "the squash is gone");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\nUNRELATED\n"
+        );
     }
 }

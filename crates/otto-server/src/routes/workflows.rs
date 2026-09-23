@@ -649,23 +649,26 @@ pub async fn cancel_run(
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     if matches!(run.status, RunStatus::Pending | RunStatus::Running) {
-        let rev = repo(&ctx)
-            .update_run(&id, RunStatus::Canceled, &run.nodes, Some("canceled"), true)
-            .await
-            .map_err(ApiError)?;
+        // Status-only and conditional: never writes back the node snapshot
+        // read above (a run that finished in between kept a step "running"
+        // forever and had its success overwritten), and a no-op once the run
+        // has settled.
+        let rev = repo(&ctx).request_cancel(&id).await.map_err(ApiError)?;
         // Announce the cancel right away (the engine re-emits once its current
         // node reaches a boundary and it marks the remaining nodes skipped).
-        let _ = ctx.events.send(Event::WorkflowRunUpdated {
-            workspace_id: run.workspace_id.clone(),
-            run_id: id.clone(),
-            status: "canceled".into(),
-            node_id: None,
-            rev,
-            node: None,
-            nodes_done: 0,
-            nodes_total: 0,
-            waiting_approval: false,
-        });
+        if let Some(rev) = rev {
+            let _ = ctx.events.send(Event::WorkflowRunUpdated {
+                workspace_id: run.workspace_id.clone(),
+                run_id: id.clone(),
+                status: "canceled".into(),
+                node_id: None,
+                rev,
+                node: None,
+                nodes_done: 0,
+                nodes_total: 0,
+                waiting_approval: false,
+            });
+        }
     }
     repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
 }
@@ -1658,6 +1661,14 @@ pub async fn approve_run(
 ) -> ApiResult<Json<Value>> {
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    // Only a LIVE run can be approved: a canceled/failed run that still
+    // carried the pause flag used to "resume" (and announce `running`) here.
+    if run.status != RunStatus::Running {
+        return Err(ApiError(Error::Conflict(format!(
+            "run is {} — only a running run can be approved or rejected",
+            run.status.as_str()
+        ))));
+    }
 
     // Confirm the run is actually waiting for approval.
     let row =
@@ -1696,16 +1707,22 @@ pub async fn approve_run(
                  approval_note   = ?,
                  approved_at     = ?,
                  rev             = rev + 1
-             WHERE id = ?
+             WHERE id = ? AND status = 'running' AND waiting_approval = 1
              RETURNING rev",
         )
         .bind(&user.id)
         .bind(req.note.as_deref().unwrap_or(""))
         .bind(&now)
         .bind(&id)
-        .fetch_one(&ctx.pool)
+        .fetch_optional(&ctx.pool)
         .await
-        .map_err(|e| ApiError(Error::Internal(format!("approve_run record: {e}"))))?;
+        .map_err(|e| ApiError(Error::Internal(format!("approve_run record: {e}"))))?
+        // Decided (or canceled) by someone else between the check and now.
+        .ok_or_else(|| {
+            ApiError(Error::Conflict(
+                "run is no longer waiting for approval".into(),
+            ))
+        })?;
         emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
 
         Ok(Json(json!({
@@ -1724,15 +1741,20 @@ pub async fn approve_run(
                  approval_note   = ?,
                  approved_at     = ?,
                  rev             = rev + 1
-             WHERE id = ?
+             WHERE id = ? AND status = 'running' AND waiting_approval = 1
              RETURNING rev",
         )
         .bind(req.note.as_deref().unwrap_or("rejected"))
         .bind(&now)
         .bind(&id)
-        .fetch_one(&ctx.pool)
+        .fetch_optional(&ctx.pool)
         .await
-        .map_err(|e| ApiError(Error::Internal(format!("reject_run record: {e}"))))?;
+        .map_err(|e| ApiError(Error::Internal(format!("reject_run record: {e}"))))?
+        .ok_or_else(|| {
+            ApiError(Error::Conflict(
+                "run is no longer waiting for approval".into(),
+            ))
+        })?;
         emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
 
         Ok(Json(json!({

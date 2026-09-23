@@ -4,6 +4,7 @@
 
 import { baseUrl, getToken } from '../api/client';
 import type { ExecuteApiReq } from '../api/types';
+import { confirmNewHost } from './apiClient.svelte';
 
 export type StreamStatus = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 export type StreamItemKind = 'open' | 'event' | 'message' | 'error' | 'closed';
@@ -40,6 +41,10 @@ class ApiStreamStore {
   mode: 'sse' | 'websocket' = $state('sse');
 
   private ws: WebSocket | null = null;
+  /** The last `connect` call — replayed once with `confirm_new_host` when the
+   *  daemon refuses to send a stored secret to an unbound host and the person
+   *  confirms. */
+  private last: { workspaceId: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq } | null = null;
 
   get active(): boolean {
     return this.status === 'connecting' || this.status === 'open';
@@ -54,6 +59,8 @@ class ApiStreamStore {
     this.error = '';
     this.mode = kind;
     this.status = 'connecting';
+    const last = { workspaceId, kind, request };
+    this.last = last;
 
     let wsUrl: string;
     try {
@@ -111,6 +118,7 @@ class ApiStreamStore {
   }
 
   disconnect(): void {
+    this.last = null;
     if (this.ws) {
       const socket = this.ws;
       this.ws = null;
@@ -140,6 +148,17 @@ class ApiStreamStore {
     this.push({ kind: 'error', data: msg });
   }
 
+  private async offerNewHostConfirm(
+    last: { workspaceId: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq },
+    message: string,
+  ): Promise<void> {
+    const host = /host '([^']*)'/.exec(message)?.[1] ?? '';
+    if (!(await confirmNewHost(host))) return;
+    // The person started (or stopped) another stream meanwhile — don't revive this one.
+    if (this.last !== last) return;
+    this.connect(last.workspaceId, last.kind, { ...last.request, confirm_new_host: true });
+  }
+
   private push(item: Omit<StreamItem, 't'>): void {
     const next = [...this.items, { t: Date.now(), ...item, data: item.data.slice(0, 64 * 1024) }];
     let bytes = next.reduce((n, entry) => n + entry.data.length, 0);
@@ -165,6 +184,9 @@ class ApiStreamStore {
         this.error = msg.message ?? 'error';
         this.status = 'error';
         this.push({ kind: 'error', data: msg.message ?? 'error' });
+        if (this.error.includes('needs_confirm=new_host') && this.last && !this.last.request.confirm_new_host) {
+          void this.offerNewHostConfirm(this.last, this.error);
+        }
         break;
       case 'closed':
         if (this.status !== 'error') this.status = 'closed';

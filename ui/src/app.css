@@ -332,9 +332,11 @@ textarea.input {
   gap: 12px;
   margin-bottom: 16px;
 }
+/* Legacy scaffold — pages use lib/components/PageHeader.svelte now. One title
+   size app-wide: --fs-l, matching the PageHeader bar. */
 .page-header h1 {
   margin: 0;
-  font-size: var(--fs-xl);
+  font-size: var(--fs-l);
   font-weight: 600;
   letter-spacing: -0.01em;
 }

@@ -4,6 +4,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import type { ApiHistorySummary } from '../../lib/api/types';
 
@@ -47,6 +49,32 @@
     void apiClient.selectHistory(h.id);
   }
 
+  // Retention: the daemon keeps the newest N rows / D days per workspace
+  // (default 0 / 0 = no limit — opt-in, pruning deletes runs) and trims after
+  // every run once a limit is set.
+  function parseLimit(v: string | null): number | null {
+    if (v === null) return null;
+    const n = Number(v.trim());
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
+  async function editRetention(): Promise<void> {
+    const cur = ws.apiHistoryRetention;
+    const rows = parseLimit(await confirmer.promptText('Keep the newest how many requests? (0 = unlimited)', {
+      title: 'History retention', confirmLabel: 'Next', initial: String(cur.rows),
+    }));
+    if (rows === null) return;
+    const days = parseLimit(await confirmer.promptText('Drop requests older than how many days? (0 = never)', {
+      title: 'History retention', confirmLabel: 'Save', initial: String(cur.days),
+    }));
+    if (days === null) return;
+    try {
+      await ws.setApiHistoryRetention(rows, days);
+      toasts.success('History retention saved', `${rows || 'Unlimited'} rows · ${days ? `${days} days` : 'no age limit'} — applied on the next request`);
+    } catch (e) {
+      toasts.error('Could not save retention', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function clear(): Promise<void> {
     if (!(await confirmer.ask('Clear all request history for this workspace?', { title: 'Clear history', confirmLabel: 'Clear' }))) return;
     await apiClient.clearHistory();
@@ -65,6 +93,12 @@
         aria-pressed={apiClient.historyAgentOnly}
         onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
       ><Icon name="zap" size={13} /></button>
+      <button
+        class="icon-btn"
+        title={`Retention: ${ws.apiHistoryRetention.rows || 'unlimited'} rows · ${ws.apiHistoryRetention.days ? `${ws.apiHistoryRetention.days} days` : 'no age limit'}`}
+        aria-label="History retention"
+        onclick={() => void editRetention()}
+      ><Icon name="clock" size={13} /></button>
       {#if apiClient.history.length > 0}
         <button class="icon-btn" title="Clear history" aria-label="Clear history" onclick={clear}><Icon name="trash" size={13} /></button>
       {/if}

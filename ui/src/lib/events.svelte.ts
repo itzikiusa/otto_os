@@ -206,7 +206,9 @@ export const budgetBus = new BudgetBus();
 
 /** Incremented each time a `work_graph_updated` WS event arrives. The Mission
  *  Control page subscribes and re-fetches the workspace summary/list when the
- *  event's workspace matches the open one — replacing any polling. */
+ *  event's workspace matches the open one — replacing any polling. A tick with
+ *  an EMPTY `workspaceId` is a resync (events were lost while the socket was
+ *  down) that every open view honours. */
 export class MissionControlBus {
   tick: number = $state(0);
   workspaceId: string = $state('');
@@ -218,6 +220,11 @@ export class MissionControlBus {
     this.itemId = itemId;
     this.status = status;
     this.tick += 1;
+  }
+
+  /** Events were missed (WS reconnect): every open Mission Control view reloads. */
+  resync(): void {
+    this.apply('', '', '');
   }
 }
 
@@ -315,6 +322,28 @@ class EventsClient {
     this.connect();
   }
 
+  /** Refetch everything the always-mounted shell caches from events. A daemon
+   *  restart kills sessions and finishes runs without a single event reaching
+   *  this client, so the sidebar kept showing them "working", with stale
+   *  badges and unread counts, until a full reload. Page-scoped stores reload
+   *  on mount; swarm + open transcripts resync themselves. */
+  private resyncAfterReconnect(): void {
+    void swarm.resync();
+    transcript.resyncVisible();
+    missionControlBus.resync();
+    void ws.refreshSessions().catch(() => {
+      /* transient — the next reconnect or workspace switch retries */
+    });
+    void ws.refreshActiveWorkflowRuns();
+    // refreshOtherSessions only SEEDS statuses (it must not clobber fresher
+    // event-fed values on a normal refresh); after a gap the fetched rows are
+    // the freshest truth, so apply them.
+    void ws.refreshOtherSessions().then(() => {
+      for (const s of ws.otherWsSessions) ws.statusMap[s.id] = s.status;
+    });
+    void notifications.load();
+  }
+
   private connect(): void {
     if (this.stopped) return;
     this.state = 'connecting';
@@ -334,10 +363,7 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
-      if (reconnected) {
-        void swarm.resync();
-        transcript.resyncVisible();
-      }
+      if (reconnected) this.resyncAfterReconnect();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;

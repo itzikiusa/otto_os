@@ -5,6 +5,8 @@
   // All data comes from the daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { usage } from '../../lib/api/usage.svelte';
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
@@ -299,56 +301,61 @@
 </script>
 
 <div class="usage">
-  <header class="usage-head">
-    <div class="title">
-      <Icon name="chart" size={16} />
-      <h1>Usage &amp; Metrics</h1>
+  <PageHeader title="Usage & Metrics" icon="chart">
+    {#snippet badge()}
       {#if usage.status?.available}
         <span class="pill ok" title={usage.status.version ?? ''}>ClickHouse</span>
       {/if}
-    </div>
-    <div class="grow"></div>
-    {#if usage.status?.available}
-      <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
-        <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
-          Otto
-        </button>
-        <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
-          All
-        </button>
-      </div>
-      <div class="seg">
-        {#each WINDOWS as w (w.days)}
-          <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
-            {w.label}
+    {/snippet}
+    {#snippet tabs()}
+      {#if usage.status?.available}
+        <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
+          <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
+            Otto
           </button>
-        {/each}
-      </div>
-      <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
-        <Icon name="refresh" size={13} /> Refresh
-      </button>
-      <button
-        class="btn"
-        class:active={usage.autoRefresh}
-        onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
-        title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
-      >
-        <Icon name="clock" size={13} />
-        {usage.autoRefresh ? 'Live' : 'Auto'}
-      </button>
-      <button
-        class="btn"
-        disabled={!usage.summary}
-        onclick={() => usage.exportSummaryJson()}
-        title="Download full summary as JSON"
-      >
-        <Icon name="download" size={13} /> Export
-      </button>
-      <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings">
-        <Icon name="gear" size={13} />
-      </button>
-    {/if}
-  </header>
+          <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
+            All
+          </button>
+        </div>
+        <div class="seg">
+          {#each WINDOWS as w (w.days)}
+            <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
+              {w.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      {#if usage.status?.available}
+        <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
+          <Icon name="refresh" size={13} /> Refresh
+        </button>
+        <button
+          class="btn"
+          class:active={usage.autoRefresh}
+          onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
+          title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
+          data-label={usage.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 60s'}
+        >
+          <Icon name="clock" size={13} />
+          {usage.autoRefresh ? 'Live' : 'Auto'}
+        </button>
+        <button
+          class="btn"
+          disabled={!usage.summary}
+          onclick={() => usage.exportSummaryJson()}
+          title="Download full summary as JSON"
+          data-label="Export JSON"
+        >
+          <Icon name="download" size={13} /> Export
+        </button>
+        <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings" aria-label="Usage settings" data-label="Settings">
+          <Icon name="gear" size={13} />
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
 
   <!-- Live budget-exceeded banner (driven by BudgetExceeded WS event).
        Dismissible; clears automatically on a "recovered" event. -->
@@ -371,10 +378,12 @@
   {/if}
 
   {#if !auth.isRoot}
-    <div class="empty">
-      <Icon name="gauge" size={28} />
-      <p>Usage analytics are available to the root account.</p>
-    </div>
+    <EmptyState
+      variant="page"
+      icon="gauge"
+      title="Usage is root-only"
+      body="Usage analytics are available to the root account."
+    />
   {:else if usage.loading && !usage.status}
     <div class="empty"><p>Loading…</p></div>
   {:else if !usage.status?.available}
@@ -977,28 +986,6 @@
     flex-direction: column;
     overflow: hidden;
   }
-  .usage-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    flex-wrap: wrap;
-  }
-  .title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-  }
-  .title h1 {
-    font-size: 15px;
-    margin: 0;
-  }
-  .grow {
-    flex: 1;
-  }
   .pill {
     font-size: 10px;
     font-weight: 600;
@@ -1013,6 +1000,8 @@
   }
   .seg {
     display: flex;
+    flex-shrink: 0;
+    margin-inline-end: 6px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 2px;
@@ -1064,7 +1053,7 @@
   .body {
     flex: 1;
     overflow-y: auto;
-    padding: 16px;
+    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -1720,14 +1709,6 @@
   }
 
   @media (max-width: 640px) {
-    .usage-head {
-      padding: 8px 12px;
-      gap: 6px;
-    }
-    /* The grow spacer collapses so the seg groups wrap to their own rows */
-    .grow {
-      flex-basis: 100%;
-    }
     .body {
       padding: 10px;
     }

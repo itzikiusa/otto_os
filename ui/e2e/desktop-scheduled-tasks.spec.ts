@@ -138,8 +138,8 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
 
   test('run now → ok run with a summary, and a fetchable markdown report', async () => {
     const { ctx } = await apiCtx();
-    // The OTTO_E2E stub is synchronous, so the manual run completes before the
-    // POST returns; poll defensively all the same.
+    // Run now returns the run at once (still `running`) and executes it in the
+    // background — poll until it settles.
     const run = await (await ctx.post(`${base}${V1}/scheduled-tasks/${taskId}/run`, { data: {} })).json();
     expect(run.trigger).toBe('manual');
 

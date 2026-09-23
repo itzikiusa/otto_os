@@ -377,7 +377,8 @@ impl JiraClient {
     /// forever ("Load more" appended duplicates). We keep the offset-based
     /// signature for callers and walk `nextPageToken` internally until the
     /// requested window is covered. The classic `/rest/api/3/search` fallback
-    /// (only reached when the new endpoint 4xx/5xxes) honors `startAt` directly.
+    /// (only reached when the new endpoint is missing — 404/405) honors
+    /// `startAt` directly.
     pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
         const PAGE: u32 = 25;
         // Hard cap on the token walk (40 pages = 1000 issues deep) — a runaway
@@ -404,9 +405,12 @@ impl JiraClient {
                 .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
 
             if !resp.status().is_success() {
-                // New endpoint unavailable: classic fallback (startAt works there).
-                // Only sensible on the first page — a mid-walk failure surfaces.
-                if page == 0 {
+                // New endpoint UNAVAILABLE (404/405 — older Server/DC): classic
+                // fallback (startAt works there). Only sensible on the first
+                // page — a mid-walk failure surfaces. Any other failure (a JQL
+                // 400, 401, 429, 5xx) is the real answer: falling back masked it
+                // behind the classic endpoint's "410 Gone" on Cloud.
+                if page == 0 && new_search_unavailable(resp.status()) {
                     return self.search_jql_classic(jql, start_at, fields).await;
                 }
                 let status = resp.status();
@@ -460,6 +464,13 @@ impl JiraClient {
             resp.json()
                 .await
                 .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
+        } else if !new_search_unavailable(resp.status()) {
+            // A real failure — surface it instead of the classic endpoint's 410.
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira my-work search failed ({status}): {body}"
+            )));
         } else {
             // Classic `/rest/api/3/search` fallback (same rule as search_jql).
             let resp = self
@@ -613,7 +624,7 @@ impl JiraClient {
 
     /// Fetch a single issue by key (e.g. "PROJ-123").
     pub async fn get_issue(&self, key: &str) -> Result<IssueDetail> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -684,7 +695,11 @@ impl JiraClient {
     ///
     /// Returns a [`CommentRef`] with the new comment's `id` and optional `self` URL.
     pub async fn add_comment(&self, key: &str, body_text: &str) -> Result<CommentRef> {
-        let url = format!("{}/rest/api/3/issue/{}/comment", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/comment",
+            self.base_url,
+            path_seg(key)
+        );
         let adf_body = text_to_adf(body_text);
         let payload = serde_json::json!({ "body": adf_body });
 
@@ -732,7 +747,11 @@ impl JiraClient {
     ///
     /// Each comment's ADF body is converted to Markdown via [`adf_to_markdown`].
     pub async fn list_comments(&self, key: &str) -> Result<Vec<IssueComment>> {
-        let url = format!("{}/rest/api/3/issue/{}/comment", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/comment",
+            self.base_url,
+            path_seg(key)
+        );
 
         // Paginate to the LAST page: the endpoint returns one default-sized
         // page ordered oldest-first, so on a busy issue the NEWEST comments —
@@ -825,7 +844,7 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?expand=changelog,names,renderedFields&fields=*all`
     pub async fn get_issue_full(&self, key: &str) -> Result<IssueFull> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -864,7 +883,7 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}?fields=id`.
     pub async fn get_issue_id(&self, key: &str) -> Result<String> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let resp = self
             .http
             .get(&url)
@@ -963,7 +982,11 @@ impl JiraClient {
     ///
     /// Uses `GET /rest/api/3/issue/{key}/transitions`
     pub async fn list_transitions(&self, key: &str) -> Result<Vec<JiraTransition>> {
-        let url = format!("{}/rest/api/3/issue/{}/transitions", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/transitions",
+            self.base_url,
+            path_seg(key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -993,7 +1016,11 @@ impl JiraClient {
     ///
     /// Uses `POST /rest/api/3/issue/{key}/transitions` with `{"transition":{"id":"..."}}`
     pub async fn transition_issue(&self, key: &str, transition_id: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}/transitions", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/transitions",
+            self.base_url,
+            path_seg(key)
+        );
         let payload = serde_json::json!({ "transition": { "id": transition_id } });
 
         let resp = self
@@ -1054,7 +1081,11 @@ impl JiraClient {
     ///
     /// Uses `PUT /rest/api/3/issue/{key}/assignee` with `{"accountId":"..."}`
     pub async fn assign_issue(&self, key: &str, account_id: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}/assignee", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/assignee",
+            self.base_url,
+            path_seg(key)
+        );
         let payload = serde_json::json!({ "accountId": account_id });
 
         let resp = self
@@ -1088,7 +1119,8 @@ impl JiraClient {
     pub async fn attachment_bytes(&self, attachment_id: &str) -> Result<(String, Vec<u8>)> {
         let url = format!(
             "{}/rest/api/3/attachment/content/{}",
-            self.base_url, attachment_id
+            self.base_url,
+            path_seg(attachment_id)
         );
         let resp = self
             .http
@@ -1123,7 +1155,20 @@ impl JiraClient {
 
     /// Update the description of an issue. The `body_md` text is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        // The Markdown the editor saved came from `adf_to_markdown`, which drops
+        // screenshots, mentions, smart links, dates, status lozenges and
+        // emoji; writing it back (via the plain-text `text_to_adf`) silently
+        // DELETED them from the issue. Refuse instead of destroying content.
+        let current = self.description_adf(key).await?;
+        let lossy = crate::adf::adf_lossy_nodes(&current);
+        if !lossy.is_empty() {
+            return Err(Error::Conflict(format!(
+                "the description of {key} contains content Otto can't preserve ({}); saving would \
+                 delete it — edit the description in Jira instead",
+                lossy.join(", ")
+            )));
+        }
         let adf_body = text_to_adf(body_md);
         let payload = serde_json::json!({
             "fields": {
@@ -1153,12 +1198,46 @@ impl JiraClient {
         Ok(())
     }
 
+    /// The issue's raw description ADF (`Value::Null` when it has none).
+    async fn description_adf(&self, key: &str) -> Result<serde_json::Value> {
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[("fields", "description")])
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira description request: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira description {key} failed ({status}): {body}"
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira description parse: {e}")))?;
+        Ok(body
+            .get("fields")
+            .and_then(|f| f.get("description"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
     /// Fetch the set of fields the caller may edit on an issue.
     ///
     /// Uses `GET /rest/api/3/issue/{key}/editmeta` and flattens the
     /// `fields` map into a `Vec<EditableField>` sorted by display name.
     pub async fn editmeta(&self, key: &str) -> Result<Vec<EditableField>> {
-        let url = format!("{}/rest/api/3/issue/{}/editmeta", self.base_url, key);
+        let url = format!(
+            "{}/rest/api/3/issue/{}/editmeta",
+            self.base_url,
+            path_seg(key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -1189,7 +1268,7 @@ impl JiraClient {
     ///
     /// Uses `PUT /rest/api/3/issue/{key}` with `{"fields": fields}`.
     pub async fn update_fields(&self, key: &str, fields: serde_json::Value) -> Result<()> {
-        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, path_seg(key));
         let payload = serde_json::json!({ "fields": fields });
 
         let resp = self
@@ -1274,7 +1353,11 @@ impl JiraClient {
     /// `subtask == true`) are excluded so callers only see top-level types
     /// such as "Story", "Task", "Bug", and "Epic".
     pub async fn list_issue_types(&self, project_key: &str) -> Result<Vec<String>> {
-        let url = format!("{}/rest/api/3/project/{}", self.base_url, project_key);
+        let url = format!(
+            "{}/rest/api/3/project/{}",
+            self.base_url,
+            path_seg(project_key)
+        );
         let resp = self
             .http
             .get(&url)
@@ -2064,8 +2147,43 @@ fn is_issue_key(s: &str) -> bool {
 }
 
 /// Escape double quotes in a JQL string value.
+/// Percent-encode one URL path segment (an issue key, project key or
+/// attachment id). Keys come from users, agents and imported URLs; unencoded,
+/// a crafted value such as `X/../../myself` walked the request to a different
+/// Jira endpoint. Real keys (`PROJ-123`, `10042`) contain only unreserved
+/// characters and pass through unchanged.
+pub(crate) fn path_seg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    // `.` / `..` survive the escaping above but are still path steps.
+    if out == "." || out == ".." {
+        return out.replace('.', "%2E");
+    }
+    out
+}
+
+/// Whether a `/rest/api/3/search/jql` failure means "this deployment has no
+/// such endpoint" (→ try the classic `/rest/api/3/search`) rather than a real
+/// error about the request.
+fn new_search_unavailable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 404 | 405)
+}
+
+/// Escape user text for a double-quoted JQL string literal. Backslashes FIRST
+/// (then quotes): escaping only `"` let `x\" OR …` close the literal early
+/// (JQL injection within the user's read scope), turned `C:\Users` into an
+/// invalid escape and left a trailing `\` unterminated. Line breaks become
+/// spaces — a search box never means a newline.
 fn escape_jql(s: &str) -> String {
-    s.replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r', '\t'], " ")
 }
 
 /// Read a string field, falling back through alternate keys, ending in `""`.
@@ -2349,6 +2467,43 @@ mod tests {
         let jql = build_jql("login issue", Some("PROJ"));
         assert!(jql.starts_with("project = \"PROJ\""), "{jql}");
         assert!(jql.contains("summary ~"), "{jql}");
+    }
+
+    #[test]
+    fn jql_escaping_cannot_break_out_of_the_literal() {
+        // Backslash is escaped BEFORE the quote, so `\"` can't close the string.
+        assert_eq!(
+            escape_jql(r#"x\" OR project = SECRET"#),
+            r#"x\\\" OR project = SECRET"#
+        );
+        assert_eq!(escape_jql(r"C:\Users"), r"C:\\Users");
+        assert_eq!(escape_jql("trailing\\"), "trailing\\\\");
+        assert_eq!(escape_jql("a\nb"), "a b");
+        let jql = build_jql(r#"x\" OR key = "Y-1"#, Some("PROJ"));
+        assert!(
+            jql.contains(r#"summary ~ "x\\\" OR key = \"Y-1*""#),
+            "{jql}"
+        );
+    }
+
+    #[test]
+    fn path_segments_cannot_traverse_to_other_endpoints() {
+        assert_eq!(path_seg("PROJ-123"), "PROJ-123");
+        assert_eq!(path_seg("10042"), "10042");
+        assert_eq!(path_seg("X/../../myself"), "X%2F..%2F..%2Fmyself");
+        assert_eq!(path_seg(".."), "%2E%2E");
+        assert_eq!(path_seg("a b?c#d"), "a%20b%3Fc%23d");
+    }
+
+    #[test]
+    fn only_a_missing_endpoint_falls_back_to_classic_search() {
+        use reqwest::StatusCode;
+        assert!(new_search_unavailable(StatusCode::NOT_FOUND));
+        assert!(new_search_unavailable(StatusCode::METHOD_NOT_ALLOWED));
+        assert!(!new_search_unavailable(StatusCode::BAD_REQUEST));
+        assert!(!new_search_unavailable(StatusCode::UNAUTHORIZED));
+        assert!(!new_search_unavailable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!new_search_unavailable(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     // ── parse_editmeta tests ─────────────────────────────────────────────────

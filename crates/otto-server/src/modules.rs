@@ -3004,6 +3004,21 @@ fn default_draft_severity() -> String {
     "info".to_string()
 }
 
+/// Whether a freshly summarized comment is the same one as an already-decided
+/// comment of this review: same file and either the same anchored line or the
+/// same (whitespace-normalized) text. The summarizer re-words between runs, so
+/// the line is the primary key and the text covers path-/line-less comments.
+fn same_draft_comment(kept: &ReviewComment, c: &DraftComment) -> bool {
+    if kept.path != c.path {
+        return false;
+    }
+    if kept.line.is_some() && kept.line == c.line {
+        return true;
+    }
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    norm(&kept.body) == norm(&c.body)
+}
+
 /// Parse the summarizer's reply into draft comments (tolerates fences/prose).
 fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment> {
     let stripped = summary_text
@@ -3120,9 +3135,13 @@ async fn summarize_and_persist(
     // (12 agents, 36k-line diff) blew straight through it — dropping to the
     // deterministic fallback, whose own cap then produced exactly 20 findings,
     // all `high`. The run looked clean; it was truncated twice over. Scale the
-    // budget with the work: ~1s per finding on top of a 2-minute floor, capped
-    // at 20 minutes so a wedged summarizer still fails rather than hanging.
-    let summarizer_timeout = Duration::from_secs((120 + total_findings as u64).clamp(120, 1_200));
+    // budget with the work, capped so a wedged summarizer still fails rather
+    // than hanging. The budget also covers the CLI's cold start and the paste,
+    // and at ~1s/finding on a 2-minute floor 9 of 10 runs on one day hit the
+    // absolute deadline and fell back to the deterministic summary (which only
+    // dedupes exact text): ~3s per finding on a 5-minute floor, capped at 30.
+    let summarizer_timeout =
+        Duration::from_secs((300 + 3 * total_findings as u64).clamp(300, 1_800));
     tracing::info!(
         review = %review_id,
         "running summarizer agent ({total_findings} findings in, {}s budget)",
@@ -3234,13 +3253,38 @@ async fn summarize_and_persist(
         Some(pr_number)
     };
     let mut seen_fingerprints: Vec<String> = Vec::new();
+    // Comments the user already decided on (or that are on the PR) — a re-run
+    // must not re-draft them. Empty on a first run.
+    let kept_comments: Vec<ReviewComment> = ctx
+        .reviews_store
+        .get_review(review_id)
+        .await
+        .map(|r| {
+            r.comments
+                .into_iter()
+                .filter(|k| k.state != CommentState::Draft || k.posted)
+                .collect()
+        })
+        .unwrap_or_default();
+    // File contents read for fingerprint anchoring, one read per path.
+    let mut anchor_files: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
     for c in parsed {
         if is_cancelled().await { return Ok(()); }
         let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
-        let comment = ctx
-            .reviews_store
-            .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
-            .await?;
+        // A summarizer RE-RUN (retry_summarizer) replaces only the drafts; a
+        // comment the user already approved/declined (or that is on the PR)
+        // must not come back as a fresh draft — approving that copy posted a
+        // duplicate. Reuse the decided comment instead.
+        let comment_id = match kept_comments.iter().find(|k| same_draft_comment(k, &c)) {
+            Some(k) => k.id.clone(),
+            None => {
+                ctx.reviews_store
+                    .add_comment(review_id, c.path.as_deref(), c.line, sev, &c.body)
+                    .await?
+                    .id
+            }
+        };
 
         // Derive the enriched fields from the comment when the summarizer didn't
         // emit them (back-compat; §15.9).
@@ -3255,13 +3299,44 @@ async fn summarize_and_persist(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| c.body.clone());
         let reasoning = c.reasoning.clone().unwrap_or_default();
-        let fp = otto_state::review_findings::compute_fingerprint(
+        // Stable (v2) fingerprint anchored on the flagged code line's text (or
+        // the title), NOT the summarizer's re-worded body — see
+        // `compute_finding_fingerprint`. The legacy body hash rides along so
+        // rows stored before v2 are recognized and re-keyed, not duplicated.
+        let legacy_fp = otto_state::review_findings::compute_fingerprint(
             repo_id,
             pr_number,
             c.path.as_deref(),
             c.category.as_deref(),
             &c.body,
         );
+        let line_text = match (c.path.as_deref(), c.line) {
+            (Some(p), Some(l)) => anchored_line_text(repo_path, p, l, &mut anchor_files).await,
+            _ => None,
+        };
+        let anchor = otto_state::review_findings::finding_anchor(line_text.as_deref(), &title, &c.body);
+        let mut fp = otto_state::review_findings::compute_finding_fingerprint(
+            repo_id,
+            pr_number,
+            c.path.as_deref(),
+            c.category.as_deref(),
+            &anchor,
+        );
+        if seen_fingerprints.contains(&fp) {
+            // A second, distinct finding on the same line/category in this run:
+            // disambiguate by title so it is not folded into the first one.
+            let titled = format!(
+                "{anchor}|{}",
+                otto_state::review_findings::normalize_anchor_text(&title)
+            );
+            fp = otto_state::review_findings::compute_finding_fingerprint(
+                repo_id,
+                pr_number,
+                c.path.as_deref(),
+                c.category.as_deref(),
+                &titled,
+            );
+        }
         // Anchor the finding to a sane (line, line_end) span — an end without a
         // start, or an inverted/degenerate range, collapses appropriately.
         let (line, line_end) = otto_core::finding::normalize_line_range(c.line, c.line_end);
@@ -3285,7 +3360,7 @@ async fn summarize_and_persist(
             fingerprint: &fp,
             run_id: review_id,
         };
-        match ctx.findings_store.upsert(&nf).await {
+        match ctx.findings_store.upsert_tracked(&nf, Some(&legacy_fp)).await {
             Ok((f, created)) => {
                 if created {
                     // Anchor the audit trail + link the originating comment id.
@@ -3298,7 +3373,7 @@ async fn summarize_and_persist(
                             "review",
                             None,
                             Some("open"),
-                            serde_json::json!({ "comment_id": comment.id }),
+                            serde_json::json!({ "comment_id": comment_id }),
                         )
                         .await;
                 }
@@ -3311,20 +3386,145 @@ async fn summarize_and_persist(
 
     // Findings present in a prior run but absent now flip open→resolved (the
     // "verification" leg: a re-run that no longer surfaces a finding resolves it).
+    //
+    // Only a run that really re-evaluated the code may resolve anything:
+    // - a PARTIAL run (a reviewer errored / was cut off, or the deterministic
+    //   fallback stood in for the summarizer) resolves nothing — a missing lens
+    //   is not evidence its findings were fixed;
+    // - a LOCAL run (the shared `pr_number = 0` sentinel) resolves only findings
+    //   in files its diff touched — one branch's review used to resolve every
+    //   open local finding in the repo (3128/3804 rows);
+    // - a PR run keeps the whole-PR scope (every run reviews the same change).
     if is_cancelled().await { return Ok(()); }
     let seen_refs: Vec<&str> = seen_fingerprints.iter().map(|s| s.as_str()).collect();
-    if let Err(e) = ctx
-        .findings_store
-        .resolve_absent(&workspace.id, repo_id, pr_number, &seen_refs, review_id)
-        .await
-    {
-        tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+    let complete = review_run_complete(&agent_states[..summarizer_idx], summary_fallback);
+    let local_scope: Option<Vec<String>> = if pr_number == 0 {
+        match ctx.reviews_store.get_diff(review_id).await {
+            Ok(Some(diff)) => Some(diff_file_paths(&diff)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if !complete {
+        tracing::info!(review = %review_id, "partial review run — not resolving absent findings");
+    } else if pr_number == 0 && local_scope.is_none() {
+        tracing::info!(review = %review_id, "local review without a stored diff — not resolving absent findings");
+    } else {
+        let scope_refs: Option<Vec<&str>> = local_scope
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        if let Err(e) = ctx
+            .findings_store
+            .resolve_absent_scoped(
+                &workspace.id,
+                repo_id,
+                pr_number,
+                &seen_refs,
+                review_id,
+                scope_refs.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(review = %review_id, "resolve_absent failed: {e}");
+        }
     }
 
     // 7. Assemble the proof pack for this review from the now-persisted findings.
     assemble_review_proof(ctx, review_id, &workspace.id).await;
 
     Ok(())
+}
+
+/// Whether every reviewer row finished cleanly and the real summarizer ran —
+/// the precondition for treating "absent this run" as "resolved". `skipped`
+/// counts as finished (a sibling row covered that lens); a row whose note
+/// starts with `partial` (an orchestrator adopted at its cap with lenses still
+/// running) does not.
+fn review_run_complete(
+    reviewers: &[otto_core::domain::ReviewAgentState],
+    summary_fallback: bool,
+) -> bool {
+    !summary_fallback
+        && reviewers.iter().all(|a| {
+            matches!(a.status.as_str(), "done" | "skipped") && !a.note.starts_with("partial")
+        })
+}
+
+/// Repo-relative paths a unified diff touches (both sides, so a deleted or
+/// renamed file's findings are in scope too). Reads the `--- a/…` + `+++ b/…`
+/// header PAIR (a lone `--- ` is a removed `-- …` content line, not a header)
+/// and git's `rename from/to` lines; `/dev/null` is skipped and a quoted
+/// header is unquoted.
+fn diff_file_paths(diff: &str) -> Vec<String> {
+    fn push(out: &mut Vec<String>, raw: &str, strip_side: bool) {
+        // Drop a trailing tab-separated timestamp (plain `diff -u` output).
+        let raw = raw.split('\t').next().unwrap_or(raw).trim();
+        let raw = raw
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(raw);
+        if raw == "/dev/null" || raw.is_empty() {
+            return;
+        }
+        let path = if strip_side {
+            raw.strip_prefix("a/")
+                .or_else(|| raw.strip_prefix("b/"))
+                .unwrap_or(raw)
+        } else {
+            raw
+        };
+        let path = otto_state::review_findings::normalize_finding_path(path);
+        if !path.is_empty() && !out.iter().any(|p| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    let lines: Vec<&str> = diff.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(old) = line.strip_prefix("--- ") {
+            if let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("+++ ")) {
+                push(&mut out, old, true);
+                push(&mut out, new, true);
+            }
+        } else if let Some(p) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+        {
+            push(&mut out, p, false);
+        }
+    }
+    out
+}
+
+/// Text of 1-based `line` in the repo-relative `path` under `repo_path`, for
+/// fingerprint anchoring. Absolute or `..` paths are refused (the path comes
+/// from agent output). Each file is read at most once per run via `cache`.
+async fn anchored_line_text(
+    repo_path: &str,
+    path: &str,
+    line: u32,
+    cache: &mut std::collections::HashMap<String, Option<Vec<String>>>,
+) -> Option<String> {
+    let rel = otto_state::review_findings::normalize_finding_path(path);
+    let rel_path = std::path::Path::new(rel);
+    if rel.is_empty()
+        || rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    if !cache.contains_key(rel) {
+        let lines = tokio::fs::read_to_string(std::path::Path::new(repo_path).join(rel_path))
+            .await
+            .ok()
+            .map(|s| s.lines().map(str::to_string).collect::<Vec<String>>());
+        cache.insert(rel.to_string(), lines);
+    }
+    let idx = (line as usize).checked_sub(1)?;
+    cache.get(rel)?.as_ref()?.get(idx).cloned()
 }
 
 /// Open/blocker/total finding counts for a review, from the persistent store.
@@ -3344,9 +3544,164 @@ pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (
     let open = all.iter().filter(|f| is_open(f)).count() as u64;
     let blocker = all
         .iter()
-        .filter(|f| f.severity == "bug" && is_open(f))
+        .filter(|f| is_blocking_severity(&f.severity) && is_open(f))
         .count() as u64;
     (total, open, blocker)
+}
+
+/// Whether a stored finding severity is a blocker (critical/high). Rows are
+/// persisted in the normalized vocabulary (`critical|high|medium|low|info`,
+/// see [`otto_core::finding::FindingSeverity::normalize`]), so comparing the
+/// raw string against the reviewer token `"bug"` never matched and every
+/// review reported 0 blockers. Normalizing first also covers legacy
+/// `bug`/`blocker` rows.
+pub(crate) fn is_blocking_severity(severity: &str) -> bool {
+    use otto_core::finding::FindingSeverity;
+    matches!(
+        FindingSeverity::normalize(severity),
+        FindingSeverity::Critical | FindingSeverity::High
+    )
+}
+
+/// Sort rank for a stored severity: critical first, info last. Shares
+/// [`is_blocking_severity`]'s normalization so legacy `bug`/`warn` rows and the
+/// normalized `high`/`medium` rows rank the same.
+fn severity_rank(severity: &str) -> u8 {
+    use otto_core::finding::FindingSeverity;
+    match FindingSeverity::normalize(severity) {
+        FindingSeverity::Critical => 0,
+        FindingSeverity::High => 1,
+        FindingSeverity::Medium => 2,
+        FindingSeverity::Low => 3,
+        FindingSeverity::Info => 4,
+    }
+}
+
+#[cfg(test)]
+mod review_scope_tests {
+    use super::{diff_file_paths, review_run_complete};
+
+    fn agent(status: &str, note: &str) -> otto_core::domain::ReviewAgentState {
+        serde_json::from_value(serde_json::json!({
+            "name": "lens", "provider": "claude", "model": "",
+            "status": status, "note": note, "comment_count": 0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn diff_paths_cover_both_sides_and_skip_content_lines() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n\
+                    index 1..2 100644\n\
+                    --- a/src/a.rs\n\
+                    +++ b/src/a.rs\n\
+                    @@ -1,2 +1,2 @@\n\
+                    --- a removed SQL comment line\n\
+                    +new\n\
+                    diff --git a/gone.rs b/gone.rs\n\
+                    deleted file mode 100644\n\
+                    --- a/gone.rs\n\
+                    +++ /dev/null\n\
+                    diff --git a/old name.rs b/new name.rs\n\
+                    similarity index 100%\n\
+                    rename from old name.rs\n\
+                    rename to new name.rs\n";
+        assert_eq!(
+            diff_file_paths(diff),
+            vec!["src/a.rs", "gone.rs", "old name.rs", "new name.rs"]
+        );
+    }
+
+    fn kept(path: Option<&str>, line: Option<u32>, body: &str) -> otto_core::domain::ReviewComment {
+        otto_core::domain::ReviewComment {
+            id: "c1".into(),
+            review_id: "r1".into(),
+            path: path.map(str::to_string),
+            line,
+            severity: otto_core::domain::CommentSeverity::Warn,
+            body: body.into(),
+            state: otto_core::domain::CommentState::Approved,
+            posted: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn draft(path: Option<&str>, line: Option<u32>, body: &str) -> super::DraftComment {
+        serde_json::from_value(serde_json::json!({
+            "path": path, "line": line, "severity": "warn", "body": body
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn decided_comments_are_not_redrafted_by_a_summarizer_rerun() {
+        use super::same_draft_comment;
+        let k = kept(Some("a.rs"), Some(10), "Unchecked unwrap");
+        // Re-worded on the same line → the same comment.
+        assert!(same_draft_comment(&k, &draft(Some("a.rs"), Some(10), "unwrap may panic")));
+        // Another line / file → a different comment.
+        assert!(!same_draft_comment(&k, &draft(Some("a.rs"), Some(11), "unwrap may panic")));
+        assert!(!same_draft_comment(&k, &draft(Some("b.rs"), Some(10), "Unchecked unwrap")));
+        // A general comment matches on its text.
+        let g = kept(None, None, "Overall:  add tests");
+        assert!(same_draft_comment(&g, &draft(None, None, "Overall: add tests")));
+    }
+
+    #[test]
+    fn only_an_anchor_rejection_falls_back_to_a_general_comment() {
+        use super::{general_comment_body, inline_anchor_rejected};
+        use otto_core::Error;
+        assert!(inline_anchor_rejected(&Error::Conflict(
+            "github 422: pull_request_review_thread.line must be part of the diff".into()
+        )));
+        assert!(inline_anchor_rejected(&Error::Upstream("gitlab 400: position is invalid".into())));
+        // Auth / 5xx are not anchor problems — never re-post on those.
+        assert!(!inline_anchor_rejected(&Error::Forbidden("github 403: bad token".into())));
+        assert!(!inline_anchor_rejected(&Error::Upstream("github 502: bad gateway".into())));
+        assert_eq!(
+            general_comment_body(&kept(Some("a.rs"), Some(3), "x")),
+            "**`a.rs:3`**\n\nx"
+        );
+    }
+
+    #[test]
+    fn only_clean_runs_are_complete() {
+        let ok = [agent("done", "3 findings"), agent("skipped", "skipped — x")];
+        assert!(review_run_complete(&ok, false));
+        assert!(!review_run_complete(&ok, true), "fallback summarizer = partial");
+        assert!(!review_run_complete(&[agent("error", "timed out")], false));
+        assert!(!review_run_complete(
+            &[agent("done", "partial — 1 lens still running")],
+            false
+        ));
+    }
+}
+
+#[cfg(test)]
+mod severity_tests {
+    use super::{is_blocking_severity, severity_rank};
+
+    #[test]
+    fn blockers_are_counted_in_the_stored_vocabulary() {
+        // What the store actually holds (normalized on write)…
+        assert!(is_blocking_severity("critical"));
+        assert!(is_blocking_severity("high"));
+        assert!(!is_blocking_severity("medium"));
+        assert!(!is_blocking_severity("low"));
+        assert!(!is_blocking_severity("info"));
+        // …and legacy reviewer tokens on older rows.
+        assert!(is_blocking_severity("bug"));
+        assert!(is_blocking_severity("blocker"));
+        assert!(!is_blocking_severity("warn"));
+    }
+
+    #[test]
+    fn rank_orders_highest_first() {
+        assert!(severity_rank("critical") < severity_rank("high"));
+        assert!(severity_rank("high") < severity_rank("medium"));
+        assert!(severity_rank("medium") < severity_rank("info"));
+        assert_eq!(severity_rank("bug"), severity_rank("high"));
+    }
 }
 
 /// Short, human-facing one-liners for a review's OPEN findings (severity dot + a
@@ -3368,19 +3723,14 @@ pub(crate) async fn review_finding_briefs(
             otto_state::FindingState::Open | otto_state::FindingState::Regressed
         )
     };
-    let sev_rank = |s: &str| match s {
-        "bug" => 0,
-        "warn" => 1,
-        _ => 2,
-    };
     let mut open: Vec<&otto_state::ReviewFindingRow> = all.iter().filter(|f| is_open(f)).collect();
-    open.sort_by_key(|f| sev_rank(&f.severity));
+    open.sort_by_key(|f| severity_rank(&f.severity));
     open.into_iter()
         .take(max)
         .map(|f| {
-            let sev = match f.severity.as_str() {
-                "bug" => "🔴",
-                "warn" => "🟡",
+            let sev = match severity_rank(&f.severity) {
+                0 | 1 => "🔴",
+                2 => "🟡",
                 _ => "🔵",
             };
             let first = f
@@ -5998,27 +6348,30 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
-    // Post the comment to the PR provider.
-    let pr_posted = match resolve_provider_remote(&ctx, &user, &repo).await {
-        Ok((provider, remote)) => {
-            let req = NewPrCommentReq {
-                body: comment.body.clone(),
-                path: comment.path.clone(),
-                line: comment.line,
-                in_reply_to: None,
-            };
-            match provider.comment(&remote, review.pr_number, &req).await {
-                Ok(_) => true,
-                Err(e) => {
-                    tracing::warn!(comment = %cid, "failed to post comment to PR: {e}");
-                    false
-                }
-            }
+    // Post the comment to the PR provider — at most once.
+    // - A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
+    //   decision; calling the forge only 404'd against "PR #0".
+    // - An already-posted comment is never re-posted, and the post is CLAIMED
+    //   atomically (posted 0→1) before the forge call, so a double click or a
+    //   retried request can't post twice; a failed call releases the claim.
+    let pr_posted = if review.pr_number == LOCAL_REVIEW_PR_NUMBER {
+        comment.posted
+    } else if comment.posted {
+        true
+    } else if !ctx
+        .reviews_store
+        .claim_comment_post(&cid)
+        .await
+        .map_err(crate::error::ApiError)?
+    {
+        // Another request holds (or completed) the post.
+        true
+    } else {
+        let posted = post_review_comment(&ctx, &user, &repo, review.pr_number, &comment).await;
+        if !posted {
+            let _ = ctx.reviews_store.release_comment_post(&cid).await;
         }
-        Err(e) => {
-            tracing::warn!(comment = %cid, "failed to resolve provider for approve: {e}");
-            false
-        }
+        posted
     };
 
     // Append to the review markdown file.
@@ -6033,6 +6386,77 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
+}
+
+/// Post one approved review comment to its PR. Inline first; when the forge
+/// rejects the ANCHOR (GitHub 422 "line is not part of the diff" → `Conflict`,
+/// GitLab/Bitbucket 400 on an invalid position) it falls back to a general
+/// comment that cites `path:line`, instead of silently leaving the approved
+/// finding unposted. Any other failure (auth, network, 5xx) is NOT retried —
+/// a 5xx may have created the comment, and a second call would duplicate it.
+async fn post_review_comment(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    repo: &otto_core::domain::Repo,
+    pr_number: u64,
+    comment: &ReviewComment,
+) -> bool {
+    let (provider, remote) = match resolve_provider_remote(ctx, user, repo).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(comment = %comment.id, "failed to resolve provider for approve: {e}");
+            return false;
+        }
+    };
+    let req = NewPrCommentReq {
+        body: comment.body.clone(),
+        path: comment.path.clone(),
+        line: comment.line,
+        in_reply_to: None,
+    };
+    let err = match provider.comment(&remote, pr_number, &req).await {
+        Ok(_) => return true,
+        Err(e) => e,
+    };
+    let inline = comment.path.is_some() && comment.line.is_some();
+    if !(inline && inline_anchor_rejected(&err)) {
+        tracing::warn!(comment = %comment.id, "failed to post comment to PR: {err}");
+        return false;
+    }
+    tracing::info!(comment = %comment.id, "inline anchor rejected ({err}); posting as a general comment");
+    let general = NewPrCommentReq {
+        body: general_comment_body(comment),
+        path: None,
+        line: None,
+        in_reply_to: None,
+    };
+    match provider.comment(&remote, pr_number, &general).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(comment = %comment.id, "failed to post fallback comment to PR: {e}");
+            false
+        }
+    }
+}
+
+/// Whether a failed inline post was the forge rejecting the ANCHOR (the line
+/// is not in the PR's current diff) rather than the request as a whole.
+fn inline_anchor_rejected(e: &Error) -> bool {
+    match e {
+        Error::Conflict(_) => true,
+        Error::Upstream(m) | Error::Invalid(m) => m.contains(" 400:"),
+        _ => false,
+    }
+}
+
+/// Body of the general-comment fallback: the location it was meant for, then
+/// the finding.
+fn general_comment_body(comment: &ReviewComment) -> String {
+    match (&comment.path, comment.line) {
+        (Some(p), Some(l)) => format!("**`{p}:{l}`**\n\n{}", comment.body),
+        (Some(p), None) => format!("**`{p}`**\n\n{}", comment.body),
+        _ => comment.body.clone(),
+    }
 }
 
 async fn decline_comment(
@@ -6057,9 +6481,11 @@ async fn decline_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
+    // Keep `posted` as-is: declining a comment that is already on the PR does
+    // not un-post it, and resetting the flag let a later approve post it AGAIN.
     let updated = ctx
         .reviews_store
-        .set_comment_state(&cid, CommentState::Declined, false)
+        .set_comment_state(&cid, CommentState::Declined, comment.posted)
         .await
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
@@ -6923,11 +7349,11 @@ struct BrowserProxyState {
 
 /// Root-level browser proxy router (self-authenticates via `?token=`).
 pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthenticator>) -> Router {
-    let http = reqwest::Client::builder()
+    // SSRF guard: the guarded resolver vets the address actually dialled (no
+    // DNS rebinding after the pre-flight check) and each redirect hop is capped
+    // + re-validated so an upstream 30x can't bounce the proxy inward.
+    let http = crate::routes::api_client::net_guard::guarded_client_builder()
         .user_agent("Mozilla/5.0 (compatible; OttoProxy/1.0)")
-        // SSRF guard: cap + re-validate each redirect hop's host so an upstream
-        // 30x can't bounce the proxy into a private/loopback address.
-        .redirect(crate::routes::api_client::net_guard::redirect_policy())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("failed to build reqwest client for browser proxy");

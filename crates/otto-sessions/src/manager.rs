@@ -946,6 +946,13 @@ const WORKING_WINDOW: Duration = Duration::from_secs(5);
 /// Status poll interval.
 const STATUS_TICK: Duration = Duration::from_secs(2);
 
+/// How long [`SessionManager::input`] waits for its bytes to drain into the
+/// PTY before reporting "not accepting input". The write itself runs on the
+/// PTY's own writer thread (never a tokio worker) and stays queued in order,
+/// so a timeout loses nothing — a 60 KB prompt paste into a TUI that is still
+/// booting drains once it starts reading.
+const INPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long a LIVE resumable session must be idle (no output) AND unattached
 /// (no WS viewer) before its PTY is suspended to free RAM. The conversation
 /// stays resumable, so reopening it auto-resumes via `--resume`.
@@ -1219,6 +1226,11 @@ pub trait OutputScanner: Send + Sync {
     /// Called for each PTY output chunk. `provider` is the session's CLI
     /// provider ("claude", "codex", "shell", …) used as the re-auth target.
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]);
+
+    /// The PTY behind `session_id`'s output stream closed (its process is gone
+    /// and the reader drained): drop any per-session state kept for it. A
+    /// respawn starts a new stream. Default: nothing to drop.
+    fn on_session_end(&self, _session_id: &Id) {}
 }
 
 /// Await the child exit code without holding the (non-Send) watch guard
@@ -1328,11 +1340,6 @@ pub struct SessionManager {
     engine_turns: Arc<DashMap<Id, usize>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
-    /// Session ids whose PTY is being deliberately suspended (RAM release, not
-    /// a real exit). The per-session status task consults this in its exit
-    /// branch so it marks the session `Reconnectable` (still resumable) instead
-    /// of `Exited`, winning the kill→exit race deterministically.
-    suspending: Arc<DashMap<Id, ()>>,
     /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
     /// process tree (excluding the direct child), sampled by the idle-suspend
     /// sweep. A tree that accrued CPU since the previous sweep is running a
@@ -1441,7 +1448,6 @@ impl SessionManager {
             viewed: Arc::new(DashMap::new()),
             engine_turns: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
-            suspending: Arc::new(DashMap::new()),
             suspend_cpu: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
             repo,
@@ -1909,6 +1915,12 @@ impl SessionManager {
         if let Some(gitdir) = resolve_git_common_dir(&cwd).await {
             extra.push(gitdir);
         }
+        // A named-account session's CLI home lives under the data dir
+        // (`provider-accounts/<id>`), which the profile otherwise write-denies;
+        // `for_agent` re-opens an extra inside the data dir — only this one.
+        if let Some(account_home) = self.provider_home(session) {
+            extra.push(account_home);
+        }
         let policy =
             otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
         let (program, args) = policy.wrap(&spec.program, &spec.args);
@@ -2164,21 +2176,18 @@ impl SessionManager {
     /// session-removal path so the `otto` tool server's credential dies with the
     /// session. Best-effort.
     async fn revoke_mcp_token(&self, owner: &Id, session_id: &Id) -> Result<()> {
-        let _ = std::fs::remove_file(codex_creds_path(session_id));
-        if let Some(auth) = &self.auth {
-            auth.revoke_session_tokens(owner, session_id).await?;
+        revoke_session_credentials(self.auth.as_ref(), &self.mcp_tokens, owner, session_id).await
+    }
+
+    /// A session's process was retired (exit, kill, suspend, archive): its
+    /// per-session MCP credential has no live holder any more, so revoke it
+    /// now instead of leaving the owner's full permissions valid for the
+    /// token's 10-year TTL. Every respawn mints a fresh one
+    /// (`maybe_enable_otto_tools`). Best-effort, logged.
+    async fn retire_credentials(&self, session: &Session) {
+        if let Err(e) = self.revoke_mcp_token(&session.created_by, &session.id).await {
+            tracing::warn!(session = %session.id, "revoke retired session credentials: {e}");
         }
-        if let Some((_, token_id)) = self.mcp_tokens.remove(session_id) {
-            if let Some(auth) = &self.auth {
-                if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
-                    tracing::warn!("otto MCP tools: revoke token failed: {e}");
-                }
-                if let Err(e) = auth.revoke_vault_reviewer_token(owner, &token_id).await {
-                    tracing::warn!("otto reviewer MCP token: revoke failed: {e}");
-                }
-            }
-        }
-        Ok(())
     }
 
     /// All `(provider_name, update_command)` pairs for providers that have an
@@ -2974,7 +2983,10 @@ impl SessionManager {
         tokio::spawn(async move {
             let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
             tokio::time::sleep(Duration::from_millis(400)).await;
-            match handle.write(format!("{cmd}\n").as_bytes()) {
+            match handle
+                .write_async(format!("{cmd}\n").as_bytes(), INPUT_WRITE_TIMEOUT)
+                .await
+            {
                 Ok(()) => tracing::info!(
                     session = %sid, %cmd,
                     "typed the nested agent's resume command into the respawned shell"
@@ -3181,7 +3193,10 @@ impl SessionManager {
                 probe.raw.extend_from_slice(&data[..data.len().min(room)]);
             }
         }
-        handle.write(data)
+        // Never a blocking `write_all` on a tokio worker: a child that stops
+        // reading its tty used to park one worker per keystroke/paste until
+        // the pool was exhausted and the whole daemon froze.
+        handle.write_async(data, INPUT_WRITE_TIMEOUT).await
     }
 
     /// Resize a live session's terminal.
@@ -3265,6 +3280,7 @@ impl SessionManager {
         if let Some(handle) = self.live_handle(id) {
             let _ = handle.kill();
         }
+        self.retire_credentials(&session).await;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Killed");
         let _ = self.events.send(Event::SessionStatus {
@@ -3284,35 +3300,58 @@ impl SessionManager {
     /// `provider_session_id`); the session ends up `Reconnectable`.
     ///
     /// Status-race handling: killing the handle makes the per-session status
-    /// task's exit branch fire, which would normally write `Exited`. We mark
-    /// the id in `suspending` *before* killing so that branch writes
-    /// `Reconnectable` instead. We also set `Reconnectable` here directly, so
-    /// the final status is correct regardless of which path wins.
+    /// task's exit branch fire ~0.5–0.8 s later (the CLI's SIGHUP shutdown).
+    /// That branch only writes a status for the handle `live` still maps, and
+    /// only under this session's resume lock (see [`Self::start_status_task`]),
+    /// so removing the handle here — under the same lock, BEFORE the kill —
+    /// turns its late exit into a no-op and the `Reconnectable` below is final.
+    /// (The old `suspending` flag was cleared before the child actually
+    /// exited, so the late exit wrote `Exited` over 334 of 337 idle suspends:
+    /// channel threads then spawned a fresh, memory-less agent per follow-up.)
     pub async fn suspend(&self, id: &Id) -> Result<()> {
+        self.suspend_inner(id, None).await.map(|_| ())
+    }
+
+    /// [`Self::suspend`] for the idle sweep. The sweep evaluates its guards
+    /// (quiet PTY, no viewer, no engine turn) and THEN does slow row /
+    /// transcript reads; an engine taking a turn hold or a user attaching in
+    /// that window must still win. So the cheap guards are re-checked under the
+    /// resume lock, right before the kill. `Ok(false)` = no longer idle (or no
+    /// longer live) — nothing was done.
+    async fn suspend_if_idle(&self, id: &Id, grace: Duration) -> Result<bool> {
+        self.suspend_inner(id, Some(grace)).await
+    }
+
+    async fn suspend_inner(&self, id: &Id, idle_grace: Option<Duration>) -> Result<bool> {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
+        if let Some(grace) = idle_grace {
+            let quiet = self
+                .live
+                .get(id)
+                .map(|h| h.value().last_output_at().elapsed() >= grace);
+            if quiet != Some(true) || self.engine_turn_open(id) || self.is_watched(id) {
+                return Ok(false);
+            }
+        }
         let session = self.repo.get(id).await?;
         self.networks.clear(id);
-        // Mark as suspending so the status task's exit branch chooses
-        // Reconnectable over Exited. Cleared by that branch (or below).
-        self.suspending.insert(id.clone(), ());
+        // Untrack BEFORE the kill: the status task's exit branch then sees a
+        // superseded handle and leaves the status alone.
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
-        // Authoritatively set Reconnectable (idempotent with the status task).
+        self.retire_credentials(&session).await;
         self.repo
             .update_status(id, SessionStatus::Reconnectable)
             .await?;
-        // Drop the suspend flag last; the status task only reads it, and a late
-        // read after this point is harmless (it would also pick Reconnectable).
-        self.suspending.remove(id);
         self.record_lifecycle(&session, "Suspended (idle — freed memory, still resumable)");
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
             status: SessionStatus::Reconnectable,
         });
-        Ok(())
+        Ok(true)
     }
 
     /// Best-effort "still working" probe: true when the session's DESCENDANT
@@ -3674,8 +3713,11 @@ impl SessionManager {
                 }
                 continue;
             }
-            match self.suspend(&id).await {
-                Ok(()) => {
+            match self.suspend_if_idle(&id, grace).await {
+                Ok(false) => {
+                    tracing::debug!(session = %id, "idle-suspend: session became active or was respawned mid-sweep; skipped");
+                }
+                Ok(true) => {
                     suspended += 1;
                     self.suspend_cpu.remove(&id);
                     self.suspend_hold.remove(&id);
@@ -3839,6 +3881,7 @@ impl SessionManager {
             // Best-effort status update; ignore errors during shutdown.
             let _ = self.repo.update_status(&id, SessionStatus::Exited).await;
             if let Ok(s) = self.repo.get(&id).await {
+                self.retire_credentials(&s).await;
                 let _ = self.events.send(Event::SessionStatus {
                     session_id: id.clone(),
                     workspace_id: s.workspace_id,
@@ -3865,6 +3908,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.retire_credentials(&session).await;
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
         self.record_lifecycle(&session, "Archived");
@@ -4139,6 +4183,7 @@ impl SessionManager {
         &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
     ) -> Result<()> {
+        self.expire_orphaned_session_credentials().await;
         for session in self.repo.list_all_restorable().await? {
             self.repo
                 .update_status(&session.id, SessionStatus::Reconnectable)
@@ -4150,6 +4195,29 @@ impl SessionManager {
             });
         }
         Ok(())
+    }
+
+    /// Boot-time credential sweep (see [`Self::restore_all`]): no agent process
+    /// survives a daemon restart, so every per-session MCP credential still
+    /// valid at boot has no live holder — revoke them all (a resume mints a
+    /// fresh one). Also retires the legacy `otto-mcp:<session>` label tokens
+    /// minted before managed ownership (thousands of full-owner, 10-year
+    /// credentials that nothing revoked). Best-effort; rows are kept.
+    async fn expire_orphaned_session_credentials(&self) {
+        let Some(auth) = &self.auth else { return };
+        match auth.expire_managed_session_tokens().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "revoked per-session MCP credentials left over from the previous daemon run"),
+            Err(e) => tracing::warn!("boot credential sweep (managed): {e}"),
+        }
+        match auth
+            .expire_legacy_session_label_tokens(legacy_session_token_cutover())
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "revoked legacy otto-mcp:<session> tokens"),
+            Err(e) => tracing::warn!("boot credential sweep (legacy): {e}"),
+        }
     }
 
     /// Per-session status task: every 2s classify working/idle from PTY
@@ -4176,13 +4244,27 @@ impl SessionManager {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
+                scanner.on_session_end(&scan_id);
             });
         }
 
+        // Status-write ownership. This task speaks for ONE process incarnation
+        // (`handle`); every lifecycle op (suspend / archive / remove / restart /
+        // kill / ensure_live) runs under the session's resume lock and, when it
+        // replaces or retires the process, untracks the handle from `live` and
+        // writes its own final status. So a write from here is only valid while
+        // `live` still maps THIS handle, checked and written under that same
+        // lock — a late exit or tick of a superseded incarnation can never
+        // overwrite a newer decision (suspend's `Reconnectable`, a respawn's
+        // `Running`, or a removed row's `SessionRemoved`).
         let repo = self.repo.clone();
         let events = self.events.clone();
         let live = Arc::clone(&self.live);
-        let suspending = Arc::clone(&self.suspending);
+        let locks = Arc::clone(&self.resume_locks);
+        let suspend_cpu = Arc::clone(&self.suspend_cpu);
+        let suspend_hold = Arc::clone(&self.suspend_hold);
+        let auth = self.auth.clone();
+        let mcp_tokens = Arc::clone(&self.mcp_tokens);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
@@ -4197,6 +4279,17 @@ impl SessionManager {
                             SessionStatus::Idle
                         };
                         if next != current {
+                            // A lifecycle op in flight owns the status right
+                            // now: don't wait behind it (a respawn can take
+                            // seconds) — retry on the next tick instead.
+                            let lock = session_lock(&locks, &id);
+                            let Ok(_guard) = lock.try_lock() else {
+                                continue;
+                            };
+                            if !maps_handle(&live, &id, &handle) {
+                                // Superseded: the exit arm finishes this task.
+                                continue;
+                            }
                             current = next;
                             let _ = repo.update_status(&id, next).await;
                             let _ = events.send(Event::SessionStatus {
@@ -4207,7 +4300,8 @@ impl SessionManager {
                         }
                     }
                     code = wait_exit_code(&mut exit_rx) => {
-                        let _ = code;
+                        let lock = session_lock(&locks, &id);
+                        let guard = lock.lock().await;
                         // Evict the dead handle so its emulator + ring buffer
                         // are dropped (no accumulation across many sessions) —
                         // but ONLY if `live` still maps THIS handle. A respawn
@@ -4216,28 +4310,97 @@ impl SessionManager {
                         // check, this superseded task's exit would evict the new
                         // handle, orphaning its process (alive but untracked, so
                         // suspend/archive never kill it). See `evict_if_same`.
-                        evict_if_same(&live, &id, &handle);
-                        // If this exit was caused by a deliberate suspend (PTY
-                        // killed to free RAM), the session stays resumable: mark
-                        // it Reconnectable, not Exited. `suspend()` also writes
-                        // Reconnectable authoritatively, so either order is safe.
-                        let status = if suspending.contains_key(&id) {
-                            SessionStatus::Reconnectable
+                        let owned = evict_if_same(&live, &id, &handle);
+                        if owned {
+                            // A real exit of the current process (the CLI quit,
+                            // crashed, or `kill_session` killed it in place).
+                            suspend_cpu.remove(&id);
+                            suspend_hold.remove(&id);
+                            // Its MCP credential has no live holder any more
+                            // (a resume mints a fresh one).
+                            if let Ok(s) = repo.get(&id).await {
+                                if let Err(e) = revoke_session_credentials(auth.as_ref(), &mcp_tokens, &s.created_by, &id).await {
+                                    tracing::warn!(session = %id, "revoke exited session credentials: {e}");
+                                }
+                            }
+                            let _ = repo.update_status(&id, SessionStatus::Exited).await;
+                            let _ = events.send(Event::SessionStatus {
+                                session_id: id.clone(),
+                                workspace_id: workspace_id.clone(),
+                                status: SessionStatus::Exited,
+                            });
                         } else {
-                            SessionStatus::Exited
-                        };
-                        let _ = repo.update_status(&id, status).await;
-                        let _ = events.send(Event::SessionStatus {
-                            session_id: id.clone(),
-                            workspace_id: workspace_id.clone(),
-                            status,
-                        });
+                            // Retired by a lifecycle op that already wrote the
+                            // final status (suspend → Reconnectable, restart →
+                            // Running, archive/shutdown → Exited, remove → row
+                            // gone). Writing `Exited` here was the bug.
+                            tracing::debug!(session = %id, code = ?code, "superseded PTY exited; status left to its lifecycle op");
+                        }
+                        drop(guard);
+                        // Don't leak a lock entry for a session nobody else is
+                        // serializing on (e.g. one that was just removed).
+                        // Strong count 2 = the map + our clone; anyone holding
+                        // or queued on it has a clone, so it stays.
+                        locks.remove_if(&id, |_, l| Arc::strong_count(l) == 2);
                         break;
                     }
                 }
             }
         });
     }
+}
+
+/// Otto stopped minting label-only `otto-mcp:<session>` tokens when managed
+/// (`session_scope`) ownership shipped on 2026-09-22 (on the author's install
+/// the last legacy row is 10:37Z, the first managed one 11:18Z). A label-only
+/// token created after this instant is a human's own naming and is never
+/// auto-revoked. (Falls back to "nothing is legacy" if the literal is bad.)
+fn legacy_session_token_cutover() -> chrono::DateTime<chrono::Utc> {
+    chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 23, 0, 0, 0)
+        .single()
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+}
+
+/// Revoke the per-session MCP credentials minted for `session_id` (managed
+/// rows by durable `session_scope`, plus the row id this daemon recorded in
+/// `mcp_tokens`) and delete the Codex creds file if one was written.
+/// Free-standing so the status task can call it without `&self`.
+async fn revoke_session_credentials(
+    auth: Option<&AuthRepo>,
+    mcp_tokens: &DashMap<Id, String>,
+    owner: &Id,
+    session_id: &Id,
+) -> Result<()> {
+    let _ = std::fs::remove_file(codex_creds_path(session_id));
+    if let Some(auth) = auth {
+        auth.revoke_session_tokens(owner, session_id).await?;
+    }
+    if let Some((_, token_id)) = mcp_tokens.remove(session_id) {
+        if let Some(auth) = auth {
+            if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
+                tracing::warn!("otto MCP tools: revoke token failed: {e}");
+            }
+            if let Err(e) = auth.revoke_vault_reviewer_token(owner, &token_id).await {
+                tracing::warn!("otto reviewer MCP token: revoke failed: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The per-session resume lock (see `SessionManager::resume_locks`), created
+/// on demand. Free-standing so the status task can take it without `&self`.
+fn session_lock(locks: &DashMap<Id, Arc<Mutex<()>>>, id: &Id) -> Arc<Mutex<()>> {
+    locks
+        .entry(id.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// True iff `live` currently maps `id` to exactly `handle` (pointer identity):
+/// the handle is the session's CURRENT process incarnation.
+fn maps_handle(live: &DashMap<Id, Arc<PtyHandle>>, id: &Id, handle: &Arc<PtyHandle>) -> bool {
+    live.get(id).is_some_and(|h| Arc::ptr_eq(h.value(), handle))
 }
 
 /// Remove `id`'s entry from `live` **only if it still maps `handle`** (pointer
@@ -4739,16 +4902,43 @@ mod tests {
         assert!(auth.list_api_tokens(&user).await.unwrap().is_empty());
     }
 
+    /// A retired process's MCP credential dies with it (it used to stay valid,
+    /// with the owner's full permissions, for its 10-year TTL while the row
+    /// lingered): archive / suspend / kill revoke it, the session row stays,
+    /// and a resume mints a fresh one.
     #[tokio::test]
-    async fn archiving_session_preserves_managed_credentials_until_removed() {
+    async fn retiring_a_session_revokes_its_managed_credentials() {
+        for operation in ["archive", "suspend", "kill"] {
+            let (mgr, repo, ws, user) = test_manager().await;
+            let id = seed_session(&repo, &ws, &user, Some("sid-cred")).await;
+            let auth = mgr.auth.as_ref().unwrap();
+            let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
+            assert!(auth.authenticate(&token).await.is_ok());
+            let outcome = match operation {
+                "archive" => mgr.archive(&id).await.map(|_| ()),
+                "suspend" => mgr.suspend(&id).await,
+                _ => mgr.kill_session(&id).await,
+            };
+            outcome.unwrap();
+            assert!(
+                auth.authenticate(&token).await.is_err(),
+                "{operation} left the session's MCP credential valid"
+            );
+            assert!(repo.get(&id).await.is_ok(), "{operation} must keep the session row");
+        }
+    }
+
+    /// The boot sweep (`restore_all`) revokes credentials left valid by the
+    /// previous daemon run — no agent process survives a restart.
+    #[tokio::test]
+    async fn restore_all_revokes_leftover_session_credentials() {
         let (mgr, repo, ws, user) = test_manager().await;
-        let id = seed_session(&repo, &ws, &user, None).await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-boot")).await;
         let auth = mgr.auth.as_ref().unwrap();
         let (token, _) = auth.issue_session_api_token(&user, &id).await.unwrap();
-        mgr.archive(&id).await.unwrap();
-        assert!(auth.authenticate(&token).await.is_ok());
-        mgr.remove(&id).await.unwrap();
+        mgr.restore_all(&|_| None).await.unwrap();
         assert!(auth.authenticate(&token).await.is_err());
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Reconnectable);
     }
 
     #[tokio::test]
@@ -5311,8 +5501,103 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Reconnectable);
         // The session is NOT lost — row and resume id are preserved.
         assert_eq!(s.provider_session_id.as_deref(), Some("sid-keep"));
-        // Suspend flag is cleared after the operation.
-        assert!(!mgr.suspending.contains_key(&id));
+    }
+
+    /// Wait (bounded) for `handle`'s child to exit, then give the status task
+    /// a beat to run its exit arm.
+    async fn wait_child_exit_and_settle(handle: &Arc<PtyHandle>) {
+        let mut exit = handle.on_exit();
+        tokio::time::timeout(Duration::from_secs(10), wait_exit_code(&mut exit))
+            .await
+            .expect("child exited in time");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    /// A child that takes a while to die after SIGHUP, like the claude CLI
+    /// (~0.8 s): the late exit is what used to overwrite the suspend.
+    fn slow_hup_spec() -> CommandSpec {
+        CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "trap 'sleep 0.5; exit 0' HUP; while :; do sleep 0.1; done".into(),
+            ],
+            cwd: None,
+            env: vec![],
+        }
+    }
+
+    /// Root-cause regression (A1, 334 of 337 idle suspends ended `exited`):
+    /// the status task's exit arm fires AFTER `suspend()` returned, and must
+    /// leave the session `Reconnectable` — resumable by the chat view and
+    /// reusable by the channel bridge — not flip it to `Exited`.
+    #[tokio::test]
+    async fn suspend_survives_late_exit_of_slow_dying_child() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-late")).await;
+        let handle = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn"));
+        mgr.live.insert(id.clone(), Arc::clone(&handle));
+        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&handle));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        mgr.suspend(&id).await.unwrap();
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Reconnectable);
+
+        wait_child_exit_and_settle(&handle).await;
+        assert_eq!(
+            repo.get(&id).await.unwrap().status,
+            SessionStatus::Reconnectable,
+            "the suspended child's late exit overwrote Reconnectable"
+        );
+        assert!(!mgr.is_live(&id));
+    }
+
+    /// A2: the exit of a SUPERSEDED process (restart / ensure_live replaced
+    /// it) must not mark the new live incarnation `Exited`.
+    #[tokio::test]
+    async fn superseded_exit_does_not_mark_new_process_exited() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-respawn")).await;
+        let old = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn old"));
+        mgr.live.insert(id.clone(), Arc::clone(&old));
+        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&old));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // What `restart_locked` does: untrack + kill the old, track the new,
+        // write Running.
+        let fresh = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn new"));
+        mgr.live.remove(&id);
+        let _ = old.kill();
+        mgr.live.insert(id.clone(), Arc::clone(&fresh));
+        repo.update_status(&id, SessionStatus::Running).await.unwrap();
+
+        wait_child_exit_and_settle(&old).await;
+        assert_eq!(
+            repo.get(&id).await.unwrap().status,
+            SessionStatus::Running,
+            "the old process's exit clobbered the respawned session"
+        );
+        assert!(Arc::ptr_eq(&mgr.live_handle(&id).unwrap(), &fresh));
+    }
+
+    /// The current process exiting on its own is still a real exit.
+    #[tokio::test]
+    async fn natural_exit_of_current_process_marks_exited() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-natural")).await;
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 0.3".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn(&spec).expect("spawn"));
+        mgr.live.insert(id.clone(), Arc::clone(&handle));
+        mgr.start_status_task(id.clone(), ws.id.clone(), "claude".into(), Arc::clone(&handle));
+
+        wait_child_exit_and_settle(&handle).await;
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
+        assert!(!mgr.is_live(&id));
     }
 
     /// Root-cause regression for the dead-on-reopen codex session

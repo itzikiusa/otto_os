@@ -60,6 +60,7 @@ pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
 pub mod proof;
+pub mod repo_directory;
 pub mod report_delivery;
 pub mod resource_sessions;
 pub mod review_fallback;

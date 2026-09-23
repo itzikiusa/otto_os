@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { missionControlBus } from '../../lib/events.svelte';
   import { missionControlApi } from '../../lib/api/missionControl';
   import { ApiError } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -61,6 +63,21 @@
     void id;
     void wsId;
     void load();
+  });
+
+  // Live: reload when THIS item changes (or on a reconnect resync) — the
+  // pane used to keep showing a stale status while the list updated. Never
+  // while the user is editing (a reload resets the edit fields).
+  let seenTick = untrack(() => missionControlBus.tick);
+  $effect(() => {
+    const tick = missionControlBus.tick;
+    const evItem = missionControlBus.itemId;
+    const evWs = missionControlBus.workspaceId;
+    if (tick === seenTick) return;
+    seenTick = tick;
+    const resync = evWs === '' && evItem === '';
+    const mine = untrack(() => evItem === id && evWs === wsId);
+    if ((resync || mine) && !untrack(() => editing)) void load();
   });
 
   async function saveEdits(): Promise<void> {

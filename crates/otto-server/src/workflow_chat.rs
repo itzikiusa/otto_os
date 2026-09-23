@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use otto_channels::workflow_trigger::{WorkflowChatAck, WorkflowChatTrigger};
 use otto_core::event::Event;
-use otto_core::workflows::{NodeStatus, RunStatus, Workflow, WorkflowRun};
+use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
@@ -1043,8 +1043,44 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 })
             }
             WfControl::Skip => {
+                // Target the step running NOW, by id: a run-wide marker set
+                // between steps (or while queued) used to skip the NEXT step
+                // the instant it started, and one left on a finished run fired
+                // on a later retry. An approval gate is never skippable — that
+                // would pass it unapproved.
+                let Some(current) = run
+                    .nodes
+                    .iter()
+                    .find(|n| n.status == NodeStatus::Running)
+                    .map(|n| n.node_id.clone())
+                else {
+                    return Some(WorkflowChatAck {
+                        reply: format!(
+                            "No step of run `{short}` is running right now — nothing to skip."
+                        ),
+                    });
+                };
+                let is_gate = repo
+                    .definition_for_run(&run)
+                    .await
+                    .ok()
+                    .and_then(|wf| {
+                        wf.graph
+                            .nodes
+                            .iter()
+                            .find(|n| n.id == current)
+                            .map(|n| n.kind == "human_approval")
+                    })
+                    .unwrap_or(false);
+                if is_gate {
+                    return Some(WorkflowChatAck {
+                        reply: format!(
+                            "⏸️ Run `{short}` is waiting for an approval — approve or reject it in Otto; an approval step can't be skipped."
+                        ),
+                    });
+                }
                 if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
-                    s.insert(run.id.clone());
+                    s.insert(crate::workflow_engine::skip_marker_key(&run.id, &current));
                 }
                 Some(WorkflowChatAck {
                     reply: format!("⏭️ Skipping the current step of run `{short}`."),
@@ -1052,19 +1088,12 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             }
             WfControl::Abort => {
                 // Same as the Cancel button (routes::workflows::cancel_run): flip
-                // the run to Canceled + emit. The engine's cancel poll then stops
-                // the in-flight node and kills the run's sessions.
-                match repo
-                    .update_run(
-                        &run.id,
-                        RunStatus::Canceled,
-                        &run.nodes,
-                        Some("canceled"),
-                        true,
-                    )
-                    .await
-                {
-                    Ok(rev) => {
+                // the run to Canceled (status only, conditional) + emit. The
+                // engine's cancel poll then stops the in-flight node and kills the
+                // run's sessions.
+                match repo.request_cancel(&run.id).await {
+                    Ok(None) => {}
+                    Ok(Some(rev)) => {
                         let _ = self.ctx.events.send(Event::WorkflowRunUpdated {
                             workspace_id: run.workspace_id.clone(),
                             run_id: run.id.clone(),
@@ -1077,7 +1106,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                             waiting_approval: false,
                         });
                     }
-                    Err(e) => tracing::warn!("workflow chat abort: update_run failed: {e}"),
+                    Err(e) => tracing::warn!("workflow chat abort: cancel failed: {e}"),
                 }
                 Some(WorkflowChatAck {
                     reply: format!("🛑 Aborting run `{short}` — stopping its agents."),

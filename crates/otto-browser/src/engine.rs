@@ -74,4 +74,11 @@ pub trait BrowserEngine: Send + Sync {
     }
     /// Stable engine identifier: `"lightpanda"` | `"fallback"` | `"mock"`.
     fn name(&self) -> &'static str;
+    /// `false` when the engine knows it can't serve requests SAFELY (e.g. a
+    /// guarded lightpanda build that can't intercept requests for SSRF
+    /// vetting) — `BrowserService` then goes straight to the guarded plain
+    /// fetch instead of probing it per page. Default: `true`.
+    fn is_usable(&self) -> bool {
+        true
+    }
 }

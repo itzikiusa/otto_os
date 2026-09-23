@@ -21,6 +21,10 @@ let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
+  // One blank draft so the story-list pane exists: a workspace with NO stories
+  // hides the (empty) list pane on ≥641px and shows the page empty state.
+  const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`, { data: {} });
+  if (!r.ok()) throw new Error(`draft seed failed: ${r.status()} ${await r.text()}`);
   await ctx.dispose();
 });
 

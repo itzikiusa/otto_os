@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Snipping: the system-wide capture shortcut (desktop app only —
   // the chord is registered by the Tauri shell via tauri-plugin-global-shortcut
   // and persisted in the app config dir, so it works while Otto runs in the
@@ -76,17 +78,10 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Snipping</h1>
-      <div class="sub">
-        One-gesture screenshots: capture a screen region, annotate it (text, boxes, arrows,
-        colors), and the result is <strong>already on your clipboard</strong> at every step —
-        paste it straight into an agent session.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Snipping" subtitle="One-gesture screenshots: capture, annotate, paste." />
+  <PageBody width="readable">
+  <p class="section-intro">Capture a screen region, annotate it (text, boxes, arrows, colors), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</p>
 
   {#if isTauri}
     <div class="card">
@@ -153,22 +148,29 @@
       </div>
     </div>
   </div>
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    padding: 24px;
-    max-width: 760px;
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-  .page-header h1 {
-    margin: 0 0 6px;
-    font-size: 20px;
-  }
-  .sub {
-    color: var(--text-dim);
-    font-size: 13px;
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
     line-height: 1.5;
-    margin-bottom: 18px;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
   }
   .card {
     border: 1px solid var(--border);

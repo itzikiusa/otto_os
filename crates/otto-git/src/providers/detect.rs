@@ -37,6 +37,18 @@ pub fn detect(remote_url: &str) -> Option<(GitProviderKind, RemoteRef)> {
     Some((kind, RemoteRef { owner, repo }))
 }
 
+/// The lowercased host of a remote (or API) URL — userinfo and port dropped.
+pub fn remote_host(url: &str) -> Option<String> {
+    split_host_path(url.trim())
+        .map(|(h, _)| h.to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+}
+
+/// GitHub's own public hosts (anything else detected as GitHub is Enterprise).
+pub(crate) fn is_github_dot_com(host: &str) -> bool {
+    matches!(host, "github.com" | "www.github.com" | "api.github.com")
+}
+
 /// Forge discriminator for the repo payload: which PR backend a remote maps
 /// to. `"unrecognized"` = the repo *has* a remote but no supported forge
 /// matches (e.g. Bitbucket Server/DC, Gitea) — the UI renders an honest
@@ -170,6 +182,20 @@ mod tests {
             "unrecognized"
         );
         assert_eq!(forge("not a url"), "unrecognized");
+    }
+
+    #[test]
+    fn remote_host_strips_userinfo_and_port() {
+        assert_eq!(
+            remote_host("https://user:tok@GHE.corp.com:8443/o/r.git").as_deref(),
+            Some("ghe.corp.com")
+        );
+        assert_eq!(remote_host("git@github.com:o/r.git").as_deref(), Some("github.com"));
+        assert_eq!(
+            remote_host("https://ghe.corp.com/api/v3").as_deref(),
+            Some("ghe.corp.com")
+        );
+        assert_eq!(remote_host("not a url"), None);
     }
 
     #[test]

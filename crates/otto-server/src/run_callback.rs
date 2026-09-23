@@ -75,9 +75,10 @@ pub(crate) async fn deliver(runs: &RunsRepo, run: &OttoRun) {
         return;
     }
 
-    let client = match reqwest::Client::builder()
+    // Guarded resolver: the address dialled is the one vetted (no DNS
+    // rebinding between the check above and the connect).
+    let client = match otto_netguard::guarded_client_builder()
         .timeout(CALLBACK_TIMEOUT)
-        .redirect(otto_netguard::redirect_policy())
         .build()
     {
         Ok(c) => c,

@@ -100,7 +100,7 @@ test('swarm page loads and the swarm list is usable', async ({ page }) => {
 test('opening a swarm shows the header + view switcher and fits the viewport', async ({ page }) => {
   await openSwarm(page);
   // Title + status pill render.
-  await expect(page.locator('.swarm-head h2', { hasText: swarmName })).toBeVisible();
+  await expect(page.locator('.swarm-head h1', { hasText: swarmName })).toBeVisible();
   await expect(page.locator('.status-pill').first()).toBeVisible();
   // The switcher and all five tabs exist.
   await expect(page.locator('.switcher')).toBeVisible();
@@ -275,26 +275,26 @@ test('phone: the Swarms rail collapses when a swarm opens and re-expands on tap'
   await expect(page.locator('.rail .swarm-item')).toBeHidden();
 });
 
-test('phone: the swarm header controls collapse and re-expand on tap', async ({ page }) => {
-  test.skip(!(phoneWidth(page)), 'header collapse is a phone-width (≤640px) layout');
+test('phone: the swarm header keeps the title and overflows secondary actions into ⋯', async ({ page }) => {
+  test.skip(!(phoneWidth(page)), 'header overflow is a phone-width (≤640px) layout');
   await openSwarm(page);
 
-  // Header starts collapsed: controls hidden, title still visible.
-  await expect(page.locator('.swarm-head.head-collapsed')).toBeVisible();
-  await expect(page.locator('.swarm-head h2', { hasText: swarmName })).toBeVisible();
-  await expect(page.locator('.swarm-head .head-controls')).toBeHidden();
-
-  // Tap the header toggle → controls (parallel cap + lifecycle/recruit/etc) show.
-  await page.locator('.swarm-head .head-toggle').click();
-  await expect(page.locator('.swarm-head .head-controls')).toBeVisible();
-  await expect(page.locator('.swarm-head #cap')).toBeVisible();
-
-  // The expanded controls still fit the viewport width (they wrap, not clip).
+  // The shared PageHeader keeps the title in its single row…
+  await expect(page.locator('.swarm-head h1', { hasText: swarmName })).toBeVisible();
+  // …and the actions that don't fit collapse into the "⋯" menu instead of
+  // wrapping onto extra rows.
+  const more = page.locator('.swarm-head .ph-more');
+  await expect(more).toBeVisible();
+  await more.click();
+  const menu = page.locator('.ctx-menu');
+  await expect(menu).toBeVisible();
   await expectFitsWidth(page);
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
 
-  // Tap again → collapses.
-  await page.locator('.swarm-head .head-toggle').click();
-  await expect(page.locator('.swarm-head .head-controls')).toBeHidden();
+  // The parallel cap lives in the view-switcher row (reachable by scrolling it).
+  await expect(page.locator('.switcher #cap')).toBeAttached();
+  await expectFitsWidth(page);
 });
 
 // --- Wide layout keeps the desktop two-pane chrome ------------------------

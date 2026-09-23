@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Self-Improvement settings page: per-workspace scheduled self-reflection.
   // Periodically reviews recent sessions and improves the workspace's memory
   // and handling skills — safe edits apply automatically, risky ones queue for
@@ -262,17 +264,9 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Self-Improvement</h1>
-      <div class="sub">
-        Periodically review this workspace's recent agent sessions and improve its memory and
-        handling skills. Safe edits apply automatically; risky ones wait for your approval below.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Self-Improvement" subtitle="Periodically review this workspace's recent agent sessions and improve its memory and handling skills. Safe edits apply automatically; risky ones wait for your approval below." />
+  <PageBody width="readable">
 
   {#if !wsId}
     <!-- No workspace selected -->
@@ -460,9 +454,17 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .form {
     display: flex;
     flex-direction: column;

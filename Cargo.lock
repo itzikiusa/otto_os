@@ -3755,6 +3755,7 @@ name = "otto-pty"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "otto-core",
  "portable-pty",
  "serde",

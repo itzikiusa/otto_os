@@ -46,11 +46,21 @@ function isProviderPath(path: string): boolean {
   return /\/repos\/[^/]+\/(prs|collaborators)([/?]|$)/.test(path);
 }
 
+/** Guarded storage (see lib/storage.ts — inlined: this is the base module).
+ *  A throwing accessor here failed EVERY request, i.e. the whole app. */
+function storedItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 export function baseUrl(): string {
   // Native app + remote browser both talk to the daemon. When the SPA is
   // served BY the daemon, same-origin works; the localStorage override is for
   // dev mode (vite on :5173, daemon on :7700).
-  return localStorage.getItem('otto_base') ?? defaultBase();
+  return storedItem('otto_base') ?? defaultBase();
 }
 
 function defaultBase(): string {
@@ -61,14 +71,25 @@ function defaultBase(): string {
 }
 
 export function getToken(): string | null {
-  return localStorage.getItem('otto_token');
+  return storedItem('otto_token');
 }
 
 export function setToken(token: string | null): void {
-  if (token === null) localStorage.removeItem('otto_token');
-  else localStorage.setItem('otto_token', token);
+  try {
+    if (token === null) localStorage.removeItem('otto_token');
+    else localStorage.setItem('otto_token', token);
+  } catch {
+    /* blocked storage: the token cannot persist; callers still proceed */
+  }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
 }
+
+/** Window event fired when a request made WITH the stored token is answered
+ *  401. The auth store listens (it imports this module, so it cannot be
+ *  called from here) and confirms against /auth/me before treating the
+ *  session as expired — without this, an expired/revoked token left every
+ *  page failing with scattered error toasts instead of returning to login. */
+export const UNAUTHORIZED_EVENT = 'otto:unauthorized';
 
 async function request<T>(
   method: string,
@@ -93,6 +114,10 @@ async function request<T>(
   // Kafka/DB infra, agent endpoints) is that call's own failure, reported by
   // its caller's error toast, never a GitHub/Bitbucket outage.
   if (isProviderPath(path)) serviceHealth.report(resp.status);
+
+  if (resp.status === 401 && token && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { token } }));
+  }
 
   if (!resp.ok) {
     let problem: Problem = { code: 'internal', message: resp.statusText };
@@ -130,6 +155,16 @@ export function isDirtyGitRefusal(e: unknown): boolean {
     e.status === 409 &&
     /overwritten|commit your changes|stash|unstaged changes/i.test(e.message)
   );
+}
+
+/** The API client's `409 needs_confirm=new_host` refusal: a stored secret
+ *  would be sent to a host it isn't bound to. Returns that host (or `''`
+ *  when the message doesn't name one), `null` for any other error. */
+export function newHostConfirmHost(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.message.includes('needs_confirm=new_host')) {
+    return null;
+  }
+  return /host '([^']*)'/.exec(e.message)?.[1] ?? '';
 }
 
 /** True when an error is a fetch abort (caller cancelled via AbortSignal). */

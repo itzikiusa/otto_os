@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
   // always shows an empty password field so the user can update it without seeing the
@@ -139,16 +141,9 @@
   const hasStoredPassword = $derived(!!(status?.gmail_address));
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Sharing — Email Sender</h1>
-      <div class="sub">
-        Configure a Gmail sender so Otto can email one-time codes to guests before
-        they attach to a shared session.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Sharing — Email Sender" subtitle="Configure a Gmail sender so Otto can email one-time codes to guests before they attach to a shared session." />
+  <PageBody width="readable">
 
   <!-- ── Status card ── -->
   <div class="section-title">Current sender</div>
@@ -281,9 +276,17 @@
       </li>
     </ol>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .status-row {
     display: flex;
     align-items: center;

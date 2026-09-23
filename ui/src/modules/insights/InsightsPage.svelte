@@ -14,11 +14,35 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { downloadText } from '../../lib/components/exporters';
+  import { downloadJson, downloadText } from '../../lib/components/exporters';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import CapabilitiesPage from './CapabilitiesPage.svelte';
+  import { capabilitiesApi } from './capabilities';
+  import type { SupportBundle } from './capabilities';
 
   // Tab: 'reports' (default) or 'health' (sub-route `#/insights/health`).
   const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
+
+  // Health tab's header action: a redacted support bundle (secrets stripped).
+  let bundleLoading = $state(false);
+  async function downloadBundle(): Promise<void> {
+    if (bundleLoading) return;
+    bundleLoading = true;
+    try {
+      const bundle: SupportBundle = await capabilitiesApi.bundle();
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      downloadJson(bundle, `otto-support-bundle-${ts}.json`);
+      toasts.success(
+        'Support bundle downloaded',
+        `${bundle.redaction_hits} secret value${bundle.redaction_hits !== 1 ? 's' : ''} redacted.`,
+      );
+    } catch (e) {
+      toasts.error('Bundle download failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      bundleLoading = false;
+    }
+  }
 
   let reports: InsightReport[] = $state([]);
   let loading = $state(true);
@@ -42,7 +66,12 @@
 
   // Currently-open report (rendered in the iframe overlay).
   let openReport: InsightReport | null = $state(null);
-  let openUrl: string | null = $state(null);
+  // The open report's HTML, rendered via `srcdoc` in a SANDBOXED iframe. The
+  // report is agent-generated from transcripts; a same-origin blob: iframe (or
+  // tab) let any script / unescaped `<img onerror>` in it read the bearer
+  // token from localStorage. `allow-scripts` without `allow-same-origin` gives
+  // it an opaque origin: charts still run, the app's storage is out of reach.
+  let openHtml: string | null = $state(null);
   let openLoading = $state(false);
 
   const kinds: { id: 'all' | InsightKind; label: string }[] = [
@@ -145,9 +174,9 @@
   async function open(r: InsightReport): Promise<void> {
     openReport = r;
     openLoading = true;
-    openUrl = null;
+    openHtml = null;
     try {
-      openUrl = await insightsApi.reportUrl(r.html_path);
+      openHtml = await reportHtml(r.html_path);
     } catch (e) {
       toasts.error('Could not open report', e instanceof Error ? e.message : String(e));
       close();
@@ -156,9 +185,18 @@
     }
   }
 
+  /** Fetch a report's HTML text (via the authed blob, revoked right away). */
+  async function reportHtml(htmlPath: string): Promise<string> {
+    const url = await insightsApi.reportUrl(htmlPath);
+    try {
+      return await (await fetch(url)).text();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   function close(): void {
-    if (openUrl) URL.revokeObjectURL(openUrl);
-    openUrl = null;
+    openHtml = null;
     openReport = null;
     openLoading = false;
   }
@@ -178,10 +216,18 @@
     }
   }
 
-  /** Open the report in a new browser tab (Tauri webview). */
+  /** Open the report in a new browser tab (Tauri webview). The tab is a
+   *  trusted wrapper page whose only content is the report in a sandboxed,
+   *  opaque-origin iframe — never the report itself at the app's origin. */
   async function openInTab(r: InsightReport): Promise<void> {
     try {
-      const url = await insightsApi.reportUrl(r.html_path);
+      const html = await reportHtml(r.html_path);
+      const attr = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const wrapper =
+        '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
+        '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +
+        `<iframe sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc="${attr}"></iframe>`;
+      const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
       // Don't revoke — the new tab needs the URL. It'll be GC'd on close.
     } catch (e) {
@@ -192,7 +238,7 @@
   // Revoke any live object URL on unmount.
   $effect(() => {
     return () => {
-      if (openUrl) URL.revokeObjectURL(openUrl);
+      openHtml = null;
       if (pollTimer) clearTimeout(pollTimer);
     };
   });
@@ -222,33 +268,31 @@
   }
 </script>
 
-<div class="page">
-  <!-- Tab switcher: Reports | Health -->
-  <div class="tab-bar">
-    <button class="tab" class:active={tab === 'reports'} onclick={() => router.go('insights')}>
-      <Icon name="gauge" size={13} />
-      Reports
-    </button>
-    <button class="tab" class:active={tab === 'health'} onclick={() => router.go('insights/health')}>
-      <Icon name="check" size={13} />
-      Health
-    </button>
-  </div>
-
-  {#if tab === 'health'}
-    <CapabilitiesPage />
-  {:else}
-  <!-- ---- Reports tab (original content follows) ---- -->
-  <div class="page-header head-row">
-    <div>
-      <h1>Insights</h1>
-      <div class="sub">
-        Generated reports about your Otto activity. Scheduled reports are opt-in
-        (<button class="link" onclick={() => router.go('settings/insights')}>Settings → Insights</button>);
-        you can also run one on demand below.
-      </div>
+<div class="insights-page">
+<PageHeader
+  title="Insights"
+  subtitle={tab === 'health'
+    ? 'What Otto can do right now — aggregated from config, PATH detection, and stored accounts. Reload to refresh.'
+    : 'Generated reports about your Otto activity. Scheduled reports are opt-in; run one on demand any time.'}
+>
+  {#snippet tabs()}
+    <div class="segmented" role="tablist" aria-label="Insights view">
+      <button role="tab" aria-selected={tab === 'reports'} class:active={tab === 'reports'} onclick={() => router.go('insights')}>Reports</button>
+      <button role="tab" aria-selected={tab === 'health'} class:active={tab === 'health'} onclick={() => router.go('insights/health')}>Health</button>
     </div>
-    <div class="run-now">
+  {/snippet}
+  {#snippet actions()}
+    {#if tab === 'health'}
+      <button class="btn" onclick={downloadBundle} disabled={bundleLoading} title="Download a redacted support bundle (secrets stripped)">
+        <Icon name="fetch" size={13} />
+        {bundleLoading ? 'Preparing…' : 'Download support bundle'}
+      </button>
+    {:else}
+      <!-- The one (quiet) link to the schedule settings. -->
+      <button class="btn ghost" onclick={() => router.go('settings/insights')} title="Scheduled reports: Settings → Insights" data-label="Insights settings">
+        <Icon name="gear" size={13} />
+        Schedule
+      </button>
       <select class="input run-period" bind:value={runPeriod} disabled={running} aria-label="Run period">
         <option value="day">Yesterday (day)</option>
         <option value="week">Last week</option>
@@ -270,8 +314,13 @@
         <Icon name="play" size={13} />
         {running ? 'Starting…' : pollRunId ? 'Running…' : 'Run now'}
       </button>
-    </div>
-  </div>
+    {/if}
+  {/snippet}
+</PageHeader>
+<PageBody width={tab === 'health' ? 'readable' : 'full'}>
+  {#if tab === 'health'}
+    <CapabilitiesPage />
+  {:else}
 
   {#if runFailReason}
     <!-- Skill not installed or no workspace available -->
@@ -298,18 +347,14 @@
   {#if loading && reports.length === 0}
     <Skeleton rows={3} height={72} />
   {:else if reports.length === 0}
+    <!-- No CTA here: "Run now" (header primary) and "Schedule" (header link)
+         are the page's single entry points. -->
     <EmptyState
+      variant="page"
       icon="gauge"
       title="No insight reports yet"
-      body="Scheduled insights are opt-in and off by default. Turn on daily, weekly, or monthly reports in Settings → Insights, or run one now."
-      actionLabel="Run now"
-      onaction={runNow}
-    >
-      <button class="btn settings-link" onclick={() => router.go('settings/insights')}>
-        <Icon name="gear" size={13} />
-        Open Settings → Insights
-      </button>
-    </EmptyState>
+      body="Scheduled insights are opt-in and off by default. Turn on daily, weekly, or monthly reports under Schedule, or press Run now."
+    />
   {:else}
     <!-- Kind filter -->
     <div class="filters">
@@ -342,6 +387,7 @@
     {/if}
   {/if}
   {/if}<!-- end tab === reports -->
+</PageBody>
 </div>
 
 <!-- Full report overlay (outside tab guard — not rendered in health tab) -->
@@ -368,53 +414,24 @@
     <div class="overlay-body">
       {#if openLoading}
         <div class="overlay-loading dim">Loading report…</div>
-      {:else if openUrl}
-        <iframe class="report-frame" src={openUrl} title="Insight report"></iframe>
+      {:else if openHtml !== null}
+        <iframe
+          class="report-frame"
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+          srcdoc={openHtml}
+          title="Insight report"
+        ></iframe>
       {/if}
     </div>
   </div>
 {/if}
 
 <style>
-  /* Tab bar (Reports / Health) */
-  .tab-bar {
+  .insights-page {
     display: flex;
-    gap: 2px;
-    border-bottom: 1px solid var(--border, #e2e8f0);
-    margin-bottom: 20px;
-    padding: 0 0 0 0;
-  }
-  .tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    border: none;
-    background: transparent;
-    font: inherit;
-    font-size: 13px;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: color 120ms ease-out, border-color 120ms ease-out;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
-
-  .head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  .run-now {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .run-period,
   .run-offset {
@@ -425,18 +442,6 @@
     margin-inline-end: 2px;
   }
 
-  .link {
-    border: none;
-    background: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent);
-    cursor: pointer;
-    text-decoration: underline;
-  }
-  .settings-link {
-    margin-top: 4px;
-  }
 
   /* Filters */
   .filters {

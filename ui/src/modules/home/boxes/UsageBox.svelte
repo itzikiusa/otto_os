@@ -29,21 +29,30 @@
   let loading = $state(true);
   let error = $state('');
 
+  // Request token: a window change starts a new poller while the old one's
+  // fetch may still be in flight — only the newest load may land, so the
+  // box never shows 30 days of totals under a "7d" label.
+  let seq = 0;
+
   async function load(): Promise<boolean> {
+    const mine = ++seq;
+    const span = days;
     try {
-      status = await api.get<UsageStatus>('/usage/status');
-      if (status.available) {
-        summary = await api.get<UsageSummary>(`/usage/summary?days=${days}&otto_only=false`);
-      } else {
-        summary = null;
-      }
+      const st = await api.get<UsageStatus>('/usage/status');
+      const sum = st.available
+        ? await api.get<UsageSummary>(`/usage/summary?days=${span}&otto_only=false`)
+        : null;
+      if (mine !== seq) return true;
+      status = st;
+      summary = sum;
       error = '';
       return true;
     } catch (e) {
+      if (mine !== seq) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 

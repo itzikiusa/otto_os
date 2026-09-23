@@ -90,12 +90,12 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         }
 
         // Advance the cursor first (idempotency: a slow/failing run can't
-        // double-fire on the next tick).
-        let mut spec2 = trigger.spec.clone();
-        if let Some(obj) = spec2.as_object_mut() {
-            obj.insert("last_run".into(), json!(now.to_rfc3339()));
-        }
-        if let Err(e) = triggers_repo.set_spec(&trigger.id, spec2).await {
+        // double-fire on the next tick). Only the cursor — never a whole-spec
+        // write-back of this tick's copy, which undid a concurrent config edit.
+        if let Err(e) = triggers_repo
+            .set_last_run(&trigger.id, &now.to_rfc3339())
+            .await
+        {
             warn!(trigger_id = %trigger.id, "workflow scheduler: advance cursor: {e}");
             continue;
         }

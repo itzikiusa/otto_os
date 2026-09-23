@@ -9,6 +9,8 @@
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentPage from './AgentPage.svelte';
   import RoomsView from './RoomsView.svelte';
@@ -74,22 +76,25 @@
     <AgentPage {agentId} />
   {/key}
 {:else}
-  <div class="pa">
-    <header class="head">
-      <div>
-        <h1>Personal Agents</h1>
-        <p class="sub">
-          Named personas with a pinned provider + model, their own schedules, memory, and delivery —
-          chat with them anytime, and let them talk to each other in rooms you can always read.
-        </p>
+  <div class="pa-page">
+  <PageHeader
+    title="Personal Agents"
+    subtitle="Named personas with a pinned provider + model, their own schedules, memory, and delivery — chat with them anytime, and let them talk to each other in rooms you can always read."
+  >
+    {#snippet tabs()}
+      <div class="segmented" role="tablist" aria-label="Personal agents view">
+        <button role="tab" aria-selected={sub !== 'rooms'} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
+        <button role="tab" aria-selected={sub === 'rooms'} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Rooms</button>
       </div>
-      <div class="head-actions">
-        <button class="btn" class:primary={sub === 'rooms'} onclick={() => router.go(sub === 'rooms' ? 'personal-agents' : 'personal-agents/rooms')}>
-          {sub === 'rooms' ? 'Agents' : 'Rooms'}
-        </button>
+    {/snippet}
+    {#snippet actions()}
+      {#if sub === 'rooms' || agents.length > 0 || personalAgents.loadingAgents}
         <button class="btn primary" onclick={() => (creating = true)}>New agent</button>
-      </div>
-    </header>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody fill={sub === 'rooms'}>
+  <div class="pa">
 
     {#if error}<div class="err" role="alert">{error}</div>{/if}
 
@@ -104,6 +109,8 @@
           title="No personal agents"
           body="Create a named agent with its own persona, schedules and memory."
           actionLabel="New agent"
+          actionIcon="plus"
+          variant="page"
           onaction={() => (creating = true)}
         />
       {/if}
@@ -157,14 +164,13 @@
       <AgentEditSheet agent={null} onclose={() => (creating = false)} />
     {/if}
   </div>
+  </PageBody>
+  </div>
 {/if}
 
 <style>
-  .pa { padding: 1rem 1.25rem; max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; min-height: 0; height: 100%; box-sizing: border-box; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
-  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
-  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 64ch; }
-  .head-actions { display: flex; gap: 0.5rem; }
+  .pa-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .pa { display: flex; flex-direction: column; min-height: 0; flex: 1; }
   .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .err {
     background: color-mix(in srgb, var(--status-exited) 12%, transparent);

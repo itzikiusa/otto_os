@@ -29,11 +29,17 @@ impl SchemaRegistry {
         skip_tls_verify: bool,
         socks_proxy: Option<String>,
     ) -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
+        // SSRF guard (audit S1): bound + re-validate redirect hops so the
+        // user-supplied registry URL can't 30x-bounce into the internal net.
+        // Direct (untunnelled) clients also get the guarded resolver, so the
+        // address dialled is the one vetted — no DNS rebinding after `guard`.
+        let base_builder = if socks_proxy.is_some() {
+            reqwest::Client::builder().redirect(otto_netguard::redirect_policy())
+        } else {
+            otto_netguard::guarded_client_builder()
+        };
+        let mut builder = base_builder
             .danger_accept_invalid_certs(skip_tls_verify)
-            // SSRF guard (audit S1): bound + re-validate redirect hops so the
-            // user-supplied registry URL can't 30x-bounce into the internal net.
-            .redirect(otto_netguard::redirect_policy())
             .timeout(Duration::from_secs(10));
         let via_tunnel = socks_proxy.is_some();
         // Basic-auth credentials ride every request: when the profile has

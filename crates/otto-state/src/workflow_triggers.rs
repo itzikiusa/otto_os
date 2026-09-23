@@ -158,15 +158,47 @@ impl TriggersRepo {
         let new_enabled = enabled.unwrap_or(current.enabled);
         let spec_json = serde_json::to_string(&new_spec)
             .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
-        sqlx::query("UPDATE workflow_triggers SET spec_json = ?, enabled = ? WHERE id = ?")
-            .bind(&spec_json)
-            .bind(new_enabled as i64)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update trigger"))?;
+        // The schedule cursor (`spec.last_run`) is SERVER-owned. A config edit
+        // carries the client's copy of the spec — captured when its edit dialog
+        // opened — and writing it back rolled the cursor back (the trigger then
+        // fired a second time) or wiped it (an interval trigger fired at once).
+        // Keep whatever cursor the row holds at write time, atomically.
+        sqlx::query(
+            "UPDATE workflow_triggers
+             SET spec_json = CASE
+                     WHEN json_extract(spec_json, '$.last_run') IS NULL
+                         THEN json_remove(?, '$.last_run')
+                     ELSE json_set(?, '$.last_run', json_extract(spec_json, '$.last_run'))
+                 END,
+                 enabled = ?
+             WHERE id = ?",
+        )
+        .bind(&spec_json)
+        .bind(&spec_json)
+        .bind(new_enabled as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update trigger"))?;
 
         self.get(id).await
+    }
+
+    /// Advance ONLY the schedule cursor, leaving the rest of the spec as it is
+    /// in the row now. The scheduler used to write back the whole spec it had
+    /// read at the start of its tick, silently undoing a config edit saved in
+    /// between.
+    pub async fn set_last_run(&self, id: &Id, last_run: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflow_triggers SET spec_json = json_set(spec_json, '$.last_run', ?)
+             WHERE id = ?",
+        )
+        .bind(last_run)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("advance trigger cursor"))?;
+        Ok(())
     }
 
     /// Update only the spec (used by the scheduler to advance `last_run`).
@@ -272,5 +304,77 @@ mod tests {
             assert_eq!(created.kind, kind);
             assert_eq!(created.spec, spec, "spec round-trips for kind={kind}");
         }
+    }
+
+    /// F7: a config edit never rolls back (or wipes) the server-owned
+    /// `last_run` cursor, and advancing the cursor never clobbers the config.
+    #[tokio::test]
+    async fn trigger_cursor_is_server_owned() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool);
+        let wf = workflows
+            .create(
+                &"ws1".into(),
+                "WF",
+                "desc",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let t = repo
+            .create(NewWorkflowTrigger {
+                workflow_id: wf.id.clone(),
+                kind: "schedule".into(),
+                spec: serde_json::json!({"cadence": "daily", "at": "09:00"}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        // A client can't plant a cursor the server never set.
+        let t2 = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"cadence": "daily", "at": "09:00", "last_run": "2020-01-01T00:00:00+00:00"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(t2.spec.get("last_run").is_none());
+        // The scheduler fires: only the cursor moves.
+        repo.set_last_run(&t.id, "2026-10-25T06:00:00+00:00")
+            .await
+            .unwrap();
+        // A stale edit (yesterday's cursor, new time) keeps today's cursor.
+        let t3 = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"cadence": "daily", "at": "10:00", "last_run": "2026-10-24T06:00:00+00:00"})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(t3.spec["at"], "10:00");
+        assert_eq!(t3.spec["last_run"], "2026-10-25T06:00:00+00:00");
+        // An edit without a cursor doesn't wipe it either.
+        let t4 = repo
+            .update(
+                &t.id,
+                Some(serde_json::json!({"cadence": "daily", "at": "11:00"})),
+                Some(false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(t4.spec["last_run"], "2026-10-25T06:00:00+00:00");
+        assert!(!t4.enabled);
+        // Advancing the cursor leaves that edit in place.
+        repo.set_last_run(&t.id, "2026-10-26T06:00:00+00:00")
+            .await
+            .unwrap();
+        let t5 = repo.get(&t.id).await.unwrap();
+        assert_eq!(t5.spec["at"], "11:00");
+        assert_eq!(t5.spec["last_run"], "2026-10-26T06:00:00+00:00");
     }
 }

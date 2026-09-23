@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
   import { api } from '../../lib/api/client';
   import { router } from '../../lib/router.svelte';
@@ -23,6 +25,11 @@
   let sandboxEnabled = $state(false);
   let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
   let savingSandbox = $state(false);
+  // Latest full settings object (the PUT response). Saves send ONLY the keys
+  // they change: PUT /settings upserts exactly the keys in the body, so
+  // spreading this page-load snapshot reverted keys written since (auto-update
+  // last-run, MCP/PR-review settings, another window) and wrote false
+  // skip-permissions / network-listener audit entries on every save.
   let allSettings: Record<string, unknown> = $state({});
 
   $effect(() => {
@@ -51,7 +58,6 @@
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         network_listener: { enabled, port },
       });
       toasts.success('Daemon settings saved', enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
@@ -67,7 +73,6 @@
     savingSandbox = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
         process_sandbox: { enabled: sandboxEnabled, network: sandboxNetwork },
       });
       toasts.success(
@@ -82,13 +87,9 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Daemon</h1>
-      <div class="sub">ottod {auth.meta?.version ?? ''} · API v{auth.meta?.api_version ?? 1}</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Daemon" subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`} />
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={3} height={40} />
@@ -163,9 +164,17 @@
       <button class="btn" onclick={() => router.go('settings/logs')}>Open log viewer</button>
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 520px;

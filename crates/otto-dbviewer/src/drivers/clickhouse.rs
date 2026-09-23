@@ -103,6 +103,11 @@ fn is_native_port(port: u16) -> bool {
 /// the auto-LIMIT injector can't rewrite; exceeding it is a clear 502, not an OOM.
 const HTTP_RESPONSE_BYTE_CAP: usize = 128 * 1024 * 1024;
 
+/// Server-side `max_execution_time` (seconds) for an HTTP request whose tab
+/// sets no timeout — just under the client's default 60s wall clock, so the
+/// server stops the query itself instead of running on after the client left.
+const DEFAULT_MAX_EXECUTION_SECS: u64 = 55;
+
 /// A transport-agnostic rowset: column (name, CH type) pairs and JSON rows. Both
 /// the HTTP `JSONCompact` reply and a decoded native `Block` normalize to this,
 /// so all higher-level logic (introspection, run, completion) is shared.
@@ -143,6 +148,12 @@ struct Conn {
     /// Per-statement wall-clock timeout (seconds), sent as the ClickHouse
     /// `max_execution_time` HTTP request setting. `None` = no limit.
     timeout_secs: Option<u64>,
+    /// Run in the server's read-only mode (`readonly=2`: reads and setting
+    /// changes only). Set for the MCP read-only path via the server-derived
+    /// `__read_only_execution` flag — a native barrier behind the statement
+    /// classifier. `2`, not `1`, because `1` also forbids the per-request
+    /// settings sent here (`session_timezone`, `max_execution_time`).
+    readonly: bool,
 }
 
 /// The shape of a `FORMAT JSONCompact` reply.
@@ -403,6 +414,11 @@ impl ClickhouseDriver {
             database: active_db.map(str::to_string),
             query_id,
             timeout_secs,
+            readonly: cfg
+                .params
+                .get("__read_only_execution")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
         })
     }
 
@@ -800,9 +816,27 @@ impl Conn {
     }
 
     /// POST a body to the HTTP interface; map non-2xx replies to a 502 carrying
-    /// the server's error text.
+    /// the server's error text. A read-only connection asks for `readonly=2`;
+    /// a user whose server profile is ALREADY read-only may not touch that
+    /// setting at all, and the server enforcing read-only is exactly the
+    /// guarantee wanted — so that one refusal is retried without it.
     async fn post(&self, body: String) -> Result<String> {
+        if !self.readonly {
+            return self.post_once(body, false).await;
+        }
+        match self.post_once(body.clone(), true).await {
+            Err(e) if is_readonly_setting_refused(&e.to_string()) => {
+                self.post_once(body, false).await
+            }
+            other => other,
+        }
+    }
+
+    async fn post_once(&self, body: String, readonly: bool) -> Result<String> {
         let mut req = self.client.post(&self.base).headers(self.headers.clone());
+        if readonly {
+            req = req.query(&[("readonly", "2")]);
+        }
         if let Some(tz) = &self.timezone {
             // ClickHouse 23.4+ honours session_timezone as a request setting.
             req = req.query(&[("session_timezone", tz.as_str())]);
@@ -817,22 +851,26 @@ impl Conn {
             // can target it from another connection.
             req = req.query(&[("query_id", qid.as_str())]);
         }
-        if let Some(secs) = self.timeout_secs {
-            // `max_execution_time` is a ClickHouse per-query setting (seconds,
-            // integer). 0 means unlimited — the guard in `run_tracked` ensures
-            // only positive values reach here.
-            req = req.query(&[("max_execution_time", secs.to_string().as_str())]);
-        }
+        // `max_execution_time` is a ClickHouse per-query setting (seconds,
+        // integer; 0 = unlimited — the guard in `run_tracked` ensures only
+        // positive tab timeouts reach here). ALWAYS sent: without a tab
+        // timeout the client still gives up at its default wall clock, and a
+        // query with no server-side bound kept burning the cluster after the
+        // UI had already reported the timeout (retries piled up more).
+        let server_secs = self.timeout_secs.unwrap_or(DEFAULT_MAX_EXECUTION_SECS);
+        req = req.query(&[("max_execution_time", server_secs.to_string().as_str())]);
         // Per-request client-side wall clock (replaces the old blanket 60s client
-        // timeout, §2.4): honour the user's per-statement timeout with a few
-        // seconds of grace so ClickHouse's own `max_execution_time` fires first
-        // (cleaner server error); otherwise the 60s default.
-        let per_request = self
-            .timeout_secs
-            .map(|s| Duration::from_secs(s.saturating_add(5)))
-            .unwrap_or(Duration::from_secs(60));
-        req = req.timeout(per_request);
-        let resp = req.body(body).send().await.map_err(req_err)?;
+        // timeout, §2.4): the server bound plus a few seconds of grace so
+        // ClickHouse's own `max_execution_time` fires first (cleaner server
+        // error).
+        req = req.timeout(Duration::from_secs(server_secs.saturating_add(5)));
+        let resp = match req.body(body).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.kill_after_client_timeout(&e).await;
+                return Err(req_err(e));
+            }
+        };
         let status = resp.status();
         // Read the body with a hard byte cap instead of `text()`: statements the
         // auto-LIMIT injector bails on (FORMAT/SETTINGS/UNION, batches) can
@@ -843,7 +881,13 @@ impl Conn {
         let mut buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(req_err)?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.kill_after_client_timeout(&e).await;
+                    return Err(req_err(e));
+                }
+            };
             if buf.len() + chunk.len() > HTTP_RESPONSE_BYTE_CAP {
                 return Err(types::upstream(format!(
                     "clickhouse: response larger than the {} MiB interactive cap — \
@@ -858,6 +902,29 @@ impl Conn {
             return Err(types::upstream(text.trim().to_string()));
         }
         Ok(text)
+    }
+
+    /// The client gave up on a tagged query (its wall clock expired, while
+    /// sending or while reading the reply) but the server may still be running
+    /// it: kill it by `query_id`, best-effort, on a fresh request — the same
+    /// statement an explicit Stop sends. Any other error, or an untagged
+    /// (introspection) request, is left alone.
+    async fn kill_after_client_timeout(&self, e: &reqwest::Error) {
+        if !e.is_timeout() {
+            return;
+        }
+        let Some(qid) = &self.query_id else {
+            return;
+        };
+        let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
+        let _ = self
+            .client
+            .post(&self.base)
+            .headers(self.headers.clone())
+            .timeout(Duration::from_secs(10))
+            .body(sql)
+            .send()
+            .await;
     }
 
     /// POST a body and return the streaming `reqwest::Response` (for
@@ -1228,6 +1295,12 @@ fn json_cell_to_text(v: &Value) -> String {
 /// visible instead of the terse "error sending request for url (…)". Critical
 /// for diagnosing TLS-through-an-SSH-tunnel issues (cert host mismatch, or a
 /// plain-HTTP port reached over HTTPS).
+/// True for the server's refusal to change the `readonly` setting — what a
+/// user whose profile is already read-only gets when a request sets it.
+fn is_readonly_setting_refused(message: &str) -> bool {
+    message.contains("Cannot modify 'readonly' setting")
+}
+
 fn req_err(e: reqwest::Error) -> otto_core::Error {
     use std::error::Error as _;
     let mut msg = e.to_string();
@@ -1683,7 +1756,8 @@ impl Driver for ClickhouseDriver {
 
         // The active database (if the user selected one) scopes unqualified
         // table names — see query_rows_db for how it's applied per transport.
-        let active_db = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let scope_db = req.scope_database();
+        let active_db = scope_db.as_deref();
 
         // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
         let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
@@ -2192,6 +2266,38 @@ mod tests {
             tls: types::TlsConfig::default(),
             params: json!({}),
         }
+    }
+
+    /// The MCP path's server-derived flag turns on the native read-only mode;
+    /// ordinary runs never send it.
+    #[test]
+    fn read_only_execution_flag_selects_server_readonly_mode() {
+        let plain = ClickhouseDriver::connection_from_client(
+            &base_cfg(8123),
+            None,
+            None,
+            None,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        assert!(!plain.readonly);
+        let mut cfg = base_cfg(8123);
+        cfg.params = json!({ "__read_only_execution": true });
+        let guarded = ClickhouseDriver::connection_from_client(
+            &cfg,
+            None,
+            None,
+            None,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        assert!(guarded.readonly);
+        assert!(is_readonly_setting_refused(
+            "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)"
+        ));
+        assert!(!is_readonly_setting_refused(
+            "Code: 164. DB::Exception: Cannot execute query in readonly mode. (READONLY)"
+        ));
     }
 
     #[test]

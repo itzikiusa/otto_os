@@ -94,7 +94,9 @@ async fn tick(
             }
             let last = schedule.last_run_at.as_deref().and_then(parse_ts);
             let tz = cadence::task_tz(&schedule.timezone);
-            if !cadence::is_due(&schedule.schedule, last, now, tz) {
+            // The creation time anchors a never-run cron (first-fire catch-up).
+            let created = parse_ts(&schedule.created_at);
+            if !cadence::is_due_since(&schedule.schedule, last, created, now, tz) {
                 continue;
             }
             set.insert(schedule.id.clone());

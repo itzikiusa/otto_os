@@ -318,7 +318,7 @@ impl VaultEngine {
                 .map_err(|e| Error::Internal(format!("remove restored trash marker: {e}")))?;
         }
         drop(publication);
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(dest)
     }
 }

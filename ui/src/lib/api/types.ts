@@ -510,6 +510,10 @@ export interface McpOttoToolInfo {
   /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
    * for forward-compat with daemons that predate the categorised catalog. */
   category?: string | null;
+  /** True when an admin turned "Ask before each call" OFF for this (mutating)
+   *  tool: its calls skip the human approval (still audited). Optional for
+   *  forward-compat with daemons that predate the per-tool exemption. */
+  approval_exempt?: boolean;
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
@@ -520,12 +524,22 @@ export interface McpOttoServerStatus {
   token_prefix?: string | null;
   /** The freshly-minted token — returned ONCE on a mint/rotate, never again. */
   token?: string | null;
+  /** Global `mcp_require_approval_dangerous` (default true). When false no
+   *  otto.* call asks for approval, whatever the per-tool setting says. */
+  require_approval_dangerous?: boolean;
+  /** Bare names of the mutating tools that skip the per-call approval. */
+  approval_exempt_tools?: string[];
 }
 
 /** `PATCH /mcp/otto-server`. */
 export interface UpdateMcpOttoServerReq {
   enabled?: boolean;
   tools?: string[];
+  /** The COMPLETE set of mutating tools that skip the per-call approval
+   *  (replaces the stored list; bare or `otto.`-prefixed names; a read or
+   *  unknown name is a 400). Pruned to the enabled set — disabling a tool
+   *  also drops its exemption. */
+  approval_exempt_tools?: string[];
   rotate_token?: boolean;
 }
 
@@ -632,6 +646,38 @@ export interface Repo {
    *  'unrecognized' (remote exists but isn't GitHub/Bitbucket Cloud/GitLab —
    *  e.g. Bitbucket Server), or null when the repo has no remote. */
   forge?: GitProviderKind | 'unrecognized' | null;
+}
+
+/** One row of the agent-facing repo directory (`GET /git/repos/directory`,
+ *  `GET /git/repos/resolve`): a repo plus the workspace it is registered in.
+ *  `current` marks the caller's own workspace (the session's, or the hint). */
+export interface RepoDirectoryEntry {
+  id: Id;
+  name: string;
+  path: string;
+  remote_url: string | null;
+  provider: GitProviderKind | null;
+  workspace_id: Id;
+  workspace_name: string;
+  current: boolean;
+}
+
+/** `GET /git/repos/directory` — every repo in every workspace the caller can
+ *  read, current workspace first. */
+export interface RepoDirectory {
+  repos: RepoDirectoryEntry[];
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** How `GET /git/repos/resolve` matched a friendly repo reference. */
+export type RepoMatchedBy = 'id' | 'path' | 'remote' | 'name' | 'session_cwd';
+
+/** `GET /git/repos/resolve?ref=&workspace_id=` — 404 lists what IS available,
+ *  409 lists the ambiguous candidates (both in the Problem `message`). */
+export interface RepoResolveResp {
+  repo: RepoDirectoryEntry;
+  matched_by: RepoMatchedBy;
 }
 
 /** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
@@ -2265,6 +2311,9 @@ export interface UpdateConfluencePageReq {
   body_md?: string | null;
   /** Replacement body in Confluence storage XHTML. Wins over body_md. */
   body_html?: string | null;
+  /** The page `version` this edit was based on; the server answers 409 when
+   *  the page has changed since (instead of overwriting the newer edit). */
+  base_version?: number | null;
 }
 
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
@@ -3446,6 +3495,9 @@ export interface FindingDetail {
 export interface FindingActionResp {
   finding: Finding;
   session_id?: Id | null;
+  /** Verify only: the evidence behind a pass ("3 tests passed") or why the
+   *  finding was NOT verified (no linked test, zero tests ran, …). */
+  note?: string | null;
 }
 
 /** A repo rule generalized from a finding, fed into the Context Engine. */
@@ -4311,10 +4363,14 @@ export interface UpsertApiEnvironmentReq {
   name: string;
   /** Non-secret variables (keys listed in secret_keys are stripped server-side). */
   variables?: Record<string, string>;
-  /** Names of variables whose values are Keychain-backed. */
-  secret_keys?: string[];
+  /** Names of variables whose values are Keychain-backed. On update, omitted
+   *  keeps the stored set + values; an explicit list replaces it. */
+  secret_keys?: string[] | null;
   /** WRITE-ONLY: new/changed secret values; absent keys keep stored values. */
   secret_values?: Record<string, string>;
+  /** Update only: `{old_name: new_name}` — a renamed secret keeps its stored
+   *  Keychain value (a value in secret_values for the new name still wins). */
+  secret_renames?: Record<string, string>;
 }
 
 export interface ExecuteApiReq {
@@ -4332,6 +4388,12 @@ export interface ExecuteApiReq {
   vars?: Record<string, string> | null;
   /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH). */
   ssh_connection_id?: Id | null;
+  /**
+   * Confirms sending a stored secret (a `$secret` marker or Keychain env
+   * variable) to a host it isn't bound to. Without it the daemon answers
+   * `409 needs_confirm=new_host`. Honoured for a person's credential only.
+   */
+  confirm_new_host?: boolean;
 }
 
 export interface ApiResponse {
@@ -5222,6 +5284,16 @@ export interface QueryStats {
   duration_ms: number;
   row_count: number;
   bytes_read?: number | null;
+}
+
+/** Response of `POST /connections/{id}/db/cancel` — mirrors `CancelOutcome` /
+ *  `CancelStatus` in `crates/otto-dbviewer/src/service.rs`. Only `cancelled`
+ *  means the database stopped the work; `aborted` means Otto dropped its side
+ *  (mongosh killed, no further statement sent) while a statement already on
+ *  the server may still complete; `not_stoppable` means it keeps running. */
+export type DbCancelStatus = 'cancelled' | 'aborted' | 'not_running' | 'not_stoppable';
+export interface DbCancelOutcome {
+  status: DbCancelStatus;
 }
 
 /** Body of `POST /connections/{id}/db/query` — mirrors `QueryRequest` in

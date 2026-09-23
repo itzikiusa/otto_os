@@ -35,11 +35,14 @@
     } catch (e) { if (request === seq) error = String(e); }
     finally { if (request === seq) loading = false; }
   }
+  // Debounced: the path filter is `bind:value`, so an undebounced effect
+  // re-read every revision's history on each keystroke.
   $effect(() => {
     const id = vault.current?.id, path = vault.historyPath;
     void vault.wsId; void mode;
-    if (id) void load(id, path);
-    else { seq++; detailSeq++; trash = []; revisions = []; selected = null; loading = false; }
+    if (!id) { seq++; detailSeq++; trash = []; revisions = []; selected = null; loading = false; return; }
+    const timer = setTimeout(() => void load(id, path), 250);
+    return () => clearTimeout(timer);
   });
 
   async function loadOlder() {

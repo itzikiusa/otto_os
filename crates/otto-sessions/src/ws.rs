@@ -61,8 +61,14 @@ const REAUTH_INTERVAL_RESOURCE: Duration = Duration::from_secs(1);
 const REAUTH_SLOW: Duration = Duration::from_millis(100);
 
 /// A PTY write slower than this means the child stopped draining its tty (the
-/// write is a synchronous `write_all` under a mutex, so it parks this task).
+/// write runs on the PTY's writer thread; this task only awaits its delivery).
 const INPUT_SLOW: Duration = Duration::from_millis(20);
+
+/// How often a viewer whose process is gone looks for a respawned one (a chat
+/// send, a channel follow-up, a workflow step or a restart from another client
+/// can bring the session back while this tab stays open). Only armed while
+/// the viewer has no live process; the check is one in-memory map lookup.
+const REVIVE_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct WsState<S> {
@@ -438,6 +444,51 @@ async fn next_exit(rx: &mut Option<watch::Receiver<Option<i32>>>) -> i32 {
     }
 }
 
+/// Point a terminal viewer at the session's CURRENT live PTY when that is not
+/// the one it is showing — its process exited and something respawned the
+/// session. Resubscribes to the new output/exit streams, then pushes a
+/// `status` frame and a full `scrollback` snapshot (new `epoch`) so the client
+/// drops its exited state and rebuilds from the new process. Without this a
+/// tab left open across an exit stayed on the dead screen while its
+/// keystrokes (routed by session id) went, unseen, into the new process.
+///
+/// `Ok(true)` = swapped, `Ok(false)` = nothing newer is live, `Err(())` = the
+/// socket is gone.
+async fn revive_viewer<S: SessionsCtx>(
+    ctx: &S,
+    session_id: &Id,
+    socket: &mut WebSocket,
+    handle: &mut Option<Arc<PtyHandle>>,
+    out_rx: &mut Option<broadcast::Receiver<Bytes>>,
+    exit_rx: &mut Option<watch::Receiver<Option<i32>>>,
+) -> std::result::Result<bool, ()> {
+    let Some(fresh) = ctx.manager().live_handle(session_id) else {
+        return Ok(false);
+    };
+    if handle.as_ref().is_some_and(|old| Arc::ptr_eq(old, &fresh)) {
+        return Ok(false);
+    }
+    *out_rx = Some(fresh.subscribe());
+    *exit_rx = Some(fresh.on_exit());
+    let status = r#"{"type":"status","status":"running"}"#;
+    if socket.send(Message::Text(status.into())).await.is_err() {
+        return Err(());
+    }
+    let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
+    // `epoch` = PTY spawn counter: the client resets its local buffer when it
+    // changes (see the Scrollback arm).
+    let frame = format!(
+        r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
+        B64.encode(&data),
+        fresh.spawn_seq()
+    );
+    if socket.send(Message::Text(frame.into())).await.is_err() {
+        return Err(());
+    }
+    *handle = Some(fresh);
+    Ok(true)
+}
+
 /// Await the next capability verdict from the off-loop re-auth task.
 /// `Some(can_input)` is a fresh (monotonically narrowing) capability;
 /// `None` means the task returned — access was revoked or the session row is
@@ -598,9 +649,13 @@ async fn serve_terminal<S: SessionsCtx>(
     // before the PTY broadcast closes.
     let mut evict_rx = Some(ctx.manager().evict_signal(&session_id));
     let mut warned_forbidden = false;
+    // One visible notice per stretch of failing input (reset on success).
+    let mut warned_input = false;
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ping.reset(); // skip the immediate first tick
+    let mut revive_tick = tokio::time::interval(REVIVE_POLL);
+    revive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Re-authorization runs OFF this loop (investigation H2): every arm here
     // must stay free of SQLite, or a slow statement elsewhere in the daemon
@@ -713,36 +768,19 @@ async fn serve_terminal<S: SessionsCtx>(
                 if socket.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
-                // Revival: a viewer attached while the session was dead (or
-                // whose PTY died mid-watch) pends on `None` forever, even if
-                // another client later restarts the session — it would get the
-                // status→running event but a blank terminal. On the ping
-                // cadence, pick up a fresh live handle, resubscribe, and replay
-                // a snapshot so the terminal comes alive without a manual
-                // reconnect.
-                if out_rx.is_none() {
-                    if let Some(fresh) = ctx.manager().live_handle(&session_id) {
-                        let is_new = handle
-                            .as_ref()
-                            .map(|old| !Arc::ptr_eq(old, &fresh))
-                            .unwrap_or(true);
-                        if is_new {
-                            out_rx = Some(fresh.subscribe());
-                            exit_rx = Some(fresh.on_exit());
-                            let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
-                            // `epoch` = PTY spawn counter: the client resets its
-                            // local buffer when it changes (see the Scrollback arm).
-                            let frame = format!(
-                                r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
-                                B64.encode(&data),
-                                fresh.spawn_seq()
-                            );
-                            if socket.send(Message::Text(frame.into())).await.is_err() {
-                                return;
-                            }
-                            handle = Some(fresh);
-                        }
-                    }
+            }
+            // Revival: a viewer attached while the session was dead, or whose
+            // process exited mid-watch, would otherwise stay on that dead
+            // screen even after another client / engine respawned the session.
+            // (It used to wait for the output broadcast to close, which never
+            // happens while this loop holds the dead handle — `exit_rx` is the
+            // reliable "my process is gone" signal.) Armed only while dead.
+            _ = revive_tick.tick(), if exit_rx.is_none() || out_rx.is_none() => {
+                if revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx)
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
             }
             // Forced disconnect: the session was terminated (admin terminate or
@@ -780,10 +818,22 @@ async fn serve_terminal<S: SessionsCtx>(
                             continue;
                         }
                         if let Ok(bytes) = B64.decode(data.as_bytes()) {
+                            // The process this viewer shows is gone: never type
+                            // blind into whatever replaced it. Swap onto the
+                            // respawn first (the user then sees where the
+                            // keystroke lands); with nothing live, `input`
+                            // fails and the notice below says so.
+                            if exit_rx.is_none()
+                                && revive_viewer(&ctx, &session_id, &mut socket, &mut handle, &mut out_rx, &mut exit_rx)
+                                    .await
+                                    .is_err()
+                            {
+                                return;
+                            }
                             // Typing claims size authority for this viewer.
                             ctx.manager().note_input_authority(&session_id, conn_id);
                             let started = std::time::Instant::now();
-                            let _ = ctx.manager().input(&session_id, &bytes).await;
+                            let res = ctx.manager().input(&session_id, &bytes).await;
                             let elapsed = started.elapsed();
                             if elapsed > INPUT_SLOW {
                                 tracing::debug!(
@@ -791,6 +841,22 @@ async fn serve_terminal<S: SessionsCtx>(
                                     elapsed_ms = elapsed.as_millis() as u64,
                                     "terminal ws: slow PTY write (child not draining its tty?)"
                                 );
+                            }
+                            match res {
+                                Ok(()) => warned_input = false,
+                                Err(e) if !warned_input => {
+                                    warned_input = true;
+                                    let frame = serde_json::json!({
+                                        "type": "error",
+                                        "code": "input_failed",
+                                        "message": e.to_string(),
+                                    })
+                                    .to_string();
+                                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Err(_) => {}
                             }
                         }
                     }

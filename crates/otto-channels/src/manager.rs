@@ -8,6 +8,7 @@
 //! generation of adapters and respawns — so config edits apply without a
 //! daemon restart. A top-level `cancel` flag stops everything on shutdown.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -247,6 +248,12 @@ impl ChannelManager {
         gen_cancel: &Arc<AtomicBool>,
     ) -> usize {
         let mut count = 0;
+        // Inbound listener tokens already started in this generation. The
+        // upsert API refuses to enable a second integration on the same token,
+        // but state from before that check (or a hand-edited DB) can still
+        // hold two — running both would split every bot's events randomly
+        // between the workspaces, so only the first (by workspace id) listens.
+        let mut listening: HashSet<String> = HashSet::new();
         for integ in integrations {
             let integ = integ.clone();
             let ws_id = integ.workspace_id.clone();
@@ -260,6 +267,13 @@ impl ChannelManager {
                             continue;
                         }
                     };
+                    if !listening.insert(token.clone()) {
+                        warn!(
+                            workspace = %ws_id,
+                            "telegram: bot token already polled by another enabled workspace, skipping (disable one of them)"
+                        );
+                        continue;
+                    }
                     info!(workspace = %ws_id, "starting Telegram listener");
                     count += 1;
                     let c = Arc::clone(gen_cancel);
@@ -283,6 +297,13 @@ impl ChannelManager {
                             continue;
                         }
                     };
+                    if !listening.insert(app_token.clone()) {
+                        warn!(
+                            workspace = %ws_id,
+                            "slack: app token already connected for another enabled workspace, skipping (Slack would split events between them; disable one)"
+                        );
+                        continue;
+                    }
                     info!(workspace = %ws_id, "starting Slack Socket Mode listener");
                     count += 1;
                     let c = Arc::clone(gen_cancel);

@@ -85,6 +85,12 @@ fn mask_result(res: &mut QueryResult) {
 /// - `Err(Forbidden)` when the statement is classified as a write/DDL (reusing the
 ///   conservative [`statement_is_write`] classifier — unknown counts as a write),
 /// - `Ok(())` for a recognised read.
+///
+/// This classification is the FIRST of two barriers, never the only one: it
+/// splits with the engine's own lexer and (MySQL/PostgreSQL) requires a
+/// parser-proven read, and [`DbViewerService::run_read_only`] then executes
+/// whatever passes in the engine's native read-only mode, so a statement the
+/// classifier misjudges still cannot change data.
 pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
     if statement.trim().is_empty() {
         return Err(Error::Invalid("empty statement".into()));
@@ -93,6 +99,12 @@ pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
         return Err(Error::Forbidden(format!(
             "{MCP_READ_ONLY_PREFIX}only read-only statements may run over MCP; \
              this statement is classified as a write/DDL"
+        )));
+    }
+    if engine == Engine::Redis && crate::types::redis_uses_keys(statement) {
+        return Err(Error::Forbidden(format!(
+            "{MCP_READ_ONLY_PREFIX}KEYS blocks the Redis server while it scans every key; \
+             use SCAN with MATCH and COUNT instead"
         )));
     }
     Ok(())
@@ -159,6 +171,41 @@ struct InFlightQuery {
     user_id: Id,
     resolved: Option<Resolved>,
     token: CancelToken,
+    /// The detached execution task (set right after it is spawned; `None` for
+    /// inline governed execution). A cancel ABORTS it when the engine has no
+    /// native handle — or the native cancel did not end it — so a Stop really
+    /// stops Otto's side: a mongosh child is killed (`kill_on_drop`) and no
+    /// further statement of a batch is sent.
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+/// How long a cancel waits for an execution to end on its own after an
+/// engine-native cancel (so the driver's "interrupted" error is recorded in
+/// history like any other outcome) before aborting the task outright.
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// What a Stop actually achieved. Reported to the client so the UI never says
+/// "stopped" about work that is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelStatus {
+    /// An engine-native cancel was issued and the execution ended.
+    Cancelled,
+    /// Otto dropped the execution: its `mongosh` process is killed and no
+    /// further statement is sent, but a statement ALREADY sent to the server
+    /// (a Mongo write, a Redis command) may still complete there.
+    Aborted,
+    /// Nothing is running under that id (already finished, or unknown).
+    NotRunning,
+    /// Still running: the engine has no native cancel for it and the execution
+    /// is not one Otto can drop from here.
+    NotStoppable,
+}
+
+/// Body of `POST …/db/cancel`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CancelOutcome {
+    pub status: CancelStatus,
 }
 
 /// How long a finished-but-unclaimed query outcome is parked for re-attach.
@@ -1195,11 +1242,16 @@ impl DbViewerService {
         }
         // Non-browsable kinds never reach `run`, but guard defensively: if we
         // can't map to an engine we can't classify, so treat it as a write.
-        let is_write = match Engine::from_kind(conn.kind) {
+        let engine = Engine::from_kind(conn.kind);
+        let is_write = match engine {
             Some(engine) => statement_is_write(engine, &req.statement),
             None => true,
         };
-        if !is_write {
+        // `KEYS` is a read that blocks the whole Redis server while it walks
+        // every key: on a guarded connection it needs the same confirmation.
+        let blocking_keys =
+            engine == Some(Engine::Redis) && crate::types::redis_uses_keys(&req.statement);
+        if !is_write && !blocking_keys {
             return Ok(());
         }
         let reason = if conn.environment.is_production() {
@@ -1207,6 +1259,12 @@ impl DbViewerService {
         } else {
             format!("read-only connection '{}'", conn.name)
         };
+        if !is_write {
+            return Err(Error::Conflict(format!(
+                "{WRITE_BLOCKED_PREFIX}KEYS blocks the Redis server while it scans every key \
+                 on this {reason}; use SCAN with MATCH/COUNT, or confirm to run it"
+            )));
+        }
         Err(Error::Conflict(format!(
             "{WRITE_BLOCKED_PREFIX}this is a {reason}; confirm the write to run it"
         )))
@@ -1412,8 +1470,25 @@ impl DbViewerService {
     /// [`Self::cancel`] can issue engine-native cancellation against it. The
     /// driver fills the [`CancelToken`] with its native handle as it starts.
     pub async fn run(&self, conn_id: &Id, user_id: &Id, req: &QueryRequest) -> Result<QueryResult> {
+        self.run_inner(conn_id, user_id, req, false).await
+    }
+
+    /// [`Self::run`], optionally forcing the engine's NATIVE read-only mode
+    /// (`read_only`, the MCP path): the driver then runs the statement inside a
+    /// read-only transaction (MySQL / PostgreSQL) or with the `readonly`
+    /// setting (ClickHouse HTTP), regardless of access mode.
+    async fn run_inner(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        read_only: bool,
+    ) -> Result<QueryResult> {
+        // Normalize the scope ONCE: drivers get the canonical node (`kdb:<n>`
+        // for a Redis keyspace, the plain name otherwise); authorization and
+        // resolution use the bare access child derived from it below.
         let req = &QueryRequest {
-            node: crate::access::child(req.node.as_deref()),
+            node: crate::access::canonical_node(req.node.as_deref()),
             ..req.clone()
         };
         self.execution_access(conn_id, user_id, req).await?;
@@ -1434,6 +1509,18 @@ impl DbViewerService {
                 .as_object_mut()
                 .unwrap()
                 .remove("__read_only_execution");
+        }
+        if read_only {
+            // Set AFTER the enforced-mode removal above: the MCP path is
+            // read-only whatever the statement classified as. The flag is
+            // server-derived (config parsing strips `__` keys from stored
+            // params) and excluded from the pool cache key.
+            if !r.config.params.is_object() {
+                r.config.params = Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = r.config.params.as_object_mut() {
+                map.insert("__read_only_execution".into(), Value::Bool(true));
+            }
         }
         self.verify_native(conn_id, user_id, &r).await?;
         let token = CancelToken::new();
@@ -1466,6 +1553,7 @@ impl DbViewerService {
                     user_id: user_id.clone(),
                     resolved: Some(r.clone()),
                     token: token.clone(),
+                    abort: None,
                 },
             );
         }
@@ -1491,7 +1579,8 @@ impl DbViewerService {
         let (out_tx, out_rx) = tokio::sync::oneshot::channel();
         let svc = self.clone();
         let (cid, uid, req_owned) = (conn_id.clone(), user_id.clone(), req.clone());
-        tokio::spawn(async move {
+        let abort_key = qid.clone();
+        let task = tokio::spawn(async move {
             let _guard = guard;
             let result = svc
                 .execute_recorded(r, &cid, &uid, &req_owned, &token)
@@ -1505,9 +1594,17 @@ impl DbViewerService {
             // `_guard` drops here — AFTER parking — so `query_status` never
             // reports "unknown" in the gap between running and parked.
         });
+        // Let a cancel abort the task. If it already finished, its guard removed
+        // the entry and there is nothing to attach to.
+        if let Ok(mut map) = self.in_flight.lock() {
+            if let Some(entry) = map.get_mut(&abort_key) {
+                entry.abort = Some(task.abort_handle());
+            }
+        }
         out_rx
             .await
-            .map_err(|_| Error::Internal("query task dropped its result".into()))?
+            // The task only ends without sending when a cancel aborted it.
+            .map_err(|_| Error::Conflict("query was stopped before it returned a result".into()))?
     }
 
     /// Drive the resolved driver, apply opt-in masking, and record history —
@@ -1698,7 +1795,13 @@ impl DbViewerService {
             offset: None,
             cursor: None,
         };
-        self.run(conn_id, user_id, &safe).await
+        // Second barrier: execute in the engine's native read-only mode —
+        // MySQL `START TRANSACTION READ ONLY` / PostgreSQL `BEGIN READ ONLY`
+        // (rolled back afterwards), ClickHouse `readonly` over HTTP. MongoDB
+        // and Redis have no such mode; their gate is a positive allow-list of
+        // read operations (Mongo: find/count/getIndexes and aggregations
+        // without `$out`/`$merge`; Redis: known read commands only).
+        self.run_inner(conn_id, user_id, &safe, true).await
     }
 
     /// Export a (potentially huge) **uncapped** read result to a local file, in
@@ -1726,6 +1829,9 @@ impl DbViewerService {
         dest: &std::path::Path,
     ) -> Result<(crate::export::ExportCounts, u64)> {
         self.require_local_path_access(conn_id, user_id).await?;
+        // Drivers receive the canonical scope (see `access::canonical_node`).
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         // Reuse the write-gate: an export is a read; a write/DDL on a guarded
         // (production / read-only) connection is refused (no confirm path here).
         self.guard_export(conn_id, user_id, statement, node).await?;
@@ -1800,6 +1906,8 @@ impl DbViewerService {
         max_rows: Option<usize>,
         w: Box<dyn std::io::Write + Send>,
     ) -> Result<(crate::export::ExportCounts, u64)> {
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
@@ -2049,6 +2157,8 @@ impl DbViewerService {
         statement: &str,
         node: Option<&str>,
     ) -> Result<DbQueryPlan> {
+        let canonical = crate::access::canonical_node(node);
+        let node = canonical.as_deref();
         let child = crate::access::child(node);
         let r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_query")
@@ -2174,7 +2284,22 @@ impl DbViewerService {
     /// `conn_id` is the connection the client *thinks* the query belongs to (the
     /// route is connection-scoped for role-gating); we additionally require the
     /// registry entry to match it, so a cancel can't reach across connections.
-    pub async fn cancel(&self, conn_id: &Id, user_id: &Id, query_id: &str) -> Result<()> {
+    /// Stop an in-flight query and report what that achieved.
+    ///
+    /// The engine-native cancel (`KILL QUERY`, `pg_cancel_backend`, `killOp`)
+    /// runs first when the driver captured a handle; the execution then gets
+    /// [`CANCEL_GRACE`] to end on its own. When there is no handle (mongosh
+    /// scripts, Mongo writes, Redis), or the native cancel did not end it, the
+    /// detached task is ABORTED: dropping it kills a mongosh child and stops a
+    /// batch before its next statement. Only a real end is reported as
+    /// [`CancelStatus::Cancelled`]; an abort is [`CancelStatus::Aborted`],
+    /// because a statement already on the server may still complete there.
+    pub async fn cancel(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        query_id: &str,
+    ) -> Result<CancelOutcome> {
         self.authorize(conn_id, user_id, None, "discover").await?;
         let key = if self.is_enforced(conn_id).await? {
             format!("{user_id}:{query_id}")
@@ -2188,12 +2313,47 @@ impl DbViewerService {
             .get(&key)
             .filter(|q| &q.conn_id == conn_id && &q.user_id == user_id)
             .cloned();
-        if let Some(target) = target {
-            if let (Some(handle), Some(r)) = (target.token.handle(), target.resolved) {
-                r.driver.cancel(&r.config, &handle).await?;
+        let Some(target) = target else {
+            return Ok(CancelOutcome {
+                status: CancelStatus::NotRunning,
+            });
+        };
+        let native = match (target.token.handle(), target.resolved.as_ref()) {
+            (Some(handle), Some(r)) => match r.driver.cancel(&r.config, &handle).await {
+                Ok(()) => true,
+                // No task to fall back on: surface the failure as before.
+                Err(e) if target.abort.is_none() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %e, "native query cancel failed; aborting the task");
+                    false
+                }
+            },
+            _ => false,
+        };
+        let status = match target.abort {
+            // Inline (governed) execution has no task to drop from here.
+            None if native => CancelStatus::Cancelled,
+            None => CancelStatus::NotStoppable,
+            Some(abort) => {
+                if native {
+                    let deadline = Instant::now() + CANCEL_GRACE;
+                    while !abort.is_finished() && Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                if abort.is_finished() {
+                    if native {
+                        CancelStatus::Cancelled
+                    } else {
+                        CancelStatus::NotRunning
+                    }
+                } else {
+                    abort.abort();
+                    CancelStatus::Aborted
+                }
             }
-        }
-        Ok(())
+        };
+        Ok(CancelOutcome { status })
     }
 
     pub async fn completion(
@@ -2422,13 +2582,9 @@ fn render_plan_text(res: &crate::types::QueryResult) -> String {
 /// Now an un-tagged node falls back to its raw name. `None` → the connection's
 /// default schema (empty string, resolved downstream).
 fn node_to_schema(node: Option<&str>) -> String {
-    node.map(|n| {
-        NodePath::parse(n)
-            .get("db")
-            .map(str::to_string)
-            .unwrap_or_else(|| n.to_string())
-    })
-    .unwrap_or_default()
+    crate::types::Scope::parse(node)
+        .map(|scope| scope.child())
+        .unwrap_or_default()
 }
 
 /// Render a [`SchemaGraph`] as a COMPLETE markdown schema for the DB Assistant —
@@ -2535,6 +2691,7 @@ mod tests {
             user_id: "test".into(),
             resolved: None,
             token,
+            abort: None,
         }
     }
 
@@ -2596,6 +2753,21 @@ mod tests {
             ensure_read_only(Engine::Redis, "DEL k").unwrap_err(),
             Error::Forbidden(_)
         ));
+    }
+
+    /// `KEYS` walks the whole keyspace in one blocking call: an agent must use
+    /// SCAN instead (other reads, including SCAN, still pass).
+    #[test]
+    fn ensure_read_only_refuses_redis_keys_over_mcp() {
+        for stmt in ["KEYS *", "keys session:*", "GET a\nKEYS *"] {
+            let err = ensure_read_only(Engine::Redis, stmt).unwrap_err();
+            assert!(
+                matches!(&err, Error::Forbidden(m) if m.contains("SCAN")),
+                "{stmt:?}: {err:?}"
+            );
+        }
+        assert!(ensure_read_only(Engine::Redis, "SCAN 0 MATCH session:* COUNT 100").is_ok());
+        assert!(ensure_read_only(Engine::Redis, "# KEYS *\nGET a").is_ok());
     }
 
     #[test]

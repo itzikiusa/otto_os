@@ -18,15 +18,16 @@
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
+    /** Account filter text (the input lives in the AWS page header). */
+    filter?: string;
     onadd: () => void;
     onedit: (a: AwsAccount) => void;
     ondelete: (a: AwsAccount) => void;
     onsignin: (a: AwsAccount) => void;
   }
-  let { onadd, onedit, ondelete, onsignin }: Props = $props();
+  let { filter = '', onadd, onedit, ondelete, onsignin }: Props = $props();
 
   const canAdmin = $derived(auth.isRoot);
-  let filter = $state('');
   const visible = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return aws.accounts;
@@ -80,41 +81,20 @@
 </script>
 
 <div class="ov">
-  <header class="head">
-    <div>
-      <h1>AWS</h1>
-      <p class="sub">
-        Accounts are Otto rows (+ Keychain); the console shells out to the <code>aws</code> CLI
-        {#if aws.status?.version}<span class="ver mono">v{aws.status.version}</span>{/if}
-      </p>
-    </div>
-    <div class="head-actions">
-      {#if aws.accounts.length > 3}
-        <label class="filter">
-          <Icon name="search" size={13} />
-          <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
-        </label>
-      {/if}
-      {#if canAdmin}
-        <button class="primary" onclick={onadd} data-testid="aws-add-account">
-          <Icon name="plus" size={13} /> Add account
-        </button>
-      {/if}
-    </div>
-  </header>
-
   {#if aws.accountsLoading && !aws.accountsLoaded}
     <div class="pad"><Skeleton rows={3} height={90} /></div>
   {:else if aws.accountsError && aws.accounts.length === 0}
     <EmptyState icon="cloud" title="Couldn't load accounts" body={aws.accountsError} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
   {:else if aws.accounts.length === 0}
     <EmptyState
+      variant="page"
       icon="cloud"
       title="No AWS accounts yet"
       body={canAdmin
         ? 'Add one from an existing ~/.aws profile (SSO, assume-role…) or with access keys. Otto never writes your ~/.aws files.'
         : 'An administrator needs to add an AWS account before you can browse S3, SQS, EC2, Athena or EKS.'}
       actionLabel={canAdmin ? 'Add account' : undefined}
+      actionIcon="plus"
       onaction={canAdmin ? onadd : undefined}
     />
   {:else}
@@ -219,59 +199,6 @@
     overflow: auto;
     height: 100%;
   }
-  .head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding: 16px 16px 8px;
-  }
-  h1 {
-    margin: 0;
-    font-size: 18px;
-  }
-  .sub {
-    margin: 4px 0 0;
-    font-size: 12.5px;
-    color: var(--text-dim);
-  }
-  .ver {
-    margin-left: 6px;
-    font-size: 11px;
-    padding: 0 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-  }
-  code {
-    font-family: var(--font-mono);
-  }
-  .head-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .filter {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 28px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    color: var(--text-dim);
-  }
-  .filter input {
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: 12.5px;
-    outline: none;
-    width: 160px;
-  }
   .primary {
     display: inline-flex;
     align-items: center;
@@ -290,13 +217,13 @@
     font-size: 12px;
   }
   .pad {
-    padding: 16px;
+    padding: 18px 20px;
   }
   .cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 12px;
-    padding: 8px 16px 24px;
+    padding: 18px 20px 40px;
   }
   .card {
     display: flex;

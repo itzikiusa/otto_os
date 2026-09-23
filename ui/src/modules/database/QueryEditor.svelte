@@ -586,7 +586,7 @@
       const completionOpen = !!rootEl?.querySelector('.cm-tooltip-autocomplete');
       if (tab.running && !completionOpen) {
         e.preventDefault();
-        database.abortQuery();
+        database.abortQuery(undefined, { report: true });
       } else if (shortcutsOpen && !completionOpen) {
         shortcutsOpen = false;
       }
@@ -772,7 +772,7 @@
 
   <div class="qe-toolbar">
     {#if tab.running}
-      <button class="btn small stop" onclick={() => database.abortQuery()} title="Stop the running query">
+      <button class="btn small stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
         <Icon name="x" size={12} />
         Stop
       </button>
@@ -1106,6 +1106,7 @@
       error={tab.error}
       statement={tab.ran_statement ?? tab.statement}
       connectionId={database.selectedConnId}
+      ranNode={tab.ran_node}
       running={tab.running}
       offset={tab.offset}
       {viewMode}

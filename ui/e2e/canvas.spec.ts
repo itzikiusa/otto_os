@@ -265,9 +265,10 @@ test('New scene: the menu offers D2 too — creates an empty D2 canvas', async (
 
   await openCanvas(page);
   await page.getByRole('button', { name: /New scene/i }).click();
-  const menu = page.locator('.scene-list .new-menu');
-  await expect(menu.getByRole('button', { name: /D2 diagram/i })).toBeVisible({ timeout: 10_000 });
-  await menu.getByRole('button', { name: /D2 diagram/i }).click();
+  // The header's New scene menu is the shared (viewport-clamped) ctxMenu.
+  const menu = page.locator('.ctx-menu');
+  await expect(menu.getByRole('menuitem', { name: /D2 diagram/i })).toBeVisible({ timeout: 10_000 });
+  await menu.getByRole('menuitem', { name: /D2 diagram/i }).click();
 
   // A fresh, empty D2 board mounts — its own empty-state hint (no source yet,
   // so the WASM renderer is never even invoked for a blank scene).
@@ -541,11 +542,11 @@ test('New scene: the format menu lets you pick Mermaid or Excalidraw', async ({ 
   await openCanvas(page);
   await page.getByRole('button', { name: /New scene/i }).click();
   // The menu (scoped, so it doesn't collide with the hero's mode cards).
-  const menu = page.locator('.scene-list .new-menu');
-  await expect(menu.getByRole('button', { name: /Excalidraw board/i })).toBeVisible({
+  const menu = page.locator('.ctx-menu');
+  await expect(menu.getByRole('menuitem', { name: /Excalidraw board/i })).toBeVisible({
     timeout: 10_000,
   });
-  await menu.getByRole('button', { name: /Mermaid diagram/i }).click();
+  await menu.getByRole('menuitem', { name: /Mermaid diagram/i }).click();
   // A fresh Mermaid board mounts.
   await expect(page.locator('.board').first()).toBeVisible({ timeout: 30_000 });
 });

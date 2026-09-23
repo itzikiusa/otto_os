@@ -37,7 +37,8 @@ use otto_core::domain::SessionKind;
 use otto_core::event::Event;
 use otto_core::{Error, Result};
 use otto_state::{
-    FinishAgentRun, NewAgentRun, PersonalAgent, PersonalAgentSchedule, PersonalAgentsRepo,
+    FinishAgentRun, NewAgentRun, PersonalAgent, PersonalAgentRun, PersonalAgentSchedule,
+    PersonalAgentsRepo,
 };
 use serde_json::json;
 use tokio::sync::Semaphore;
@@ -245,8 +246,53 @@ pub async fn run_agent(
     schedule: Option<&PersonalAgentSchedule>,
     trigger: &str,
 ) -> Result<String> {
-    let repo = repo(ctx);
-    let run = repo
+    let run = open_agent_run(ctx, agent, schedule, trigger).await?;
+    complete_agent_run(ctx, agent, schedule, &run.id, trigger).await
+}
+
+/// Start a run in the BACKGROUND and return its `running` row at once — the
+/// manual "Run" path (same reasons as the scheduled-task Run now: the whole
+/// agent turn used to run inside the HTTP request, so the caller's timeout or
+/// a dropped request orphaned the run in `running`). 409 while a run of the
+/// agent is already in progress.
+pub async fn spawn_agent_run(
+    ctx: &ServerCtx,
+    agent: &PersonalAgent,
+    schedule: Option<&PersonalAgentSchedule>,
+    trigger: &str,
+) -> Result<PersonalAgentRun> {
+    let busy = repo(ctx)
+        .list_runs(&agent.id, 1)
+        .await?
+        .first()
+        .is_some_and(|r| r.status == "running");
+    if busy {
+        return Err(Error::Conflict(
+            "a run of this agent is already in progress".into(),
+        ));
+    }
+    let run = open_agent_run(ctx, agent, schedule, trigger).await?;
+    let (ctx2, agent2, schedule2, run_id, trigger2) = (
+        ctx.clone(),
+        agent.clone(),
+        schedule.cloned(),
+        run.id.clone(),
+        trigger.to_string(),
+    );
+    tokio::spawn(async move {
+        let _ = complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2).await;
+    });
+    Ok(run)
+}
+
+/// Open the run row (`running`) and announce it.
+async fn open_agent_run(
+    ctx: &ServerCtx,
+    agent: &PersonalAgent,
+    schedule: Option<&PersonalAgentSchedule>,
+    trigger: &str,
+) -> Result<PersonalAgentRun> {
+    let run = repo(ctx)
         .create_run(NewAgentRun {
             agent_id: agent.id.clone(),
             schedule_id: schedule.map(|s| s.id.clone()),
@@ -255,13 +301,27 @@ pub async fn run_agent(
         })
         .await?;
     emit(ctx, agent, &run.id, "running");
+    Ok(run)
+}
+
+/// Execute an opened run to completion and settle it (+ the schedule cursor
+/// for a scheduled run). Returns the run id.
+async fn complete_agent_run(
+    ctx: &ServerCtx,
+    agent: &PersonalAgent,
+    schedule: Option<&PersonalAgentSchedule>,
+    run_id: &str,
+    trigger: &str,
+) -> Result<String> {
+    let repo = repo(ctx);
+    let run_id = run_id.to_string();
 
     let directive = schedule
         .map(|s| s.directive.clone())
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "Check in: review your standing instructions and report status.".into());
 
-    match execute_agent(ctx, agent, &run.id, &directive).await {
+    match execute_agent(ctx, agent, &run_id, &directive).await {
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&agent.id, now);
@@ -278,7 +338,7 @@ pub async fn run_agent(
             // the report also always lands on the agent page regardless).
             let hash = report_hash(&out.report);
             let unchanged = repo
-                .last_ok_report_hash(&agent.id, &run.id)
+                .last_ok_report_hash(&agent.id, &run_id)
                 .await
                 .ok()
                 .flatten()
@@ -301,7 +361,7 @@ pub async fn run_agent(
             };
 
             repo.finish_run(
-                &run.id,
+                &run_id,
                 FinishAgentRun {
                     status: "ok".into(),
                     summary: out.summary.clone(),
@@ -319,15 +379,15 @@ pub async fn run_agent(
             .await?;
             advance_cursor(ctx, schedule, trigger, now).await;
             prune(ctx, &agent.id).await;
-            emit(ctx, agent, &run.id, "ok");
-            Ok(run.id)
+            emit(ctx, agent, &run_id, "ok");
+            Ok(run_id)
         }
         Err(e) => {
             let msg = e.to_string();
             warn!(agent = %agent.id, "personal agent run failed: {msg}");
             let _ = repo
                 .finish_run(
-                    &run.id,
+                    &run_id,
                     FinishAgentRun {
                         status: "error".into(),
                         error: Some(msg),
@@ -336,8 +396,8 @@ pub async fn run_agent(
                 )
                 .await;
             advance_cursor(ctx, schedule, trigger, Utc::now()).await;
-            emit(ctx, agent, &run.id, "error");
-            Ok(run.id)
+            emit(ctx, agent, &run_id, "error");
+            Ok(run_id)
         }
     }
 }

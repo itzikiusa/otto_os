@@ -174,11 +174,7 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            // Surface the daemon's error text (already small) but don't leak a
-            // huge body; the status is the actionable part for the agent.
-            let snippet = String::from_utf8_lossy(&body);
-            let snippet = snippet.chars().take(300).collect::<String>();
-            return Err(format!("daemon returned {status}: {snippet}"));
+            return Err(daemon_error(status, &body));
         }
         serde_json::from_slice(&body).map_err(|e| format!("parse json: {e}"))
     }
@@ -222,11 +218,7 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
         serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
     }
@@ -491,6 +483,32 @@ impl Ctx {
     }
 }
 
+/// Cap on a daemon error MESSAGE surfaced to the agent. Larger than the raw
+/// snippet cap because some messages are the actionable part — a repo
+/// reference that did not resolve lists the candidates to pick from.
+const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+
+/// The agent-facing text for a non-2xx daemon reply. A JSON `Problem`
+/// (`{code, message}`) surfaces its `message` (capped at
+/// [`MAX_ERROR_MESSAGE_CHARS`]); anything else is a raw 300-char snippet so a
+/// huge body never reaches the transcript. The status stays in front — it is
+/// the actionable part when the message is terse.
+fn daemon_error(status: reqwest::StatusCode, body: &[u8]) -> String {
+    let message = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_string));
+    match message {
+        Some(m) => format!(
+            "daemon returned {status}: {}",
+            m.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>()
+        ),
+        None => format!(
+            "daemon returned {status}: {}",
+            String::from_utf8_lossy(body).chars().take(300).collect::<String>()
+        ),
+    }
+}
+
 /// Recursively cap the number of elements in every JSON array to [`MAX_ROWS`],
 /// appending a string marker element when truncation happens. Returns the capped
 /// value and the largest array length seen (used as the audited `rows`).
@@ -557,11 +575,11 @@ fn tool_catalog() -> Value {
         "tools": [
             {
                 "name": "otto_list_connections",
-                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, redis, mongodb, clickhouse).",
+                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, postgres, redis, mongodb, clickhouse).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | redis | mongodb | clickhouse." }
+                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | postgres | redis | mongodb | clickhouse." }
                     }
                 }
             },
@@ -603,7 +621,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_db_query",
-                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
+                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/postgres/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -622,10 +640,10 @@ fn tool_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "repo_id": { "type": "string", "description": "Otto repo id." },
+                        "repo_id": { "type": "string", "description": REPO_REF_DESC },
                         "pr_number": { "type": "integer", "description": "Pull request number." }
                     },
-                    "required": ["repo_id", "pr_number"]
+                    "required": ["pr_number"]
                 }
             },
             {
@@ -759,8 +777,8 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_repos",
-                "description": "Read-only: list this workspace's git repositories (id, name, branch, remote).",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: list the git repositories in EVERY workspace you can read — `{repos, current_workspace_id, workspace_count}`; each row has id, name, path, remote_url, workspace_id + workspace_name, and `current` (this session's workspace, listed first). A repo is registered in exactly one workspace, so the one you need may live in another — look here before concluding it is missing. Optional `workspace_id` narrows to one workspace.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional: only this workspace's repos." } } }
             },
             {
                 "name": "otto_list_sessions",
@@ -800,24 +818,24 @@ fn tool_catalog() -> Value {
             {
                 "name": "otto_list_prs",
                 "description": "Read-only: list a repo's pull requests as `{items, has_more, page, per_page}` (each item: number, title, state, source/destination branches, author, url). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } }, "required": ["repo_id"] }
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC } } }
             },
             {
                 "name": "otto_get_pr",
                 "description": "Read-only: one pull request plus its existing review comments (id, body, path, line, thread_id). Call this BEFORE commenting so you can dedupe and reply in-thread instead of posting duplicates.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" }, "pr_number": { "type": "integer" } }, "required": ["repo_id", "pr_number"] }
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC }, "pr_number": { "type": "integer" } }, "required": ["pr_number"] }
             },
             {
                 "name": "otto_comment_pr",
                 "description": "Post a comment on a pull request. Pass `path` (and optionally `line`) to anchor it INLINE on a file in the diff; omit both for a PR-level comment; pass `in_reply_to` with an existing comment id to reply in that thread. Mutating and outward-facing — the comment is visible to everyone on the PR.",
                 "inputSchema": { "type": "object", "properties": {
-                    "repo_id": { "type": "string" },
+                    "repo_id": { "type": "string", "description": REPO_REF_DESC },
                     "pr_number": { "type": "integer" },
                     "body": { "type": "string", "description": "Markdown comment body." },
                     "path": { "type": "string", "description": "Repo-relative file path to anchor the comment to." },
                     "line": { "type": "integer", "description": "1-indexed line in `path` to anchor to." },
                     "in_reply_to": { "type": "string", "description": "Existing comment id to reply to." }
-                }, "required": ["repo_id", "pr_number", "body"] }
+                }, "required": ["pr_number", "body"] }
             },
             {
                 "name": "otto_usage_summary",
@@ -1362,6 +1380,50 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "k8s_top",
 ];
 
+/// Native tools whose `repo_id` is a friendly reference: resolved by the
+/// daemon (`GET /git/repos/resolve`) before the call — id, name, local path or
+/// remote, across EVERY workspace the session owner can read, falling back to
+/// the session's own cwd when omitted. The governed `otto.*` git tools get the
+/// same resolution server-side in the invoke choke point.
+const NATIVE_REPO_REF_TOOLS: &[&str] = &[
+    "otto_git_pr_review",
+    "otto_list_prs",
+    "otto_get_pr",
+    "otto_comment_pr",
+];
+
+/// Schema text for a friendly `repo_id` (kept in step with the governed
+/// catalog's wording in `otto_server::mcp_outward`).
+const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just this one. Omit it to use the repo this session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+
+/// The `/git/repos/resolve` query for a tool call's `repo_id` (+ optional
+/// `workspace_id` filter). Pure, so the binding is unit-tested.
+fn resolve_repo_path(args: &Value) -> String {
+    let q = opt_query(args, &[("ref", "repo_id"), ("workspace_id", "workspace_id")]);
+    let q = q.trim_start_matches('&');
+    if q.is_empty() {
+        "/git/repos/resolve".to_string()
+    } else {
+        format!("/git/repos/resolve?{q}")
+    }
+}
+
+/// Resolve `args.repo_id` (a friendly reference, or absent) to the canonical
+/// Otto repo id via the daemon, returning the arguments with `repo_id`
+/// rewritten. The daemon authorizes as the session owner (Git:View +
+/// workspace Viewer), so a reference only ever lands on a repo the owner could
+/// already list; an unknown/ambiguous reference errors with the candidates.
+async fn resolve_repo_arg(ctx: &Ctx, args: &Value) -> Result<Value, String> {
+    let v = ctx.get_json(&resolve_repo_path(args)).await?;
+    let id = v["repo"]["id"]
+        .as_str()
+        .ok_or("repo resolution returned no repo")?
+        .to_string();
+    let mut out = args.clone();
+    out["repo_id"] = json!(id);
+    Ok(out)
+}
+
 /// Append `&key=<value>` for every `(key, arg)` whose argument is a non-empty
 /// string or a number, percent-encoding string values. Optional query filters
 /// for the AWS/K8s reads (`?region=`, `?prefix=`, `?ns=` …) all follow this
@@ -1566,7 +1628,21 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
                 body,
             )
         }
-        "otto_list_repos" => ReadCall::get(format!("/workspaces/{}/repos", seg(ws_req()?))),
+        // Every workspace the caller can read, this session's first (the
+        // daemon also infers "current" from the session token); an explicit
+        // `workspace_id` narrows it.
+        "otto_list_repos" => {
+            let mut q = opt_query(args, &[("workspace_id", "workspace_id")]);
+            if let Some(ws) = ws.filter(|s| !s.is_empty()) {
+                q.push_str(&format!("&prefer_workspace_id={}", seg(ws)));
+            }
+            let q = q.trim_start_matches('&');
+            ReadCall::get(if q.is_empty() {
+                "/git/repos/directory".to_string()
+            } else {
+                format!("/git/repos/directory?{q}")
+            })
+        }
         "otto_list_sessions" => ReadCall::get(format!("/workspaces/{}/sessions", seg(ws_req()?))),
         "otto_get_session" => {
             ReadCall::get(format!("/sessions/{}", seg(&arg_str(args, "session_id")?)))
@@ -1877,6 +1953,15 @@ fn seg(s: &str) -> String {
 /// Run one tool by name. Returns the capped+redacted result `Value` and the
 /// audited row count, or an error string surfaced to the agent.
 async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
+    // Git tools: turn a friendly repo reference (or none → this session's
+    // repo) into the canonical id before any arm builds a `/repos/{id}` path.
+    let resolved;
+    let args = if NATIVE_REPO_REF_TOOLS.contains(&name) {
+        resolved = resolve_repo_arg(ctx, args).await?;
+        &resolved
+    } else {
+        args
+    };
     match name {
         // API-client reads and writes are thin wrappers over the masked,
         // workspace-scoped daemon routes. All returned values pass `finalize`.
@@ -2204,7 +2289,10 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .iter()
                 .filter_map(|c| {
                     let kind = c.get("kind").and_then(Value::as_str).unwrap_or("");
-                    if !matches!(kind, "mysql" | "redis" | "mongodb" | "clickhouse") {
+                    if !matches!(
+                        kind,
+                        "mysql" | "postgres" | "redis" | "mongodb" | "clickhouse"
+                    ) {
                         return None;
                     }
                     if kind_filter.is_some_and(|kf| kf != kind) {
@@ -3663,6 +3751,94 @@ mod tests {
         assert!(governed_invoke_args(&ctx, &no_ws, &json!({}))
             .get("workspace_id")
             .is_none());
+    }
+
+    /// The bridged git tools (`otto_create_pr`, `otto_git_status`, …) must NOT
+    /// get the session's workspace injected: their `repo_id` is resolved across
+    /// every readable workspace server-side, and a `workspace_id` would narrow
+    /// that back to the session's own — the exact bug this resolution fixes.
+    #[test]
+    fn governed_git_tools_resolve_across_workspaces_not_the_session_one() {
+        let ctx = test_ctx();
+        for short in ["create_pr", "git_status", "start_pr_review", "open_pr_draft"] {
+            let spec = otto_server::mcp_outward::otto_tool_specs()
+                .into_iter()
+                .find(|s| s["name"] == format!("otto.{short}"))
+                .unwrap_or_else(|| panic!("otto.{short} spec"));
+            let args = governed_invoke_args(&ctx, &spec, &json!({"repo_id":"promotions"}));
+            assert!(args.get("workspace_id").is_none(), "{short}: {args}");
+            let required = spec["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !required.contains(&json!("repo_id")),
+                "{short}: repo_id must be optional (session cwd fallback)"
+            );
+        }
+    }
+
+    #[test]
+    fn native_git_tools_take_a_friendly_optional_repo_ref() {
+        let catalog = tool_catalog();
+        for name in NATIVE_REPO_REF_TOOLS {
+            let tool = catalog["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == *name)
+                .unwrap_or_else(|| panic!("{name} in catalog"));
+            let schema = &tool["inputSchema"];
+            assert_eq!(
+                schema["properties"]["repo_id"]["description"],
+                json!(REPO_REF_DESC),
+                "{name}"
+            );
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            assert!(!required.contains(&json!("repo_id")), "{name}");
+        }
+        // The resolve query forwards the reference + optional filter, encoded.
+        assert_eq!(
+            resolve_repo_path(&json!({"repo_id":"team/games_management"})),
+            "/git/repos/resolve?ref=team%2Fgames_management"
+        );
+        assert_eq!(
+            resolve_repo_path(&json!({"repo_id":"promotions","workspace_id":"ws-b"})),
+            "/git/repos/resolve?ref=promotions&workspace_id=ws-b"
+        );
+        // No reference → the daemon falls back to the session's cwd.
+        assert_eq!(resolve_repo_path(&json!({})), "/git/repos/resolve");
+    }
+
+    #[test]
+    fn list_repos_spans_every_workspace_current_first() {
+        assert_eq!(
+            read_route("otto_list_repos", &json!({}), Some("ws1")).unwrap(),
+            ReadCall::get("/git/repos/directory?prefer_workspace_id=ws1".into())
+        );
+        assert_eq!(
+            read_route("otto_list_repos", &json!({"workspace_id":"ws2"}), Some("ws1")).unwrap(),
+            ReadCall::get("/git/repos/directory?workspace_id=ws2&prefer_workspace_id=ws1".into())
+        );
+        // No session workspace is no longer an error — it just lists everything.
+        assert_eq!(
+            read_route("otto_list_repos", &json!({}), None).unwrap(),
+            ReadCall::get("/git/repos/directory".into())
+        );
+    }
+
+    #[test]
+    fn daemon_error_surfaces_the_problem_message() {
+        let status = reqwest::StatusCode::NOT_FOUND;
+        let long = "x".repeat(1000);
+        let body = json!({"code":"not_found","message": format!("not found: {long}")});
+        let msg = daemon_error(status, body.to_string().as_bytes());
+        assert!(msg.starts_with("daemon returned 404 Not Found: not found: xxx"), "{msg}");
+        // The whole (bounded) message survives — candidate lists are the point.
+        assert!(msg.len() > 1000, "{}", msg.len());
+        // A non-Problem body stays a short raw snippet.
+        let raw = daemon_error(status, "y".repeat(5000).as_bytes());
+        assert!(raw.len() < 400, "{}", raw.len());
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
   // POST /usage/forecast and shows a projected cost estimate before a run.
   // Usage: <CostForecastChip feature="review" provider="claude" />
   //        <CostForecastChip feature="agent" provider="claude" estTokens={4000} />
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { ForecastReq, ForecastResp } from './types';
 
@@ -24,25 +25,34 @@
   let loading = $state(false);
   let expanded = $state(false);
 
-  async function load(): Promise<void> {
-    if (loading) return;
+  // Request token: a newer load supersedes any in-flight one, so a slow
+  // response for stale inputs can never overwrite the current forecast.
+  let seq = 0;
+
+  async function load(f: string, p: string, est: number | undefined): Promise<void> {
+    const mine = ++seq;
     loading = true;
     try {
-      const req: ForecastReq = { feature, provider };
-      if (estTokens && estTokens > 0) req.est_tokens = estTokens;
-      resp = await api.post<ForecastResp>('/usage/forecast', req);
+      const req: ForecastReq = { feature: f, provider: p };
+      if (est && est > 0) req.est_tokens = est;
+      const r = await api.post<ForecastResp>('/usage/forecast', req);
+      if (mine === seq) resp = r;
     } catch {
-      resp = null;
+      if (mine === seq) resp = null;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
-  // Reload whenever inputs change.
+  // Reload whenever inputs change. Only the three props are dependencies:
+  // `load` reads and writes `loading`/`resp`, so it runs untracked — a
+  // tracked `loading` re-ran this effect on every `finally`, which fired
+  // POST /usage/forecast back-to-back for as long as the chip was mounted.
   $effect(() => {
-    void load();
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    feature; provider; estTokens;
+    const f = feature;
+    const p = provider;
+    const est = estTokens;
+    untrack(() => void load(f, p, est));
   });
 
   function fmtCost(n: number): string {

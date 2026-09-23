@@ -6,7 +6,7 @@
 //! methods only when a real caller needs them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +30,10 @@ pub enum CdpError {
     Protocol(String),
     #[error("timed out waiting for {0}")]
     Timeout(String),
+    /// A top-level document request (navigation or redirect hop) was refused
+    /// by the SSRF guard. Carries the refused host, never the full URL.
+    #[error("navigation to {0} blocked (SSRF guard)")]
+    Blocked(String),
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
@@ -197,6 +201,112 @@ impl CdpClient {
         }
     }
 
+    /// Turn on CDP request interception (`Fetch.enable`, request stage, every
+    /// URL) for `session_id`: from here on every network request the page
+    /// makes — the navigation, each redirect hop, subresources, XHR/fetch —
+    /// is PAUSED until [`Self::pump_until_load`] answers it. Errors when the
+    /// engine does not implement the `Fetch` domain.
+    pub async fn enable_request_interception(&self, session_id: &str) -> Result<(), CdpError> {
+        self.call(
+            "Fetch.enable",
+            json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+            Some(session_id),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Like [`Self::wait_for_load_event`], but also answers every
+    /// `Fetch.requestPaused` event while waiting: when `guard` is set the
+    /// request's URL is vetted through `otto-netguard` (see
+    /// [`request_allowed`]) and continued or failed (`BlockedByClient`); a
+    /// refused *document* request (the navigation itself or a redirect hop)
+    /// ends the wait with [`CdpError::Blocked`]. With `guard` off paused
+    /// requests are simply continued.
+    pub async fn pump_until_load(
+        &self,
+        session_id: &str,
+        timeout: Duration,
+        guard: bool,
+    ) -> Result<(), CdpError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut events = self.events.lock().await;
+        // Per-navigation verdict cache keyed by scheme://host:port, so a page
+        // with 100 subresources on one CDN costs one DNS vetting, not 100.
+        let mut verdicts: HashMap<String, bool> = HashMap::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(CdpError::Timeout("Page.loadEventFired".into()));
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some((method, _))) if method == "Page.loadEventFired" => return Ok(()),
+                Ok(Some((method, params))) if method == "Fetch.requestPaused" => {
+                    self.answer_paused(session_id, &params, guard, &mut verdicts)
+                        .await?;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => return Err(CdpError::Closed),
+                Err(_) => return Err(CdpError::Timeout("Page.loadEventFired".into())),
+            }
+        }
+    }
+
+    async fn answer_paused(
+        &self,
+        session_id: &str,
+        params: &Value,
+        guard: bool,
+        verdicts: &mut HashMap<String, bool>,
+    ) -> Result<(), CdpError> {
+        let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let url = params
+            .pointer("/request/url")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let allowed = if !guard {
+            true
+        } else {
+            let key = origin_key(url);
+            match verdicts.get(&key) {
+                Some(v) => *v,
+                None => {
+                    let v = request_allowed(url).await;
+                    verdicts.insert(key, v);
+                    v
+                }
+            }
+        };
+        if allowed {
+            self.call(
+                "Fetch.continueRequest",
+                json!({"requestId": request_id}),
+                Some(session_id),
+            )
+            .await?;
+            return Ok(());
+        }
+        let _ = self
+            .call(
+                "Fetch.failRequest",
+                json!({"requestId": request_id, "errorReason": "BlockedByClient"}),
+                Some(session_id),
+            )
+            .await;
+        // A refused document (navigation / redirect hop) ends the page. An
+        // engine that omits `resourceType` is treated the same (fail closed).
+        if params
+            .get("resourceType")
+            .and_then(Value::as_str)
+            .is_none_or(|t| t == "Document")
+        {
+            return Err(CdpError::Blocked(host_for_error(url)));
+        }
+        Ok(())
+    }
+
     pub async fn evaluate_outer_html(&self, session_id: &str) -> Result<String, CdpError> {
         self.evaluate(session_id, "document.documentElement.outerHTML")
             .await?
@@ -252,18 +362,157 @@ fn cdp_err(e: CdpError) -> EngineError {
         CdpError::Closed => EngineError::Unavailable("cdp websocket closed".into()),
         CdpError::Protocol(msg) => EngineError::Nav(msg),
         CdpError::Timeout(_) => EngineError::Timeout(PAGE_TIMEOUT_SECS),
+        e @ CdpError::Blocked(_) => EngineError::Nav(e.to_string()),
     }
+}
+
+/// SSRF verdict for one request the page makes (navigation, redirect hop,
+/// subresource, XHR). Non-network schemes (`data:`/`blob:`/`about:`) pass;
+/// everything else must satisfy `otto_netguard::check_url` — http(s)/ws(s)
+/// only, and no loopback / private / link-local / metadata address.
+pub(crate) async fn request_allowed(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if matches!(parsed.scheme(), "data" | "blob" | "about") {
+        return true;
+    }
+    if !otto_netguard::check_url_literal(&parsed) {
+        return false;
+    }
+    otto_netguard::check_url(url).await.is_ok()
+}
+
+/// Cache key for [`request_allowed`] verdicts: `scheme://host:port`.
+fn origin_key(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => format!(
+            "{}://{}:{}",
+            u.scheme(),
+            u.host_str().unwrap_or(""),
+            u.port_or_known_default().unwrap_or(0)
+        ),
+        Err(_) => url.to_string(),
+    }
+}
+
+/// Host of a refused URL for an error message (never the path/query, which
+/// may carry tokens).
+fn host_for_error(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "an unparseable url".into())
 }
 
 /// Drives a lightpanda sidecar over CDP: navigate, wait for load, snapshot
 /// the DOM. Runs JS, so pages it returns are never `degraded`.
+///
+/// SSRF: the route layer netguard-checks the URL it hands us, but the engine
+/// then follows redirects and loads subresources/XHR on its own. A guarded
+/// engine ([`Self::new`]) therefore intercepts EVERY request the page makes
+/// (`Fetch.enable`) and vets it through `otto-netguard` before letting it go,
+/// and re-checks the settled `location.href`. An engine build that cannot
+/// intercept is refused (reported `Unavailable`, so [`crate::BrowserService`]
+/// degrades to the guarded plain fetch) rather than browsing unguarded.
+/// Residual: lightpanda resolves hostnames itself, so a request is vetted on
+/// our resolution of the name, not pinned to it.
 pub struct LightpandaEngine {
     cdp_url: String,
+    /// Vet every request through the SSRF guard. Only fixtures pointing the
+    /// engine at a loopback test server turn this off ([`Self::new_unguarded`]).
+    guard: bool,
+    /// Latched when the engine rejected `Fetch.enable`: every later call is
+    /// refused up front instead of re-probing per page.
+    interception_unsupported: AtomicBool,
 }
 
 impl LightpandaEngine {
+    /// A guarded engine — what the daemon uses.
     pub fn new(cdp_url: String) -> Self {
-        Self { cdp_url }
+        Self {
+            cdp_url,
+            guard: true,
+            interception_unsupported: AtomicBool::new(false),
+        }
+    }
+
+    /// An engine WITHOUT request interception / SSRF vetting. For tests that
+    /// drive a real sidecar against a loopback fixture server only — never
+    /// for user-supplied URLs.
+    pub fn new_unguarded(cdp_url: String) -> Self {
+        Self {
+            cdp_url,
+            guard: false,
+            interception_unsupported: AtomicBool::new(false),
+        }
+    }
+
+    /// `false` once this (guarded) engine found it cannot intercept requests.
+    pub fn interception_ok(&self) -> bool {
+        !(self.guard && self.interception_unsupported.load(Ordering::Relaxed))
+    }
+
+    /// Guarded navigation: enable interception (when guarding), then run
+    /// `Page.navigate` CONCURRENTLY with the event pump — with interception on,
+    /// the navigation request itself is paused until the pump continues it, so
+    /// awaiting `navigate` first could stall. Finally re-vet the settled
+    /// `location.href` (belt and braces for engines that don't pause redirect
+    /// hops).
+    async fn navigate_guarded(
+        &self,
+        client: &CdpClient,
+        session_id: &str,
+        url: &str,
+    ) -> Result<(), EngineError> {
+        if self.guard {
+            if !self.interception_ok() {
+                return Err(unsupported_interception());
+            }
+            match client.enable_request_interception(session_id).await {
+                Ok(()) => {}
+                // The engine answered and said no: it lacks the Fetch domain.
+                // Latch, so later pages skip straight to the plain fetch.
+                Err(CdpError::Protocol(_)) => {
+                    self.interception_unsupported.store(true, Ordering::Relaxed);
+                    tracing::warn!(
+                        "browser: lightpanda does not support CDP request interception \
+                         (Fetch.enable); refusing JS browsing and using the guarded plain fetch"
+                    );
+                    return Err(unsupported_interception());
+                }
+                Err(e) => return Err(cdp_err(e)),
+            }
+        }
+        let nav = client.navigate(session_id, url);
+        let load = client.pump_until_load(
+            session_id,
+            Duration::from_secs(PAGE_TIMEOUT_SECS),
+            self.guard,
+        );
+        tokio::pin!(nav);
+        tokio::pin!(load);
+        tokio::select! {
+            r = &mut load => {
+                r.map_err(cdp_err)?;
+                nav.await.map_err(cdp_err)?;
+            }
+            r = &mut nav => {
+                r.map_err(cdp_err)?;
+                load.await.map_err(cdp_err)?;
+            }
+        }
+        if self.guard {
+            let href = client
+                .evaluate(session_id, "location.href")
+                .await
+                .map_err(cdp_err)?;
+            let href = href.as_str().unwrap_or("");
+            if !request_allowed(href).await {
+                return Err(cdp_err(CdpError::Blocked(host_for_error(href))));
+            }
+        }
+        Ok(())
     }
 
     /// Caller must netguard-check `url` first — see crate docs.
@@ -299,11 +548,10 @@ impl LightpandaEngine {
         let target_id = client.create_target("about:blank").await.map_err(cdp_err)?;
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
-        client.navigate(&session_id, url).await.map_err(cdp_err)?;
-        client
-            .wait_for_load_event(Duration::from_secs(PAGE_TIMEOUT_SECS))
-            .await
-            .map_err(cdp_err)?;
+        if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
+            let _ = client.close_target(&target_id).await;
+            return Err(e);
+        }
         let html = client
             .evaluate_outer_html(&session_id)
             .await
@@ -356,11 +604,20 @@ impl LightpandaEngine {
         let target_id = client.create_target("about:blank").await.map_err(cdp_err)?;
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
-        client.navigate(&session_id, url).await.map_err(cdp_err)?;
-        client
-            .wait_for_load_event(Duration::from_secs(PAGE_TIMEOUT_SECS))
-            .await
-            .map_err(cdp_err)?;
+        if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
+            let _ = client.close_target(&target_id).await;
+            return Err(e);
+        }
+
+        // The credential belongs to the REQUESTED site: the fill script
+        // refuses (before touching any field) when the page settled on
+        // another site — an open redirect, a lapsed domain or a takeover must
+        // not receive the password — or when the form would post it off-site
+        // or downgrade it to plain http.
+        let Some(expected) = LoginOrigin::of(url) else {
+            let _ = client.close_target(&target_id).await;
+            return Err(EngineError::Nav("login url has no host".into()));
+        };
 
         // `serde_json::to_string` on a `&str` produces a properly-escaped
         // JSON string literal, which is also a valid JS string literal — the
@@ -368,21 +625,42 @@ impl LightpandaEngine {
         // expression string without risking injection into the surrounding
         // script (see `fill_and_submit_expr`'s doc comment).
         let outcome = client
-            .evaluate(&session_id, &fill_and_submit_expr(username, password))
+            .evaluate(
+                &session_id,
+                &fill_and_submit_expr(username, password, &expected),
+            )
             .await
             .map_err(cdp_err)?;
-        if outcome.as_str() == Some("no-password-field") {
+        let refusal = match outcome.as_str() {
+            Some("no-password-field") => Some("no password field found on login page"),
+            Some("wrong-origin") => Some(
+                "login page is served from a different site than the credential's domain; \
+                 refusing to fill credentials",
+            ),
+            Some("wrong-form-action") => Some(
+                "login form would submit to a different site (or over plain http); \
+                 refusing to fill credentials",
+            ),
+            _ => None,
+        };
+        if let Some(message) = refusal {
             let _ = client.close_target(&target_id).await;
-            return Err(EngineError::Nav(
-                "no password field found on login page".into(),
-            ));
+            return Err(EngineError::Nav(message.into()));
         }
 
         // Best-effort settle: a classic form submit fires a real navigation
         // (Page.loadEventFired); a JS/SPA login (fetch/XHR, no navigation)
         // never will, so a timeout here is expected, not an error — it just
         // means "check the DOM as it stands now" instead of "reload happened".
-        let _ = client.wait_for_load_event(Duration::from_secs(5)).await;
+        // The pump keeps answering intercepted requests (the submit POST and
+        // whatever it loads); a refused document hop is a hard error.
+        if let Err(e @ CdpError::Blocked(_)) = client
+            .pump_until_load(&session_id, Duration::from_secs(5), self.guard)
+            .await
+        {
+            let _ = client.close_target(&target_id).await;
+            return Err(cdp_err(e));
+        }
 
         let still_present = client
             .evaluate(
@@ -396,6 +674,53 @@ impl LightpandaEngine {
     }
 }
 
+fn unsupported_interception() -> EngineError {
+    EngineError::Unavailable(
+        "lightpanda cannot intercept requests (CDP Fetch domain), so its redirects and \
+         subresources can't be SSRF-checked"
+            .into(),
+    )
+}
+
+/// The site a stored browser credential may be typed into, derived from the
+/// login URL the route built (`https://{domain}/`).
+struct LoginOrigin {
+    /// Lower-cased host, trailing dot stripped.
+    host: String,
+    /// The login URL was https — the page and the form must stay https.
+    require_https: bool,
+}
+
+impl LoginOrigin {
+    fn of(url: &str) -> Option<Self> {
+        let parsed = reqwest::Url::parse(url).ok()?;
+        let host = parsed
+            .host_str()?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host.is_empty() {
+            return None;
+        }
+        Some(Self {
+            host,
+            require_https: parsed.scheme() == "https",
+        })
+    }
+
+    /// Rust mirror of the in-page `okSite` check in [`fill_and_submit_expr`]
+    /// (kept in lockstep; unit-tested here since the JS can't be).
+    #[cfg(test)]
+    fn allows(&self, protocol: &str, host: &str) -> bool {
+        let h = host.trim_end_matches('.').to_ascii_lowercase();
+        if self.require_https && protocol != "https:" {
+            return false;
+        }
+        h == self.host
+            || (h.len() > self.host.len() + 1 && h.ends_with(&format!(".{}", self.host)))
+            || self.host == format!("www.{h}")
+    }
+}
+
 /// Builds the JS expression `drive_login` evaluates in the target page to
 /// fill and submit a login form. `username`/`password` are embedded via
 /// `serde_json::to_string` (JSON string-literal escaping, which is also
@@ -403,13 +728,40 @@ impl LightpandaEngine {
 /// quotes, backslashes, control characters) rather than any hand-rolled
 /// escaping, so a credential containing `"`, `\`, or a newline can't break
 /// out of the string literal into surrounding script.
-fn fill_and_submit_expr(username: &str, password: &str) -> String {
+///
+/// Before touching any field it checks, in the page, that the document it
+/// settled on belongs to `expected` (same host, a subdomain of it, or the bare
+/// domain of a `www.` login host — the same rule as [`LoginOrigin::allows`])
+/// and, for an https login, is still https; and that the enclosing form's
+/// `action` satisfies the same rule. Returns `'wrong-origin'` /
+/// `'wrong-form-action'` instead of filling when it doesn't.
+fn fill_and_submit_expr(username: &str, password: &str, expected: &LoginOrigin) -> String {
     let user_js = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string());
     let pass_js = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string());
+    let host_js = serde_json::to_string(&expected.host).unwrap_or_else(|_| "\"\"".to_string());
+    let https_js = if expected.require_https { "true" } else { "false" };
     format!(
         "(function(){{\
+           var EXP = {host_js};\
+           var REQ_HTTPS = {https_js};\
+           var okSite = function(proto, h) {{\
+             h = String(h || '').toLowerCase();\
+             if (h.charAt(h.length - 1) === '.') h = h.slice(0, -1);\
+             if (REQ_HTTPS && proto !== 'https:') return false;\
+             return h === EXP || \
+                    (h.length > EXP.length + 1 && h.slice(-(EXP.length + 1)) === '.' + EXP) || \
+                    ('www.' + h) === EXP;\
+           }};\
+           if (!okSite(location.protocol, location.hostname)) return 'wrong-origin';\
            var pwd = document.querySelector('input[type=\"password\"]');\
            if (!pwd) return 'no-password-field';\
+           var owner = pwd.closest('form');\
+           if (owner) {{\
+             var act;\
+             try {{ act = new URL(owner.getAttribute('action') || location.href, location.href); }}\
+             catch (e) {{ return 'wrong-form-action'; }}\
+             if (!okSite(act.protocol, act.hostname)) return 'wrong-form-action';\
+           }}\
            var user = document.querySelector('input[type=\"email\"]') || \
                       document.querySelector('input[autocomplete=\"username\"]') || \
                       document.querySelector('input[type=\"text\"]');\
@@ -478,5 +830,78 @@ impl BrowserEngine for LightpandaEngine {
 
     fn name(&self) -> &'static str {
         "lightpanda"
+    }
+
+    fn is_usable(&self) -> bool {
+        self.interception_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_origin_binds_to_the_credential_site() {
+        let o = LoginOrigin::of("https://Example.com./").unwrap();
+        assert_eq!(o.host, "example.com");
+        assert!(o.allows("https:", "example.com"));
+        assert!(o.allows("https:", "login.example.com"));
+        assert!(o.allows("https:", "EXAMPLE.COM."));
+        // Off-site redirects (open redirect, lapsed domain, look-alikes).
+        assert!(!o.allows("https:", "evil.com"));
+        assert!(!o.allows("https:", "example.com.evil.com"));
+        assert!(!o.allows("https:", "notexample.com"));
+        // Downgrade to plain http.
+        assert!(!o.allows("http:", "example.com"));
+        // A www. login host may settle on its bare domain, not vice versa.
+        let w = LoginOrigin::of("https://www.example.com/").unwrap();
+        assert!(w.allows("https:", "example.com"));
+        assert!(!o.allows("https:", "com"));
+        // An http login (fixtures only) doesn't demand https.
+        let h = LoginOrigin::of("http://127.0.0.1:8080/login").unwrap();
+        assert!(h.allows("http:", "127.0.0.1"));
+        assert!(!h.allows("http:", "127.0.0.2"));
+    }
+
+    #[test]
+    fn fill_script_embeds_the_expected_site_before_any_field() {
+        let o = LoginOrigin::of("https://example.com/").unwrap();
+        let js = fill_and_submit_expr("u", "p\"w", &o);
+        let origin_check = js.find("'wrong-origin'").unwrap();
+        let fill = js.find("pwd.value").unwrap();
+        assert!(origin_check < fill, "origin must be checked before filling");
+        assert!(js.contains("var EXP = \"example.com\""));
+        assert!(js.contains("var REQ_HTTPS = true"));
+        assert!(js.contains("'wrong-form-action'"));
+        // Credentials stay JSON-escaped.
+        assert!(js.contains("\"p\\\"w\""));
+    }
+
+    #[tokio::test]
+    async fn request_vetting_blocks_internal_targets() {
+        assert!(!request_allowed("http://127.0.0.1:7700/api/v1/sessions").await);
+        assert!(!request_allowed("http://169.254.169.254/latest/meta-data/").await);
+        assert!(!request_allowed("http://[::1]/").await);
+        assert!(!request_allowed("file:///etc/passwd").await);
+        assert!(!request_allowed("not a url").await);
+        assert!(request_allowed("data:text/plain,hi").await);
+        assert!(request_allowed("about:blank").await);
+        assert!(request_allowed("https://8.8.8.8/").await);
+    }
+
+    #[test]
+    fn engine_usability_latches_only_for_guarded_engines() {
+        let guarded = LightpandaEngine::new("ws://127.0.0.1:1".into());
+        assert!(guarded.is_usable());
+        guarded
+            .interception_unsupported
+            .store(true, Ordering::Relaxed);
+        assert!(!guarded.is_usable());
+        let fixture = LightpandaEngine::new_unguarded("ws://127.0.0.1:1".into());
+        fixture
+            .interception_unsupported
+            .store(true, Ordering::Relaxed);
+        assert!(fixture.is_usable());
     }
 }

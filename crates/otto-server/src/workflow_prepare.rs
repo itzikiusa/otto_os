@@ -16,9 +16,14 @@ use serde_json::Value;
 use crate::state::ServerCtx;
 
 /// Resolve the Jira key a `prepare_context` step should fetch, in order:
-/// `params.key` → `input.jira_ticket` (both trusted verbatim — the caller
-/// already knows the exact key) → the first Jira-key-shaped token found by
-/// scanning `input.prompt`, then `input.msg` (free text — must be scanned).
+/// `params.key` (the workflow author's, trusted verbatim) → the Jira key in
+/// `input.jira_ticket` → the first Jira-key-shaped token found by scanning
+/// `input.prompt`, then `input.msg` (free text — must be scanned).
+///
+/// `jira_ticket` comes from a chat field, so it is scanned too (case-folded;
+/// a pasted issue URL yields its key): "N/A" / "none" used to be fetched as
+/// `/issue/N/A` and written as `jira-N/A.md` (which failed, and with
+/// `require: true` failed the run). A value with no key means "no ticket".
 pub(crate) fn extract_jira_key(params: &Value, input: &Value) -> Option<String> {
     if let Some(k) = params
         .get("key")
@@ -33,8 +38,9 @@ pub(crate) fn extract_jira_key(params: &Value, input: &Value) -> Option<String> 
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .and_then(|s| scan_jira_key(&s.to_ascii_uppercase()))
     {
-        return Some(k.to_string());
+        return Some(k);
     }
     for field in ["prompt", "msg"] {
         if let Some(text) = input.get(field).and_then(Value::as_str) {
@@ -239,6 +245,38 @@ mod tests {
             None
         );
         assert_eq!(extract_jira_key(&json!({}), &json!({})), None);
+    }
+
+    /// A chat `Jira ticket:` value is validated, not trusted: placeholders
+    /// mean "no ticket" (falling through to the prompt scan), a URL or a
+    /// lowercase key yields the key.
+    #[test]
+    fn jira_ticket_field_must_hold_a_key() {
+        for junk in ["N/A", "none", "-", "TBD"] {
+            assert_eq!(
+                extract_jira_key(&json!({}), &json!({ "jira_ticket": junk })),
+                None,
+                "{junk}"
+            );
+        }
+        assert_eq!(
+            extract_jira_key(
+                &json!({}),
+                &json!({"jira_ticket": "N/A", "prompt": "fix PROJ-5"})
+            ),
+            Some("PROJ-5".into())
+        );
+        assert_eq!(
+            extract_jira_key(
+                &json!({}),
+                &json!({"jira_ticket": "https://acme.atlassian.net/browse/GS-16749"})
+            ),
+            Some("GS-16749".into())
+        );
+        assert_eq!(
+            extract_jira_key(&json!({}), &json!({"jira_ticket": "gs-12"})),
+            Some("GS-12".into())
+        );
     }
 
     /// Order: params.key wins over input.jira_ticket, which wins over a

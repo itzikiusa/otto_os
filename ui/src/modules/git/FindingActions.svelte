@@ -96,7 +96,26 @@
     void runAgent('ask agent to fix', () => fixFinding(finding.id), 'Fix agent started');
   }
   function doVerify(): void {
-    void runAgent('verify', () => verifyFinding(finding.id), 'Verification started');
+    // Verify is judged synchronously and is evidence-based: say plainly when
+    // it did NOT verify (and why) instead of a generic "started" toast.
+    if (busy) return;
+    busy = 'verify';
+    verifyFinding(finding.id)
+      .then((resp) => {
+        onupdated(resp.finding);
+        if (resp.finding.status === 'verified') {
+          toasts.success('Verified', resp.note ?? undefined);
+        } else {
+          toasts.warn('Not verified', resp.note ?? undefined);
+        }
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+        toasts.error('Could not verify', msg);
+      })
+      .finally(() => {
+        busy = '';
+      });
   }
   function doRegressionTest(): void {
     void runAgent(

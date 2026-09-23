@@ -14,6 +14,7 @@
   import type { BrowserCredential } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
   import AgentDock from './AgentDock.svelte';
@@ -520,7 +521,16 @@
 </script>
 
 <div class="browser">
-  <TabStrip onnew={newTab} />
+  {#if embedded}
+    <TabStrip onnew={newTab} />
+  {:else}
+    <!-- Module page: the page tabs ride inline in the unified header bar. -->
+    <PageHeader title="Browser">
+      {#snippet tabs()}
+        <TabStrip onnew={newTab} inbar />
+      {/snippet}
+    </PageHeader>
+  {/if}
 
   <div class="urlbar">
     <input

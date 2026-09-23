@@ -103,9 +103,16 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
                                                     // Also pushed unsolicited to resync a viewer whose output stream
                                                     // lagged (dropped chunks) or whose dead session came back alive.
 {"type":"status","status":"working"}                // running|working|idle|exited|reconnectable
-{"type":"exit","code":0}                            // child exited; socket stays open
+{"type":"exit","code":0}                            // child exited; socket stays open. When the session is respawned
+                                                    // (resume/restart from any client or engine) the server moves this
+                                                    // socket onto the new process within ~1 s — or at the next `input` —
+                                                    // and sends `status` (live value) + an unsolicited `scrollback`
+                                                    // (new `epoch`); clients drop their exited state on a live `status`.
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
+{"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
+                                                    // its terminal (queue full / not drained in 15 s — already-queued bytes
+                                                    // are still delivered in order). Sent once per failing stretch.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches
 ```
 

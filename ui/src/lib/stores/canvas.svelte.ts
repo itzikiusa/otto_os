@@ -178,8 +178,13 @@ class CanvasStore {
    *  Skipped while the user has UNSAVED edits in flight (`dirty`) — the agent's
    *  ~1s live poll would otherwise reset the source pane mid-keystroke; once
    *  the debounced save lands (dirty clears) live pushes apply again, and the
-   *  server-side `expect_updated_at` guard arbitrates the final commit. */
-  ingestDoc(doc: CanvasDoc): void {
+   *  server-side `expect_updated_at` guard arbitrates the final commit.
+   *  `sceneId` binds a result to the scene it was produced for: an Ask-AI run
+   *  can take minutes, and applying it to whichever scene is open by then
+   *  wrote scene A's drawing into scene B on the next autosave. (The server
+   *  already committed it to its own scene; opening that scene shows it.) */
+  ingestDoc(doc: CanvasDoc, sceneId?: string | null): void {
+    if (sceneId !== undefined && sceneId !== this.currentId) return;
     if (typeof doc.source !== 'string') return;
     if (this.dirty) return;
     this.source = doc.source;
@@ -188,8 +193,10 @@ class CanvasStore {
     this.savedAt = Date.now();
   }
 
-  /** Append a turn to the inline conversation. */
-  pushConvo(role: 'user' | 'assistant', text: string): void {
+  /** Append a turn to the inline conversation (of `sceneId` when given — a
+   *  late reply for another scene is dropped, not appended to this one). */
+  pushConvo(role: 'user' | 'assistant', text: string, sceneId?: string | null): void {
+    if (sceneId !== undefined && sceneId !== this.currentId) return;
     this.convo = [...this.convo, { role, text, ts: Date.now() }];
   }
 

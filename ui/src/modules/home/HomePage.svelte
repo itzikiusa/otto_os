@@ -7,6 +7,8 @@
   import { fly } from 'svelte/transition';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -136,52 +138,62 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="home" role="region" aria-label="Home dashboard" ontouchstart={onTouchStart} ontouchend={onTouchEnd}>
-  <div class="bar">
-    {#if home.views.length > 1}
-      <button class="icon-btn" onclick={() => home.prev()} title="Previous view (←)" aria-label="Previous view"><Icon name="chevronLeft" size={14} /></button>
-    {/if}
-    <button class="vname" onclick={viewMenu} oncontextmenu={viewMenu} title="View options">
-      <span class="ellipsis">{home.active?.name ?? 'Home'}</span>
-      <Icon name="chevronDown" size={11} />
-    </button>
-    {#if home.views.length > 1}
-      <button class="icon-btn" onclick={() => home.next()} title="Next view (→)" aria-label="Next view"><Icon name="chevronRight" size={14} /></button>
-    {/if}
-    <div class="dots" role="tablist" aria-label="Views">
-      {#each home.views as v, i (v.id)}
+  <PageHeader title="Home">
+    {#snippet tabs()}
+      <div class="bar">
+        {#if home.views.length > 1}
+          <button class="icon-btn" onclick={() => home.prev()} title="Previous view (←)" aria-label="Previous view"><Icon name="chevronLeft" size={14} /></button>
+        {/if}
+        <button class="vname" onclick={viewMenu} oncontextmenu={viewMenu} title="View options">
+          <span class="ellipsis">{home.active?.name ?? 'Home'}</span>
+          <Icon name="chevronDown" size={11} />
+        </button>
+        {#if home.views.length > 1}
+          <button class="icon-btn" onclick={() => home.next()} title="Next view (→)" aria-label="Next view"><Icon name="chevronRight" size={14} /></button>
+        {/if}
+        <div class="dots" role="tablist" aria-label="Views">
+          {#each home.views as v, i (v.id)}
+            <button
+              class="dot"
+              class:on={i === home.activeIndex}
+              role="tab"
+              aria-selected={i === home.activeIndex}
+              aria-label={v.name}
+              title={v.name}
+              onclick={() => home.goTo(i)}
+            ></button>
+          {/each}
+        </div>
+        {#if home.views.length < MAX_VIEWS}
+          <!-- Outside the tablist: a tablist may only contain tabs (axe aria-required-children). -->
+          <button class="dot add" onclick={addView} title="Add view" aria-label="Add view"><Icon name="plus" size={9} /></button>
+        {/if}
+      </div>
+    {/snippet}
+    {#snippet actions()}
+      {#if home.views.length > 1}
         <button
-          class="dot"
-          class:on={i === home.activeIndex}
-          role="tab"
-          aria-selected={i === home.activeIndex}
-          aria-label={v.name}
-          title={v.name}
-          onclick={() => home.goTo(i)}
-        ></button>
-      {/each}
-    </div>
-    {#if home.views.length < MAX_VIEWS}
-      <!-- Outside the tablist: a tablist may only contain tabs (axe aria-required-children). -->
-      <button class="dot add" onclick={addView} title="Add view" aria-label="Add view"><Icon name="plus" size={9} /></button>
-    {/if}
-    <span class="spacer"></span>
-    {#if home.views.length > 1}
-      <button
-        class="btn small ghost rot"
-        class:on={home.autoRotate}
-        onclick={() => home.setAutoRotate(!home.autoRotate)}
-        title={home.autoRotate ? 'Auto-rotate every 30 s — click to pause' : 'Auto-rotate is paused — click to resume'}
-        aria-pressed={home.autoRotate}
-        aria-label="Auto-rotate views"
-      >
-        <Icon name={home.autoRotate ? 'refresh' : 'play'} size={11} />
-        {home.autoRotate ? '30s' : 'Paused'}
-      </button>
-    {/if}
-    <button class="btn small" onclick={() => (picking = true)} disabled={!home.active || full} title={full ? `A view holds at most ${MAX_BOXES} boxes` : 'Add a box to this view'}>
-      <Icon name="plus" size={11} />Add box
-    </button>
-  </div>
+          class="btn small ghost rot"
+          class:on={home.autoRotate}
+          onclick={() => home.setAutoRotate(!home.autoRotate)}
+          title={home.autoRotate ? 'Auto-rotate every 30 s — click to pause' : 'Auto-rotate is paused — click to resume'}
+          aria-pressed={home.autoRotate}
+          aria-label="Auto-rotate views"
+          data-label={home.autoRotate ? 'Pause auto-rotate' : 'Resume auto-rotate'}
+        >
+          <Icon name={home.autoRotate ? 'refresh' : 'play'} size={11} />
+          {home.autoRotate ? '30s' : 'Paused'}
+        </button>
+      {/if}
+      <!-- One primary per page: an empty view's EmptyState owns "Add a box". -->
+      {#if home.active && home.active.boxes.length > 0}
+        <button class="btn small primary" onclick={() => (picking = true)} disabled={full} title={full ? `A view holds at most ${MAX_BOXES} boxes` : 'Add a box to this view'}>
+          <Icon name="plus" size={11} />Add box
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody padded={false} fill>
   {#if rotating}
     {#key home.rotationEpoch}
       <div class="progress" aria-hidden="true"><i style:animation-duration="{ROTATE_MS}ms"></i></div>
@@ -206,7 +218,7 @@
         >
           {#if home.active.boxes.length === 0}
             <div class="empty">
-              <EmptyState icon="grid" title="This view is empty" body="Add up to {MAX_BOXES} boxes — resize them from the corner, drag the grip to reorder, double-click a header to zoom." actionLabel="Add a box" onaction={() => (picking = true)} />
+              <EmptyState variant="page" icon="grid" title="This view is empty" body="Add up to {MAX_BOXES} boxes — resize them from the corner, drag the grip to reorder, double-click a header to zoom." actionLabel="Add a box" actionIcon="plus" onaction={() => (picking = true)} />
             </div>
           {:else}
             {#each home.active.boxes as b, i (b.id)}
@@ -217,10 +229,11 @@
       {/key}
     {:else}
       <div class="empty">
-        <EmptyState icon="grid" title="No views yet" body="Create a view, then fill it with boxes." actionLabel="Add view" onaction={addView} />
+        <EmptyState variant="page" icon="grid" title="No views yet" body="Create a view, then fill it with boxes." actionLabel="Add view" actionIcon="plus" onaction={addView} />
       </div>
     {/if}
   </div>
+  </PageBody>
 </div>
 
 {#if picking}
@@ -253,9 +266,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 12px;
     flex: none;
-    flex-wrap: wrap;
   }
   .vname {
     display: inline-flex;
@@ -267,8 +278,8 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 14px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 600;
     border-radius: var(--radius-s);
     cursor: pointer;
   }
@@ -307,9 +318,6 @@
   .dot.add:hover {
     color: var(--accent);
     border-color: var(--accent);
-  }
-  .spacer {
-    flex: 1;
   }
   .rot {
     gap: 4px;
@@ -370,9 +378,7 @@
   }
   .empty {
     grid-column: 1 / -1;
-    grid-row: span 5;
-    display: grid;
-    place-items: center;
+    grid-row: span 6;
   }
   .kinds {
     display: grid;

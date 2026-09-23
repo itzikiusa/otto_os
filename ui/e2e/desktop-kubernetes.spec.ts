@@ -99,7 +99,7 @@ test('#/kubernetes renders the install panel or the clusters overview', async ({
   const pageRoot = page.getByTestId('k8s-page');
   await expect(pageRoot).toBeVisible();
   const install = page.getByTestId('k8s-install-panel');
-  const overview = page.locator('.page-header h1', { hasText: 'Kubernetes' });
+  const overview = page.locator('[data-testid=page-header] h1', { hasText: 'Kubernetes' });
   await expect(install.or(overview).first()).toBeVisible({ timeout: 15_000 });
   if (status && !status.kubectl.installed) {
     await expect(install).toBeVisible();

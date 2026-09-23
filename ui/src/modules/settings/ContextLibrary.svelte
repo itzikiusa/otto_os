@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Context Library (root-only): author and edit the Otto-owned library of
   // skills, souls, and context snippets — the single source of truth that gets
   // materialized into each workspace's CLIs. Also sets the instance-wide default
@@ -209,17 +211,9 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Context Library</h1>
-      <div class="sub">
-        The Otto-owned library of skills, souls, and context snippets — the single source of truth
-        materialized into each workspace's CLIs. Edits here propagate at the next session spawn.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title="Context Library" subtitle="The Otto-owned library of skills, souls, and context snippets — the single source of truth materialized into each workspace's CLIs. Edits here propagate at the next session spawn." />
+  <PageBody width="readable">
 
   <!-- Default soul selector (souls tab only) -->
   {#if tab === 'souls'}
@@ -329,9 +323,17 @@
       {/if}
     </div>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .default-soul {
     display: flex;
     flex-direction: column;

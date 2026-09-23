@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import { tick } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { DaemonLogs } from '../../lib/api/types';
@@ -130,19 +132,16 @@
   }
 </script>
 
-<div class="page logs-page">
-  <div class="page-header">
-    <div>
-      <h1>Logs</h1>
-      <div class="sub">{payload?.log_dir ?? '~/Library/Logs/Otto'}</div>
-    </div>
-    <div class="header-actions">
+<div class="settings-section logs-section">
+  <PageHeader title="Logs" subtitle={payload?.log_dir ?? '~/Library/Logs/Otto'}>
+    {#snippet actions()}
       <button class="btn" disabled={refreshing || loading} onclick={refreshFull}>
         <Icon name="refresh" size={13} />
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
+  <PageBody padded={false} fill>
 
   {#if loading}
     <Skeleton rows={8} height={34} />
@@ -205,26 +204,23 @@
 
     <pre class="log-view" bind:this={logEl}>{visibleContent}</pre>
   {/if}
+  </PageBody>
 </div>
 
 <style>
-  .logs-page {
-    height: 100%;
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
     display: flex;
     flex-direction: column;
+    height: 100%;
     min-height: 0;
-  }
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
   .toolbar {
     display: flex;
     flex-wrap: wrap;
     align-items: end;
     gap: 10px;
-    padding: 0 24px 12px;
+    padding: 12px 20px;
     border-bottom: 1px solid var(--border);
   }
   .field {
@@ -261,7 +257,7 @@
     justify-content: space-between;
     align-items: center;
     gap: 12px;
-    padding: 0 24px;
+    padding: 0 20px;
     color: var(--text-dim);
     font-size: 11.5px;
     border-bottom: 1px solid var(--border);

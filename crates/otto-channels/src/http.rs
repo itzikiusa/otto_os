@@ -122,6 +122,29 @@ async fn upsert_integration<S: ChannelsCtx>(
     let channel = Channel::parse(&channel_str)
         .ok_or_else(|| Error::Invalid(format!("unknown channel '{channel_str}'")))?;
 
+    // One listener per bot: refuse to ENABLE an integration whose inbound
+    // token (Slack app token / Telegram bot token) another workspace's enabled
+    // integration already listens with. Checked before any secret is stored so
+    // a refused request changes nothing.
+    if req.enabled {
+        let incoming = match channel {
+            Channel::Slack => req.app_token.as_deref(),
+            Channel::Telegram => req.bot_token.as_deref(),
+            Channel::Webhook => None,
+        }
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            listener_token_ref(&ws_id, channel)
+                .and_then(|r| s.secrets().get(&r).ok().flatten())
+                .filter(|t| !t.is_empty())
+        });
+        if let Some(token) = incoming {
+            ensure_listener_token_unique(&s, &ws_id, channel, &token).await?;
+        }
+    }
+
     // Store bot token if provided and non-empty.
     let bot_token_ref = if let Some(tok) = req.bot_token.as_deref().filter(|t| !t.trim().is_empty())
     {
@@ -163,6 +186,77 @@ async fn upsert_integration<S: ChannelsCtx>(
         .await?
         .ok_or_else(|| Error::Internal("integration not found after upsert".into()))?;
     Ok(Json(integration))
+}
+
+/// Keychain ref of the token that identifies a channel's inbound listener: the
+/// Slack **app** token (Socket Mode connection) or the Telegram bot token
+/// (`getUpdates` long-poll). Webhooks have no listener.
+pub(crate) fn listener_token_ref(ws_id: &str, channel: Channel) -> Option<String> {
+    match channel {
+        Channel::Slack => Some(format!("chan-app-{ws_id}-slack")),
+        Channel::Telegram => Some(format!("chan-bot-{ws_id}-telegram")),
+        Channel::Webhook => None,
+    }
+}
+
+/// The workspace (other than `ws_id`) among the `enabled` integrations whose
+/// `channel` listener uses `token`, reading stored tokens via `secret`.
+fn workspace_listening_with(
+    enabled: &[Integration],
+    ws_id: &str,
+    channel: Channel,
+    token: &str,
+    secret: impl Fn(&str) -> Option<String>,
+) -> Option<Id> {
+    enabled
+        .iter()
+        .filter(|o| o.channel == channel && o.workspace_id != ws_id)
+        .find(|o| {
+            listener_token_ref(&o.workspace_id, channel)
+                .and_then(|r| secret(&r))
+                .is_some_and(|t| t == token)
+        })
+        .map(|o| o.workspace_id.clone())
+}
+
+/// `Err(Conflict)` when another workspace's ENABLED `channel` integration
+/// listens with the same `token`. Two Socket Mode connections on one Slack app
+/// get each event delivered to only ONE of them at random, so messages would
+/// land in a random workspace (wrong repos/cwd, wrong `allowed_users`) and a
+/// thread could alternate between two agents; two Telegram pollers on one bot
+/// fight over `getUpdates` (409s) the same way.
+async fn ensure_listener_token_unique<S: ChannelsCtx>(
+    s: &S,
+    ws_id: &Id,
+    channel: Channel,
+    token: &str,
+) -> std::result::Result<(), Error> {
+    let enabled = s.integrations().list_all_enabled().await?;
+    let clash = workspace_listening_with(&enabled, ws_id, channel, token, |r| {
+        s.secrets().get(r).ok().flatten()
+    });
+    let Some(other_ws) = clash else {
+        return Ok(());
+    };
+    let name = s
+        .workspaces()
+        .get(&other_ws)
+        .await
+        .map(|w| w.name)
+        .unwrap_or_else(|_| other_ws.clone());
+    let what = match channel {
+        Channel::Slack => "Slack app token",
+        _ => "bot token",
+    };
+    Err(Error::Conflict(format!(
+        "this {what} is already used by the enabled {} integration of workspace \
+         '{name}'. One bot can only feed one workspace — the platform delivers each \
+         message to just one of its connections, so both workspaces would receive a \
+         random share. Disable that integration first, or create a separate {} app/bot \
+         for this workspace.",
+        channel.as_str(),
+        channel.as_str()
+    )))
 }
 
 async fn delete_integration<S: ChannelsCtx>(
@@ -312,4 +406,62 @@ async fn seed_from_loom<S: ChannelsCtx>(
         .await?;
     let integrations = seed::seed_from_loom(&s, &ws_id).await?;
     Ok(Json(integrations))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn integ(ws: &str, channel: Channel) -> Integration {
+        Integration {
+            workspace_id: ws.to_string(),
+            channel,
+            enabled: true,
+            allowed_users: String::new(),
+            agent_reply: true,
+            reply_instructions: String::new(),
+            channel_id: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: channel == Channel::Slack,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_listener_token_can_only_be_enabled_once() {
+        let enabled = vec![
+            integ("ws_a", Channel::Slack),
+            integ("ws_b", Channel::Telegram),
+        ];
+        let secret = |r: &str| match r {
+            "chan-app-ws_a-slack" => Some("xapp-1".to_string()),
+            "chan-bot-ws_b-telegram" => Some("123:tg".to_string()),
+            _ => None,
+        };
+        // Same Slack app token as ws_a → clash names ws_a.
+        assert_eq!(
+            workspace_listening_with(&enabled, "ws_c", Channel::Slack, "xapp-1", secret).as_deref(),
+            Some("ws_a")
+        );
+        // A different app token, or re-saving ws_a itself, is fine.
+        assert_eq!(
+            workspace_listening_with(&enabled, "ws_c", Channel::Slack, "xapp-2", secret),
+            None
+        );
+        assert_eq!(
+            workspace_listening_with(&enabled, "ws_a", Channel::Slack, "xapp-1", secret),
+            None
+        );
+        // Telegram compares the bot token, per channel.
+        assert_eq!(
+            workspace_listening_with(&enabled, "ws_c", Channel::Telegram, "123:tg", secret)
+                .as_deref(),
+            Some("ws_b")
+        );
+        assert_eq!(
+            workspace_listening_with(&enabled, "ws_c", Channel::Slack, "123:tg", secret),
+            None
+        );
+    }
 }
