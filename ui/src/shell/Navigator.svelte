@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Expanded 240px navigator: modules (Agents with nested session list),
-  // workspaces section, user/settings at the bottom.
+  // Expanded 240px navigator: modules in foldable macOS source-list sections
+  // (Agents with its nested session lists in Work), workspaces section,
+  // user/settings at the bottom.
   import Icon from '../lib/components/Icon.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
@@ -19,12 +20,17 @@
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
   import type { WorkspaceWithRole } from '../lib/api/types';
+  import { tick, untrack } from 'svelte';
   import {
+    activeNavId,
     availableModules,
-    navIdForModule,
+    groupModules,
+    moveWithinGroup,
     resolveOrder,
     visibleOrder,
     type SidebarModule,
+    type SidebarPluginEntry,
+    type SidebarSection,
   } from '../lib/sidebar';
   import type { Session, SessionStatus } from '../lib/api/types';
 
@@ -320,29 +326,65 @@
   const pluginEntries = $derived(
     plugins.list
       .filter((p) => auth.canPlugin(p.slug, 'view'))
-      .map((p): SidebarModule => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+      .map((p): SidebarPluginEntry => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
   const resolved = $derived(
     resolveOrder(availableModules((f) => auth.can(f, 'view'), pluginEntries), ui.sidebarOrder),
   );
   const visible = $derived(visibleOrder(resolved, ui.sidebarHidden));
   const navList = $derived(ui.sidebarEditMode ? resolved : visible);
+  // Sections (Work / Automate / Build / …) in fixed order; the saved order
+  // applies within each. A section whose modules are all hidden drops out.
+  const sections = $derived(groupModules(navList));
 
-  // Active when the route matches the module id. Plugin entries carry a
-  // `plugin/<slug>` id while router.module is just `plugin`, so compare the slug.
-  // Agents also owns the default ('') route; database/brokers routes highlight
-  // Connections (their views are opened from the unified hub — navIdForModule).
+  // The sidebar id the current route highlights (plugin slug / default route /
+  // database+brokers → Connections are resolved in activeNavId).
+  const activeId = $derived(activeNavId(router.parts));
   function isActive(id: string): boolean {
-    if (id.startsWith('plugin/')) {
-      return router.module === 'plugin' && `plugin/${router.parts[1] ?? ''}` === id;
-    }
-    if (id === 'agents') return router.module === 'agents' || router.module === '';
-    return navIdForModule(router.module) === id;
+    return activeId === id;
   }
+  const activeGroup = $derived(resolved.find((m) => m.id === activeId)?.group ?? null);
 
   function isHidden(id: string): boolean {
     return ui.sidebarHidden.includes(id);
   }
+
+  // ── Section fold state ──────────────────────────────────────────────────
+  // The section holding the current page is never shown folded: navigating
+  // into a folded section unfolds it (and persists that, so the state the
+  // user sees is the state that's saved). While a session search / Needs-you
+  // filter is on, Agents' section is forced open so its results show; edit
+  // mode opens everything so every row can be reordered / re-shown.
+  $effect(() => {
+    const g = activeGroup;
+    if (g) untrack(() => ui.setSidebarGroupCollapsed(g, false));
+  });
+  /** Held open regardless of the saved fold state (so its header can't fold it). */
+  function sectionPinned(sec: SidebarSection): boolean {
+    if (ui.sidebarEditMode || sec.group.id === activeGroup) return true;
+    return (q !== '' || ws.needsYouFilter) && sec.modules.some((m) => m.id === 'agents');
+  }
+  function sectionOpen(sec: SidebarSection): boolean {
+    return sectionPinned(sec) || !ui.sidebarCollapsedGroups.includes(sec.group.id);
+  }
+
+  // Keep the current row on screen: on every route / focused-session change,
+  // scroll the active row (the focused session's row when there is one, else
+  // the module row) into view — at laptop heights the list overflows and the
+  // active entry would otherwise sit below the fold.
+  let scrollEl = $state<HTMLDivElement>();
+  $effect(() => {
+    void router.parts.join('/');
+    void ws.activeSessionId;
+    const el = scrollEl;
+    if (!el) return;
+    void tick().then(() => {
+      const row =
+        el.querySelector<HTMLElement>('.nav-item.nested-item.active') ??
+        el.querySelector<HTMLElement>('.nav-item.active');
+      row?.scrollIntoView({ block: 'nearest' });
+    });
+  });
 
   // ── Edit mode: drag-to-reorder (HTML5 DnD, like TabBar) + up/down buttons
   // (touch-reliable + keyboard-accessible). Both persist the full module order.
@@ -355,7 +397,7 @@
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
   }
   function onDragOver(e: DragEvent, id: string): void {
-    if (!dragId || id === dragId) return;
+    if (!dragId || id === dragId || !sameGroup(dragId, id)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     dragOverId = id;
@@ -365,7 +407,7 @@
   }
   function onDrop(e: DragEvent, id: string): void {
     e.preventDefault();
-    if (dragId) ui.reorderSidebar(resolved.map((m) => m.id), dragId, id);
+    if (dragId && sameGroup(dragId, id)) ui.reorderSidebar(resolved.map((m) => m.id), dragId, id);
     dragId = null;
     dragOverId = null;
   }
@@ -373,12 +415,15 @@
     dragId = null;
     dragOverId = null;
   }
-  function move(id: string, delta: number): void {
-    ui.moveSidebar(
-      resolved.map((m) => m.id),
-      id,
-      delta,
-    );
+  // Reordering stays inside a section: up/down swap with the nearest
+  // same-section neighbour, and a drag only targets rows of its own section.
+  function move(id: string, delta: -1 | 1): void {
+    const next = moveWithinGroup(resolved, id, delta);
+    if (next) ui.setSidebarOrder(next);
+  }
+  function sameGroup(a: string | null, b: string): boolean {
+    const ga = resolved.find((m) => m.id === a)?.group;
+    return ga != null && ga === resolved.find((m) => m.id === b)?.group;
   }
 </script>
 
@@ -414,17 +459,19 @@
     >
       <Icon name="chevronRight" size={14} />
     </button>
+    <!-- On phone the Navigator is the off-canvas drawer: this closes it (the
+         desktop collapse-to-Rail preference means nothing there). -->
     <button
       class="icon-btn"
-      onclick={() => ui.toggleRail()}
-      title="Collapse sidebar (⌘1)"
-      aria-label="Collapse sidebar"
+      onclick={() => (viewport.isPhone ? (ui.navDrawerOpen = false) : ui.toggleRail())}
+      title={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar (⌘1)'}
+      aria-label={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar'}
     >
       <Icon name="sidebar" size={14} />
     </button>
   </div>
 
-  <div class="nav-scroll">
+  <div class="nav-scroll" bind:this={scrollEl}>
     <!-- Global session search: filters every group below (Agents / Telegram /
          Slack). Hidden while editing the sidebar (no session lists shown then). -->
     {#if !ui.sidebarEditMode}
@@ -463,82 +510,47 @@
         <p class="edit-hint">Drag to reorder · tap the eye to hide. Hidden items stay listed here while you edit.</p>
       {/if}
 
-      <!-- Modules render in the user's saved order (shared registry). While
-           editing, every resolved module shows as a compact draggable row
-           (incl. hidden ones, so they can be toggled back on); otherwise the
-           special Agents block (with its nested session list) and plain rows
-           render normally. Connections is a plain row — open connections live
-           as tabs on the Agents view, so the sidebar doesn't repeat them. -->
-      {#each navList as m, i (m.id)}
-        {#if ui.sidebarEditMode}
-          {@render editRow(m, i)}
-        {:else if m.id === 'agents'}
-          {@render agentsBlock()}
-        {:else}
-          {@render simpleRow(m)}
-        {/if}
-      {/each}
-
-      {#if !ui.sidebarEditMode && ws.archivedSessions.length > 0}
-        <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>
-          <Icon name="archive" size={14} />
-          <span class="grow">Archived</span>
-          <span class="count-chip">{ws.archivedSessions.length}</span>
-          <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={11} />
-        </button>
-        {#if archivedOpen}
-          <div class="nested">
-            {#if ws.myRole !== 'viewer' && ws.archivedSessions.length > 1}
-              <div class="arch-tools">
-                <label class="arch-all" title="Select all archived sessions">
-                  <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
-                  <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
-                </label>
-                <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
-                  <Icon name="trash" size={11} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
-                </button>
-              </div>
+      <!-- Modules render section by section (macOS source list), each section
+           in the user's saved order (shared registry). A section header folds
+           its rows away (persisted per device). While editing, every resolved
+           module shows as a compact draggable row (incl. hidden ones, so they
+           can be toggled back on); otherwise the special Agents block (with its
+           nested session list) and plain rows render normally. Connections is a
+           plain row — open connections live as tabs on the Agents view, so the
+           sidebar doesn't repeat them. -->
+      {#each sections as sec (sec.group.id)}
+        {@const open = sectionOpen(sec)}
+        {@const pinned = sectionPinned(sec)}
+        <div class="nav-group" data-testid={`sidebar-group-${sec.group.id}`} data-open={open}>
+          <button
+            class="group-head"
+            class:pinned
+            aria-expanded={open}
+            onclick={() => !pinned && ui.toggleSidebarGroup(sec.group.id)}
+            title={pinned ? undefined : open ? `Hide ${sec.group.label}` : `Show ${sec.group.label}`}
+            data-testid={`sidebar-group-head-${sec.group.id}`}
+          >
+            <span class="group-label">{sec.group.label}</span>
+            {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
+              <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
             {/if}
-            {#each ws.archivedSessions as s (s.id)}
-              <div class="nested-row" class:selected={archSel.has(s.id)}>
-                {#if ws.canEditSession(s)}
-                  <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
-                {/if}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="nav-item nested-item archived"
-                  title={s.title}
-                  oncontextmenu={(e) => ctxMenu.show(e, [
-                    ...(ws.canEditSession(s) ? [
-                      { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
-                      { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
-                    ] : []),
-                    { separator: true },
-                    { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-                    { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-                  ])}
-                >
-                  <StatusDot status="exited" />
-                  <span class="grow ellipsis">{s.title}</span>
-                  {#if hasProviderIcon(s.provider)}
-                    <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
-                  {:else}
-                    <span class="provider">{s.provider}</span>
-                  {/if}
-                </div>
-                {#if ws.canEditSession(s)}
-                  <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
-                    <Icon name="refresh" size={11} />
-                  </button>
-                  <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
-                    <Icon name="trash" size={11} />
-                  </button>
-                {/if}
-              </div>
+            {#if !pinned}
+              <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+            {/if}
+          </button>
+          {#if open}
+            {#each sec.modules as m, i (m.id)}
+              {#if ui.sidebarEditMode}
+                {@render editRow(m, i === 0, i === sec.modules.length - 1)}
+              {:else if m.id === 'agents'}
+                {@render agentsBlock()}
+              {:else}
+                {@render simpleRow(m)}
+              {/if}
             {/each}
-          </div>
-        {/if}
-      {/if}
+          {/if}
+        </div>
+      {/each}
     </div>
 
     <div class="nav-section">
@@ -638,7 +650,7 @@
   </button>
 {/snippet}
 
-{#snippet editRow(m: SidebarModule, i: number)}
+{#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="edit-row"
@@ -658,7 +670,7 @@
     <button
       class="row-action"
       onclick={() => move(m.id, -1)}
-      disabled={i === 0}
+      disabled={first}
       title="Move up"
       aria-label={`Move ${m.label} up`}
     >
@@ -667,7 +679,7 @@
     <button
       class="row-action"
       onclick={() => move(m.id, 1)}
-      disabled={i === navList.length - 1}
+      disabled={last}
       title="Move down"
       aria-label={`Move ${m.label} down`}
     >
@@ -750,136 +762,204 @@
     </button>
   </div>
 
-  {#if q ? fAgents.length > 0 : agentsOpen}
-    <div class="nested" data-testid="agents-list">
-      {#if agentSelMode}
-        <div class="arch-tools" data-testid="agents-select-tools">
-          <label class="arch-all" title="Select all sessions">
-            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === selectable.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < selectable.length} onchange={agentSelectAll} />
-            <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
-          </label>
-          <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
-            <Icon name="archive" size={11} /><span>Archive</span>
-          </button>
-          <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
-            <Icon name="trash" size={11} /><span>Delete</span>
-          </button>
+  <!-- Everything Agents owns (its session lists, channel groups, archive)
+       hangs off its row on one outline guide, so it reads as Agents' content
+       rather than more sections. -->
+  <div class="agents-sub">
+    {#if q ? fAgents.length > 0 : agentsOpen}
+      <div class="nested" data-testid="agents-list">
+        {#if agentSelMode}
+          <div class="arch-tools" data-testid="agents-select-tools">
+            <label class="arch-all" title="Select all sessions">
+              <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === selectable.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < selectable.length} onchange={agentSelectAll} />
+              <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
+            </label>
+            <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
+              <Icon name="archive" size={11} /><span>Archive</span>
+            </button>
+            <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
+              <Icon name="trash" size={11} /><span>Delete</span>
+            </button>
+          </div>
+        {/if}
+        {#each fAgents as s (s.id)}
+          {@render sessionRow(s, undefined, true)}
+        {:else}
+          <div class="nested-empty">No sessions — ⌘T to start one</div>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- Workspace-less sessions (the daemon's hidden scratch workspace): one
+         group in every workspace and with none. Plain `sessionRow`s — they are
+         already in `ws.sessions`, so open / rename / archive work as above. -->
+    {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="ws-group-label"
+        title="Sessions not tied to any workspace"
+        data-testid="scratch-group"
+        oncontextmenu={(e) => ctxMenu.show(e, [
+          { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+        ])}
+      >
+        <Icon name="home" size={11} />
+        <span class="ellipsis">No workspace</span>
+      </div>
+      <div class="nested">
+        {#each fScratch as s (s.id)}
+          {@render sessionRow(s)}
+        {:else}
+          <div class="nested-empty">No sessions — ⌘T, then “No workspace”</div>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- All-workspaces view: sessions living in OTHER workspaces, grouped by
+         workspace (the current one keeps its flat list above). Clicking a row
+         switches to that workspace and focuses the session. -->
+    {#if ws.allWorkspaces && (agentsOpen || q)}
+      {#each ws.otherWsGroups as g (g.ws.id)}
+        {@const rows = g.sessions.filter(matches)}
+        {#if rows.length > 0}
+          <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
+            <Icon name="folder" size={11} />
+            <span class="ellipsis">{g.ws.name}</span>
+          </div>
+          <div class="nested">
+            {#each rows as s (s.id)}
+              {@render sessionRow(s, g.ws.id)}
+            {/each}
+          </div>
+        {/if}
+      {/each}
+    {/if}
+
+    {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
+      <div class="nav-item-row">
+        <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
+          <Icon name="send" size={14} />
+          <span class="grow">Telegram</span>
+          <span class="count-chip">{ws.telegramSessions.length}</span>
+        </button>
+        <button
+          class="icon-btn twisty"
+          onclick={() => (telegramOpen = !telegramOpen)}
+          aria-label="Toggle Telegram list"
+        >
+          <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+        </button>
+      </div>
+      {#if telegramOpen || q}
+        <div class="nested">
+          {#each visTelegram as s (s.id)}
+            {@render sessionRow(s)}
+          {:else}
+            <div class="nested-empty">No matching</div>
+          {/each}
+          {#if !q && fTelegram.length > CHANNEL_CAP}
+            <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
+              {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
+            </button>
+          {/if}
         </div>
       {/if}
-      {#each fAgents as s (s.id)}
-        {@render sessionRow(s, undefined, true)}
-      {:else}
-        <div class="nested-empty">No sessions — ⌘T to start one</div>
-      {/each}
-    </div>
-  {/if}
+    {/if}
 
-  <!-- Workspace-less sessions (the daemon's hidden scratch workspace): one
-       group in every workspace and with none. Plain `sessionRow`s — they are
-       already in `ws.sessions`, so open / rename / archive work as above. -->
-  {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="ws-group-label"
-      title="Sessions not tied to any workspace"
-      data-testid="scratch-group"
-      oncontextmenu={(e) => ctxMenu.show(e, [
-        { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-      ])}
-    >
-      <Icon name="home" size={11} />
-      <span class="ellipsis">No workspace</span>
-    </div>
-    <div class="nested">
-      {#each fScratch as s (s.id)}
-        {@render sessionRow(s)}
-      {:else}
-        <div class="nested-empty">No sessions — ⌘T, then “No workspace”</div>
-      {/each}
-    </div>
-  {/if}
-
-  <!-- All-workspaces view: sessions living in OTHER workspaces, grouped by
-       workspace (the current one keeps its flat list above). Clicking a row
-       switches to that workspace and focuses the session. -->
-  {#if ws.allWorkspaces && (agentsOpen || q)}
-    {#each ws.otherWsGroups as g (g.ws.id)}
-      {@const rows = g.sessions.filter(matches)}
-      {#if rows.length > 0}
-        <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
-          <Icon name="folder" size={11} />
-          <span class="ellipsis">{g.ws.name}</span>
-        </div>
+    {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
+      <div class="nav-item-row">
+        <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
+          <Icon name="slack" size={14} />
+          <span class="grow">Slack</span>
+          <span class="count-chip">{ws.slackSessions.length}</span>
+        </button>
+        <button
+          class="icon-btn twisty"
+          onclick={() => (slackOpen = !slackOpen)}
+          aria-label="Toggle Slack list"
+        >
+          <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+        </button>
+      </div>
+      {#if slackOpen || q}
         <div class="nested">
-          {#each rows as s (s.id)}
-            {@render sessionRow(s, g.ws.id)}
+          {#each visSlack as s (s.id)}
+            {@render sessionRow(s)}
+          {:else}
+            <div class="nested-empty">No matching</div>
+          {/each}
+          {#if !q && fSlack.length > CHANNEL_CAP}
+            <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
+              {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
+            </button>
+          {/if}
+        </div>
+      {/if}
+    {/if}
+
+    <!-- Archived sessions: parked rows under the Agents lists (restore /
+         delete), folded by default. -->
+    {#if ws.archivedSessions.length > 0}
+      <button class="nav-item subtle" onclick={() => (archivedOpen = !archivedOpen)}>
+        <Icon name="archive" size={14} />
+        <span class="grow">Archived</span>
+        <span class="count-chip">{ws.archivedSessions.length}</span>
+        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+      </button>
+      {#if archivedOpen}
+        <div class="nested">
+          {#if ws.myRole !== 'viewer' && ws.archivedSessions.length > 1}
+            <div class="arch-tools">
+              <label class="arch-all" title="Select all archived sessions">
+                <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
+                <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
+              </label>
+              <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
+                <Icon name="trash" size={11} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
+              </button>
+            </div>
+          {/if}
+          {#each ws.archivedSessions as s (s.id)}
+            <div class="nested-row" class:selected={archSel.has(s.id)}>
+              {#if ws.canEditSession(s)}
+                <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
+              {/if}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="nav-item nested-item archived"
+                title={s.title}
+                oncontextmenu={(e) => ctxMenu.show(e, [
+                  ...(ws.canEditSession(s) ? [
+                    { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
+                    { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
+                  ] : []),
+                  { separator: true },
+                  { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+                  { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+                ])}
+              >
+                <StatusDot status="exited" />
+                <span class="grow ellipsis">{s.title}</span>
+                {#if hasProviderIcon(s.provider)}
+                  <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
+                {:else}
+                  <span class="provider">{s.provider}</span>
+                {/if}
+              </div>
+              {#if ws.canEditSession(s)}
+                <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
+                  <Icon name="refresh" size={11} />
+                </button>
+                <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
+                  <Icon name="trash" size={11} />
+                </button>
+              {/if}
+            </div>
           {/each}
         </div>
       {/if}
-    {/each}
-  {/if}
-
-  {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
-    <div class="nav-item-row">
-      <button class="nav-item" onclick={() => (telegramOpen = !telegramOpen)}>
-        <Icon name="send" size={14} />
-        <span class="grow">Telegram</span>
-        <span class="count-chip">{ws.telegramSessions.length}</span>
-      </button>
-      <button
-        class="icon-btn twisty"
-        onclick={() => (telegramOpen = !telegramOpen)}
-        aria-label="Toggle Telegram list"
-      >
-        <Icon name={telegramOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-      </button>
-    </div>
-    {#if telegramOpen || q}
-      <div class="nested">
-        {#each visTelegram as s (s.id)}
-          {@render sessionRow(s)}
-        {:else}
-          <div class="nested-empty">No matching</div>
-        {/each}
-        {#if !q && fTelegram.length > CHANNEL_CAP}
-          <button class="show-more" onclick={() => (telegramShowAll = !telegramShowAll)}>
-            {telegramShowAll ? 'Show less' : `Show ${fTelegram.length - CHANNEL_CAP} more`}
-          </button>
-        {/if}
-      </div>
     {/if}
-  {/if}
-
-  {#if q ? fSlack.length > 0 : ws.slackSessions.length > 0}
-    <div class="nav-item-row">
-      <button class="nav-item" onclick={() => (slackOpen = !slackOpen)}>
-        <Icon name="slack" size={14} />
-        <span class="grow">Slack</span>
-        <span class="count-chip">{ws.slackSessions.length}</span>
-      </button>
-      <button
-        class="icon-btn twisty"
-        onclick={() => (slackOpen = !slackOpen)}
-        aria-label="Toggle Slack list"
-      >
-        <Icon name={slackOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-      </button>
-    </div>
-    {#if slackOpen || q}
-      <div class="nested">
-        {#each visSlack as s (s.id)}
-          {@render sessionRow(s)}
-        {:else}
-          <div class="nested-empty">No matching</div>
-        {/each}
-        {#if !q && fSlack.length > CHANNEL_CAP}
-          <button class="show-more" onclick={() => (slackShowAll = !slackShowAll)}>
-            {slackShowAll ? 'Show less' : `Show ${fSlack.length - CHANNEL_CAP} more`}
-          </button>
-        {/if}
-      </div>
-    {/if}
-  {/if}
+  </div>
 {/snippet}
 
 {#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
@@ -1058,7 +1138,7 @@
     margin-bottom: 14px;
   }
   .nav-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -1094,6 +1174,7 @@
     height: 20px;
   }
   .nav-item {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1112,17 +1193,95 @@
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
+  /* Selection = the theme accent as a TINT (never a solid fill: --text on a
+     solid --accent is unreadable in several themes) + a short accent bar at the
+     inline-start edge and an accent icon. The label stays --text, which clears
+     contrast on the tint in every theme × scheme. */
   .nav-item.active {
-    /* Explicit high-contrast selection: a light-green fill with black text/
-       icons. Independent of --accent (which is a dark blue that read as
-       "black text on dark blue" — invisible). Reads clearly on dark AND light. */
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--accent-soft);
+    color: var(--text);
     font-weight: 600;
-    box-shadow: inset 3px 0 0 #2ea043;
   }
-  .nav-item.active :global(svg) {
-    color: #0a0a0a;
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    inset-inline-start: 0;
+    inset-block: 6px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
+  }
+  :global([dir='rtl']) .nav-item.active::before {
+    border-radius: 2px 0 0 2px;
+  }
+  .nav-item.active > :global(svg) {
+    color: var(--accent-text);
+  }
+  /* Agents' row carries trailing toggles (select / sort / all-workspaces /
+     fold): tint the WHOLE row so the selection doesn't stop short of them. */
+  .nav-item-row:has(> .nav-item.active) {
+    background: var(--accent-soft);
+    border-radius: var(--radius-s);
+  }
+  .nav-item-row > .nav-item.active {
+    background: transparent;
+  }
+  /* A focused session row is the quieter variant: a lighter tint, no bar —
+     the Agents row above it already carries the strong marker. */
+  .nav-item.nested-item.active {
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    font-weight: 500;
+  }
+  .nav-item.nested-item.active::before {
+    content: none;
+  }
+  /* ── Sections (macOS source-list headers) ───────────────────────────── */
+  .nav-group + .nav-group {
+    margin-top: 10px;
+  }
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 22px;
+    padding: 0 6px 0 8px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-s);
+    color: var(--text-dim);
+    cursor: pointer;
+    text-align: start;
+  }
+  .group-head.pinned {
+    cursor: default;
+  }
+  .group-label {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Chevron appears on hover / keyboard focus (like Finder's "Hide"), and
+     stays visible while the section is folded so the state reads at a glance. */
+  .group-chev {
+    display: grid;
+    place-items: center;
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+  .group-head:hover .group-chev,
+  .group-head:focus-visible .group-chev,
+  .group-head[aria-expanded='false'] .group-chev {
+    opacity: 1;
+  }
+  .group-head:not(.pinned):hover {
+    color: var(--text);
   }
   .nav-item.active-ws {
     font-weight: 600;
@@ -1179,17 +1338,26 @@
     margin: 2px 0 6px;
     padding-inline-start: 10px;
   }
-  /* All-workspaces view: a small workspace-name heading over each group of
-     foreign-workspace session rows. */
+  /* Agents' sub-content hangs off one hairline guide under the Agents icon
+     (8px row padding + half the 14px icon), outline-view style. */
+  .agents-sub {
+    margin-inline-start: 15px;
+    padding-inline-start: 4px;
+    border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+  }
+  .agents-sub .nested {
+    padding-inline-start: 0;
+    margin: 1px 0 4px;
+  }
+  /* A workspace-name sub-heading inside Agents (No workspace / other
+     workspaces). Sentence case, so it never reads as a sidebar section. */
   .ws-group-label {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px 2px 12px;
-    font-size: 10.5px;
+    padding: 5px 8px 2px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
     color: var(--text-dim);
     min-width: 0;
   }
@@ -1377,7 +1545,7 @@
   }
   .task-chip.active {
     color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .task-chip.done {
     color: var(--status-working, #3fb950);
@@ -1480,7 +1648,7 @@
     line-height: 1.2;
   }
   .user-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

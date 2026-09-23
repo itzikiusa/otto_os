@@ -13,6 +13,7 @@
     OrchestrateResp,
     SearchHit,
   } from '../lib/api/types';
+  import { untrack } from 'svelte';
   import { registry, type Command } from '../lib/commands.svelte';
   import {
     parseCommand,
@@ -196,32 +197,38 @@
   });
 
   $effect(() => {
-    // reset on open + focus, honoring the requested mode + prefill
-    if (ui.paletteOpen) {
-      mode = ui.paletteMode;
-      query = '';
-      selected = 0;
-      plan = null;
-      optimizedText = null;
-      searchHits = [];
-      searchBusy = false;
-      if (mode === 'english') englishText = ui.palettePrefill;
-      ui.palettePrefill = '';
-      queueMicrotask(() => {
-        if (mode === 'commands') inputEl?.focus();
-        else {
-          textareaEl?.focus();
-          // place caret at the end (after any prefill like "broadcast ")
-          const len = englishText.length;
-          textareaEl?.setSelectionRange(len, len);
-        }
-      });
-    } else {
-      // Palette closed — cancel any pending search so we don't waste a round-trip.
-      if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
-      searchAbort?.abort();
-      searchAbort = null;
-    }
+    // Reset on open + focus, honoring the requested mode + prefill. Track ONLY
+    // `ui.paletteOpen`: the body reads `mode` after writing it, so without the
+    // untrack a Commands↔English toggle (or askOtto) re-ran this effect, which
+    // flipped `mode` back and wiped `query` / `plan`.
+    const open = ui.paletteOpen;
+    untrack(() => {
+      if (open) {
+        mode = ui.paletteMode;
+        query = '';
+        selected = 0;
+        plan = null;
+        optimizedText = null;
+        searchHits = [];
+        searchBusy = false;
+        if (mode === 'english') englishText = ui.palettePrefill;
+        ui.palettePrefill = '';
+        queueMicrotask(() => {
+          if (mode === 'commands') inputEl?.focus();
+          else {
+            textareaEl?.focus();
+            // place caret at the end (after any prefill like "broadcast ")
+            const len = englishText.length;
+            textareaEl?.setSelectionRange(len, len);
+          }
+        });
+      } else {
+        // Palette closed — cancel any pending search so we don't waste a round-trip.
+        if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
+        searchAbort?.abort();
+        searchAbort = null;
+      }
+    });
   });
 
   // Free text in commands mode is always offered as an orchestrator ask, so
@@ -700,6 +707,7 @@
               onclick={() => run(item.cmd)}
             >
               <span class="pal-item-title">{item.cmd.title}</span>
+              {#if item.cmd.detail}<span class="pal-detail">{item.cmd.detail}</span>{/if}
               <span class="grow"></span>
               {#if item.cmd.group}<span class="pal-group">{item.cmd.group}</span>{/if}
               {#if item.cmd.shortcut}<kbd>{item.cmd.shortcut}</kbd>{/if}
@@ -838,7 +846,7 @@
     padding: 10px 12px 0;
   }
   .pal-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pal-input-row {
@@ -880,12 +888,20 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .pal-group {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .pal-detail {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   kbd {
     font-family: var(--font-ui);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -964,7 +980,7 @@
     border-radius: 50%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     display: grid;
     place-items: center;
     color: var(--text-dim);
@@ -1011,7 +1027,7 @@
     max-width: 220px;
   }
   .pal-hit-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;

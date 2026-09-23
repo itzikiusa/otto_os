@@ -12,7 +12,13 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { plugins } from '../../lib/stores/plugins.svelte';
-  import { availableModules, resolveOrder, type SidebarModule } from '../../lib/sidebar';
+  import {
+    availableModules,
+    groupModules,
+    moveWithinGroup,
+    resolveOrder,
+    type SidebarPluginEntry,
+  } from '../../lib/sidebar';
 
   // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
   // the user may see + permitted plugins, in the saved order, including hidden
@@ -20,11 +26,16 @@
   const sidebarPlugins = $derived(
     plugins.list
       .filter((p) => auth.canPlugin(p.slug, 'view'))
-      .map((p): SidebarModule => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+      .map((p): SidebarPluginEntry => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
   const sidebarResolved = $derived(
     resolveOrder(availableModules((f) => auth.can(f, 'view'), sidebarPlugins), ui.sidebarOrder),
   );
+  /** Up/down within the module's sidebar section (same rule as the Navigator). */
+  function moveSidebarItem(id: string, delta: -1 | 1): void {
+    const next = moveWithinGroup(sidebarResolved, id, delta);
+    if (next) ui.setSidebarOrder(next);
+  }
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
     { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
@@ -192,37 +203,41 @@
     (“Customize sidebar” at the bottom of the expanded sidebar). Saved per device.
   </p>
   <div class="sidebar-list" data-testid="settings-sidebar-list">
-    {#each sidebarResolved as m, i (m.id)}
-      <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
-        <Icon name={m.icon} size={14} />
-        <span class="grow">{m.label}</span>
-        <button
-          class="sb-btn"
-          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, -1)}
-          disabled={i === 0}
-          title="Move up"
-          aria-label={`Move ${m.label} up`}
-        >
-          <Icon name="arrowUp" size={12} />
-        </button>
-        <button
-          class="sb-btn"
-          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, 1)}
-          disabled={i === sidebarResolved.length - 1}
-          title="Move down"
-          aria-label={`Move ${m.label} down`}
-        >
-          <Icon name="arrowDown" size={12} />
-        </button>
-        <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
-          <input
-            type="checkbox"
-            checked={!ui.sidebarHidden.includes(m.id)}
-            onchange={() => ui.toggleSidebarHidden(m.id)}
-            aria-label={`Show ${m.label}`}
-          />
-        </label>
-      </div>
+    <!-- Section by section, as the sidebar shows them; moves stay in-section. -->
+    {#each groupModules(sidebarResolved) as sec (sec.group.id)}
+      <div class="sidebar-group-label">{sec.group.label}</div>
+      {#each sec.modules as m, i (m.id)}
+        <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
+          <Icon name={m.icon} size={14} />
+          <span class="grow">{m.label}</span>
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarItem(m.id, -1)}
+            disabled={i === 0}
+            title="Move up"
+            aria-label={`Move ${m.label} up`}
+          >
+            <Icon name="arrowUp" size={12} />
+          </button>
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarItem(m.id, 1)}
+            disabled={i === sec.modules.length - 1}
+            title="Move down"
+            aria-label={`Move ${m.label} down`}
+          >
+            <Icon name="arrowDown" size={12} />
+          </button>
+          <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
+            <input
+              type="checkbox"
+              checked={!ui.sidebarHidden.includes(m.id)}
+              onchange={() => ui.toggleSidebarHidden(m.id)}
+              aria-label={`Show ${m.label}`}
+            />
+          </label>
+        </div>
+      {/each}
     {/each}
   </div>
   <div class="row">
@@ -374,6 +389,17 @@
   }
   .sidebar-row:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .sidebar-group-label {
+    padding: 8px 8px 2px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-dim);
+  }
+  .sidebar-group-label:first-child {
+    padding-top: 2px;
   }
   .sidebar-row .grow {
     flex: 1;

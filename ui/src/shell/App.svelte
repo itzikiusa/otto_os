@@ -87,6 +87,7 @@
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry } from '../lib/commands.svelte';
+  import { availableModules, groupLabel, moduleLabel } from '../lib/sidebar';
   import { api, baseUrl } from '../lib/api/client';
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
@@ -94,6 +95,19 @@
   import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+  // Phone top-bar title: the registry label ("Mission Control", "Skills Lab"),
+  // a plugin's own name, never the raw route id.
+  const moduleTitle = $derived(
+    moduleName === 'plugin'
+      ? (plugins.list.find((p) => p.slug === router.parts[1])?.name ?? 'Plugin')
+      : moduleLabel(moduleName),
+  );
+  // The phone Navigator drawer closes on every navigation (tapping a module or
+  // a session row in it should land on that page, not leave it covered).
+  $effect(() => {
+    void router.parts.join('/');
+    ui.navDrawerOpen = false;
+  });
 
   // The right activity panel (Git/Files/Notes/Activity/Info/Browser/API) is only
   // meaningful for coding-agent sessions. Connection terminals (SSH / DB / custom,
@@ -446,32 +460,12 @@
       { id: 'core.split-v', title: 'Split Vertically', group: 'Sessions', shortcut: '⌘D', run: () => ws.split('col') },
       { id: 'core.split-h', title: 'Split Horizontally', group: 'Sessions', shortcut: '⌘⇧D', run: () => ws.split('row') },
       { id: 'core.new-workspace', title: 'Add Workspace', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
-      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Sessions', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
-      { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Sessions', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
-      { id: 'core.go-home', title: 'Go to Home', group: 'Navigate', keywords: 'module home dashboard overview boxes views', run: () => router.go('home') },
-      { id: 'core.go-agents', title: 'Go to Agents', group: 'Navigate', keywords: 'module terminal', run: () => router.go('agents') },
-      { id: 'core.go-connections', title: 'Go to Connections', group: 'Navigate', keywords: 'module ssh mysql redis', run: () => router.go('connections') },
-      { id: 'core.go-git', title: 'Go to Git', group: 'Navigate', keywords: 'module repos prs pull requests', run: () => router.go('git') },
-      { id: 'core.go-api', title: 'Go to API Client', group: 'Navigate', keywords: 'module postman http request rest curl', run: () => router.go('api') },
-      { id: 'core.go-skills-eval', title: 'Go to Skills Lab', group: 'Navigate', keywords: 'module skill lab evaluate validate review edit improve', run: () => router.go('skills-eval') },
-      { id: 'core.go-usage', title: 'Go to Usage & Metrics', group: 'Navigate', keywords: 'module usage cost tokens clickhouse metrics cpu ram billing analytics', run: () => router.go('usage') },
+      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
+      { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
-      { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
-      { id: 'core.go-scheduled-tasks', title: 'Go to Scheduled Tasks', group: 'Navigate', keywords: 'module scheduled task cron recurring job report cadence hourly daily', run: () => router.go('scheduled-tasks') },
-      { id: 'core.go-aws', title: 'Go to AWS', group: 'Navigate', keywords: 'module aws amazon cloud s3 bucket sqs queue ec2 instance athena query eks account profile sso', run: () => router.go('aws') },
-      { id: 'core.go-kubernetes', title: 'Go to Kubernetes', group: 'Navigate', keywords: 'module kubernetes k8s kubectl k9s cluster context namespace pod deployment logs exec rollout argo argocd restart', run: () => router.go('kubernetes') },
-      { id: 'core.go-personal-agents', title: 'Go to Personal Agents', group: 'Navigate', keywords: 'module personal agent persona soul bot room chat schedule recap', run: () => router.go('personal-agents') },
-      { id: 'core.go-run-with-otto', title: 'Go to Run with Otto', group: 'Navigate', keywords: 'run with otto one button launch jira github issue pr confluence finding test story channel review proof approval pr draft', run: () => router.go('run-with-otto') },
-      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
-      { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
-      { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
-      { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
-      { id: 'core.go-proof', title: 'Go to Proof', group: 'Navigate', keywords: 'proof pack evidence badge verified tests ci approval audit', run: () => router.go('proof') },
-      { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
-      { id: 'core.go-mcp', title: 'Go to MCP Control Plane', group: 'Navigate', keywords: 'mcp model context protocol server tool governance allowlist policy approval audit injection risk', run: () => router.go('mcp') },
-      { id: 'core.go-browser', title: 'Go to Browser', group: 'Navigate', keywords: 'browser reader mode tabs annotate url fetch page', run: () => router.go('browser') },
+      { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -483,6 +477,29 @@
       { id: 'core.logout', title: 'Sign Out', group: 'Account', run: () => auth.logout() },
     ]);
     return unreg;
+  });
+
+  // ---- palette commands: Go to <module> ----
+  // Derived from the sidebar registry (RBAC-filtered + permitted plugins), so
+  // every module is reachable by ⌘K and the list can never drift from the
+  // sidebar. Hidden modules are included on purpose — ⌘K is the way back to
+  // one you've hidden. The sidebar section shows as secondary text.
+  $effect(() => {
+    const pluginEntries = plugins.list
+      .filter((p) => auth.canPlugin(p.slug, 'view'))
+      .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name }));
+    const mods = availableModules((f) => auth.can(f, 'view'), pluginEntries);
+    return registry.register(
+      'nav',
+      mods.map((m) => ({
+        id: `core.go-${m.id}`,
+        title: `Go to ${m.label}`,
+        group: 'Navigate',
+        detail: groupLabel(m.group),
+        keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
+        run: () => router.go(m.id),
+      })),
+    );
   });
 
   // ---- palette commands: focused session ----
@@ -769,7 +786,7 @@
     {#if viewport.isPhone}
       <button
         class="mtop-btn"
-        onclick={() => ui.toggleRail()}
+        onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
         title="Menu"
         aria-label="Open navigator"
       >
@@ -779,7 +796,7 @@
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
          the title so the thumb can reach them comfortably on phone + tablet. -->
     <NavButtons />
-    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
+    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle}</span>
     <span class="grow"></span>
     <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
          Navigator is a closed drawer, so the top bar carries it instead. -->
@@ -832,10 +849,12 @@
   <StatusBar />
 </div>
 
-<!-- Phone: Navigator lives in a LEFT drawer (reuses ui.railExpanded as its
-     open-state). On tablet the Navigator is persistent, so no left drawer. -->
+<!-- Phone: Navigator lives in a LEFT drawer with its own open-state
+     (ui.navDrawerOpen — not persisted, closed on load, closed on navigation;
+     never the desktop sidebar's railExpanded preference). On tablet the
+     Navigator is persistent, so no left drawer. -->
 {#if viewport.isPhone}
-  <Drawer bind:open={ui.railExpanded} side="left" label="Navigator" width="min(86vw, 280px)">
+  <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width="min(86vw, 280px)">
     <Navigator />
   </Drawer>
 {/if}
@@ -967,13 +986,17 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .mtop-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    text-transform: capitalize;
+  }
+  /* A module page that draws its own PageHeader already titles itself right
+     below the bar — don't show the same name twice. */
+  :global(.shell.mobile:has(.mcenter [data-testid='page-header'])) .mtop-title {
+    display: none;
   }
   .mbody {
     flex: 1;

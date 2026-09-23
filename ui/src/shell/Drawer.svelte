@@ -1,7 +1,7 @@
 <script lang="ts">
   // Reusable off-canvas slide-over used by the mobile shell to host the
   // Navigator (left) and the RightPanel (right). Open-state is a bound prop so
-  // callers can wire it to an existing store flag (e.g. ui.railExpanded /
+  // callers can wire it to an existing store flag (e.g. ui.navDrawerOpen /
   // ui.rightOpen). A backdrop fades in behind the panel; tapping it — or
   // pressing Esc — dismisses. Body content is provided via a snippet.
   //

@@ -74,6 +74,7 @@ const LS = {
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
   sidebarHidden: 'otto_sidebar_hidden',
+  sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
   gitSideWidth: 'otto_git_side_width',
   gitGraphListWidth: 'otto_git_graph_list_width',
   gitGraphSideWidth: 'otto_git_graph_side_width',
@@ -355,6 +356,30 @@ class UiStore {
   sidebarOrder: string[] = $state(lsGetJson<string[]>(LS.sidebarOrder, []));
   sidebarHidden: string[] = $state(lsGetJson<string[]>(LS.sidebarHidden, []));
   sidebarEditMode = $state(false);
+  /** Navigator sections (SidebarGroupId) the user has folded shut. Per device;
+   *  the section holding the current page is re-opened on navigation. */
+  sidebarCollapsedGroups: string[] = $state(
+    ((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []))(
+      lsGetJson<unknown>(LS.sidebarCollapsedGroups, []),
+    ),
+  );
+  /** Phone-only: the off-canvas Navigator drawer. Deliberately NOT persisted
+   *  and NOT `railExpanded` (the desktop sidebar preference) — a phone always
+   *  boots onto the page, never under the drawer. */
+  navDrawerOpen = $state(false);
+
+  /** Fold / unfold one Navigator section. */
+  toggleSidebarGroup(id: string): void {
+    this.setSidebarGroupCollapsed(id, !this.sidebarCollapsedGroups.includes(id));
+  }
+
+  setSidebarGroupCollapsed(id: string, collapsed: boolean): void {
+    if (collapsed === this.sidebarCollapsedGroups.includes(id)) return;
+    this.sidebarCollapsedGroups = collapsed
+      ? [...this.sidebarCollapsedGroups, id]
+      : this.sidebarCollapsedGroups.filter((x) => x !== id);
+    lsSet(LS.sidebarCollapsedGroups, JSON.stringify(this.sidebarCollapsedGroups));
+  }
 
   /** Replace the full module order (the complete resolved id list, incl. hidden). */
   setSidebarOrder(ids: string[]): void {
@@ -392,12 +417,14 @@ class UiStore {
     lsSet(LS.sidebarHidden, JSON.stringify(this.sidebarHidden));
   }
 
-  /** Restore the shipped default order with everything visible. */
+  /** Restore the shipped default order with everything visible and unfolded. */
   resetSidebar(): void {
     this.sidebarOrder = [];
     this.sidebarHidden = [];
+    this.sidebarCollapsedGroups = [];
     lsSet(LS.sidebarOrder, '[]');
     lsSet(LS.sidebarHidden, '[]');
+    lsSet(LS.sidebarCollapsedGroups, '[]');
   }
 
   toggleSidebarEdit(): void {
