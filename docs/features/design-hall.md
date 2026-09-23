@@ -4,9 +4,10 @@
 > surface, the legacy import, the Design Hall UI (§8), the unified
 > `design_assist` agent turn (every studio / format), variants, verified
 > reference citations, the suggest-only Learning v1 and the design MCP tools
-> (reads + approval-gated writes), the Brand Kit v1 editor (§9) and **3D
+> (reads + approval-gated writes), the Brand Kit v1 editor (§9), **3D
 > Studio 1.5** (§10: scene3d v2, the studio layout, Generate, exports and the
-> embed runtime) ship now. Export/publish and Site Studio are the next phases
+> embed runtime) and **Site Studio v1** (§11: sections, breakpoints, static
+> export + local preview) ship now. The remaining studios are the next phases
 > (see the proposal's roadmap). The existing Product → Design arena and Canvas
 > keep working unchanged meanwhile.
 
@@ -417,8 +418,9 @@ still routes (it is the Whiteboard studio, one ⌘K "Go to Canvas" away).
   (`#/design/a/<id>/otto`); "Draft only" skips generation. "Use references"
   sends the team's closest past designs first as R1–R3. Frames/Graphics
   edit HTML (and SVG) as source with a live preview, 3D opens 3D Studio 1.5
-  (§10), Whiteboard edits Mermaid/D2/Excalidraw; Site Studio and Spatial Hall
-  show their planned release instead of an editor.
+  (§10), Whiteboard edits Mermaid/D2/Excalidraw, Site Studio opens its
+  section editor (§11); Spatial Hall shows its planned release instead of an
+  editor.
 - **Saving** is explicit (Save / ⌘S): `PUT …/content` with `base_version`; a
   409 asks "Save mine on top" or "Load vN (discard my edits)".
 - **Otto tab** (every studio): agent + model picker, live status from
@@ -653,3 +655,117 @@ their own loaders via `resolve` (the default uses the authed client).
   and materials only (no lights or states).
 - `token:` colours resolve in 3D (studio + embeds); the Blender script and GLB
   export use the resolved hex (GLB) or a neutral fallback (Blender).
+
+## 11. Site Studio (`otto-site` v1)
+
+A site is one versioned artifact (studio `site`, format `otto-site`): pages →
+sections → blocks, themed by a brand kit, rendered as real HTML/CSS. Code:
+`crates/otto-design/src/site/` (schema, validator, indexer, theme, renderer,
+exporter, ZIP writer, routes) and `ui/src/modules/design-hall/site/` (the
+editor; `engine/` is the pure document model + renderer, unit-tested in
+`ui/unit/siteStudio.test.ts`). Contract: [`api.md` § Site
+Studio](../contracts/api.md).
+
+### Create a site
+
+**New design → Site Studio** (the lobby's studio tile or the New ▾ menu)
+offers six starters in **Start from**: Landing page, Product launch, Event,
+Portfolio, Docs home and Waitlist — real copy, motion presets and brand
+tokens only (no raw colours), each passing the contrast checks with the
+default palette. **Blank** opens the same six as live, brand-themed
+thumbnails inside the studio ("Start your site"). Picking one edits the working
+copy only; **Save** (⌘S) makes it a version. When the project has a brand kit,
+the template names it in the document (`brand`), so the kit's impact preview
+counts the site.
+
+### The editor
+
+- **Toolbar**: Desktop 1280 / Tablet 834 / Mobile 390, zoom (Fit, 50–100 %),
+  **Motion** (play the presets on the canvas; editing keeps them still),
+  undo / redo (⌘Z / ⇧⌘Z), a "N to fix" chip when a check fails, **Preview**
+  and **Publish ▾**.
+- **Left — Pages · Layers · Blocks.** Pages: add, rename, make home, delete
+  (confirmed; undo brings it back). Layers: the page's sections (drag to
+  reorder, eye = hide everywhere, a glyph when hidden at a breakpoint, a link
+  glyph for linked 3D embeds and "From your library" sections); the selected
+  section expands to its child blocks. Blocks: a searchable library of 27
+  sections in ten families (Navigation, Hero ×4, Features ×5, Social proof ×3,
+  Pricing & tiers ×3, FAQ ×2, Call to action ×3, Content, Media — 3D embed,
+  video, gallery — and Footer ×2), each tile a live miniature in the site's
+  own brand; plus **From your library** — sections of your other sites with
+  their provenance ("FAQ · Spring Promo 2025 site v12"). Click a tile to insert
+  after the selection, or drag it onto the page (a blue line shows where).
+  A library section keeps `derived_from: otto://design/<site>@v<n>#<section>`,
+  saved as a pinned `derived_from` link.
+- **Canvas**: the page as real DOM in a browser frame (same markup and
+  stylesheet the export ships; breakpoints are container queries, so the frame
+  behaves like a device). Hover outlines and names a section; click selects it
+  (a second click inside selects a child block); **double-click any text to
+  edit it in place** (Enter / ⌘Enter keeps it, Esc cancels). The floating
+  toolbar (clamped inside the canvas) has **Ask Otto**, **Variants**, move
+  up/down, duplicate, hide on mobile and ⋯ (rename, hide everywhere, move to
+  top/bottom, delete). Links and forms never navigate while editing. 3D
+  embeds render **live** through the 3D Studio embed runtime (§10.5, auto-
+  rotating, off under reduced motion); until the first frame — and in the
+  preview and the export — the artifact's thumbnail or a CSS stand-in card
+  shows. A badge names the link: `Rewards Card 3D · v7 · follows approved`.
+- **Design inspector** (right; under the left panel when the window is
+  narrower): *nothing selected* → page title / URL / description, site name /
+  domain / language, the brand kit (link or change it; swatches) and the
+  page's **Checks**; *a section* → Swap layout (same family, copy kept),
+  content fields bound to the canvas, its items (add / open), the media slot
+  (a 3D artifact from the workspace, or an image), **Style** — background
+  swatches from the kit, four brand gradients, or a raw `#hex` (flagged
+  **Off-brand**, with "Use <nearest brand colour>"; switching back records a
+  `brand_correction` signal), spacing S–XL, alignment, motion preset
+  (None / Fade up / Scroll reveal / Parallax / Tilt on hover), min height for
+  heroes — **Responsive** (show on desktop / tablet / mobile, media above the
+  text on mobile, centre on mobile) and live **Accessibility** chips (text and
+  button contrast vs 4.5 : 1); *a 3D embed* → source, **version policy**
+  (Follow approved · Follow latest · Pin vN — written as `@approved` /
+  `@latest` / `@vN` in the reference) and interaction (auto-rotate, tilt).
+- **Checks** (deterministic, no agent): text and button contrast against the
+  brand colours, missing text alternatives on images and 3D embeds, no / many
+  h1 (heroes), empty headlines, off-brand and unknown colour tokens, links
+  still pointing to `#`.
+- **Co-design hook**: the selection (page · section · block) is mirrored into
+  `siteSelection` (`site/selection.svelte.ts`) — `label` ("Section: Hero")
+  and `payload`, the ≤ 4 KB `selection` for `POST …/assist` — and Ask Otto /
+  Variants bump `siteSelection.request` (and fire `otto:site-ask`) for the
+  Otto panel.
+- **Preview** opens the working copy (unsaved edits included) full size,
+  without editor chrome, in a script-less frame; switch pages by clicking the
+  site's own links, and width Fill / Desktop / Tablet / Mobile.
+
+### Publish ▾ (everything stays on this Mac)
+
+- **Export static site (.zip)** — the last SAVED version (the sheet warns when
+  you have unsaved edits): `index.html` + one file per page, ONE `site.css`
+  whose first block is the brand tokens as `--brand-<group>-<name>` CSS
+  variables, library images under `assets/`, and `otto-publish.json`. No
+  JavaScript: motion is CSS (scroll-driven where the browser supports it) and
+  3D embeds are posters.
+- **Publish preview (local)** — serves the saved version from the daemon at
+  `/api/v1/design/artifacts/<id>/preview?publish=<id>` (loopback, needs your
+  Otto sign-in), opened in the same preview sheet.
+- Both record a publish whose **pinned set** is the site version, its kit and
+  the exact version of every embed and image it rendered — reproducible, and
+  protected from the retention prune. "Recent publishes" lists them.
+- **Export as Svelte project** (v2) and **Publish as claude.ai artifact**
+  (coming soon) are shown disabled; nothing is ever sent outside this Mac
+  from Site Studio today.
+
+### Troubleshooting
+
+- **"otto-site: pages[0].sections[3].block: unknown section block …" on
+  save** — an edit (often an agent's) used a block the renderer doesn't know;
+  the message lists the known names. A section with no `block` is kept but not
+  rendered.
+- **The site is in the default violet palette** — no brand kit applies: link
+  one (Design inspector → Brand) or set the project's kit.
+- **A 3D embed shows a stand-in card** — no 3D artifact picked, it was
+  deleted, you can't view its workspace, or (export) it has no thumbnail yet.
+- **The export lacks my latest change** — it exports the saved version; press
+  Save first.
+- **Local preview opens in the browser as 401** — it is bearer-authenticated;
+  open it from Publish ▾ inside Otto.

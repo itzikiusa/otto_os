@@ -9,6 +9,8 @@ import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../product/d
 import { emptyScene, serializeScene, studioScene } from '../product/design/scene3d';
 import { fileToB64 } from '../product/design/format';
 import { brandStarter, formatForFile, isTextFormat, studioInfo } from './model';
+import { SITE_TEMPLATES, starterSite } from './site/engine/templates';
+import { serializeSite } from './site/engine/ops';
 
 /** A starter graphic: a 1080×1350 portrait tile as plain HTML. */
 const GRAPHIC_STARTER =
@@ -21,13 +23,15 @@ const GRAPHIC_STARTER =
 
 const D2_STARTER = 'direction: right\nidea -> draft -> review -> shipped\n';
 
-/** Templates the arena ships, offered per format. */
-export function templatesFor(format: string): DesignTemplate[] {
+/** Templates the arena ships, offered per format (Site Studio has its own six). */
+export function templatesFor(format: string): Pick<DesignTemplate, 'id' | 'name' | 'description'>[] {
+  if (format === 'otto-site') return SITE_TEMPLATES.map(({ id, name, description }) => ({ id, name, description }));
   return DESIGN_TEMPLATES.filter((t) => t.format === format);
 }
 
 /** The first document of a new artifact. */
 export function starterContent(studio: DesignStudio, format: string, title: string, templateId?: string): string {
+  if (format === 'otto-site') return serializeSite(starterSite(templateId, title));
   const tpl = templateId ? DESIGN_TEMPLATES.find((t) => t.id === templateId) : undefined;
   if (tpl && tpl.format === format) return tpl.source;
   switch (format) {

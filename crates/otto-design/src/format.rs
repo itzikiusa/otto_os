@@ -214,6 +214,9 @@ pub fn validate(spec: &FormatSpec, bytes: &[u8]) -> Result<()> {
             if spec.name == "otto-brand" {
                 crate::brand::validate(&v)?;
             }
+            if spec.name == "otto-site" {
+                crate::site::validate(&v)?;
+            }
         }
         Encoding::Binary => {
             if bytes.is_empty() {
