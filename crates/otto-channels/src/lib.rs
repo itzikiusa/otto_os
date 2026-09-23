@@ -2,6 +2,7 @@
 //! Stage 2 adds a runtime channel manager (Telegram-first, Slack-ready).
 
 pub mod adapter;
+pub mod attach_guard;
 pub mod bridge;
 pub mod email;
 pub mod http;

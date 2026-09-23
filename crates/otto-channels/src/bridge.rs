@@ -632,14 +632,16 @@ impl Bridge {
              message is sent as-is. To attach a file (e.g. a full report you wrote to disk), put \
              its absolute path between ⟦otto-file⟧ and ⟦/otto-file⟧ — e.g. \
              ⟦otto-file⟧/tmp/investigation.md⟦/otto-file⟧ — and Otto uploads it to the thread for \
-             you. Use ONLY ⟦otto-file⟧ to attach files; do NOT use MEDIA: or any other scheme, and \
+             you (the file must be inside your working directory or /tmp). Use ONLY ⟦otto-file⟧ \
+             to attach files; do NOT use MEDIA: or any other scheme, and \
              do NOT upload files yourself. A long inline reply is also auto-attached as \
              investigation.md."
         } else {
             "Otto relays your reply back to the chat automatically. Do NOT run commands, read .env, \
              or use any token to post a reply yourself; just write the answer. To attach a file, \
              put its absolute path between ⟦otto-file⟧ and ⟦/otto-file⟧ (e.g. \
-             ⟦otto-file⟧/tmp/report.md⟦/otto-file⟧) and Otto uploads it to the thread."
+             ⟦otto-file⟧/tmp/report.md⟦/otto-file⟧; it must be inside your working directory \
+             or /tmp) and Otto uploads it to the thread."
         };
         let text = format!(
             "{user_text}\n\n\

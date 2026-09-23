@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -22,6 +23,7 @@ use otto_core::Id;
 use otto_sessions::SessionManager;
 
 use crate::adapter::Adapter;
+use crate::attach_guard::{AttachmentPolicy, MAX_ATTACHMENT_BYTES};
 use crate::transcript::{self, TranscriptEvent};
 
 /// Hook that runs Otto's self-improvement on a just-finished channel
@@ -380,7 +382,7 @@ impl Mirror {
                                     }
                                 }
                                 for path in &file_paths {
-                                    upload_file_path(&adapter, &chat, thread_ref, path).await;
+                                    upload_file_path(&adapter, &chat, thread_ref, path, &cwd).await;
                                 }
                                 last_posted_final = Some(joined);
 
@@ -724,26 +726,80 @@ fn strip_file_directives(text: &str) -> String {
 
 /// Read a local file the agent asked to attach (via ⟦otto-file⟧) and upload it
 /// to the chat. Best-effort: a missing/unreadable path is logged, not fatal.
+///
+/// The path is agent output, i.e. attacker-influenced (prompt injection), and
+/// the upload is the DAEMON's egress — so it is confined by
+/// [`AttachmentPolicy`] (session cwd, /tmp, Otto artifact dirs; never secrets,
+/// keys or Otto's own DB/credentials) before a single byte is read. A refusal
+/// is logged with the resolved reason and noted in the thread.
 async fn upload_file_path(
     adapter: &Arc<dyn Adapter>,
     chat: &str,
     thread: Option<&str>,
     path: &str,
+    cwd: &str,
 ) {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("attachment");
-            // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
-            // binary attachments (images, PDFs, …).
-            match adapter.upload(chat, thread, filename, &bytes).await {
-                Ok(()) => info!(file = filename, "mirror: uploaded agent file attachment"),
-                Err(e) => warn!("mirror: file upload {path}: {e}"),
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment")
+        .to_string();
+    let policy = AttachmentPolicy::for_session(cwd);
+    let canon = match policy.vet(path, cwd) {
+        Ok((canon, _len)) => canon,
+        Err(reason) => {
+            warn!(
+                path,
+                cwd,
+                reason = reason.as_str(),
+                "mirror: refused ⟦otto-file⟧ attachment"
+            );
+            let note = format!("⚠️ Otto did not attach `{filename}`: {reason}.");
+            if let Err(e) = adapter.send(chat, thread, &note).await {
+                warn!("mirror: attachment-refusal note: {e}");
+            }
+            return;
+        }
+    };
+    // Read the CANONICAL path (no symlinks left to swap) and re-apply the size
+    // cap on the bytes actually read, so a file grown after the check can't
+    // blow the buffer.
+    let bytes = match tokio::fs::File::open(&canon).await {
+        Ok(f) => {
+            let mut buf = Vec::new();
+            match f.take(MAX_ATTACHMENT_BYTES + 1).read_to_end(&mut buf).await {
+                Ok(_) => buf,
+                Err(e) => {
+                    warn!(
+                        "mirror: could not read file to attach {}: {e}",
+                        canon.display()
+                    );
+                    return;
+                }
             }
         }
-        Err(e) => warn!("mirror: could not read file to attach {path}: {e}"),
+        Err(e) => {
+            warn!(
+                "mirror: could not open file to attach {}: {e}",
+                canon.display()
+            );
+            return;
+        }
+    };
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        warn!(path = %canon.display(), "mirror: refused ⟦otto-file⟧ attachment: grew past the size cap");
+        return;
+    }
+    // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
+    // binary attachments (images, PDFs, …).
+    match adapter.upload(chat, thread, &filename, &bytes).await {
+        Ok(()) => info!(
+            file = filename.as_str(),
+            resolved = %canon.display(),
+            bytes = bytes.len(),
+            "mirror: uploaded agent file attachment"
+        ),
+        Err(e) => warn!("mirror: file upload {}: {e}", canon.display()),
     }
 }
 
