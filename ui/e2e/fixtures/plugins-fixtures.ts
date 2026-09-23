@@ -5,13 +5,33 @@
 //
 // The mock dataset mirrors examples/plugins/team-performance/test/fixtures/
 // mock-jira.js (kept independent on purpose — neither suite reaches into the
-// other's tree): 2 assignees, 6 done + 2 in-progress issues, June 2026.
+// other's tree): 2 assignees, 6 done + 2 in-progress issues, June 2026
+// (shifted by whole weeks to stay recent — see `at`).
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { APIRequestContext } from '@playwright/test';
+
+// ---------------------------------------------------------------------------
+// Fixture clock
+// ---------------------------------------------------------------------------
+
+// The dataset is written in late-June-2026 terms, but both plugins measure
+// trailing windows from NOW (DORA defaults to the last 30 days), so fixed
+// dates silently age out of every window. Shift every fixture timestamp by
+// WHOLE WEEKS — weekday and UTC time of day stay exactly as authored (the
+// weekly buckets and working-time maths depend on them) — so the latest
+// event (TP-8, Jun 29 09:00) lands within the week before now.
+const AUTHORED_LATEST = Date.parse('2026-06-29T09:00:00Z');
+const WEEK_MS = 7 * 24 * 3600 * 1000;
+const SHIFT_MS = Math.max(0, Math.floor((Date.now() - 3600 * 1000 - AUTHORED_LATEST) / WEEK_MS) * WEEK_MS);
+
+/** An authored fixture timestamp, moved onto the current calendar. */
+export function at(iso: string): string {
+  return new Date(Date.parse(iso) + SHIFT_MS).toISOString().replace('.000Z', 'Z');
+}
 
 // ---------------------------------------------------------------------------
 // Mock Jira
@@ -25,7 +45,7 @@ type Issue = {
 };
 
 const h = (created: string, from: string, to: string): History => ({
-  created,
+  created: at(created),
   items: [{ field: 'status', fromString: from, toString: to }],
 });
 
@@ -51,9 +71,9 @@ function issue(
       issuetype: { name: type },
       status: { name: status, statusCategory: { key: category } },
       assignee,
-      created,
-      resolutiondate: resolved,
-      updated,
+      created: at(created),
+      resolutiondate: resolved && at(resolved),
+      updated: at(updated),
       customfield_10016: points,
       timeoriginalestimate: null,
     },
@@ -201,7 +221,8 @@ export function startMockJira(): Promise<MockJira> {
 // ---------------------------------------------------------------------------
 
 /** Scripted repo: issue-key feature merges into develop, release/hotfix merges,
- *  and `*-deployed` tags — deterministic timestamps in June 2026. */
+ *  and `*-deployed` tags — deterministic June-2026 timestamps, moved by
+ *  {@link at} onto the current calendar. */
 export function makeFixtureRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-plugins-repo-'));
   const g = (args: string[], when?: string) =>
@@ -213,7 +234,7 @@ export function makeFixtureRepo(): string {
         GIT_AUTHOR_EMAIL: 'e2e@otto.local',
         GIT_COMMITTER_NAME: 'e2e',
         GIT_COMMITTER_EMAIL: 'e2e@otto.local',
-        ...(when ? { GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when } : {}),
+        ...(when ? { GIT_AUTHOR_DATE: at(when), GIT_COMMITTER_DATE: at(when) } : {}),
       },
     });
   const commit = (msg: string, when: string) => {
@@ -272,9 +293,24 @@ export function makeFixtureRepo(): string {
 // Install / enable helpers (root API)
 // ---------------------------------------------------------------------------
 
-export async function installPlugin(ctx: APIRequestContext, base: string, source: string): Promise<void> {
+/** Install from `source`; resolves to the installed plugin's slug. */
+export async function installPlugin(ctx: APIRequestContext, base: string, source: string): Promise<string> {
   const r = await ctx.post(`${base}/api/v1/plugin-admin/install`, { data: { source } });
   if (!r.ok()) throw new Error(`install ${source} → ${r.status()} ${await r.text()}`);
+  return ((await r.json()) as { slug: string }).slug;
+}
+
+/** Slugs of every plugin currently installed on the daemon. */
+export async function installedPlugins(ctx: APIRequestContext, base: string): Promise<string[]> {
+  const r = await ctx.get(`${base}/api/v1/plugin-admin`);
+  if (!r.ok()) throw new Error(`plugin-admin list → ${r.status()} ${await r.text()}`);
+  return ((await r.json()) as { slug: string }[]).map((p) => p.slug);
+}
+
+/** Uninstall (stop the sidecar + delete the record). Already gone is fine. */
+export async function uninstallPlugin(ctx: APIRequestContext, base: string, slug: string): Promise<void> {
+  const r = await ctx.delete(`${base}/api/v1/plugin-admin/${slug}`);
+  if (!r.ok() && r.status() !== 404) throw new Error(`uninstall ${slug} → ${r.status()} ${await r.text()}`);
 }
 
 export async function enablePlugin(ctx: APIRequestContext, base: string, slug: string): Promise<void> {

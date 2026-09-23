@@ -4,7 +4,7 @@
 //! checks the caller's workspace role.
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
@@ -30,6 +30,11 @@ use crate::error::{ApiError, ApiResult};
 use crate::proof as engine;
 use crate::state::ServerCtx;
 
+/// Request-body cap for the base64 media upload: `MEDIA_CAP` × 4/3 base64
+/// inflation plus JSON framing, rounded up to 40 MiB.
+const MEDIA_BODY_LIMIT: usize = 40 * 1024 * 1024;
+const _: () = assert!(MEDIA_BODY_LIMIT > MEDIA_CAP / 3 * 4 + 64 * 1024);
+
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
         .route("/workspaces/{id}/proof-packs", get(list).post(create))
@@ -47,7 +52,14 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/proof-packs/{id}/snapshot", post(create_snapshot))
         .route("/proof-packs/{id}/snapshots", get(list_snapshots))
         .route("/proof-snapshots/{id}", get(get_snapshot))
-        .route("/proof-packs/{id}/media", post(add_media))
+        // Media arrives as base64 JSON: the 25 MiB decoded cap (`MEDIA_CAP`, a
+        // clean 413 from the handler) needs ~34 MiB of body, far past axum's
+        // 2 MiB default — which also refuses before reading and closes the
+        // socket mid-upload. Same 40 MiB envelope as story attachments.
+        .route(
+            "/proof-packs/{id}/media",
+            post(add_media).layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT)),
+        )
         .route("/proof-artifacts/{id}/blob", get(artifact_blob))
         .route("/proof-packs/{id}/evidence/api", post(evidence_api))
         .route("/proof-packs/{id}/evidence/db", post(evidence_db))

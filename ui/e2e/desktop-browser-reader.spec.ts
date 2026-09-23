@@ -111,19 +111,31 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
 
 test('save to vault writes a note without re-fetching the page', async ({ page }) => {
   const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-browser-vault-'));
+  // Vaults are daemon-global, so earlier specs on the same daemon may have
+  // registered others — then Save offers a chooser instead of saving straight
+  // away. A unique name lets the spec pick ITS vault either way.
+  const vaultName = `Browser E2E Vault ${Date.now().toString(36)}`;
   const vaultResp = await ctx.post(`${base}/api/v1/workspaces/${wsId}/vault/vaults`, {
-    data: { name: 'Browser E2E Vault', root_path: dir },
+    data: { name: vaultName, root_path: dir },
   });
   expect(vaultResp.ok(), `create vault → ${vaultResp.status()} ${await vaultResp.text()}`).toBeTruthy();
+  const vaultId = ((await vaultResp.json()) as { id: number }).id;
 
   await openFixture(page);
   const vaultSaveReq = page.waitForRequest(
     (req) => req.url().includes('/vault-save') && req.method() === 'POST',
   );
   await page.getByTitle('Save to vault').click();
+  const choice = page.getByRole('menuitem', { name: vaultName });
+  const chooser = await Promise.race([
+    vaultSaveReq.then(() => false),
+    choice.waitFor({ state: 'visible' }).then(() => true, () => false),
+  ]);
+  if (chooser) await choice.click();
   const req = await vaultSaveReq;
   const body = req.postDataJSON() as { url: string; vault_id: number; summary?: string };
   expect(body.url).toBe(FIXTURE_URL);
+  expect(body.vault_id, 'saves into the vault this spec registered').toBe(vaultId);
   expect(body.summary, 'vault-save must carry a client-supplied summary to skip the server fetch').toBeTruthy();
 
   await expect(page.locator('.toasts')).toContainText('Saved to vault', { timeout: 10_000 });
