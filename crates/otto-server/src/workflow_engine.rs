@@ -1659,8 +1659,68 @@ pub async fn run_workflow(
         // happens to be on. Best-effort + SAFE (only creates a new worktree under
         // data_dir; never touches the user's checkout). Returns the primary
         // provisioned worktree to adopt as the run's working directory.
-        let provisioned_cwd = provision_wf_worktrees(&ctx, &run_id, &mut entries).await;
+        let (provisioned_cwd, isolation_failures) =
+            provision_wf_worktrees(&ctx, &run_id, &mut entries).await;
         files.set_repos(entries.clone());
+        if !isolation_failures.is_empty() {
+            // Fail LOUDLY before any step runs: never let agents work in the
+            // user's own checkout because isolation silently failed.
+            let msg = format!(
+                "cannot isolate this run from your own checkout — {}",
+                isolation_failures.join("; ")
+            );
+            tracing::warn!(%run_id, "{msg}");
+            // Nothing ran: a retry keeps its prior step history, a fresh run
+            // shows every step skipped.
+            let nodes: Vec<NodeRunState> = match &prior_nodes {
+                Some(prior) => prior.clone(),
+                None => states
+                    .iter()
+                    .cloned()
+                    .map(|mut s| {
+                        s.status = NodeStatus::Skipped;
+                        s
+                    })
+                    .collect(),
+            };
+            let rev = repo
+                .update_run_if(
+                    &run_id,
+                    &[RunStatus::Pending, RunStatus::Running],
+                    RunStatus::Error,
+                    &nodes,
+                    Some(&msg),
+                    true,
+                )
+                .await
+                .ok()
+                .flatten();
+            if let Some(rev) = rev {
+                deliver_run_result(
+                    &ctx,
+                    &workflow,
+                    &nodes,
+                    RunStatus::Error,
+                    None,
+                    &input,
+                    None,
+                )
+                .await;
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "error",
+                    None,
+                    rev,
+                    None,
+                    &nodes,
+                    false,
+                );
+            }
+            reap_run_worktrees(&ctx, &run_id).await;
+            return;
+        }
         let input = seed_input_from_entries(input, &entries);
         match provisioned_cwd {
             Some(wt) => {
@@ -7097,15 +7157,22 @@ fn normalize_prompt(input: Value) -> Value {
 /// SAFETY (load-bearing): this only ever CREATES a new linked worktree + a fresh
 /// `otto-wf/<run_id>` branch under the data dir. It never checks out, resets, or
 /// switches branches in the user's own repo, never deletes, never fetches or
-/// forces. `rev-parse` (read-only) resolves the base; if the base ref is absent
-/// or the worktree can't be created, it logs and leaves the entry untouched, so
-/// the run still proceeds on the given working copy. No-op when no `base` is set.
+/// forces. `rev-parse` (read-only) resolves the base — the local branch, else
+/// its remote-tracking `origin/<base>` (a repo that only has `origin/develop`
+/// used to fall through here). No-op when no `base` is set.
+///
+/// Returns `(primary, isolation_failures)`. A failure is an entry that WOULD
+/// run in the user's own checkout because its base could not be resolved or
+/// its worktree could not be created: the caller fails the run with those
+/// messages rather than silently letting agents edit/commit in the user's
+/// working copy (seen for `koala-zenith-go`: base `develop` only on origin).
 async fn provision_wf_worktrees(
     ctx: &ServerCtx,
     run_id: &Id,
     entries: &mut [crate::workflow_context::RepoEntry],
-) -> Option<String> {
+) -> (Option<String>, Vec<String>) {
     let mut primary: Option<String> = None;
+    let mut failures: Vec<String> = Vec::new();
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
     for e in entries.iter_mut() {
         if e.error.is_some() {
@@ -7130,15 +7197,16 @@ async fn provision_wf_worktrees(
         }
         let git = otto_git::LocalGit::new(&repo.path);
         // READ-ONLY: resolve the base branch to a commit in the user's repo.
-        let base_commit = match git.rev_parse(&base).await {
-            Ok(c) => c,
-            Err(_) => {
-                tracing::warn!(
-                    "wf worktree: base '{base}' not found in {} — using the given checkout",
-                    repo.path
-                );
-                continue;
-            }
+        let Some(base_commit) = resolve_wf_base(&git, &base).await else {
+            tracing::warn!(
+                "wf worktree: base '{base}' not found in {} (locally or as origin/{base}) — refusing to run in the user's checkout",
+                repo.path
+            );
+            failures.push(format!(
+                "base branch '{base}' was not found in {} (neither locally nor as origin/{base}) — fetch it or fix the run's base",
+                repo.name
+            ));
+            continue;
         };
         let wt_path = ctx
             .data_dir
@@ -7160,13 +7228,26 @@ async fn provision_wf_worktrees(
             }
             Err(err) => {
                 tracing::warn!(
-                    "wf worktree provision failed for {} @ {base}: {err} — using the given checkout",
+                    "wf worktree provision failed for {} @ {base}: {err} — refusing to run in the user's checkout",
                     repo.name
                 );
+                failures.push(format!(
+                    "could not create an isolated worktree of {} @ {base}: {err}",
+                    repo.name
+                ));
             }
         }
     }
-    primary
+    (primary, failures)
+}
+
+/// Resolve a run's declared base to a commit: the ref as given (a local
+/// branch, tag or sha), else the remote-tracking `origin/<base>`. Read-only.
+async fn resolve_wf_base(git: &otto_git::LocalGit, base: &str) -> Option<String> {
+    if let Ok(c) = git.rev_parse(base).await {
+        return Some(c);
+    }
+    git.rev_parse(&format!("origin/{base}")).await.ok()
 }
 
 /// Reap the worktrees a run provisioned under
