@@ -33,6 +33,7 @@
 //! `learn` (the deterministic signal → candidate-rule extractor).
 
 pub mod blobs;
+pub mod brand;
 pub mod cite;
 pub mod diff;
 pub mod extract;
