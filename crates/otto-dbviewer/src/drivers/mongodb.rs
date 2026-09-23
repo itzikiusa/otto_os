@@ -1493,8 +1493,14 @@ impl MongoDriver {
         // on mongosh's argv (visible to every local process via `ps` for the
         // script's lifetime). Instead the shell starts with `--nodb` and the
         // 0600 temp script itself connects via a `db = connect(<uri>)` prelude.
-        std::io::Write::write_all(&mut file, mongosh_script_prelude(&uri).as_bytes())
-            .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
+        // A conn_string is used verbatim, so its own path database (or mongosh's `test`) would be
+        // `db`; the database selected in the tree must win, exactly like the native run path.
+        let selected = resolve_db(cfg, req.node.as_deref()).ok();
+        std::io::Write::write_all(
+            &mut file,
+            mongosh_script_prelude(&uri, selected.as_deref()).as_bytes(),
+        )
+        .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
         std::io::Write::write_all(&mut file, req.statement.as_bytes())
             .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
 
@@ -1667,8 +1673,17 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String
 /// not argv — carries the credential-bearing URI: the shell starts `--nodb` and
 /// the script itself connects. JSON-encoding the URI yields a valid JS string
 /// literal (quotes/backslashes escaped).
-fn mongosh_script_prelude(uri: &str) -> String {
-    format!("db = connect({});\n", Value::String(uri.to_string()))
+fn mongosh_script_prelude(uri: &str, database: Option<&str>) -> String {
+    let mut prelude = format!("db = connect({});\n", Value::String(uri.to_string()));
+    // Switching after the connect keeps the URI's own auth database: rewriting the URI path would
+    // change the default authSource of a conn_string that does not name one.
+    if let Some(database) = database.map(str::trim).filter(|d| !d.is_empty()) {
+        prelude.push_str(&format!(
+            "db = db.getSiblingDB({});\n",
+            Value::String(database.to_string())
+        ));
+    }
+    prelude
 }
 
 // --- command parsing --------------------------------------------------------
@@ -3249,12 +3264,30 @@ mod tests {
     #[test]
     fn mongosh_prelude_json_escapes_the_uri() {
         assert_eq!(
-            mongosh_script_prelude("mongodb://u:p@h:1/db"),
+            mongosh_script_prelude("mongodb://u:p@h:1/db", None),
             "db = connect(\"mongodb://u:p@h:1/db\");\n"
         );
         assert_eq!(
-            mongosh_script_prelude("mongodb://u:p\"x\\@h:1/db"),
+            mongosh_script_prelude("mongodb://u:p\"x\\@h:1/db", None),
             "db = connect(\"mongodb://u:p\\\"x\\\\@h:1/db\");\n"
+        );
+    }
+
+    /// A conn_string names its own path database (here `frb`); a script run with another
+    /// database selected in the tree must run against the selected one, not the URI's.
+    #[test]
+    fn mongosh_prelude_switches_to_the_selected_database() {
+        assert_eq!(
+            mongosh_script_prelude("mongodb+srv://u:p@c.example.net/frb", Some("games_management")),
+            "db = connect(\"mongodb+srv://u:p@c.example.net/frb\");\ndb = db.getSiblingDB(\"games_management\");\n"
+        );
+        assert_eq!(
+            mongosh_script_prelude("mongodb://u:p@h:1/app", Some("  ")),
+            "db = connect(\"mongodb://u:p@h:1/app\");\n"
+        );
+        assert_eq!(
+            mongosh_script_prelude("mongodb://u:p@h:1/app", Some("we\"ird")),
+            "db = connect(\"mongodb://u:p@h:1/app\");\ndb = db.getSiblingDB(\"we\\\"ird\");\n"
         );
     }
 
