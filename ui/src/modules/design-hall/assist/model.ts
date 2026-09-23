@@ -607,6 +607,45 @@ export function signalKindLabel(kind: string): string {
   return m[kind] ?? kind;
 }
 
+/**
+ * A readable line for the signals the co-design flow records (the graph's own
+ * `signalSummary` covers the rest — return null to fall back to it).
+ */
+export function assistSignalSummary(kind: string, payload: Record<string, unknown> | null | undefined): string | null {
+  const p = payload ?? {};
+  const str = (k: string): string | null => (typeof p[k] === 'string' && (p[k] as string).trim() ? (p[k] as string).trim() : null);
+  switch (kind) {
+    case 'variant_accepted': {
+      const d = str('direction');
+      return d ? `Applied the “${directionName(d)}” variant` : 'Applied a variant';
+    }
+    case 'variant_rejected': {
+      if (p.source !== 'variant_tray') return null;
+      const d = str('direction');
+      const reason = REJECT_REASONS.find((r) => r.id === p.reason)?.label ?? null;
+      return `Rejected ${d ? `the “${directionName(d)}” variant` : 'a variant'}${reason ? ` · ${reason}` : ''}`;
+    }
+    case 'agent_draft': {
+      const mode = str('mode');
+      const d = str('direction');
+      const cited = Array.isArray(p.cited) ? p.cited.length : 0;
+      const what = mode === 'variant' ? `a “${directionName(d)}” variant` : mode === 'a11y' ? 'an accessibility fix' : 'a new version';
+      return `Otto drafted ${what}${cited ? ` · cited ${cited} reference${cited === 1 ? '' : 's'}` : ''}`;
+    }
+    case 'a11y_fix': {
+      const rule = str('rule');
+      return rule ? `Accepted accessibility fix: ${rule}` : null;
+    }
+    case 'critique_finding': {
+      if (p.disposition !== 'dismissed') return null;
+      const rule = str('rule');
+      return `Dismissed a finding${rule ? `: ${rule}` : ''}`;
+    }
+    default:
+      return null;
+  }
+}
+
 /** The active rules as a Markdown file (Settings → Export rules). */
 export function exportRulesMarkdown(r: DesignLearnedResp, workspaceName: string): string {
   const lines = [
@@ -620,4 +659,35 @@ export function exportRulesMarkdown(r: DesignLearnedResp, workspaceName: string)
   for (const a of r.active) lines.push(`- [rule:${a.key}] ${a.rule}`);
   lines.push('');
   return lines.join('\n');
+}
+
+// ── Lobby hand-off ──────────────────────────────────────────────────────────
+
+const STOP = new Set(
+  (
+    'a an and are as at be but by for from has have in into is it its of on or our that the their this to with ' +
+    'we you your make made create design page screen new some more very like want need using use one two three ' +
+    'about over under e.g eg etc'
+  ).split(' '),
+);
+
+/**
+ * The prompt's most salient terms for the "Use references" preview: words of
+ * 3+ letters that aren't stop words, longest first (ties keep prompt order),
+ * de-duplicated. Library search ANDs its terms, so the lobby searches each
+ * term on its own and merges the hits.
+ */
+export function salientTerms(prompt: string, n = 3): string[] {
+  const words = prompt
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}+-]+/u)
+    .map((w) => w.replace(/^[-+]+|[-+]+$/g, ''))
+    .filter((w) => w.length >= 3 && !STOP.has(w));
+  const seen = new Set<string>();
+  const uniq = words.filter((w) => (seen.has(w) ? false : (seen.add(w), true)));
+  return uniq
+    .map((w, i) => ({ w, i }))
+    .sort((a, b) => b.w.length - a.w.length || a.i - b.i)
+    .slice(0, n)
+    .map((x) => x.w);
 }

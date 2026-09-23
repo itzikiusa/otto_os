@@ -27,6 +27,7 @@
   import SpatialView from './SpatialView.svelte';
   import { STUDIOS, filterProjects, studioInfo, titleFromPrompt, type ProjectFilter } from './model';
   import { createDesign } from './create';
+  import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
   import { library } from './library.svelte';
 
   interface Props {
@@ -88,7 +89,9 @@
       })),
   );
 
-  // ── Prompt hero (Phase 0: creates a draft; generation is Phase 1) ───────
+  // ── Prompt hero: Generate = create the draft + hand the brief to Otto (one
+  // generate turn, or a variants run), then open it on the Otto tab. "Draft
+  // only" keeps the brief on an empty draft without an agent. ─────────────
   let prompt = $state('');
   let heroStudio = $state<DesignStudio>('frames');
   let heroProject = $state('');
@@ -96,6 +99,63 @@
   const heroStudios = STUDIOS.filter((s) => s.formats.length > 0);
   const TRY = ['Launch page with a product hero', 'Social tile in portrait', 'Checkout flow diagram', 'Product shot on a plinth'];
   const TRY_STUDIO: DesignStudio[] = ['frames', 'graphics', 'whiteboard', '3d'];
+  let variants = $state(1);
+  let useRefs = $state(true);
+  /** The team's best matches for the brief — offered to Otto first as [R1..R3]. */
+  let refHits = $state<DesignSearchHit[]>([]);
+  let refCtl: AbortController | null = null;
+  let refTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const p = prompt.trim();
+    const on = useRefs;
+    const wsId = ws.currentId;
+    if (refTimer) clearTimeout(refTimer);
+    if (!on || p.length < 4 || !wsId) {
+      refCtl?.abort();
+      refHits = [];
+      return;
+    }
+    refTimer = setTimeout(() => void loadRefs(p, wsId), 450);
+  });
+  async function loadRefs(p: string, wsId: string): Promise<void> {
+    refCtl?.abort();
+    const mine = new AbortController();
+    refCtl = mine;
+    try {
+      const hits = await suggestReferences(p, wsId, mine.signal);
+      if (refCtl === mine) refHits = hits;
+    } catch {
+      /* no preview; Otto still searches the library itself */
+    }
+  }
+
+  async function generate(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) {
+      toasts.warn('Pick a workspace first', 'New designs are filed under a workspace.');
+      return;
+    }
+    creating = true;
+    try {
+      const r = await generateFromBrief({
+        workspaceId: wsId,
+        studio: heroStudio,
+        format: studioInfo(heroStudio).formats[0],
+        title: titleFromPrompt(prompt),
+        projectId: heroProject || null,
+        brief: prompt,
+        variants,
+        references: useRefs ? refHits.map(referenceOf) : [],
+      });
+      prompt = '';
+      if (r.assistError) toasts.warn('Draft created, but Otto couldn’t start', r.assistError);
+      router.go(`design/a/${encodeURIComponent(r.artifactId)}/otto`);
+    } catch (e) {
+      toasts.error('Couldn’t create the draft', e instanceof Error ? e.message : String(e));
+    } finally {
+      creating = false;
+    }
+  }
 
   async function createFromPrompt(): Promise<void> {
     const wsId = ws.currentId;
@@ -248,7 +308,7 @@
         <!-- Prompt hero -->
         <section class="hero card" aria-labelledby="dh-hero-h">
           <h2 id="dh-hero-h">What do you want to make?</h2>
-          <p class="dim">Start a draft in any studio. It links to your project and keeps every version.</p>
+          <p class="dim">Otto drafts it in the studio you pick, from your team’s past designs. Every result is a version you can compare, keep or undo.</p>
           <div class="composer">
             <textarea
               class="input"
@@ -257,9 +317,9 @@
               aria-label="Describe the design"
               bind:value={prompt}
               onkeydown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && prompt.trim()) {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && prompt.trim() && !creating) {
                   e.preventDefault();
-                  void createFromPrompt();
+                  void generate();
                 }
               }}
               data-testid="design-prompt"
@@ -278,11 +338,36 @@
                   {#each allProjects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
                 </select>
               </label>
+              <label class="sel">
+                <span>Variants</span>
+                <select class="input" bind:value={variants} aria-label="How many directions Otto drafts" data-testid="design-prompt-variants">
+                  {#each [1, 2, 3, 4] as n (n)}<option value={n}>{n}</option>{/each}
+                </select>
+              </label>
+              <button class="pill-toggle" class:on={useRefs} aria-pressed={useRefs} onclick={() => (useRefs = !useRefs)}
+                title="Offer your team’s closest past designs to Otto first, as references it can cite" data-testid="design-prompt-refs">
+                {#if useRefs}<Icon name="check" size={12} />{/if} Use references
+              </button>
               <span class="grow"></span>
-              <button class="btn primary" disabled={!prompt.trim() || creating} onclick={createFromPrompt} data-testid="design-prompt-create">
-                <Icon name="sparkle" size={13} /> {creating ? 'Creating…' : 'Create draft'}
+              <button class="btn ghost" disabled={!prompt.trim() || creating} onclick={createFromPrompt} data-testid="design-prompt-create"
+                title="Save the brief on an empty draft, without asking Otto">
+                Draft only
+              </button>
+              <button class="btn primary" disabled={!prompt.trim() || creating} onclick={generate} data-testid="design-prompt-generate"
+                title="Create the draft and ask Otto to design it (⌘Enter)">
+                <Icon name="sparkle" size={13} /> {creating ? 'Starting…' : 'Generate'}
               </button>
             </div>
+            {#if useRefs && refHits.length}
+              <div class="refs" aria-label="References Otto gets first" data-testid="design-prompt-ref-chips">
+                <span class="dim">References</span>
+                {#each refHits as h, i (h.artifact.id)}
+                  <a class="chip" href={`#/design/a/${encodeURIComponent(h.artifact.id)}`} title={`${h.artifact.title} (${h.artifact.status}) — offered as R${i + 1}`}>
+                    R{i + 1} · {h.artifact.title}
+                  </a>
+                {/each}
+              </div>
+            {/if}
           </div>
           <div class="try">
             <span class="dim">Try</span>
@@ -290,7 +375,7 @@
               <button class="chip as-btn" onclick={() => { prompt = t; heroStudio = TRY_STUDIO[i]; }}>{t}</button>
             {/each}
           </div>
-          <p class="phase"><Icon name="info" size={12} /> Otto generates designs from a brief in Phase 1. Today the brief is saved on the draft for you and your agents.</p>
+          <p class="phase"><Icon name="info" size={12} /> Nothing is applied for you: Otto’s drafts are versions, and variants wait until you pick one.</p>
         </section>
 
         <!-- Studios -->
@@ -580,6 +665,23 @@
     font-family: inherit;
   }
   .as-btn:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .refs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: var(--fs-s);
+  }
+  .refs .chip {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-decoration: none;
+  }
+  .refs .chip:hover {
     color: var(--text);
     border-color: var(--border-strong);
   }

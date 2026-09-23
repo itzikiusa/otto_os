@@ -14,6 +14,7 @@ import {
   provenanceChips,
   quickActionRequest,
   rejectSignal,
+  salientTerms,
   statusInfo,
   variantCards,
   type AssistEventLike,
@@ -315,4 +316,10 @@ test('candidate progress counts toward ≥ 3 signals across ≥ 2 designs', () =
   assert.equal(p.text, '2 of 3 signals · 1 of 2 designs');
   assert.equal(p.pct, 58);
   assert.equal(candidateProgress({ ...c, signal_count: 5, artifact_count: 3, ready: true }).pct, 100);
+});
+
+test('salient terms: no stop words, longest first, unique', () => {
+  assert.deepEqual(salientTerms('A launch page for Rewards+ with a 3D card hero, a launch!'), ['rewards', 'launch', 'card']);
+  assert.deepEqual(salientTerms('the a of'), []);
+  assert.deepEqual(salientTerms('checkout flow diagram', 2), ['checkout', 'diagram']);
 });
