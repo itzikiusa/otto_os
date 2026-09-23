@@ -69,9 +69,31 @@
     }
   }
   let codeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The code-pane text a pending debounce has not saved yet. */
+  let pendingCode: string | null = null;
   function onCode(value: string): void {
     if (codeTimer) clearTimeout(codeTimer);
-    codeTimer = setTimeout(() => void saveMermaid(value), 500);
+    pendingCode = value;
+    // Unsaved typing wins over live agent pushes (ingestDoc skips while dirty).
+    if (canvas.currentId === sceneId) canvas.dirty = true;
+    codeTimer = setTimeout(() => {
+      codeTimer = null;
+      pendingCode = null;
+      void saveMermaid(value);
+    }, 500);
+  }
+  /** Unmount (scene switch / navigation) inside the debounce window: PUT the
+   *  last typed text straight to THIS scene — `saveMermaid` would drop it, since
+   *  currentId already points at the next scene. */
+  function flushPendingCode(): void {
+    if (codeTimer) clearTimeout(codeTimer);
+    codeTimer = null;
+    if (pendingCode === null || !sceneId) return;
+    const doc = { type: 'otto-canvas', version: 1, format: 'mermaid' as CanvasFormat, source: pendingCode };
+    pendingCode = null;
+    void api.put(`/canvas/scenes/${sceneId}`, { doc }).catch((e: unknown) =>
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e)),
+    );
   }
 
   /** Render the current source to SVG (Mermaid native) and auto-fit. */
@@ -268,7 +290,7 @@
     liveId = canvas.currentId;
   });
   onDestroy(() => {
-    if (codeTimer) clearTimeout(codeTimer);
+    flushPendingCode();
     if (liveId === canvas.currentId) liveId = null;
   });
 </script>
