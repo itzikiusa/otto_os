@@ -52,10 +52,15 @@ pub fn text_to_adf(text: &str) -> Value {
                 // Collect run of non-bullet lines into a single paragraph.
                 let mut para_content: Vec<Value> = Vec::new();
                 while i < lines.len() && !lines[i].trim().starts_with("- ") {
-                    if !para_content.is_empty() {
-                        para_content.push(json!({"type": "hardBreak"}));
+                    // A whitespace-only line would become `{"type":"text","text":""}`,
+                    // which Jira rejects with a 400 — skip it.
+                    let text = lines[i].trim();
+                    if !text.is_empty() {
+                        if !para_content.is_empty() {
+                            para_content.push(json!({"type": "hardBreak"}));
+                        }
+                        para_content.push(json!({"type": "text", "text": text}));
                     }
-                    para_content.push(json!({"type": "text", "text": lines[i].trim()}));
                     i += 1;
                 }
                 if !para_content.is_empty() {
@@ -73,6 +78,46 @@ pub fn text_to_adf(text: &str) -> Value {
         "version": 1,
         "content": content
     })
+}
+
+/// ADF node types present in `adf` that the Markdown round-trip
+/// ([`adf_to_markdown`] → edit → [`text_to_adf`]) cannot carry — saving the
+/// edited Markdown back would delete them: attachments/screenshots (`media*`),
+/// `mention`s, smart links (`inlineCard`/`blockCard`/`embedCard`), `status`
+/// lozenges, `date`s, `emoji` and app `extension`s. Deduplicated, in
+/// first-seen (document) order. Empty ⇒ the save loses no content.
+pub fn adf_lossy_nodes(adf: &Value) -> Vec<String> {
+    const LOSSY: [&str; 14] = [
+        "media",
+        "mediaSingle",
+        "mediaGroup",
+        "mediaInline",
+        "mention",
+        "inlineCard",
+        "blockCard",
+        "embedCard",
+        "status",
+        "date",
+        "emoji",
+        "extension",
+        "bodiedExtension",
+        "inlineExtension",
+    ];
+    fn walk(node: &Value, out: &mut Vec<String>) {
+        if let Some(t) = node.get("type").and_then(Value::as_str) {
+            if LOSSY.contains(&t) && !out.iter().any(|s| s == t) {
+                out.push(t.to_string());
+            }
+        }
+        if let Some(children) = node.get("content").and_then(Value::as_array) {
+            for c in children {
+                walk(c, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(adf, &mut out);
+    out
 }
 
 /// Convert an ADF JSON document to a Markdown string.
@@ -253,6 +298,42 @@ mod tests {
     use serde_json::json;
 
     // ---- text_to_adf tests ----
+
+    #[test]
+    fn text_to_adf_never_emits_empty_text_nodes() {
+        // "a\n   \nb" is ONE chunk (no blank-line split) with a whitespace line.
+        let doc = text_to_adf("a\n   \nb");
+        let para = &doc["content"][0]["content"];
+        let texts: Vec<&str> = para
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n.get("text").and_then(Value::as_str))
+            .collect();
+        assert_eq!(texts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn lossy_adf_nodes_are_found_anywhere_in_the_tree() {
+        let doc = json!({"type":"doc","version":1,"content":[
+            {"type":"paragraph","content":[
+                {"type":"text","text":"hi "},
+                {"type":"mention","attrs":{"id":"1","text":"@Ann"}},
+                {"type":"emoji","attrs":{"shortName":":+1:"}}
+            ]},
+            {"type":"mediaSingle","content":[{"type":"media","attrs":{"id":"x","type":"file"}}]},
+            {"type":"bulletList","content":[{"type":"listItem","content":[
+                {"type":"paragraph","content":[{"type":"mention","attrs":{"id":"2"}}]}
+            ]}]}
+        ]});
+        assert_eq!(
+            adf_lossy_nodes(&doc),
+            vec!["mention", "emoji", "mediaSingle", "media"]
+        );
+        let plain = text_to_adf("just text\n\n- a bullet");
+        assert!(adf_lossy_nodes(&plain).is_empty());
+        assert!(adf_lossy_nodes(&Value::Null).is_empty());
+    }
 
     #[test]
     fn test_text_to_adf_structure() {

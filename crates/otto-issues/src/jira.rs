@@ -1124,6 +1124,19 @@ impl JiraClient {
     /// Update the description of an issue. The `body_md` text is converted to ADF.
     pub async fn update_description(&self, key: &str, body_md: &str) -> Result<()> {
         let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        // The Markdown the editor saved came from `adf_to_markdown`, which drops
+        // screenshots, mentions, smart links, dates, status lozenges and
+        // emoji; writing it back (via the plain-text `text_to_adf`) silently
+        // DELETED them from the issue. Refuse instead of destroying content.
+        let current = self.description_adf(key).await?;
+        let lossy = crate::adf::adf_lossy_nodes(&current);
+        if !lossy.is_empty() {
+            return Err(Error::Conflict(format!(
+                "the description of {key} contains content Otto can't preserve ({}); saving would \
+                 delete it — edit the description in Jira instead",
+                lossy.join(", ")
+            )));
+        }
         let adf_body = text_to_adf(body_md);
         let payload = serde_json::json!({
             "fields": {
@@ -1151,6 +1164,36 @@ impl JiraClient {
         }
 
         Ok(())
+    }
+
+    /// The issue's raw description ADF (`Value::Null` when it has none).
+    async fn description_adf(&self, key: &str) -> Result<serde_json::Value> {
+        let url = format!("{}/rest/api/3/issue/{}", self.base_url, key);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[("fields", "description")])
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira description request: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Upstream(format!(
+                "jira description {key} failed ({status}): {body}"
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira description parse: {e}")))?;
+        Ok(body
+            .get("fields")
+            .and_then(|f| f.get("description"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Fetch the set of fields the caller may edit on an issue.
