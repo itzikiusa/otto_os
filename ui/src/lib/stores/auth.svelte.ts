@@ -1,6 +1,6 @@
 // Auth / boot state: GET /meta → onboarding | login | ready.
 
-import { api, setToken, getToken, ApiError } from '../api/client';
+import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT } from '../api/client';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
 
@@ -195,6 +195,43 @@ class AuthStore {
     await this.loadCapabilities();
   }
 
+  private verifying401 = false;
+
+  /**
+   * Global 401 handler (see `UNAUTHORIZED_EVENT`). A route may use 401 for a
+   * request-specific reason (a wrong current password), so the session is
+   * only dropped when /auth/me ALSO answers 401 for the same token. An
+   * expired impersonation token falls back to the saved admin token.
+   */
+  async handleUnauthorized(token: string): Promise<void> {
+    if (this.phase !== 'ready' || this.verifying401 || token !== getToken()) return;
+    this.verifying401 = true;
+    try {
+      await api.get<MeResp>('/auth/me');
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 401) || token !== getToken()) return;
+      const savedAdmin = localStorage.getItem(ADMIN_TOKEN_KEY);
+      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      if (savedAdmin && savedAdmin !== token) {
+        setToken(savedAdmin);
+        try {
+          await this.loadMe();
+          await this.loadCapabilities();
+          return;
+        } catch {
+          /* the admin token is gone too — fall through to login */
+        }
+      }
+      setToken(null);
+      this.me = null;
+      this.realUser = null;
+      this.capabilities = {};
+      this.phase = 'login';
+    } finally {
+      this.verifying401 = false;
+    }
+  }
+
   async logout(): Promise<void> {
     try {
       await api.post('/auth/logout');
@@ -211,3 +248,10 @@ class AuthStore {
 }
 
 export const auth = new AuthStore();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(UNAUTHORIZED_EVENT, (e) => {
+    const token = (e as CustomEvent<{ token: string }>).detail?.token;
+    if (token) void auth.handleUnauthorized(token);
+  });
+}

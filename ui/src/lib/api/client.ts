@@ -70,6 +70,13 @@ export function setToken(token: string | null): void {
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
 }
 
+/** Window event fired when a request made WITH the stored token is answered
+ *  401. The auth store listens (it imports this module, so it cannot be
+ *  called from here) and confirms against /auth/me before treating the
+ *  session as expired — without this, an expired/revoked token left every
+ *  page failing with scattered error toasts instead of returning to login. */
+export const UNAUTHORIZED_EVENT = 'otto:unauthorized';
+
 async function request<T>(
   method: string,
   path: string,
@@ -93,6 +100,10 @@ async function request<T>(
   // Kafka/DB infra, agent endpoints) is that call's own failure, reported by
   // its caller's error toast, never a GitHub/Bitbucket outage.
   if (isProviderPath(path)) serviceHealth.report(resp.status);
+
+  if (resp.status === 401 && token && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { token } }));
+  }
 
   if (!resp.ok) {
     let problem: Problem = { code: 'internal', message: resp.statusText };
