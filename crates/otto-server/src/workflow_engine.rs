@@ -2359,6 +2359,18 @@ pub async fn run_workflow(
                         max_eff + 1,
                         sleep_ms / 1000
                     ));
+                    // The failed attempt's agent must not stay alive next to the
+                    // retry's fresh one (5 live PTYs per step in a 529 storm; and
+                    // fd exhaustion is itself a retry class). Suspend/kill it the
+                    // way a successful step's session is stopped.
+                    if stop_step_sessions_wanted(&node.kind, &node.params) {
+                        while let Ok(sid) = sess_rx.try_recv() {
+                            record_association(&mut states[idx], sid);
+                        }
+                        for sid in states[idx].sessions.clone() {
+                            stop_step_session(&ctx, &sid, &run_id, &mut retry_logs).await;
+                        }
+                    }
                     // Bail out of the backoff promptly if the run was canceled.
                     if let Ok(r) = repo.get_run(&run_id).await {
                         if r.status == RunStatus::Canceled {
@@ -2527,6 +2539,13 @@ pub async fn run_workflow(
                 let mut elogs = std::mem::take(&mut states[idx].logs);
                 elogs.append(&mut retry_logs);
                 elogs.push(format!("✗ {e}"));
+                // A failed step's agent is stopped like a successful one's —
+                // it used to idle at its prompt until the idle sweep found it.
+                if stop_step_sessions_wanted(&node.kind, &node.params) {
+                    for sid in states[idx].sessions.clone() {
+                        stop_step_session(&ctx, &sid, &run_id, &mut elogs).await;
+                    }
+                }
                 // A failed step leaves a trace file too — the error is part of
                 // the handoff trail (a fix step or a human reads what broke).
                 let mut flogs = files.persist_step(
@@ -5088,13 +5107,22 @@ async fn execute_node(
                         }
                         if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
                             if rr.status == RunStatus::Canceled {
-                                status = "cancelled".into();
-                                break;
+                                // Stop HERE: breaking out went on to the goals
+                                // agent / the next target's review before the
+                                // engine's cancel poll dropped this future, and a
+                                // review started in that gap was never cancelled.
+                                return Err(otto_core::Error::Internal("run canceled".into()));
                             }
                         }
                         if Instant::now() >= deadline {
                             status = "timeout".into();
                             logs.push(format!("review_run{tag}: timed out waiting for review"));
+                            // Don't abandon it running: inside a fix/review loop
+                            // the next iteration would start a second fleet on the
+                            // same worktree next to it.
+                            if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
+                                crate::modules::cancel_running_review(ctx, &review, &ws.id).await;
+                            }
                             break;
                         }
                     }
