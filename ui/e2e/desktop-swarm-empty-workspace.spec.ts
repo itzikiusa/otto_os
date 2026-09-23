@@ -46,10 +46,11 @@ test('empty rail names the workspace and finds swarms in the others', async ({ p
   await page.goto('/#/swarm');
   await expect(page.locator('.swarm-page')).toBeVisible({ timeout: 30_000 });
 
-  // Both the rail and the main empty state must scope the statement to THIS
-  // workspace rather than claiming there are no swarms at all.
-  await expect(page.locator('.rail-list')).toContainText('No swarms in', { timeout: 20_000 });
-  await expect(page.locator('.main')).toContainText('No swarms in');
+  // The page-level empty state must scope the statement to THIS workspace
+  // rather than claiming there are no swarms at all. (The empty swarms rail is
+  // hidden — the single empty state owns the page.)
+  await expect(page.locator('.main')).toContainText('No swarms in', { timeout: 20_000 });
+  await expect(page.locator('.rail')).toHaveCount(0);
 
   // The probe finds the sibling workspace and offers a jump.
   const probe = page.getByRole('button', { name: /Look in my other workspaces/ });

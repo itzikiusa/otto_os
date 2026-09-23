@@ -7,6 +7,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import ProofBadges from '../../lib/components/ProofBadges.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import DoneContractMeter from '../../lib/components/DoneContractMeter.svelte';
@@ -59,6 +61,29 @@
   });
 
   const detail = $derived(proof.detail);
+
+  // Never open onto an empty "select a pack" pane when packs exist: restore the
+  // last-opened pack (or the first) once per workspace load. Not on a phone,
+  // where an open pack replaces the list.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (proof.detail) {
+      autoPickedFor = wsId;
+      return;
+    }
+    if (proof.loading || proof.packs.length === 0) return;
+    autoPickedFor = wsId;
+    const id = initialSelection('proof', proof.packs, (p) => p.id);
+    if (id) open(id);
+  });
+  $effect(() => {
+    if (detail?.pack.id) rememberSelection('proof', detail.pack.id);
+  });
+  // An empty, unfiltered list has nothing to show: the page-level empty state
+  // owns the page (a filtered-empty list keeps the rail so the filter can change).
+  const showRail = $derived(proof.packs.length > 0 || filter !== 'all');
 
   // Group the open pack's artifacts by kind for display.
   const artifactGroups = $derived.by((): [string, ProofArtifactView[]][] => {
@@ -511,7 +536,45 @@
 </script>
 
 <div class="proof-page" class:phone={viewport.isPhone}>
+  <PageHeader
+    class="detail-head"
+    title={detail ? detail.pack.title || detail.pack.work_item_id : 'Proof Packs'}
+  >
+    {#snippet leading()}
+      {#if viewport.isPhone && detail}
+        <button class="icon-btn" onclick={() => proof.closeDetail()} aria-label="Back to list" title="Back to list">
+          <Icon name="chevronLeft" size={16} />
+        </button>
+      {/if}
+    {/snippet}
+    {#snippet badge()}
+      {#if detail}
+        <ProofStatusChip status={detail.pack.status} risk={detail.pack.risk_score} />
+        <span class="kind-tag">{detail.pack.work_item_kind}</span>
+        {#if detail.pack.pr_number != null}
+          <span class="kind-tag pr" title="Linked pull request">PR #{detail.pack.pr_number}</span>
+        {/if}
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      {#if detail}
+        <button class="btn small" data-icon="plus" onclick={() => { resetAdd(); addOpen = true; }}><Icon name="plus" size={12} /> Add artifact</button>
+        <button class="btn small" data-icon="file" onclick={() => { resetMedia(); mediaOpen = true; }}><Icon name="file" size={12} /> Add media</button>
+        <button class="btn small" data-icon="db" onclick={() => { resetEvidence(); evidenceOpen = true; }}><Icon name="db" size={12} /> Add evidence</button>
+        <button class="btn small" data-icon="pr" onclick={() => { resetPr(); prOpen = true; }}><Icon name="pr" size={12} /> PR check</button>
+        {#if detail.pack.repo_id}
+          <button class="btn small" data-icon="fetch" onclick={refreshCi}><Icon name="fetch" size={12} /> Refresh CI</button>
+        {/if}
+        <button class="btn small" data-overflow="-1" data-icon="check" onclick={() => { waiveReason = ''; waiveOpen = true; }}><Icon name="check" size={12} /> Waive</button>
+        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>
+        <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+
+  <div class="proof-split">
   <!-- Left: filters + pack list. Hidden on a phone while a pack is open. -->
+  {#if showRail}
   <aside class="rail" class:hide-phone={viewport.isPhone && detail}>
     <div class="rail-head">
       <span class="section-title">Proof Packs</span>
@@ -543,46 +606,32 @@
       {/if}
     </div>
   </aside>
+  {/if}
 
   <!-- Right: detail. -->
   <section class="main">
     {#if !detail}
-      <EmptyState
-        icon="check"
-        title="Proof packs"
-        body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Select a pack to inspect its artifacts and badges."
-        actionLabel="New proof pack"
-        onaction={newPack}
-      />
+      {#if showRail}
+        <EmptyState
+          variant="page"
+          icon="check"
+          title="Select a proof pack"
+          body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Pick a pack to inspect its artifacts and badges."
+        />
+      {:else if proof.loading}
+        <p class="dim empty">Loading…</p>
+      {:else}
+        <EmptyState
+          variant="page"
+          icon="check"
+          title="No proof packs yet"
+          body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work."
+          actionLabel="New proof pack"
+          actionIcon="plus"
+          onaction={newPack}
+        />
+      {/if}
     {:else}
-      <header class="page-header detail-head">
-        <div class="title-wrap">
-          {#if viewport.isPhone}
-            <button class="back-btn" onclick={() => proof.closeDetail()} aria-label="Back to list">
-              <Icon name="chevronLeft" size={16} />
-            </button>
-          {/if}
-          <h2 class="ellipsis">{detail.pack.title || detail.pack.work_item_id}</h2>
-          <ProofStatusChip status={detail.pack.status} risk={detail.pack.risk_score} />
-          <span class="kind-tag">{detail.pack.work_item_kind}</span>
-          {#if detail.pack.pr_number != null}
-            <span class="kind-tag pr" title="Linked pull request">PR #{detail.pack.pr_number}</span>
-          {/if}
-        </div>
-        <div class="head-actions">
-          <button class="btn small" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
-          <button class="btn small" onclick={() => { resetAdd(); addOpen = true; }}><Icon name="plus" size={12} /> Add artifact</button>
-          <button class="btn small" onclick={() => { resetMedia(); mediaOpen = true; }}><Icon name="file" size={12} /> Add media</button>
-          <button class="btn small" onclick={() => { resetEvidence(); evidenceOpen = true; }}><Icon name="db" size={12} /> Add evidence</button>
-          <button class="btn small" onclick={() => { resetPr(); prOpen = true; }}><Icon name="pr" size={12} /> PR check</button>
-          {#if detail.pack.repo_id}
-            <button class="btn small" onclick={refreshCi}><Icon name="fetch" size={12} /> Refresh CI</button>
-          {/if}
-          <button class="btn small" onclick={() => { waiveReason = ''; waiveOpen = true; }}><Icon name="check" size={12} /> Waive</button>
-          <button class="icon-btn" onclick={removePack} aria-label="Delete pack"><Icon name="trash" size={14} /></button>
-        </div>
-      </header>
-
       <div class="detail-body">
         <!-- Done contract (R8): explainable readiness score + checklist. -->
         <DoneContractMeter contract={detail.done_contract} />
@@ -702,6 +751,7 @@
       </div>
     {/if}
   </section>
+  </div>
 </div>
 
 {#if addOpen && detail}
@@ -929,7 +979,13 @@
 <style>
   .proof-page {
     display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .proof-split {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .rail {
@@ -1089,45 +1145,11 @@
     min-width: 0;
     min-height: 0;
   }
-  .detail-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    flex: 1;
-  }
-  .title-wrap h2 {
-    margin: 0;
-    font-size: 16px;
-    min-width: 0;
-  }
-  .back-btn {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0;
-    display: grid;
-    place-items: center;
-    flex: none;
-  }
-  .head-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
   .detail-body {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 12px 16px 32px;
+    padding: 14px 20px 32px;
   }
   .badges-row {
     margin-bottom: 10px;
@@ -1339,7 +1361,7 @@
   }
 
   @media (max-width: 640px) {
-    .proof-page.phone {
+    .proof-page.phone .proof-split {
       flex-direction: column;
     }
     .proof-page.phone .rail {
