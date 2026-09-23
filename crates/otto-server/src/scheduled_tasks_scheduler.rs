@@ -85,7 +85,10 @@ async fn tick(ctx: &ServerCtx, in_flight: &Arc<Mutex<HashSet<String>>>) -> otto_
             }
             let last = task.last_run_at.as_deref().and_then(parse_ts);
             let tz = cadence::task_tz(&task.timezone);
-            if !cadence::is_due(&task.schedule, last, now, tz) {
+            // The creation time anchors a never-run cron, so its first fire is
+            // caught up when the Mac slept / the daemon was down at that minute.
+            let created = parse_ts(&task.created_at);
+            if !cadence::is_due_since(&task.schedule, last, created, now, tz) {
                 continue;
             }
             set.insert(task.id.clone());
