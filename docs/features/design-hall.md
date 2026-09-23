@@ -154,7 +154,9 @@ that would close a cycle is a 409. Extracted links can't be deleted over the
 API (409) — edit the document.
 
 `GET …/links?dir=out|in|both` returns the links plus the artifacts on the
-other end that you can view.
+other end that you can view. `GET /design/links?artifact_ids=a,b,c&dir=…`
+does the same for up to 100 artifacts in one call (each link once; ids you
+can't view are skipped) — what Product's design strip uses.
 
 ### Search (the References drawer)
 
@@ -165,6 +167,15 @@ the project name. Terms are AND-ed, the last one prefix-matched; results come
 shipped → approved → review → draft, then by relevance, each with a snippet,
 `reference_count` and the `story_ids` it implements.
 
+### Listing (the Lobby)
+
+`GET /design/artifacts?story_id=S&limit=100` lists newest-updated first. Every
+row carries `story_ids` (so the Lobby can group by story without a search
+call), `created_by_name` and the head's `last_editor_id` / `_kind` / `_name`
+(versions carry `author_name`) — all resolved from the users table on read. A
+full page answers `X-Next-Cursor: <updated_at>|<id>`; send it back as
+`cursor=` for the next page (clients can also build it from the last row).
+
 ### Signals
 
 `POST /design/signals {artifact_id, kind, version_id?, payload}` records a
@@ -172,8 +183,12 @@ bounded signal (≤ 8 KB JSON object). Captured automatically:
 `edit_after_draft` (a human save within 2 h of an agent version — the payload
 is a structural summary, never the content), `status_change`, `shipped`,
 `agent_draft` (every committed assist turn) and `variant_accepted` /
-`variant_rejected` (a variant accept). `GET /design/signals` reads the log;
-§5.3 turns repeated signals into team-rule proposals.
+`variant_rejected` (a variant accept). Clients record `restored` (an older
+version saved again — `payload.from_version_id`), `reference_added`
+(`payload.target_artifact_id`) and `forked` (on the new artifact —
+`payload.source_artifact_id`); those three are refused (400) without their
+key. `GET /design/signals` reads the log; §5.3 turns repeated signals into
+team-rule proposals.
 
 ## 4. Legacy import
 
@@ -237,6 +252,12 @@ the artifact's assist session (`meta.assist`) when the provider matches.
 
 Costs stay bounded: one agent run per artifact at a time (409 otherwise), 20
 minutes per turn (the session is stopped past it), at most 4 variants.
+
+Under the opt-in process sandbox (`process_sandbox`, macOS Seatbelt) the
+agent may write `<data>/design/<artifact>/work/**` — per artifact, by
+pattern — and nothing else of `<data>/design/`: the blob store is denied
+again after that grant. Variant turns work in `design/<artifact>/variants/…`,
+which the sandbox does NOT open yet, so run variants with the sandbox off.
 
 **Variants.** `POST …/variants {prompt, n ≤ 4, providers?, directions?}` runs
 n fresh turns in parallel, one direction each (`defaults` follows the team
@@ -333,8 +354,15 @@ with people.
 - Brand-token references (`token:color.primary`) are not resolved yet.
 - The `edit_after_draft` summary is a bounded heuristic (changed JSON paths /
   line counts); the per-format structural diff arrives with Compare.
-- Design blobs are not part of the saved-state archive's file roots yet (the
-  DB rows are); back up `<data>/design/` with the data dir.
+- Thumbnails: the UI stores what it rendered with `PUT
+  …/thumbnail` (PNG or WebP, ≤ 2 MB; never bumps `updated_at`). Agents only
+  get PNG thumbnails (`render/current.png`, `refs/R<n>.png`) — a WebP one is
+  not offered to them.
+- The saved-state archive carries the design rows and — best-effort, last,
+  within the 256 MiB budget — the blobs they reference (versions +
+  thumbnails; see `docs/features/state-archive.md`). Skipped blobs are listed
+  in the archive's `excluded` notes; working copies (`<id>/work/`) are not
+  archived (they are re-materialized from the head).
 - Content caps: 25 MB raw per version, 4 MB inline in live events, 256 KiB
   inline in `design_get`.
 

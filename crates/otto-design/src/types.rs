@@ -71,7 +71,11 @@ pub const VERSION_KINDS: &[&str] = &["autosave", "named", "agent", "import", "sy
 /// client-recorded pick (a tray "Apply"); `variant_accepted` is recorded by the
 /// server when `POST …/variants/{v}/accept` fast-forwards main — the learner
 /// treats both the same. `agent_draft` marks a version a design-assist turn
-/// committed (main or a variant branch).
+/// committed (main or a variant branch). `restored` (an older version saved
+/// again as the new head), `reference_added` (a library artifact added as a
+/// reference) and `forked` ("Start from this" — a `derived_from` copy) are
+/// client-recorded and carry a required payload key, see
+/// [`SIGNAL_PAYLOAD_KEYS`].
 pub const SIGNAL_KINDS: &[&str] = &[
     "variant_chosen",
     "variant_accepted",
@@ -85,6 +89,19 @@ pub const SIGNAL_KINDS: &[&str] = &[
     "rule_feedback",
     "status_change",
     "shipped",
+    "restored",
+    "reference_added",
+    "forked",
+];
+
+/// Signal kinds whose API payload must name what they point at: `(kind,
+/// required non-empty string key)`. `restored` is recorded on the artifact
+/// (its `version_id` = the new head) with the version it restored; the other
+/// two name the other artifact of the pair.
+pub const SIGNAL_PAYLOAD_KEYS: &[(&str, &str)] = &[
+    ("restored", "from_version_id"),
+    ("reference_added", "target_artifact_id"),
+    ("forked", "source_artifact_id"),
 ];
 
 /// Who authored a version / emitted a signal.
@@ -137,7 +154,7 @@ pub struct DesignArtifact {
     pub head_seq: Option<i64>,
     pub approved_version_id: Option<Id>,
     pub tags: Vec<String>,
-    /// sha256 of the PNG thumbnail blob (`GET …/thumbnail`), if any.
+    /// sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail`), if any.
     pub thumb_blob: Option<String>,
     pub meta: Value,
     /// `product_attachment` | `canvas_scene` for imported legacy rows.
@@ -148,6 +165,28 @@ pub struct DesignArtifact {
     pub created_session_id: Option<Id>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // -- Resolved on read (joined in by the store; never written) ----------
+    /// Display name of `created_by` (`users.display_name`, else the
+    /// username); `null` for a system author such as the legacy import.
+    #[serde(default)]
+    pub created_by_name: Option<String>,
+    /// `author_id` of the head version — who (or whose agent) saved last.
+    #[serde(default)]
+    pub last_editor_id: Option<String>,
+    /// `author_kind` of the head version (`user` | `agent` | `system`).
+    #[serde(default)]
+    pub last_editor_kind: Option<String>,
+    /// Display name of `last_editor_id` (`null` when it is not a user).
+    #[serde(default)]
+    pub last_editor_name: Option<String>,
+    /// Product stories this artifact is linked to (`dst_kind: story` links —
+    /// `implements`), sorted.
+    #[serde(default)]
+    pub story_ids: Vec<Id>,
+    /// Title of `created_session_id`'s session (`null` when unset or the
+    /// session row is gone).
+    #[serde(default)]
+    pub created_session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +205,10 @@ pub struct DesignVersion {
     pub message: String,
     pub provenance: Value,
     pub created_at: DateTime<Utc>,
+    /// Display name of `author_id` (`users.display_name`, else the
+    /// username), resolved on read; `null` when the author is not a user.
+    #[serde(default)]
+    pub author_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -161,6 +161,52 @@ fn seatbelt_agent_profile_confines_otto_data_dir() {
     );
 }
 
+/// Design-assist agents edit `<data>/design/<artifact>/work/**` in place: the
+/// OS lets them write there (the regex grant really matches, spaces and dots
+/// in the data-dir path included) and nowhere else under `design/` — not the
+/// blob store (even a `blobs/work/` look-alike), not a sibling of `work/`.
+#[test]
+fn seatbelt_agent_profile_opens_design_working_copies_only() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let data = root.join("Otto Data.v2");
+    let cwd = data.join("design").join("A1").join("work");
+    let blobs = data.join("design").join("blobs");
+    for d in [
+        cwd.clone(),
+        blobs.join("work"),
+        data.join("design").join("A1").join("variants"),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let pol = SandboxPolicy::for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
+
+    let edit = cwd.join("index.html");
+    let (ok, err) = run_sandboxed(&pol, &format!("echo '<h1>x</h1>' > {}", shell_quote(&edit)));
+    assert!(ok, "the working copy must be writable: {err}");
+    let nested = cwd.join("refs");
+    let (ok, err) = run_sandboxed(
+        &pol,
+        &format!("mkdir -p {0} && echo x > {0}/R1.json", shell_quote(&nested)),
+    );
+    assert!(ok, "subdirs of the working copy must be writable: {err}");
+    for denied in [
+        blobs.join("0000"),
+        blobs.join("work").join("x"),
+        data.join("design").join("A1").join("variants").join("x"),
+        data.join("design").join("A1").join("other.txt"),
+        data.join("design").join("x.txt"),
+    ] {
+        let (ok, _) = run_sandboxed(&pol, &format!("echo x > {}", shell_quote(&denied)));
+        assert!(!ok, "{} must stay write-denied", denied.display());
+        assert!(!denied.exists(), "{} was created", denied.display());
+    }
+}
+
 /// Minimal shell-quote for a path inside a `/bin/sh -c` script.
 fn shell_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
