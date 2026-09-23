@@ -108,6 +108,20 @@ async function seedMasterOnlyRepo(): Promise<{ repoId: string; dir: string }> {
   return { repoId: (await r.json()).id as string, dir };
 }
 
+/** A linked `git worktree` of `dir` on a fresh `branch` cut from the repo's
+ *  current branch (returned as `base`), with one UNCOMMITTED change so a review
+ *  of it has a non-empty diff. A declared repo pointing at the user's MAIN
+ *  checkout is isolated into a clean per-run worktree cut from its base (which
+ *  never carries the user's uncommitted edits); one pointing at a dedicated
+ *  linked worktree is used as-is — the shape a real "review this branch" run has. */
+function linkedWorktree(dir: string, branch: string, file: string): { path: string; base: string } {
+  const base = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+  const path = join(mkdtempSync(join(tmpdir(), 'otto-e2e-wt-')), branch);
+  execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', '-b', branch, path], { stdio: 'ignore' });
+  writeFileSync(join(path, file), `changed on ${branch} for e2e\n`);
+  return { path, base };
+}
+
 test.beforeEach(async ({}, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
 });
@@ -239,13 +253,15 @@ test('review_run succeeds on a master-only repo — the exit-128 regression', as
 });
 
 test('two declared repos → review aggregates both → git_pr drafts one PR per repo', async () => {
-  // Two sequential stub reviews (~30s each) + two PR-draft agent turns.
+  // Two sequential reviews + two (stubbed) PR-draft agent turns.
   test.setTimeout(240_000);
   const a = await seedMasterOnlyRepo();
   const b = await seedGitRepo(ctx, base, ws);
-  // The second repo needs uncommitted changes too, or its review diff is
-  // empty and the PR draft skips it.
-  writeFileSync(join(b.dir, 'file_00.txt'), 'changed for e2e\n');
+  // Each repo's work lives on its own branch in a linked worktree with an
+  // uncommitted change — otherwise the run isolates it into a clean worktree
+  // cut from base, its review diff is empty and git_pr has nothing to draft.
+  const wtA = linkedWorktree(a.dir, 'e2e-multi-a', 'app.txt');
+  const wtB = linkedWorktree(b.dir, 'e2e-multi-b', 'file_00.txt');
 
   const wfId = await createWorkflow(
     'E2E Multi Repo PR',
@@ -254,7 +270,12 @@ test('two declared repos → review aggregates both → git_pr drafts one PR per
       node('review', 'review_run', {
         await: true,
         timeout_s: 120,
-        providers: ['claude'],
+        // Reviewer sessions are real PTYs — OTTO_E2E stubs agent TURNS, not
+        // reviewer sessions — so with a non-empty diff a `claude` reviewer
+        // launches the host's real CLI. A provider that doesn't exist fails
+        // each reviewer fast (as desktop-review-agent-stop does); what's under
+        // test is the per-repo aggregation and the PR fan-out, not findings.
+        providers: ['e2e-no-such-cli'],
         lenses: ['correctness-review'],
       }),
       node('pr', 'git_pr', { open: false }),
@@ -265,8 +286,10 @@ test('two declared repos → review aggregates both → git_pr drafts one PR per
     wfId,
     {
       repos: [
-        { repo: a.dir, type: 'branch', name: 'master' },
-        { repo: b.dir, type: 'worktree', name: b.dir },
+        // A branch entry resolves to the linked worktree that has it checked out…
+        { repo: a.dir, type: 'branch', name: 'e2e-multi-a', source: wtA.base },
+        // …a worktree entry names that checkout directly.
+        { repo: b.dir, type: 'worktree', name: wtB.path, source: wtB.base },
       ],
     },
     200_000,
@@ -276,6 +299,8 @@ test('two declared repos → review aggregates both → git_pr drafts one PR per
   const review = nodeState(run, 'review').output;
   expect(review.reviews?.length).toBe(2);
   expect(review.repos?.length).toBe(2);
+  // …each a REAL review of that repo's work, not an empty diff.
+  for (const r of review.reviews ?? []) expect(r.no_changes, JSON.stringify(r)).toBeFalsy();
   // …and git_pr fans out one draft per repo (not just the first-mirrored one).
   const pr = nodeState(run, 'pr').output;
   expect(pr.prs?.length, JSON.stringify(pr, null, 2)).toBe(2);
