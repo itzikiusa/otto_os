@@ -660,6 +660,24 @@ impl VaultEngine {
         Ok(target)
     }
 
+    /// Fully canonicalized path of an EXISTING `rel` for reads that follow the
+    /// path (asset streaming, backlink context). `abs_guarded` only vets the
+    /// parent, so a final-component symlink (`logo.png -> ~/.ssh/id_rsa`)
+    /// escaped the vault; here the resolved target itself must stay inside.
+    pub(crate) fn abs_confined(root: &str, rel: &str) -> Result<PathBuf> {
+        let rootc = Path::new(root)
+            .canonicalize()
+            .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
+        let resolved = rootc
+            .join(rel)
+            .canonicalize()
+            .map_err(|_| Error::NotFound(rel.to_string()))?;
+        if !resolved.starts_with(&rootc) {
+            return Err(Error::Forbidden("path escapes the vault".into()));
+        }
+        Ok(resolved)
+    }
+
     /// Open (and create where absent) every parent component relative to a held
     /// vault directory capability. `NOFOLLOW` on each hop prevents a concurrent
     /// symlink swap from redirecting later reads or the final rename.
@@ -1438,28 +1456,30 @@ impl VaultEngine {
         let mut out = Vec::new();
         for (src, title, kind) in self.store.backlinks(id, &rel).await? {
             // Context: first line mentioning the target (wikilink or md link).
-            let abs = Self::abs_guarded(&v.root_path, &src)?;
-            let context = tokio::fs::read_to_string(&abs)
-                .await
-                .ok()
-                .and_then(|c| {
-                    let stem = rel.rsplit('/').next().unwrap_or(&rel);
-                    let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
-                    c.lines()
-                        .find(|l| {
-                            let ll = l.to_lowercase();
-                            ll.contains(&stem_noext) || ll.contains(&rel.to_lowercase())
-                        })
-                        .map(|l| {
-                            let t = l.trim();
-                            if t.chars().count() > 240 {
-                                t.chars().take(240).collect::<String>()
-                            } else {
-                                t.to_string()
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            // A source that resolves outside the vault contributes no context.
+            let abs = Self::abs_confined(&v.root_path, &src).ok();
+            let context = match abs {
+                Some(abs) => tokio::fs::read_to_string(&abs).await.ok(),
+                None => None,
+            }
+            .and_then(|c| {
+                let stem = rel.rsplit('/').next().unwrap_or(&rel);
+                let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
+                c.lines()
+                    .find(|l| {
+                        let ll = l.to_lowercase();
+                        ll.contains(&stem_noext) || ll.contains(&rel.to_lowercase())
+                    })
+                    .map(|l| {
+                        let t = l.trim();
+                        if t.chars().count() > 240 {
+                            t.chars().take(240).collect::<String>()
+                        } else {
+                            t.to_string()
+                        }
+                    })
+            })
+            .unwrap_or_default();
             out.push(Backlink {
                 path: src,
                 title,
@@ -1474,7 +1494,10 @@ impl VaultEngine {
     pub async fn asset_path(&self, ws: &str, id: i64, path: &str) -> Result<PathBuf> {
         let v = self.get_scoped(ws, id).await?;
         let rel = Self::check_rel(path)?;
-        let abs = Self::abs_guarded(&v.root_path, &rel)?;
+        let abs = Self::abs_confined(&v.root_path, &rel).map_err(|e| match e {
+            Error::NotFound(_) => Error::NotFound(format!("asset {rel}")),
+            other => other,
+        })?;
         if !abs.is_file() {
             return Err(Error::NotFound(format!("asset {rel}")));
         }

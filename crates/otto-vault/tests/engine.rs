@@ -1081,6 +1081,34 @@ async fn regression_symlinked_note_does_not_wedge_scans_or_pruning() {
     assert!(std::fs::symlink_metadata(td.path().join("runbooks/linked.md")).is_ok());
 }
 
+/// Asset reads resolved only the parent, so a final-component symlink could
+/// stream any file the daemon can read (`logo.png -> ~/.ssh/id_rsa`).
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_asset_symlink_cannot_escape_the_vault() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.key"), "top secret").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.key"),
+        td.path().join("assets/logo.png"),
+    )
+    .unwrap();
+    let err = eng
+        .asset_path(WS, id, "assets/logo.png")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
+    // A regular attachment (and an in-vault symlink) still streams.
+    assert!(eng.asset_path(WS, id, "assets/arch.png").await.is_ok());
+    std::os::unix::fs::symlink("arch.png", td.path().join("assets/alias.png")).unwrap();
+    assert!(eng.asset_path(WS, id, "assets/alias.png").await.is_ok());
+    assert!(matches!(
+        eng.asset_path(WS, id, "assets/missing.png").await,
+        Err(otto_core::Error::NotFound(_))
+    ));
+}
+
 /// A case-only rename left the old-case row "present" on case-insensitive
 /// APFS (`stat note.md` still succeeds), so every later scan was incomplete.
 #[tokio::test(flavor = "multi_thread")]
