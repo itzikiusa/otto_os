@@ -3197,6 +3197,60 @@ server overwrites any `workspace_id` before the token-pin check, audit and
 approval), exposed on stdio only through the governed bridge as
 `otto_design_assist` / `otto_design_link`. No tool approves a version.
 
+### Brand Kit — `otto-brand/1` tokens, exports, impact preview
+
+A brand kit is an artifact of format `otto-brand` (studio `brand`), saved,
+versioned and approved like any other (`PUT …/content`, `POST …/approve`).
+Code: `crates/otto-design/src/brand/` (validator, extractor, exporters,
+contrast, impact). Types: `BrandDoc`, `BrandImpactResp`, `BrandConsumer`,
+`BrandTokenChange`, `BrandContrastReport` … in `ui/src/lib/api/types.ts`
+("Brand Kit"); shared UI helpers `brandCssVars(doc)` / `resolveToken(doc,
+ref)` in `ui/src/modules/design-hall/brand/tokens.ts`.
+
+**Document** (DTCG-flavoured; every group optional, unknown top-level keys
+kept):
+
+```json
+{ "$schema": "otto-brand/1", "name": "Acme Brand Kit",
+  "color":  { "<name>": { "$value": "#5B3DF5", "$description": "…" } },
+  "font":   { "display|body|mono": { "$value": "\"Inter\", system-ui, sans-serif", "weights": [700, 800] } },
+  "type":   { "<style>": { "size": 64, "line": 72, "weight": 800 } },
+  "radius": { "<name>": { "$value": 14 } },
+  "space":  { "<name>": { "$value": 16 } },
+  "logos":  [ { "name": "Acme", "kind": "full|mark|mono", "asset": "otto://design/<id>" | "blob:<sha256>" } ],
+  "imagery": { "summary": "…", "do": ["…"], "dont": ["…"] },
+  "voice":   { "summary": "…", "do": ["…"], "dont": ["…"] } }
+```
+
+**Validation** (every create / save / agent result, via `format::validate`;
+400 `invalid otto-brand document: <path>: <problem>; …`): `$schema` when
+present is `otto-brand/1`; token names `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`,
+≤ 64 per group; colours `#RGB` / `#RRGGBB` / `#RRGGBBAA`; font roles
+`display` / `body` / `mono`, stacks ≤ 300 chars with no `; { } < > \` or line
+breaks, `weights` 1–1000 (≤ 9); type styles need positive `size` / `line` px
+and an integer `weight` 1–1000; radius / space `$value` a px number 0–10 000;
+≤ 16 logos, each with a name, a kind and an optional `asset` (an
+`otto://design/…` reference or `blob:<sha256>`; empty = placeholder); voice /
+imagery `summary` ≤ 2 000 chars and `do` / `dont` ≤ 20 strings. The Phase 0
+scaffold markers `"type": "otto-brand"` and `"version": 1` stay accepted. A
+kit created without content starts from a default kit.
+
+**References.** Other artifacts name a token as `token:<group>.<name>` (a
+type style's sub-property `token:type.display.size` counts as `type.display`)
+or through its CSS custom property `--brand-<group>-<name>` (type styles:
+`--brand-type-<name>-size|-line|-weight`; names are kebab-cased, `surfaceAlt`
+→ `surface-alt`), and link the kit with rel `uses_tokens` (a JSON document's
+`brand` / `brand_kit` / `tokens` / `theme` key, or an explicit link). The kit
+itself `embeds` each logo asset (`src_node` `logos.<kind>`). Consumers follow
+the kit's **approved** version by default: approving a kit version fans out
+`design_link_updated {reason: "target_approved"}` to them (`follow_latest`
+consumers hear every save; `pinned` ones never move).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/brand/impact | design edit + ws viewer | `BrandImpactReq {content?}` — the PROPOSED kit (object or JSON text), validated as above (400); omitted = the head, unvalidated (a plain "used in" listing) | `BrandImpactResp {kit_id, base (approved\|head\|none), base_version_id, base_seq, changes: BrandTokenChange[] {token, change (changed\|added\|removed), before, after}, artifact_count, studio_count, by_studio, affected_count, affected_studio_count, affected_by_studio, consumers: BrandConsumer[] {artifact, policy, pinned_version_id, tokens, whole_kit, affected, scanned}, hidden_count, contrast, warnings}`. Compares the proposal with what consumers follow (the approved version, else the head). Consumers = non-archived artifacts with a `uses_tokens` link into the kit that the caller can view (others counted in `hidden_count`); each consumer's head (text formats ≤ 4 MB, first 300 consumers) is scanned for token references — a consumer naming no token (or not scannable) is `whole_kit` and sees every change. `contrast` = WCAG ratios of the proposed colours vs white, vs the kit's ink (`ink`, else `text`, else the darkest colour) and every pair (`AAA` ≥ 7, `AA` ≥ 4.5, `AA-large` ≥ 3, `fail`); `warnings` flag colours below 3:1 on both white and ink. Read-only — nothing is saved. 400 when the artifact isn't an `otto-brand` kit |
+| GET /api/v1/design/artifacts/{id}/brand/export | design view + ws viewer | `?format=css\|tailwind\|dtcg` (default `css`; `json` = `dtcg`) `&version=` (id / `v12` / `12` / `approved`; default the head) | the export as text: `css` → `:root { --brand-<group>-<name>: …; }` (`text/css`); `tailwind` → a Tailwind v4 `@theme { --color-* --font-* --text-* (+ --line-height / --font-weight) --radius-* --spacing-* }` block (`text/css`); `dtcg` → W3C Design Tokens JSON (typed groups `color` / `fontFamily` / `typography` / `dimension` as `{value, unit}`; logos, voice and imagery under `$extensions["dev.otto.brand"]`) (`application/json`). `Content-Disposition: attachment; filename="<kit-slug>.tokens.css\|.theme.css\|.tokens.json"`, `X-Design-Version`, `X-Design-Seq`. 400 unknown format / not a kit; 404 no content or no approved version |
+
 ## Discovery Chat
 
 A lightweight, interactive conversation with an agent attached to a product
