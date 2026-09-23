@@ -3135,9 +3135,13 @@ async fn summarize_and_persist(
     // (12 agents, 36k-line diff) blew straight through it — dropping to the
     // deterministic fallback, whose own cap then produced exactly 20 findings,
     // all `high`. The run looked clean; it was truncated twice over. Scale the
-    // budget with the work: ~1s per finding on top of a 2-minute floor, capped
-    // at 20 minutes so a wedged summarizer still fails rather than hanging.
-    let summarizer_timeout = Duration::from_secs((120 + total_findings as u64).clamp(120, 1_200));
+    // budget with the work, capped so a wedged summarizer still fails rather
+    // than hanging. The budget also covers the CLI's cold start and the paste,
+    // and at ~1s/finding on a 2-minute floor 9 of 10 runs on one day hit the
+    // absolute deadline and fell back to the deterministic summary (which only
+    // dedupes exact text): ~3s per finding on a 5-minute floor, capped at 30.
+    let summarizer_timeout =
+        Duration::from_secs((300 + 3 * total_findings as u64).clamp(300, 1_800));
     tracing::info!(
         review = %review_id,
         "running summarizer agent ({total_findings} findings in, {}s budget)",
