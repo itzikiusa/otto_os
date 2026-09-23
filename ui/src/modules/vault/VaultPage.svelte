@@ -629,6 +629,12 @@
     flex: 1;
     min-height: 0;
   }
+  /* The graph-scope bar is chrome too: under the `flex: 1` rule above it took
+     HALF the pane, pushing the graph (and its controls panel) down by ~200px
+     and off the bottom of the window. */
+  .center > .graph-scope {
+    flex: 0 0 auto;
+  }
   /* The tab strip is chrome, not content — never let it stretch. */
   .center > .tabstrip {
     flex: 0 0 auto;
