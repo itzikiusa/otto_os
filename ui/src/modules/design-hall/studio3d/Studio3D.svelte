@@ -26,6 +26,7 @@
   import { ApiError } from '../../../lib/api/client';
   import { downloadText } from '../../../lib/components/exporters';
   import * as dapi from '../../../lib/api/design';
+  import { listTurns, startAssist as startTurn } from '../assist/api';
   import type { DesignArtifact, DesignAssistTurn, DesignVersion } from '../../../lib/api/types';
   import {
     ENV_PRESETS,
@@ -164,7 +165,7 @@
     const a = agent;
     if (!a) return;
     try {
-      const turns = await dapi.listAssistTurns(artifact.id);
+      const turns = await listTurns(artifact.id);
       const t = turns.find((x) => x.turn_id === a.turnId);
       if (!t || t.status === 'starting' || t.status === 'running') {
         if (agent?.turnId === a.turnId) schedulePoll();
@@ -188,7 +189,7 @@
 
   async function startAssist(prompt: string, mode: 'generate' | 'refine', label: string): Promise<void> {
     try {
-      track(await dapi.assistArtifact(artifact.id, { prompt, mode }), label);
+      track(await startTurn(artifact.id, { prompt, mode }), label);
     } catch (e) {
       const msg = e instanceof ApiError && e.status === 409 ? 'Otto is already working on this design.' : e instanceof Error ? e.message : String(e);
       toasts.error('Couldn’t start Otto', msg);

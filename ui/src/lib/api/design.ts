@@ -11,8 +11,6 @@ import type {
   CreateDesignProjectReq,
   DesignArtifact,
   DesignArtifactDetail,
-  DesignAssistReq,
-  DesignAssistTurn,
   DesignCommitReq,
   DesignContentPutReq,
   DesignLink,
@@ -217,21 +215,8 @@ export async function thumbnailUrl(id: Id): Promise<string> {
   return URL.createObjectURL(await resp.blob());
 }
 
-// ── Agent assist + rendered thumbnails ──────────────────────────────────────
-
-/**
- * One design-assist agent turn (`POST …/assist`, 202 once the session is live).
- * The result lands as a new `agent` version; progress arrives over WS
- * (`design_assist_updated`, `design_artifact_updated {change:"live"}`).
- */
-export function assistArtifact(id: Id, body: DesignAssistReq) {
-  return api.post<DesignAssistTurn>(`/design/artifacts/${enc(id)}/assist`, body);
-}
-
-/** Recent assist turns of an artifact (in memory, newest first; empty after a restart). */
-export function listAssistTurns(id: Id) {
-  return api.get<DesignAssistTurn[]>(`/design/artifacts/${enc(id)}/assist`);
-}
+// ── Rendered thumbnails ─────────────────────────────────────────────────────
+// (Agent turns: `modules/design-hall/assist/api.ts`.)
 
 /**
  * Store a UI-rendered thumbnail (`PUT …/thumbnail`, raw PNG/WebP ≤ 2 MB). A

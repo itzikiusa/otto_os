@@ -10,7 +10,8 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ApiError } from '../../../lib/api/client';
-  import { assistArtifact, createArtifact } from '../../../lib/api/design';
+  import { createArtifact } from '../../../lib/api/design';
+  import { startAssist } from '../assist/api';
   import type { DesignArtifact, DesignArtifactFormat, DesignAssistTurn } from '../../../lib/api/types';
   import {
     GEN3D_PROVIDERS,
@@ -97,7 +98,7 @@
         });
         refId = res.artifact.id;
       }
-      const turn = await assistArtifact(artifact.id, {
+      const turn = await startAssist(artifact.id, {
         prompt: localPrompt(kind, prompt, quality, refId ? 'R1' : null),
         mode: 'refine',
         references: refId ? [refId] : undefined,
