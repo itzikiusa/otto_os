@@ -15,15 +15,35 @@ import { test, expect, type Page } from '@playwright/test';
 //   • the collapsed Rail draws a separator between sections and no two
 //     modules share a glyph;
 //   • ⌘K "Go to …" is derived from the registry (Vault / Workflows / Mission
-//     Control reachable, with the section as secondary text).
+//     Control reachable, with the section as secondary text);
+//   • runtime plugins get their own trailing "Plugins" section.
+//
+// The enabled-plugin list (GET /plugins) is STUBBED per test: the e2e daemon is
+// shared by the whole run and desktop-plugins.spec.ts leaves its example
+// plugins installed, which would otherwise append a sixth section to every
+// count here depending on which spec happened to run first.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ORDER = ['work', 'automate', 'build', 'infra', 'insight'];
 
+// The UI's fetch to the 127.0.0.1 daemon is cross-origin (context.route, not
+// page.route) and the app's fetch-proxying service worker would bypass it.
+test.use({ serviceWorkers: 'block' });
+
+type PluginNav = { slug: string; name: string; icon: string; has_ui: boolean };
+
 /** Fresh sidebar config + expanded Navigator, ONCE per test (init scripts
  *  re-run on reload; the sessionStorage flag keeps the reset one-shot so a
  *  reload inside a test sees what the test persisted). */
-async function boot(page: Page, route: string, rail: '1' | '0' = '1'): Promise<void> {
+async function boot(
+  page: Page,
+  route: string,
+  rail: '1' | '0' = '1',
+  plugins: PluginNav[] = [],
+): Promise<void> {
+  await page.context().route(/\/api\/v1\/plugins(\?|$)/, (r) =>
+    r.request().method() === 'GET' ? r.fulfill({ json: plugins }) : r.fallback(),
+  );
   await page.addInitScript((r) => {
     if (sessionStorage.getItem('sg-reset')) return;
     sessionStorage.setItem('sg-reset', '1');
@@ -204,6 +224,24 @@ test('collapsed Rail: section separators, unique glyphs, accent selection', asyn
   const gear = rail.getByRole('button', { name: 'Settings' });
   const box = (await gear.boundingBox())!;
   expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+});
+
+test('runtime plugins get their own trailing section (Navigator and Rail)', async ({ page }) => {
+  await boot(page, 'home', '1', [{ slug: 'e2e-sidebar-plugin', name: 'E2E Sidebar Plugin', icon: 'box', has_ui: true }]);
+  await expect(group(page, 'plugins')).toBeVisible();
+  const ids = await page
+    .locator('[data-testid^="sidebar-group-"][data-open]')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')!.replace('sidebar-group-', '')));
+  expect(ids).toEqual([...ORDER, 'plugins']);
+  await expect(group(page, 'plugins').getByRole('button', { name: 'E2E Sidebar Plugin', exact: true })).toBeVisible();
+  // Built-in sections never absorb a plugin row.
+  for (const id of ORDER) {
+    await expect(group(page, id).getByRole('button', { name: 'E2E Sidebar Plugin', exact: true })).toHaveCount(0);
+  }
+  await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
+  await expect(page.locator('.rail')).toBeVisible();
+  await expect(page.getByTestId('rail-sep')).toHaveCount(ORDER.length); // one more section
+  await expect(page.locator('.rail').getByRole('button', { name: 'E2E Sidebar Plugin', exact: true })).toBeVisible();
 });
 
 test('⌘K reaches Vault, Workflows and Mission Control (derived from the registry)', async ({ page }) => {

@@ -298,9 +298,7 @@
   // Load swarms lazily so the discovery team picker is populated.
   $effect(() => {
     const wsId = ws.currentId;
-    if (wsId && swarm.swarms.length === 0) {
-      void swarm.loadSwarms(wsId);
-    }
+    if (wsId) void swarm.ensureSwarms(wsId);
   });
 
   /** Launch a discovery swarm run and switch to the Discovery tab. */
