@@ -14,6 +14,11 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 > flags the drift; see [Known drift](#known-drift-between-docs-and-code) below.
 >
 > _Last verified against the codebase: **2026-09-02**._
+>
+> **Building or changing a feature's UI?** Follow the
+> [design guidelines](../design/guidelines/README.md): tokens, page chrome,
+> components, agent-facing patterns, copy, accessibility and the UI review
+> checklist.
 
 ---
 

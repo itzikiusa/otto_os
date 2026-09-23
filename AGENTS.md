@@ -149,6 +149,55 @@ macOS-only.
   `ui/e2e/helpers.ts`, seeding ENOUGH items to overflow the window (see
   `ui/e2e/desktop-git-add-menu.spec.ts`).
 
+### Design guidelines (UI)
+
+Any change under `ui/` follows **[docs/design/guidelines/](./docs/design/guidelines/README.md)**.
+It covers foundations, layout, components, agent-facing patterns, copy,
+accessibility, and the PR review checklist. The docs mark what is still
+in flight: `PageHeader`/`PageBody` land with `feat/page-chrome`, and sidebar
+groups with `feat/shell-nav`. The rules below are the ones you must not break:
+
+- **macOS-native, one product.**
+  - Every module page renders the shared `PageHeader` (a single unified
+    toolbar row with one title and at most one `.primary` action; the rest
+    overflow into ⋯) and `PageBody`.
+  - A new module is one `SIDEBAR_MODULES` entry (`ui/src/lib/sidebar.ts`) with
+    a unique icon and a group. ⌘K "Go to" commands are generated from it.
+  - No in-app windows or docks.
+- **Tokens only.**
+  - Colours come from `ui/src/lib/tokens.css`: semantic `--danger`,
+    `--warning`, `--success`, `--info` (plus `-soft`), and `--accent-text` /
+    `-solid` / `-soft`.
+  - No hex values in module styles, and no `var(--x)` for a token that doesn't
+    exist (`npm run check` fails).
+  - Type uses the `--fs-*` scale. Nothing a user must read is below 11 px.
+- **Use the shared components.**
+  - `Modal` for dialogs.
+  - `confirmer.ask()` / `promptText()` / `choose()`. Never native
+    `confirm()` / `prompt()` / `alert()`: they are no-ops in the Tauri webview,
+    and `npm run check` fails on them.
+  - `ctxMenu` for menus, `toasts` for action results, `EmptyState` for empty
+    pages, and `Icon` with a typed `IconName`.
+- **Design every state.**
+  - Loading, empty, error and loaded.
+  - List/detail pages open on an item, never on an empty "pick one" pane.
+  - A failed load shows inline with Retry, not as a raw exception in a toast.
+- **Vibrancy on chrome only** (sidebar, toolbar, the proposed floating bar), never behind
+  tables, editors, logs or forms. Animations respect `prefers-reduced-motion`.
+- **Agents are visible and ask first.**
+  - Agent output is attributed and stays a draft until a person applies it.
+  - Anything outward-facing (PR, Jira/Confluence, Slack/Telegram, publish,
+    prod) confirms where it goes, what is sent and who sees it.
+- **Accessible and responsive.**
+  - Real `<button>` controls, and `aria-label` + `title` on icon-only buttons.
+  - Visible focus, logical CSS properties for RTL, and no horizontal page
+    scroll on phone or tablet.
+  - Check light and dark before review.
+- **Verify.**
+  - `npm run check` passes.
+  - Run the [review checklist](./docs/design/guidelines/review-checklist.md).
+  - Attach light and dark screenshots to UI PRs.
+
 ## Do NOT damage user work
 
 This app manages a user's real sessions, repositories, databases, and local
