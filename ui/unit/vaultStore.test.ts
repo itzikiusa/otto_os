@@ -22,7 +22,8 @@ function setup(overrides: Record<string, unknown> = {}) {
     exports: {} as Record<string, any>, $state: (v: unknown) => v,
     require: (p: string) => p.endsWith('treeRefresh') ? {refreshVisibleTree} : p.endsWith('/vault') ? api : p.endsWith('/client') ? {ApiError}
       : p.includes('workspace.svelte') ? {ws: {current: {id: 'ws'}}}
-      : p.includes('toast') ? {toasts: {error() {}, success() {}, warn() {}}} : {},
+      : p.includes('toast') ? {toasts: {error() {}, success() {}, warn() {}}}
+      : p.endsWith('/storage') ? {lsGet: () => null, lsSet() {}, lsRemove() {}} : {},
     localStorage: {setItem() {}, getItem() {return null;}}, setTimeout, clearTimeout, setInterval, clearInterval, URL,
   };
   runInNewContext(ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);

@@ -21,6 +21,7 @@
 const _shareTokens: Map<string, string> = new Map();
 
 import { winKey } from './win';
+import { lsGet, lsSet } from './storage';
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
 // a fresh Tauri window loads with an empty hash, so restoring the saved route
@@ -44,7 +45,7 @@ function restoreLastRoute(): void {
   }
   const h = window.location.hash;
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
-  const saved = localStorage.getItem(winKey(LS_LAST_ROUTE));
+  const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
   if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/')) {
     history.replaceState(null, '', saved);
@@ -54,7 +55,7 @@ function restoreLastRoute(): void {
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
   if (hash.startsWith('#/s/')) return; // share tokens/views are never sticky
-  localStorage.setItem(winKey(LS_LAST_ROUTE), hash);
+  lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
 /** Retrieve the in-memory share token captured for a given session.

@@ -1,6 +1,7 @@
 // Auth / boot state: GET /meta → onboarding | login | ready.
 
 import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT } from '../api/client';
+import { lsGet, lsSet, lsRemove } from '../storage';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
 
@@ -152,7 +153,7 @@ class AuthStore {
     );
 
     // Persist the admin token so Exit works even after a page reload.
-    localStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
+    lsSet(ADMIN_TOKEN_KEY, adminToken);
     setToken(impToken);
 
     // Re-load identity + capabilities as the impersonated user.
@@ -175,8 +176,8 @@ class AuthStore {
     }
 
     const savedAdmin =
-      localStorage.getItem(ADMIN_TOKEN_KEY);
-    localStorage.removeItem(ADMIN_TOKEN_KEY);
+      lsGet(ADMIN_TOKEN_KEY);
+    lsRemove(ADMIN_TOKEN_KEY);
 
     if (savedAdmin) {
       setToken(savedAdmin);
@@ -210,8 +211,8 @@ class AuthStore {
       await api.get<MeResp>('/auth/me');
     } catch (e) {
       if (!(e instanceof ApiError && e.status === 401) || token !== getToken()) return;
-      const savedAdmin = localStorage.getItem(ADMIN_TOKEN_KEY);
-      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      const savedAdmin = lsGet(ADMIN_TOKEN_KEY);
+      lsRemove(ADMIN_TOKEN_KEY);
       if (savedAdmin && savedAdmin !== token) {
         setToken(savedAdmin);
         try {
@@ -238,7 +239,7 @@ class AuthStore {
     } catch {
       /* token may already be invalid */
     }
-    localStorage.removeItem(ADMIN_TOKEN_KEY);
+    lsRemove(ADMIN_TOKEN_KEY);
     setToken(null);
     this.me = null;
     this.realUser = null;

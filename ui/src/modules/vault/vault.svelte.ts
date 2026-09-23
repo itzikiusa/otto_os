@@ -42,6 +42,7 @@ import { assetPath } from '../../lib/api/vault';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
+import { lsGet, lsSet } from '../../lib/storage';
 
 export type LeftMode = 'files' | 'search' | 'tags';
 export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file' | 'trash' | 'history';
@@ -224,8 +225,8 @@ class VaultStore {
       // Vaults are GLOBAL (the ws in the URL is auth context only) — the
       // last-vault choice and per-vault view keys are ws-independent too.
       const lastId = Number(
-        localStorage.getItem(LAST_VAULT_KEY) ??
-          localStorage.getItem(`${LAST_VAULT_KEY}:${this.wsId}`) ??
+        lsGet(LAST_VAULT_KEY) ??
+          lsGet(`${LAST_VAULT_KEY}:${this.wsId}`) ??
           0,
       );
       const pick = this.vaults.find((v) => v.id === lastId) ?? this.vaults[0] ?? null;
@@ -271,8 +272,8 @@ class VaultStore {
     this.clearFileView();
     this.centerMode = 'empty';
     if (!v) return;
-    localStorage.setItem(LAST_VAULT_KEY, String(v.id));
-    this.editing = localStorage.getItem(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
+    lsSet(LAST_VAULT_KEY, String(v.id));
+    this.editing = lsGet(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
     await Promise.all([this.loadRoot(), this.refreshStatus(), this.refreshDocsRuns()]);
     void this.loadTags();
     await this.restoreView();
@@ -490,7 +491,7 @@ class VaultStore {
       this.dirty = false;
       this.conflict = false;
       try {
-        const saved = JSON.parse(localStorage.getItem(this.draftKey(id, path)) ?? 'null');
+        const saved = JSON.parse(lsGet(this.draftKey(id, path)) ?? 'null');
         if (saved && typeof saved.content === 'string' && saved.content !== n.raw) {
           this.draft = saved.content;
           this.dirty = true;
@@ -515,7 +516,7 @@ class VaultStore {
   private persistDraft(): void {
     if (!this.current || !this.notePath) return;
     try {
-      localStorage.setItem(this.draftKey(this.current.id, this.notePath), this.dirty
+      lsSet(this.draftKey(this.current.id, this.notePath), this.dirty
         ? JSON.stringify({content: this.draft, hash: this.note?.meta.hash}) : 'null');
     } catch { /* storage quota must never interrupt editing or the save timer */ }
   }
@@ -582,7 +583,7 @@ class VaultStore {
    *  contract, including across full app restarts. */
   persistView(): void {
     if (!this.current) return;
-    localStorage.setItem(
+    lsSet(
       this.viewKey(),
       JSON.stringify({ tabs: this.tabs, active: this.activeTab, mode: this.centerMode, graphLocal: this.graphLocal, historyPath: this.historyPath, historySince: this.historySince }),
     );
@@ -592,7 +593,7 @@ class VaultStore {
     if (!this.current) return;
     let saved: { tabs?: unknown; active?: unknown; mode?: unknown; graphLocal?: unknown; historyPath?: unknown; historySince?: unknown } = {};
     try {
-      saved = JSON.parse(localStorage.getItem(this.viewKey()) ?? '{}');
+      saved = JSON.parse(lsGet(this.viewKey()) ?? '{}');
     } catch {
       /* corrupt blob — start clean */
     }
@@ -690,7 +691,7 @@ class VaultStore {
   setView(edit: boolean): void {
     this.editing = edit;
     if (this.current) {
-      localStorage.setItem(`${VIEW_MODE_KEY}:${this.current.id}`, edit ? 'edit' : 'read');
+      lsSet(`${VIEW_MODE_KEY}:${this.current.id}`, edit ? 'edit' : 'read');
     }
   }
 
@@ -772,7 +773,7 @@ class VaultStore {
         `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This cannot be undone.`,
         { title: 'Discard your edits?', confirmLabel: 'Discard my edits', danger: true },
       ))) return;
-      if (this.current) localStorage.setItem(this.draftKey(this.current.id, this.notePath), 'null');
+      if (this.current) lsSet(this.draftKey(this.current.id, this.notePath), 'null');
       this.dirty = false;
       this.conflict = false;
       await this.open(this.notePath);
