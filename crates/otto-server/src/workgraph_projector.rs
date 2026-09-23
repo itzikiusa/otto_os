@@ -455,6 +455,15 @@ fn pr_source_key(repo_id: &str, pr_number: u64) -> Option<String> {
     (pr_number != 0).then(|| format!("{repo_id}:{pr_number}"))
 }
 
+/// Status of the `pr` item a review reviews: running while that review is in
+/// flight, done once it has settled.
+fn pr_item_status(review_status: WorkStatus) -> WorkStatus {
+    match review_status {
+        WorkStatus::Pending | WorkStatus::Running | WorkStatus::Waiting => WorkStatus::Running,
+        _ => WorkStatus::Done,
+    }
+}
+
 async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
     let review = match ctx.reviews_store.get_review(review_id).await {
         Ok(r) => r,
@@ -530,7 +539,10 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         source_id: pr_source.clone(),
         title: format!("PR #{} · {}", review.pr_number, repo_label),
         goal: None,
-        status: WorkStatus::Running,
+        // The PR is "running" only while a review of it runs; once that review
+        // settles the item is done (it was hard-coded Running, so every reviewed
+        // PR showed as running forever). A new review flips it back.
+        status: pr_item_status(status),
         owner: None,
         owner_kind: WorkActor::System,
         repo_id: Some(review.repo_id.clone()),
@@ -768,5 +780,20 @@ mod tests {
         assert_eq!(pr_source_key("repo1", 42).as_deref(), Some("repo1:42"));
         assert_eq!(pr_source_key("repo1", 1).as_deref(), Some("repo1:1"));
         assert_eq!(pr_source_key("repo1", 0), None);
+    }
+
+    /// A reviewed PR leaves `running` once its review settles (it was
+    /// hard-coded Running forever); a new review in flight makes it running.
+    #[test]
+    fn pr_item_follows_its_review() {
+        assert_eq!(pr_item_status(WorkStatus::Running), WorkStatus::Running);
+        assert_eq!(pr_item_status(WorkStatus::Pending), WorkStatus::Running);
+        for settled in [
+            WorkStatus::Succeeded,
+            WorkStatus::Failed,
+            WorkStatus::Cancelled,
+        ] {
+            assert_eq!(pr_item_status(settled), WorkStatus::Done);
+        }
     }
 }
