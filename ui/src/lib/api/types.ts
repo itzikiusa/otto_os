@@ -510,6 +510,10 @@ export interface McpOttoToolInfo {
   /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
    * for forward-compat with daemons that predate the categorised catalog. */
   category?: string | null;
+  /** True when an admin turned "Ask before each call" OFF for this (mutating)
+   *  tool: its calls skip the human approval (still audited). Optional for
+   *  forward-compat with daemons that predate the per-tool exemption. */
+  approval_exempt?: boolean;
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
@@ -520,12 +524,22 @@ export interface McpOttoServerStatus {
   token_prefix?: string | null;
   /** The freshly-minted token — returned ONCE on a mint/rotate, never again. */
   token?: string | null;
+  /** Global `mcp_require_approval_dangerous` (default true). When false no
+   *  otto.* call asks for approval, whatever the per-tool setting says. */
+  require_approval_dangerous?: boolean;
+  /** Bare names of the mutating tools that skip the per-call approval. */
+  approval_exempt_tools?: string[];
 }
 
 /** `PATCH /mcp/otto-server`. */
 export interface UpdateMcpOttoServerReq {
   enabled?: boolean;
   tools?: string[];
+  /** The COMPLETE set of mutating tools that skip the per-call approval
+   *  (replaces the stored list; bare or `otto.`-prefixed names; a read or
+   *  unknown name is a 400). Pruned to the enabled set — disabling a tool
+   *  also drops its exemption. */
+  approval_exempt_tools?: string[];
   rotate_token?: boolean;
 }
 
@@ -632,6 +646,38 @@ export interface Repo {
    *  'unrecognized' (remote exists but isn't GitHub/Bitbucket Cloud/GitLab —
    *  e.g. Bitbucket Server), or null when the repo has no remote. */
   forge?: GitProviderKind | 'unrecognized' | null;
+}
+
+/** One row of the agent-facing repo directory (`GET /git/repos/directory`,
+ *  `GET /git/repos/resolve`): a repo plus the workspace it is registered in.
+ *  `current` marks the caller's own workspace (the session's, or the hint). */
+export interface RepoDirectoryEntry {
+  id: Id;
+  name: string;
+  path: string;
+  remote_url: string | null;
+  provider: GitProviderKind | null;
+  workspace_id: Id;
+  workspace_name: string;
+  current: boolean;
+}
+
+/** `GET /git/repos/directory` — every repo in every workspace the caller can
+ *  read, current workspace first. */
+export interface RepoDirectory {
+  repos: RepoDirectoryEntry[];
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** How `GET /git/repos/resolve` matched a friendly repo reference. */
+export type RepoMatchedBy = 'id' | 'path' | 'remote' | 'name' | 'session_cwd';
+
+/** `GET /git/repos/resolve?ref=&workspace_id=` — 404 lists what IS available,
+ *  409 lists the ambiguous candidates (both in the Problem `message`). */
+export interface RepoResolveResp {
+  repo: RepoDirectoryEntry;
+  matched_by: RepoMatchedBy;
 }
 
 /** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
