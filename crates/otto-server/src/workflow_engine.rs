@@ -1847,16 +1847,14 @@ pub async fn run_workflow(
 
     // Global wall clock: a run can't execute forever. Checked at each node
     // boundary; a node already executing finishes first (bounded per-node).
-    // Anchored to the ROW's `started_at` (not a process-local Instant) so a
-    // crash-looping daemon resuming the run over and over can't extend its
-    // budget indefinitely; falls back to "now" if the row can't be read.
-    let run_deadline = repo
-        .get_run(&run_id)
-        .await
-        .map(|r| r.started_at)
-        .unwrap_or_else(|_| chrono::Utc::now())
-        + chrono::Duration::from_std(RUN_WALL_CLOCK_TIMEOUT)
-            .unwrap_or_else(|_| chrono::Duration::hours(10));
+    // The budget is per EXECUTION (a fresh run, a retry-a-step, a restart
+    // resume) and excludes time parked at a `human_approval` gate. It used to
+    // be anchored to the row's `started_at`, which failed every approval given
+    // after 10h (the gate itself waits up to 24h) and every retry of a run
+    // older than 10h before it executed a single node. A crash-looping daemon
+    // still can't extend a run indefinitely: restart resumes are capped at
+    // MAX_RESUME_ATTEMPTS.
+    let mut run_deadline = Instant::now() + RUN_WALL_CLOCK_TIMEOUT;
 
     for node_id in order {
         // Canceled before it started (the Pending→Running CAS above lost).
@@ -1872,7 +1870,7 @@ pub async fn run_workflow(
         }
 
         // Stop once the run has exceeded its global time budget.
-        if chrono::Utc::now() >= run_deadline {
+        if Instant::now() >= run_deadline {
             timed_out = true;
             break;
         }
@@ -2202,6 +2200,11 @@ pub async fn run_workflow(
                 }
             }
         };
+        // Time parked waiting for a human is not execution time — it doesn't
+        // count against the run's wall-clock budget.
+        if node.kind == "human_approval" {
+            run_deadline += started.elapsed();
+        }
         // Drain any session ids reported right as the node finished.
         while let Ok(sid) = sess_rx.try_recv() {
             record_association(&mut states[idx], sid);
