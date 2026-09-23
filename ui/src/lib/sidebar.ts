@@ -5,6 +5,7 @@
 // via e2e) without Svelte/auth state — the caller supplies the RBAC predicate
 // and the already-permitted plugin list.
 
+import type { IconName } from './components/Icon.svelte';
 import type { Feature } from './api/types';
 
 /** A built-in module entry in the canonical registry. */
@@ -12,7 +13,7 @@ export interface SidebarModuleDef {
   /** Route id (`router.go(id)`) and the key used for ordering/hiding. */
   id: string;
   /** Icon name (see Icon.svelte). */
-  icon: string;
+  icon: IconName;
   /** Display label. */
   label: string;
   /** RBAC feature gate (checked at 'view'). Omitted = ungated: always visible
@@ -29,7 +30,7 @@ export interface SidebarModuleDef {
 /** A resolved, currently-available module (a built-in or a runtime plugin). */
 export interface SidebarModule {
   id: string;
-  icon: string;
+  icon: IconName;
   label: string;
   special?: boolean;
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Collapsible right panel (⌘J): Git / Files / Notes / Activity / Outputs / Canvas / Info / Browser / API tabs ⇄ 36px icon strip.
-  import Icon from '../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../lib/components/Icon.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import GitPanel from '../modules/git/GitPanel.svelte';
   import InfoPanel from '../modules/panels/InfoPanel.svelte';
@@ -55,7 +55,7 @@
     );
   });
 
-  const tabs: { id: RightTab; icon: string; label: string }[] = [
+  const tabs: { id: RightTab; icon: IconName; label: string }[] = [
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'files', icon: 'file', label: 'Files' },
     { id: 'notes', icon: 'note', label: 'Notes' },

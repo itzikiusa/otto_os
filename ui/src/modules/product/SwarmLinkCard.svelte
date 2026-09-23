@@ -91,7 +91,7 @@
       {/if}
       {#if link.prs.length > 0}
         <span class="stat">
-          <Icon name="git-pull-request" size={11} />
+          <Icon name="pr" size={11} />
           {link.prs.length} PR{link.prs.length === 1 ? '' : 's'}
         </span>
       {/if}

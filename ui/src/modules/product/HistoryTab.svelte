@@ -1,6 +1,6 @@
 <script lang="ts">
   // History tab — sectioned event timeline with section filter for the selected story.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductEvent } from './types';
@@ -80,7 +80,7 @@
     }
   }
 
-  function sectionIcon(section: string): string {
+  function sectionIcon(section: string): IconName {
     switch (section) {
       case 'source': return 'file';
       case 'analysis': return 'gauge';

@@ -276,7 +276,7 @@
   {#if runFailReason}
     <!-- Skill not installed or no workspace available -->
     <div class="skill-missing card">
-      <Icon name="alert" size={20} />
+      <Icon name="warning" size={20} />
       <div class="skill-missing-body">
         <strong>Insights skill not available</strong>
         <p>{runFailReason}</p>

@@ -232,7 +232,7 @@
       </label>
       {#if !emailSenderLoading && !hasSender}
         <div class="sm-sender-warn">
-          <Icon name="warn" size={12} />
+          <Icon name="warning" size={12} />
           No verified email sender.
           <!-- svelte-ignore a11y_invalid_attribute -->
           <a

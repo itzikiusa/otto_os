@@ -5,7 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import './product.css';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -259,7 +259,7 @@
   // `icon` is purely cosmetic (the merged header band renders it beside the
   // group label) — `id`/`label`/`subs` stay byte-for-byte what they were: the
   // sub `id`s ARE the `product.tab` values that E2E + deep links depend on.
-  type Group = { id: string; label: string; icon: string; subs: Sub[] };
+  type Group = { id: string; label: string; icon: IconName; subs: Sub[] };
   const GROUPS: Group[] = [
     {
       id: 'story',
@@ -337,7 +337,7 @@
     }
   }
 
-  function sourceIcon(kind: string): string {
+  function sourceIcon(kind: string): IconName {
     switch (kind) {
       case 'jira': return 'ticket';
       case 'confluence': return 'globe';

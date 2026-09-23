@@ -7,7 +7,7 @@
   //   3. create the kept ones (passwords are never imported — the user sets them
   //      after, exactly like a hand-made connection).
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api, importSources, importScan, importCreate } from '../../lib/api/client';
   import type {
@@ -29,7 +29,7 @@
   let { wsId, onclose, onimported }: Props = $props();
 
   // Same kind→icon mapping the connection list rows use, so a row reads the same.
-  const kindIcons: Record<ConnectionKind, string> = {
+  const kindIcons: Record<ConnectionKind, IconName> = {
     ssh: 'key',
     mysql: 'db',
     postgres: 'db',

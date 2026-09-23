@@ -3,7 +3,7 @@
   // triggers (schedule / webhook / event).  Shown in the workflow inspector
   // sidebar when the "Triggers" tab is active.
   import { onDestroy } from 'svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
@@ -168,7 +168,7 @@
     return '';
   }
 
-  function kindIcon(kind: TriggerKind): string {
+  function kindIcon(kind: TriggerKind): IconName {
     if (kind === 'schedule') return 'clock';
     if (kind === 'webhook') return 'zap';
     if (kind === 'chat') return 'comment';

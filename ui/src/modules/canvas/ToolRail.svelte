@@ -4,7 +4,7 @@
   // (Select, Sticky, Text, Shape, Connector), then a divider, then the power
   // blocks (Mermaid, Code, JSON, Image, Frame, Freehand). Each button shows its
   // single-key shortcut in the tooltip.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { SHAPE_VARIANTS, type Tool } from './tools';
 
   interface Props {
@@ -17,7 +17,7 @@
 
   interface ToolBtn {
     tool: Tool;
-    icon: string;
+    icon: IconName;
     label: string;
     key: string;
   }

@@ -8,7 +8,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { agentProviders } from '../../lib/providers';
@@ -266,7 +266,7 @@
   {:else}
     <div class="channel-list">
       <!-- Slack card -->
-      {#snippet channelCard(channel: Channel, intg: Integration | null, icon: string, label: string)}
+      {#snippet channelCard(channel: Channel, intg: Integration | null, icon: IconName, label: string)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="channel-card card"

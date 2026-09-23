@@ -3,7 +3,7 @@
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
@@ -278,7 +278,7 @@
     const i = order.indexOf(effView);
     setView(order[(i + 1) % order.length]);
   }
-  const VIEW_META: [SessionViewMode, string, string][] = [
+  const VIEW_META: [SessionViewMode, string, IconName][] = [
     ['terminal', 'Terminal', 'terminal'],
     ['chat', 'Chat', 'comment'],
     ['split', 'Split', 'split'],

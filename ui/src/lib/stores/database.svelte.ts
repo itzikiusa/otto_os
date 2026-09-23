@@ -2,6 +2,7 @@
 // query tabs, saved queries, history, and Superset-style dashboards/widgets.
 // Reads `ws.currentId` only (never mutates it), mirroring apiClient.svelte.ts.
 
+import type { IconName } from '../components/Icon.svelte';
 import {
   api,
   ApiError,
@@ -327,7 +328,7 @@ function extractWhereBody(sql: string): string | null {
 }
 
 /** Glyph (Icon name) for a connection engine. */
-export function engineGlyph(kind: string): string {
+export function engineGlyph(kind: string): IconName {
   switch (kind) {
     case 'redis':
       return 'key';

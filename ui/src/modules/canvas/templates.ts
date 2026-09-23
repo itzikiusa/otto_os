@@ -3,6 +3,7 @@
 // drop a real diagram on the canvas in one click instead of staring at a blank
 // page. Kept pure — no Svelte state, no side effects.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import { genId, makeNode } from './scene';
 import type { CanvasEdge, Scene } from './types';
 
@@ -12,7 +13,7 @@ export interface Template {
   /** One-line description for the gallery card. */
   hint: string;
   /** Icon name (must exist in Icon.svelte). */
-  icon: string;
+  icon: IconName;
   build: () => Scene;
 }
 

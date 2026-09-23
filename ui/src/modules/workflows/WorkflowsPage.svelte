@@ -4,7 +4,7 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
   import { marked } from 'marked';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
@@ -1279,7 +1279,7 @@
                   }}
                   title={t.description}
                 >
-                  <span class="tpl-ic"><Icon name={t.icon} size={14} /></span>
+                  <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
                   <span class="tpl-body">
                     <span class="tpl-name">{t.name}</span>
                     <span class="tpl-sub">agent design + engine</span>
@@ -1402,7 +1402,7 @@
             <div class="palette">
               {#each types as t (t.kind)}
                 <button class="pal-item" onclick={() => addNode(t)}>
-                  <span class="pal-ic" style="--c:{t.color}"><Icon name={t.icon} size={12} /></span>
+                  <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
                   <span class="pal-body">
                     <span class="pal-name">{t.label}</span>
                     <span class="pal-cat">{t.category}</span>
@@ -1564,7 +1564,7 @@
 
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
-          <Icon name="user-check" size={14} />
+          <Icon name="userCheck" size={14} />
           <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
           <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
             Approve

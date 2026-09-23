@@ -9,7 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   interface Props {
@@ -189,7 +189,7 @@
     }
   }
 
-  function iconFor(e: SftpEntry): string {
+  function iconFor(e: SftpEntry): IconName {
     if (e.kind === 'dir') return 'folder';
     if (e.kind === 'symlink') return 'link';
     return 'file';

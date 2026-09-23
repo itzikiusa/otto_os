@@ -6,7 +6,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { plugins, type PluginRecord } from '../../lib/stores/plugins.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   let list = $state<PluginRecord[]>([]);
@@ -112,7 +112,7 @@
         {#each list as p (p.slug)}
           <tr>
             <td>
-              <div class="name"><Icon name={p.icon} size={14} /> {p.name}</div>
+              <div class="name"><Icon name={asIcon(p.icon, 'box')} size={14} /> {p.name}</div>
               <div class="src">{p.source}</div>
             </td>
             <td><code>{p.slug}</code></td>
