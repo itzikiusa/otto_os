@@ -205,23 +205,25 @@ impl LocalGit {
         if !dirty {
             return Ok((self.pull_outcome_mode(token, mode).await?, None));
         }
-        self.stash_save().await?;
+        let sha = self.stash_save_sha().await?;
         match self.pull_outcome_mode(token, mode).await {
             Ok(out) if out.conflicted_files.is_empty() => {
-                let note = self.pop_after_merge().await;
+                let note = self.pop_after_merge(&sha).await;
                 Ok((out, note))
             }
             Ok(out) => Ok((
                 out,
                 Some(
                     "The pull stopped with conflicts. Your uncommitted changes stay stashed — \
-                     resolve the conflicts and commit, then run `git stash pop` to restore them."
+                     resolve the conflicts and commit, then restore them from `git stash list`."
                         .into(),
                 ),
             )),
             Err(e) => {
-                let _ = self.stash_pop().await;
-                Err(e)
+                // The refused pull never touched the tree — restore it (by
+                // SHA), or say where the changes are if that fails.
+                let origin = self.head_label().await.unwrap_or_default();
+                Err(self.restore_autostash(e, &sha, &origin).await)
             }
         }
     }

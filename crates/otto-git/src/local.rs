@@ -1593,18 +1593,27 @@ impl LocalGit {
                 dirty = false;
             }
         }
+        // Our entry's commit: every pop below addresses THIS stash by SHA,
+        // never `stash@{0}` — an agent in the same repo may push its own
+        // stash in between, and popping that one onto the user's tree is
+        // both a loss (theirs) and a corruption (ours).
+        let ours: Option<String> = if dirty {
+            Some(
+                self.run_read(&["rev-parse", "-q", "--verify", "refs/stash"])
+                    .await?
+                    .trim()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         if let Err(e) = self.checkout(branch, create).await {
-            if dirty {
+            if let Some(sha) = &ours {
                 // The pop rides the same `index.lock` retry as everything else
                 // here: a concurrent agent's lock must not be the reason the
-                // user's changes are left behind in the stash.
-                let (ok, out, _, _) = self.run_raw_retry_lock(&["stash", "pop"]).await.unwrap_or((
-                    false,
-                    String::new(),
-                    String::new(),
-                    None,
-                ));
-                if !ok && !out.contains("CONFLICT") {
+                // user's changes are left behind in the stash. A CONFLICTING
+                // pop is Ok (applied with markers, entry kept).
+                if self.pop_stash_sha(sha).await.is_err() {
                     return Err(match e {
                         Error::Conflict(m) => Error::Conflict(format!(
                             "{m} — your changes are kept in `git stash list`"
@@ -1615,10 +1624,11 @@ impl LocalGit {
             }
             return Err(e);
         }
-        if !dirty {
+        let Some(sha) = ours else {
             return Ok(CheckoutOutcome::default());
-        }
-        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop"]).await?;
+        };
+        let sel = self.resolve_stash_selector(&sha).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
         if ok {
             return Ok(CheckoutOutcome {
                 stashed: true,
@@ -1964,24 +1974,25 @@ impl LocalGit {
         if !dirty {
             return Ok((self.pull_outcome(token).await?, None));
         }
-        self.stash_save().await?;
+        let sha = self.stash_save_sha().await?;
         match self.pull_outcome(token).await {
             Ok(out) if out.conflicted_files.is_empty() => {
-                let note = self.pop_after_merge().await;
+                let note = self.pop_after_merge(&sha).await;
                 Ok((out, note))
             }
             Ok(out) => Ok((
                 out,
                 Some(
                     "The pull merged with conflicts. Your uncommitted changes stay stashed — \
-                     resolve the conflicts and commit, then run `git stash pop` to restore them."
+                     resolve the conflicts and commit, then restore them from `git stash list`."
                         .into(),
                 ),
             )),
             Err(e) => {
-                // The refused pull never touched the tree — restore it.
-                let _ = self.stash_pop().await;
-                Err(e)
+                // The refused pull never touched the tree — restore it (by
+                // SHA), or say where the changes are if that fails.
+                let origin = self.head_label().await.unwrap_or_default();
+                Err(self.restore_autostash(e, &sha, &origin).await)
             }
         }
     }
@@ -2361,16 +2372,101 @@ impl LocalGit {
     /// Pop the stash after a clean merge. Returns a human note: a confirmation on
     /// a clean pop, or a warning if the pop conflicted (git KEEPS the stash in
     /// that case, so the user's work is never lost).
-    pub(crate) async fn pop_after_merge(&self) -> Option<String> {
-        match self.stash_pop().await {
-            Ok(_) => Some("Your stashed changes were restored.".into()),
-            Err(_) => Some(
+    ///
+    /// `sha` is the auto-stash's own commit ([`Self::stash_save_sha`]): the pop
+    /// is addressed by it, never by `stash@{0}` — an agent in the same repo
+    /// may have pushed its own stash on top in the meantime.
+    pub(crate) async fn pop_after_merge(&self, sha: &str) -> Option<String> {
+        match self.pop_stash_sha(sha).await {
+            Ok(out) if !out.contains("CONFLICT") => {
+                Some("Your stashed changes were restored.".into())
+            }
+            _ => Some(
                 "Merge succeeded, but restoring your stashed changes hit a conflict — \
                  they're preserved in `git stash`; resolve the working tree and run \
                  `git stash pop` manually."
                     .into(),
             ),
         }
+    }
+
+    /// [`Self::stash_save`], returning the new entry's commit SHA so the
+    /// matching restore can address THIS stash rather than whatever is on top.
+    pub(crate) async fn stash_save_sha(&self) -> Result<String> {
+        self.stash_save().await?;
+        let sha = self
+            .run_read(&["rev-parse", "-q", "--verify", "refs/stash"])
+            .await?
+            .trim()
+            .to_string();
+        if sha.is_empty() {
+            return Err(Error::Internal("stash saved but refs/stash is unreadable".into()));
+        }
+        Ok(sha)
+    }
+
+    /// `git stash pop` of the entry whose commit is `sha`. A CONFLICTING pop
+    /// is Ok (the stash is applied with markers and git KEEPS the entry), as
+    /// in [`Self::stash_pop`].
+    pub(crate) async fn pop_stash_sha(&self, sha: &str) -> Result<String> {
+        let sel = self.resolve_stash_selector(sha).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop", &sel]).await?;
+        if ok || out.contains("CONFLICT") {
+            return Ok(out.trim().to_string());
+        }
+        Err(upstream_err(&err, &out, code))
+    }
+
+    /// Put the user back where an auto-stashing operation found them after it
+    /// FAILED: switch back to `origin` (the branch or detached SHA they were
+    /// on, when the failure left HEAD elsewhere) and pop the auto-stash `sha`
+    /// there. Returns `err`, annotated when the changes could not be
+    /// restored so the message says where they are instead of implying they
+    /// were lost.
+    pub(crate) async fn restore_autostash(&self, err: Error, sha: &str, origin: &str) -> Error {
+        let short = &sha[..sha.len().min(12)];
+        let here = self.head_label().await;
+        let mut back = true;
+        if here.as_deref() != Some(origin) {
+            back = self.checkout(origin, false).await.is_ok();
+        }
+        let popped = if back {
+            Some(self.pop_stash_sha(sha).await)
+        } else {
+            None
+        };
+        let kept = match popped {
+            Some(Ok(out)) if !out.contains("CONFLICT") => return err,
+            Some(Ok(_)) => format!(
+                "restoring your uncommitted changes conflicted: resolve the marked files; \
+                 the stash is kept in `git stash list` (stash {short})"
+            ),
+            _ => format!(
+                "your uncommitted changes are kept in `git stash list` (stash {short}) — \
+                 run `git stash apply {short}` on {origin} to restore them"
+            ),
+        };
+        match err {
+            Error::Conflict(m) => Error::Conflict(format!("{m} — {kept}")),
+            Error::Upstream(m) => Error::Upstream(format!("{m} — {kept}")),
+            Error::Invalid(m) => Error::Invalid(format!("{m} — {kept}")),
+            Error::NotFound(m) => Error::NotFound(format!("{m} — {kept}")),
+            Error::Internal(m) => Error::Internal(format!("{m} — {kept}")),
+            other => Error::Conflict(format!("{other} — {kept}")),
+        }
+    }
+
+    /// Where HEAD is, in a form `checkout` can return to: the branch name, or
+    /// the commit SHA when detached. `None` when HEAD can't be read.
+    pub(crate) async fn head_label(&self) -> Option<String> {
+        if let Some(b) = self.symbolic_head().await {
+            return Some(b);
+        }
+        self.run_read(&["rev-parse", "-q", "--verify", "HEAD"])
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Dry-run a merge of `source` into `target` via `git merge-tree --write-tree`
@@ -2461,18 +2557,44 @@ impl LocalGit {
         }
 
         // Dirty-tree handling: either auto-stash, or refuse.
-        let mut stashed = false;
-        if self.working_dirty().await? {
-            if auto_stash {
-                self.stash_save().await?;
-                stashed = true;
-            } else {
-                return Err(Error::Conflict(
-                    "working tree has uncommitted changes; commit or stash first".into(),
-                ));
-            }
+        if !self.working_dirty().await? {
+            return self.merge_branch_inner(source, target, strategy, None).await;
         }
+        if !auto_stash {
+            return Err(Error::Conflict(
+                "working tree has uncommitted changes; commit or stash first".into(),
+            ));
+        }
+        // Where the user is BEFORE the stash: any failure from here on puts
+        // them back there with their changes. The old code returned early when
+        // the switch to `target` failed (routine: `target` checked out in an
+        // agent's worktree) and every tracked + untracked change silently
+        // stayed in the stash, the error not even mentioning it.
+        let origin = self
+            .head_label()
+            .await
+            .ok_or_else(|| Error::Conflict("cannot read HEAD — nothing was stashed".into()))?;
+        let sha = self.stash_save_sha().await?;
+        match self
+            .merge_branch_inner(source, target, strategy, Some(&sha))
+            .await
+        {
+            Ok(r) => Ok(r),
+            Err(e) => Err(self.restore_autostash(e, &sha, &origin).await),
+        }
+    }
 
+    /// [`Self::merge_branch`] after the dirty-tree decision. `stash` is the
+    /// auto-stash taken for this merge: popped (by SHA) after a clean merge,
+    /// kept with a note on conflicts. An `Err` pops nothing — the caller
+    /// restores the stash on the original branch.
+    async fn merge_branch_inner(
+        &self,
+        source: &str,
+        target: &str,
+        strategy: LocalMergeStrategy,
+        stash: Option<&str>,
+    ) -> Result<MergeResult> {
         // Ensure the target branch is checked out.
         if self.current_branch().await? != target {
             self.checkout(target, false).await?;
@@ -2567,10 +2689,9 @@ impl LocalGit {
                 // Advance the checked-out target branch onto the new merge commit
                 // (it descends from target_head, so this is a clean fast-forward).
                 self.run(&["merge", "--ff-only", &new_commit]).await?;
-                let note = if stashed {
-                    self.pop_after_merge().await
-                } else {
-                    None
+                let note = match stash {
+                    Some(sha) => self.pop_after_merge(sha).await,
+                    None => None,
                 };
                 return Ok(MergeResult {
                     status: "merged".into(),
@@ -2588,10 +2709,9 @@ impl LocalGit {
                 Some(self.run(&["rev-parse", "HEAD"]).await?.trim().to_string())
             };
             // Merge landed cleanly — restore any auto-stashed work.
-            let note = if stashed {
-                self.pop_after_merge().await
-            } else {
-                None
+            let note = match stash {
+                Some(sha) => self.pop_after_merge(sha).await,
+                None => None,
             };
             return Ok(MergeResult {
                 status: if up_to_date { "up_to_date" } else { "merged" }.into(),
@@ -2611,16 +2731,14 @@ impl LocalGit {
         if is_conflict {
             // We auto-stashed and the merge conflicted: do NOT pop onto a
             // conflicted tree. Leave the stash saved and tell the user.
-            let note = if stashed {
-                Some(
+            let note = stash.map(|sha| {
+                let short = &sha[..sha.len().min(12)];
+                format!(
                     "Your uncommitted changes were stashed before the merge, which then \
-                     conflicted. Resolve the conflicts and commit, then run `git stash pop` \
-                     to restore your changes."
-                        .into(),
+                     conflicted. Resolve the conflicts and commit, then restore your changes \
+                     from `git stash list` (stash {short})."
                 )
-            } else {
-                None
-            };
+            });
             return Ok(MergeResult {
                 status: "conflicts".into(),
                 commit: None,
@@ -2629,11 +2747,8 @@ impl LocalGit {
                 note,
             });
         }
-        // Hard error — if we stashed, restore the user's work before surfacing it
-        // so nothing is stranded.
-        if stashed {
-            let _ = self.stash_pop().await;
-        }
+        // Hard error — the caller (`merge_branch`) switches back and restores
+        // any auto-stash before surfacing it, so nothing is stranded.
         Err(upstream_err(&stderr, &stdout, code))
     }
 
@@ -5656,6 +5771,36 @@ mod tests {
         sh_git(&dir, &["tag", "v1"]);
         git.checkout("v1", false).await.unwrap();
         git.checkout("main", false).await.unwrap();
+    }
+
+    /// G-6: when the switch to `target` fails after the auto-stash (target is
+    /// checked out in an agent's worktree), the user's tracked AND untracked
+    /// changes come back on the branch they were on — nothing is stranded.
+    #[tokio::test]
+    async fn merge_autostash_restores_changes_when_the_switch_fails() {
+        let (tmp, dir) = fixture_on_branch("main");
+        sh_git(&dir, &["branch", "develop"]);
+        sh_git(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "f.txt", "feature\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "feature"]);
+        let wt = tmp.path().join("wt");
+        sh_git(&dir, &["worktree", "add", wt.to_str().unwrap(), "develop"]);
+        write(&dir, "a.txt", "hello\nDIRTY\n");
+        write(&dir, "new.txt", "untracked\n");
+
+        let git = LocalGit::new(&dir);
+        let err = git
+            .merge_branch("feature", "develop", LocalMergeStrategy::MergeCommit, true)
+            .await
+            .unwrap_err();
+        assert_eq!(git.current_branch().await.unwrap(), "feature", "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "hello\nDIRTY\n"
+        );
+        assert!(dir.join("new.txt").exists(), "untracked file restored");
+        assert!(git.stash_list().await.unwrap().is_empty(), "{err:?}");
     }
 
 }
