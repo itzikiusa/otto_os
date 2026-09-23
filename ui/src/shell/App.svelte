@@ -56,6 +56,7 @@
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
   import ProductPage from '../modules/product/ProductPage.svelte';
   import CanvasPage from '../modules/canvas/CanvasPage.svelte';
+  import DesignHallPage from '../modules/design-hall/DesignHallPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import MissionControlPage from '../modules/mission-control/MissionControlPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
@@ -466,6 +467,9 @@
       { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
+      // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
+      // but stays a route of its own — keep it one ⌘K away.
+      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2', run: () => router.go('canvas') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -700,6 +704,10 @@
       <Walkthroughs />
     {:else if moduleName === 'product'}
       <ProductPage />
+    {:else if moduleName === 'design'}
+      <!-- Design Hall: one library for every studio (#/design…). Canvas below
+           stays routable as its Whiteboard studio. -->
+      <DesignHallPage />
     {:else if moduleName === 'canvas'}
       <CanvasPage />
     {:else if moduleName === 'insights'}

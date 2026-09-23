@@ -75,7 +75,8 @@ Otto.app (Tauri / otto-desktop)
 ### UI module areas (`ui/src/modules/`)
 
 `agents`, `api` (REST client), `brokers` (Kafka viewer), `browser`, `canvas`,
-`connections`, `database` (Database Explorer), `git`, `help`, `home` (personal
+`connections`, `database` (Database Explorer), `design-hall` (Design Hall:
+lobby, artifact view, brand kit, learning log), `git`, `help`, `home` (personal
 dashboard of live boxes), `insights`,
 `loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
 `plugins`, `product`, `proof` (proof packs), `run-with-otto`,

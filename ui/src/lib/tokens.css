@@ -65,6 +65,20 @@
   --accent-solid: color-mix(in srgb, var(--accent) 84%, black);
   --hover: color-mix(in srgb, var(--text) 7%, transparent);
   --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
+
+  /* Design Hall studio identity — the categorical fill of a studio's BADGE
+     TILE only (a 16–28px square behind a --studio-glyph icon, always shown
+     next to the studio's name). Never text, never large areas, never status.
+     Each fill keeps the white glyph at >= 3:1 (graphics contrast) and reads on
+     both schemes, so there is one set for every theme. */
+  --studio-frames: #2563eb;
+  --studio-graphics: #ea580c;
+  --studio-site: #16a34a;
+  --studio-3d: #7c3aed;
+  --studio-whiteboard: #d97706;
+  --studio-brand: #db2777;
+  --studio-spatial: #0d9488;
+  --studio-glyph: #ffffff;
 }
 
 /* Light-scheme tones (Pro Dark is always dark, whatever the scheme says). */

@@ -18,6 +18,22 @@
     compass: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Zm2.4 3.1L9.1 9.1 5.6 10.4l1.3-3.5 3.5-1.3Z',
     calendar: 'M3.5 3.5h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Zm-1 3h11M5.5 2v2.5M10.5 2v2.5M5.5 9.3h.01M8 9.3h.01m2.5 0h.01',
     server: 'M3.5 2.5h9a1 1 0 0 1 1 1V6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Zm0 6.5h9a1 1 0 0 1 1 1v2.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1Zm1.8-4.25h.01m-.01 6.5h.01',
+    // Design Hall (module): a diamond inside a diamond — a design, set in its hall
+    designHall: 'M8 1.8 14.2 8 8 14.2 1.8 8 8 1.8Zm0 3.4L10.8 8 8 10.8 5.2 8 8 5.2Z',
+    // Design Hall studios + learning (in-page glyphs, not sidebar modules)
+    frame: 'M5.5 2.5v11M10.5 2.5v11M2.5 5.5h11M2.5 10.5h11',
+    layout: 'M3 2.5h10a.5.5 0 0 1 .5.5v10a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Zm-.5 3.5h11M7 6v7.5',
+    palette: 'M8 2.5a5.5 5.5 0 1 0 0 11c.9 0 1.3-.6 1.1-1.3-.3-.9.2-1.7 1.2-1.7h1.2a2 2 0 0 0 2-2A5.8 5.8 0 0 0 8 2.5Zm-3 5.2h.01M6.2 5h.01M9.3 4.6h.01M11.3 6.6h.01',
+    // museum front — Spatial Hall
+    gallery: 'M2 6 8 2.5 14 6M2.5 6h11M3 13.5h10M4 7.5V12M6.7 7.5V12M9.3 7.5V12M12 7.5V12',
+    // light bulb — "What Otto learned"
+    bulb: 'M6 12.5h4M6.6 14h2.8M8 2a4 4 0 0 0-2.5 7.1c.4.4.7.9.7 1.4v.5h3.6v-.5c0-.5.3-1 .7-1.4A4 4 0 0 0 8 2Z',
+    // four-point spark — a prompt / generation
+    sparkle: 'M7 2l1.2 3.3L11.5 6.5 8.2 7.7 7 11 5.8 7.7 2.5 6.5l3.3-1.2L7 2Zm5 7.5.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z',
+    // three dots — a "More actions" menu (ringed dots so they read at 12–14px)
+    more: 'M3.2 8a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0',
+    // two side-by-side panes — Compare
+    columns: 'M2.5 3h4.5v10H2.5V3Zm6.5 0h4.5v10H9V3Z',
     // stored procedure — a runnable block (rounded card + play glyph)
     procedure: 'M3.5 3h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm2.3 2.7 3.4 2.3-3.4 2.3V5.7Z',
     // stored function — curly braces { } denoting a callable routine
