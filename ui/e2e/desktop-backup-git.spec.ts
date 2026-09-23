@@ -41,7 +41,11 @@ test('Git backup preview commits only snapshot files and supports reviewed impor
     await expect(card.getByLabel('Restore preview')).toBeVisible();
     await card.getByLabel('I reviewed the contents, conflicts, and reconnect requirements.').check();
     await card.getByRole('button', { name: 'Restore new items', exact: true }).click();
-    await expect(card.getByRole('status')).toContainText('Restored');
+    // A restore is one whole-state SQLite transaction: well under a second on
+    // an idle daemon, but on the shared e2e daemon it queues behind other
+    // workers' writes (e.g. desktop-backup-archive's own restore running in
+    // parallel), so allow it more than the default 10 s to report.
+    await expect(card.getByRole('status')).toContainText('Restored', { timeout: 60_000 });
     expect(git('diff', '--cached', '--name-only')).toBe('unrelated.txt');
   } finally { await ctx.dispose(); rmSync(repo, { recursive: true, force: true }); }
 });
