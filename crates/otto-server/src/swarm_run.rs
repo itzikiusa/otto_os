@@ -395,7 +395,8 @@ async fn run_turn_inner(
     // below can bound usage to THIS turn — the agent's session is reused across
     // turns, so an unbounded session total would accumulate run1+run2+….
     let turn_started_at = Utc::now();
-    match repo
+    // `Ok(None)`: stopped while its cwd/brief were being prepared.
+    if let Ok(None) = repo
         .update_run_if_status(
             &run.id,
             &["queued", "running", "waiting"],
@@ -407,9 +408,7 @@ async fn run_turn_inner(
         )
         .await
     {
-        // Stopped while its cwd/brief were being prepared.
-        Ok(None) => return None,
-        Ok(Some(_)) | Err(_) => {}
+        return None;
     }
     emit_run(ctx, &run.id).await;
 

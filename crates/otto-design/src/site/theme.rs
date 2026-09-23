@@ -335,7 +335,7 @@ fn legacy_tokens(doc: &Value) -> Vec<BrandToken> {
         if group.starts_with('$') || SKIP_GROUPS.contains(&group.as_str()) {
             continue;
         }
-        walk_legacy(group, node, &[group.clone()], 0, &mut out);
+        walk_legacy(group, node, std::slice::from_ref(group), 0, &mut out);
     }
     out
 }

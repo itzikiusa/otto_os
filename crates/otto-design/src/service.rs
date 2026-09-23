@@ -200,10 +200,10 @@ pub fn bound_json(v: Value, max_bytes: usize, what: &str) -> Result<Value> {
 pub fn check_signal_payload(kind: &str, payload: &Value) -> Result<()> {
     for (k, key) in SIGNAL_PAYLOAD_KEYS {
         if *k == kind
-            && !payload
+            && payload
                 .get(*key)
                 .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty())
+                .is_none_or(|s| s.trim().is_empty())
         {
             return Err(Error::Invalid(format!(
                 "a {kind} signal needs payload.{key}"
@@ -1287,7 +1287,7 @@ impl DesignService {
                 if RENDER_RELS.contains(&req.rel.as_str()) {
                     let adj = self
                         .store
-                        .render_adjacency(&[t.id.clone()], ADJACENCY_CAP)
+                        .render_adjacency(std::slice::from_ref(&t.id), ADJACENCY_CAP)
                         .await?;
                     if t.id == src.id || graph::reaches(&adj, &t.id, &src.id, ADJACENCY_CAP) {
                         return Err(Error::Conflict(format!(
@@ -1302,10 +1302,8 @@ impl DesignService {
                     return Err(Error::NotFound(format!("product story {dst_id}")));
                 }
             }
-            "url" => {
-                if !(dst_id.starts_with("https://") || dst_id.starts_with("http://")) {
-                    return Err(Error::Invalid("url links must be http(s)".into()));
-                }
+            "url" if !(dst_id.starts_with("https://") || dst_id.starts_with("http://")) => {
+                return Err(Error::Invalid("url links must be http(s)".into()));
             }
             _ => {}
         }

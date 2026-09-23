@@ -1005,7 +1005,7 @@ fn registry() -> &'static Mutex<HashMap<Id, ArtifactRuns>> {
 
 fn with_registry<T>(f: impl FnOnce(&mut HashMap<Id, ArtifactRuns>) -> T) -> T {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut *g)
+    f(&mut g)
 }
 
 /// Holds an artifact's single run slot; released on drop (every path).

@@ -210,7 +210,7 @@ fn redact_word(
 /// `KEY=value` / `--password=value` with a sensitive key → `KEY=[redacted]`.
 fn redact_key_value(w: &str) -> Option<String> {
     let eq = w.find('=')?;
-    let key = w[..eq].trim_start_matches(|c: char| matches!(c, '-' | '"' | '\'' | '`'));
+    let key = w[..eq].trim_start_matches(['-', '"', '\'', '`']);
     let value = &w[eq + 1..];
     let value_core = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | ','));
     if key.is_empty() || value_core.is_empty() {

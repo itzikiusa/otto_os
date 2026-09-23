@@ -1103,7 +1103,7 @@ mod tests {
         );
         let files: Vec<(String, PathBuf)> = ["correctness", "security", "perf"]
             .iter()
-            .map(|s: &&str| (s.to_string(), p(*s)))
+            .map(|s: &&str| (s.to_string(), p(s)))
             .collect();
         let missing = merge_lens_files(&mut findings, &files);
         assert_eq!(missing, vec!["perf".to_string()]);

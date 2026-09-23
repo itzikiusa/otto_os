@@ -8,6 +8,7 @@
 //!   - `token:<group>.<name>` (the Design Hall reference form; a type style's
 //!     sub-property `token:type.display.size` counts as `type.display`);
 //!   - the CSS custom property `--brand-<group>-<name>` (`var(--brand-color-primary)`).
+//!
 //! A consumer that links to the kit but names no single token gets the WHOLE
 //! kit applied (a site theme), so every change reaches it.
 //!

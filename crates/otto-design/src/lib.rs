@@ -12,7 +12,7 @@
 //! Storage is file-backed (docs/features/design-hall.md §2):
 //!   - blobs:        `<data>/design/blobs/<sha256>` (dedup; never auto-deleted)
 //!   - working copy: `<data>/design/<artifact>/work/<file>` (text formats only —
-//!                   where an agent edits in place; `POST …/versions` snapshots it)
+//!     where an agent edits in place; `POST …/versions` snapshots it)
 //!   - SQLite rows:  metadata only (`design_*` tables + the runtime FTS5 index).
 //!
 //! Legacy design data is mirrored, never moved: `import` creates graph rows for
