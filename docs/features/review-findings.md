@@ -202,7 +202,7 @@ openable in **Agents**. The seven headline buttons:
 | Button | Endpoint | Effect | Enabled when |
 |---|---|---|---|
 | **Ask agent to fix** | `POST /findings/{id}/fix` | `open\|accepted → accepted`, spawns a fix agent in a worktree; async stamps `fixed` on commit (sets `fix_session_id`) | `status ∈ {open, accepted}` |
-| **Verify resolved** | `POST /findings/{id}/verify` | spawns a verify agent; on pass `accepted\|fixed\|verified → verified` | `status ∈ {accepted, fixed, verified}` |
+| **Verify resolved** | `POST /findings/{id}/verify` | spawns a verify agent and runs the finding's `linked_test` (Rust/cargo) in the fix worktree; passes only if ≥1 test ran and passed → `accepted\|fixed\|verified → verified`. No linked test / 0 tests run / non-Rust test = "Not verified" with the reason (`note`) | `status ∈ {accepted, fixed, verified}` |
 | **Convert to Jira** | `POST /findings/{id}/jira` | creates a Jira issue, stores `jira_key`/`jira_url` (inline project-key input) | `jira_key` not set |
 | **Mark false positive** | `POST /findings/{id}/false-positive` | `→ false_positive` | `status ∈ {open, accepted, fixed, verified}` |
 | **Require human approval** | `POST /findings/{id}/require-approval` | sets the human-approval gate; **status unchanged** | gate not already set |
