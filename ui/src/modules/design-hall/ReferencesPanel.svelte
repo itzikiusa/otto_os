@@ -9,7 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { isAbortError } from '../../lib/api/client';
-  import { createArtifact, createLink, search } from '../../lib/api/design';
+  import { captureSignal, createArtifact, createLink, search } from '../../lib/api/design';
   import type { DesignArtifact, DesignArtifactFormat, DesignSearchHit, DesignStatus, DesignStudio } from '../../lib/api/types';
   import ArtifactThumb from './ArtifactThumb.svelte';
   import StudioBadge from './StudioBadge.svelte';
@@ -90,6 +90,7 @@
     busyId = ref.id;
     try {
       await createLink(artifact.id, { rel: 'references', dst_kind: 'artifact', dst_id: ref.id });
+      captureSignal({ artifact_id: artifact.id, kind: 'reference_added', payload: { target_artifact_id: ref.id, target_seq: ref.head_seq } });
       toasts.success('Added as reference', `${ref.title} is pinned at v${ref.head_seq ?? '?'}.`);
       onreload();
     } catch (e) {
@@ -110,6 +111,12 @@
         project_id: artifact.project_id ?? undefined,
         derived_from: { artifact_id: ref.id },
         message: `Started from ${ref.title}`,
+      });
+      captureSignal({
+        artifact_id: res.artifact.id,
+        kind: 'forked',
+        version_id: res.version.id,
+        payload: { source_artifact_id: ref.id, source: 'start_from_this', from_artifact_id: artifact.id },
       });
       toasts.success('Draft created', `“${res.artifact.title}” keeps a pinned link to ${ref.title}.`);
       openArtifact(res.artifact.id);
