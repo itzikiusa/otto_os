@@ -1138,7 +1138,7 @@
     margin-bottom: 14px;
   }
   .nav-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -1259,7 +1259,7 @@
   .group-label {
     flex: 1;
     min-width: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -1356,7 +1356,7 @@
     align-items: center;
     gap: 6px;
     padding: 5px 8px 2px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     min-width: 0;
@@ -1648,7 +1648,7 @@
     line-height: 1.2;
   }
   .user-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

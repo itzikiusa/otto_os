@@ -846,7 +846,7 @@
     padding: 10px 12px 0;
   }
   .pal-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pal-input-row {
@@ -888,7 +888,7 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .pal-group {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pal-detail {
@@ -901,7 +901,7 @@
   }
   kbd {
     font-family: var(--font-ui);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -980,7 +980,7 @@
     border-radius: 50%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     display: grid;
     place-items: center;
     color: var(--text-dim);
@@ -1027,7 +1027,7 @@
     max-width: 220px;
   }
   .pal-hit-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
