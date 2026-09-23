@@ -19,6 +19,7 @@ pub mod context_packet;
 pub mod database_changes;
 pub mod db_assist;
 pub mod db_drafter;
+pub mod design_assist;
 pub mod design_blender;
 pub mod design_format;
 pub mod design_hall;

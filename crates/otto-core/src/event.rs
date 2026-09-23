@@ -306,7 +306,9 @@ pub enum Event {
         artifact_id: Id,
         /// The artifact's format (`html` | `scene3d` | `otto-canvas` | `png` …).
         format: String,
-        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`.
+        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`,
+        /// or `live` — an UNCOMMITTED, validated edit a design-assist agent
+        /// just saved mid-turn (`version_id: null`; the turn's commit follows).
         change: String,
         /// The newly committed version, when the change created one.
         version_id: Option<Id>,
@@ -349,8 +351,10 @@ pub enum Event {
         workspace_id: Id,
         artifact_id: Id,
         turn_id: Id,
-        /// `running` | `done` (a version was committed) | `unchanged` (the
-        /// agent changed nothing — e.g. a critique) | `failed`.
+        /// `starting` (accepted, session not live yet) | `running` | `done` (a
+        /// version was committed) | `unchanged` (the agent changed nothing —
+        /// e.g. a critique) | `conflict` (the head moved meanwhile: the draft
+        /// was kept as a side version `variant/<turn>/1`) | `failed`.
         status: String,
         /// `generate` | `refine` | `critique` | `a11y` | `variant`.
         mode: String,

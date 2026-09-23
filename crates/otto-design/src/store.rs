@@ -991,7 +991,10 @@ impl Store {
             .await
             .map_err(dberr("design.side.lock"))?;
         if upd.rows_affected() == 0 {
-            return Err(Error::NotFound(format!("design artifact {}", v.artifact_id)));
+            return Err(Error::NotFound(format!(
+                "design artifact {}",
+                v.artifact_id
+            )));
         }
         let seq: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM design_versions WHERE artifact_id = ?",

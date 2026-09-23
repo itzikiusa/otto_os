@@ -7892,6 +7892,9 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_canvas::router::<ServerCtx>(),
         // Design Hall — the artifact graph (`/design/*`, Feature::Design).
         otto_design::router::<ServerCtx>(),
+        // The unified design-assist pipeline (agent turns, variants, learned
+        // rules) — needs the session runner, so it lives in the server.
+        crate::design_assist::routes(),
         otto_memory::router::<ServerCtx>(),
         otto_vault::router::<ServerCtx>(),
         crate::vault_docs_agent::routes(),
