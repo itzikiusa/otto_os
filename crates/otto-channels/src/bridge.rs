@@ -40,7 +40,9 @@ fn session_alive(s: &Session) -> bool {
 /// True when `s` was spawned by the bridge for exactly this conversation —
 /// the `meta` stamped at creation (`source: "channel"`, `channel`, `chat`,
 /// `thread`). `thread` compares as an optional string: a top-level chat
-/// (no thread) only matches a session created without one.
+/// (no thread) only matches a session created without one. A session the
+/// conversation was detached from (`/new`, `/restart` →
+/// `meta.channel_detached`) never matches again.
 fn session_matches_conversation(
     s: &Session,
     channel: &str,
@@ -52,6 +54,16 @@ fn session_matches_conversation(
         && m.get("channel").and_then(|v| v.as_str()) == Some(channel)
         && m.get("chat").and_then(|v| v.as_str()) == Some(chat)
         && m.get("thread").and_then(|v| v.as_str()) == thread
+        && m.get("channel_detached").and_then(|v| v.as_bool()) != Some(true)
+}
+
+/// True when `s` was spawned by the bridge from `chat` on `channel` (any
+/// thread). Scopes `/sessions` to what this chat itself started.
+fn session_in_chat(s: &Session, channel: &str, chat: &str) -> bool {
+    let m = &s.meta;
+    m.get("source").and_then(|v| v.as_str()) == Some("channel")
+        && m.get("channel").and_then(|v| v.as_str()) == Some(channel)
+        && m.get("chat").and_then(|v| v.as_str()) == Some(chat)
 }
 
 const PASTE_TO_ENTER: Duration = Duration::from_millis(200);
@@ -310,6 +322,76 @@ impl Bridge {
         })
     }
 
+    /// The live agent session bound to conversation `key` on `channel`, if any:
+    /// the in-memory map first (skipping a mapped session that has since
+    /// exited / been archived), then — on a map miss (daemon restart, or a
+    /// listener generation that never saw this thread) — the newest live
+    /// session whose creation `meta` names this conversation, which is then
+    /// re-mapped. Without the meta fallback every restart turned the next
+    /// follow-up into a brand-new agent with no memory of the thread. Shared by
+    /// message routing and the `/stop` `/new` `/restart` `/who` commands so
+    /// they all agree on which session "this conversation" is.
+    async fn lookup_live_session(
+        &self,
+        map: &mut HashMap<ConvKey, Id>,
+        key: &ConvKey,
+        channel: &str,
+    ) -> Option<Id> {
+        if let Some(sid) = map.get(key) {
+            match self.manager.get(sid).await {
+                Ok(s) if session_alive(&s) => return Some(sid.clone()),
+                _ => {}
+            }
+        }
+        let (ws_id, chat, thread) = key;
+        let list = self.manager.list_by_workspace(ws_id).await.ok()?;
+        let s = list
+            .into_iter()
+            .filter(|s| {
+                s.kind == SessionKind::Agent
+                    && session_alive(s)
+                    && session_matches_conversation(s, channel, chat, thread.as_deref())
+            })
+            .max_by_key(|s| s.created_at)?;
+        info!(
+            channel = %channel,
+            workspace = %ws_id,
+            chat = %chat,
+            thread = ?thread,
+            session = %s.id,
+            "bridge: recovered the thread's session from its meta (map miss)"
+        );
+        map.insert(key.clone(), s.id.clone());
+        Some(s.id)
+    }
+
+    /// Unbind conversation `key` from its session so the next message starts a
+    /// fresh agent (`/new`, `/restart`). Dropping the map entry alone is not
+    /// enough — the meta fallback in [`Self::lookup_live_session`] would find
+    /// the same live session again — so the session is stamped
+    /// `meta.channel_detached = true`, which excludes it from conversation
+    /// matching. The old session is left running (still inspectable in the app;
+    /// the idle reaper archives it later); its feed tailer is stopped. Returns
+    /// the detached session id, if one was bound.
+    async fn detach_conversation(&self, key: &ConvKey, channel: &str) -> Option<Id> {
+        let sid = {
+            let mut guard = self.sessions.lock().await;
+            let sid = self.lookup_live_session(&mut guard, key, channel).await;
+            guard.remove(key);
+            sid
+        }?;
+        if let Err(e) = self
+            .manager
+            .update_meta(&sid, serde_json::json!({ "channel_detached": true }))
+            .await
+        {
+            warn!(session = %sid, "bridge: could not mark session detached: {e}");
+        }
+        self.mirror.cancel(&sid).await;
+        info!(session = %sid, "bridge: detached conversation from session");
+        Some(sid)
+    }
+
     /// Handle one inbound message.
     pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, msg: Inbound) {
         info!(
@@ -489,52 +571,9 @@ impl Bridge {
         let session_id = {
             let mut guard = self.sessions.lock().await;
 
-            // Check if the existing session is still alive. Skip archived ones
-            // (e.g. auto-reaped after idle) so a fresh session is spawned.
-            let mut existing = if let Some(sid) = guard.get(&key) {
-                match self.manager.get(sid).await {
-                    Ok(s) if session_alive(&s) => Some(sid.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            // Map miss (daemon restarted, or a listener generation that never saw
-            // this thread): the sessions themselves carry the conversation in
-            // their meta, so find the newest live one for it. Without this every
-            // restart turned the next follow-up into a brand-new agent with no
-            // memory of the thread.
-            if existing.is_none() {
-                let channel = adapter.channel().as_str();
-                if let Ok(list) = self.manager.list_by_workspace(&ws_id).await {
-                    if let Some(s) = list
-                        .into_iter()
-                        .filter(|s| {
-                            s.kind == SessionKind::Agent
-                                && session_alive(s)
-                                && session_matches_conversation(
-                                    s,
-                                    channel,
-                                    &msg.chat,
-                                    msg.thread.as_deref(),
-                                )
-                        })
-                        .max_by_key(|s| s.created_at)
-                    {
-                        info!(
-                            channel = %channel,
-                            workspace = %msg.workspace_id,
-                            chat = %msg.chat,
-                            thread = ?msg.thread,
-                            session = %s.id,
-                            "bridge: recovered the thread's session from its meta (map miss)"
-                        );
-                        guard.insert(key.clone(), s.id.clone());
-                        existing = Some(s.id);
-                    }
-                }
-            }
+            let existing = self
+                .lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                .await;
 
             if let Some(sid) = existing {
                 // A follow-up is activity. `last_active_at` only moves on a
@@ -738,16 +777,20 @@ impl Bridge {
                 let help = "\
                     Otto quick commands:\n\
                     /help     — show this message\n\
-                    /sessions — list active agent sessions for this workspace\n\
+                    /sessions — list active agent sessions started from this chat\n\
                     /stop     — stop the session bound to this chat/thread\n\
-                    /new      — drop the current session mapping so the next message starts fresh\n\
+                    /new      — detach the current session so the next message starts fresh\n\
                     /restart  — restart the current session (equivalent to /new)\n\
                     /who      — show which session this conversation is mapped to";
                 let _ = adapter.send(&msg.chat, msg.thread.as_deref(), help).await;
                 true
             }
             "/sessions" => {
+                // Only the agents THIS chat spawned: a channel is shared with
+                // people who can't see the app, so listing every session title
+                // in the workspace would leak what else the user is working on.
                 let ws_id: Id = msg.workspace_id.clone();
+                let channel = adapter.channel().as_str();
                 let sessions = match self.manager.list_by_workspace(&ws_id).await {
                     Ok(list) => list,
                     Err(e) => {
@@ -760,6 +803,7 @@ impl Bridge {
                 };
                 let lines: Vec<String> = sessions
                     .iter()
+                    .filter(|s| session_alive(s) && session_in_chat(s, channel, &msg.chat))
                     .map(|s| {
                         let title = if s.title.is_empty() {
                             s.id.as_str()
@@ -770,7 +814,7 @@ impl Bridge {
                     })
                     .collect();
                 let reply = if lines.is_empty() {
-                    "No active sessions.".to_string()
+                    "No active sessions for this chat.".to_string()
                 } else {
                     lines.join("\n")
                 };
@@ -783,7 +827,16 @@ impl Bridge {
                     msg.chat.clone(),
                     msg.thread.clone(),
                 );
-                let sid = self.sessions.lock().await.remove(&key);
+                // Same map-then-meta lookup as message routing, so /stop
+                // still finds the thread's agent after a daemon restart.
+                let sid = {
+                    let mut guard = self.sessions.lock().await;
+                    let sid = self
+                        .lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                        .await;
+                    guard.remove(&key);
+                    sid
+                };
                 match sid {
                     None => {
                         let _ = adapter
@@ -807,60 +860,37 @@ impl Bridge {
                 }
                 true
             }
-            "/new" => {
+            "/new" | "/restart" => {
                 let key: ConvKey = (
                     msg.workspace_id.clone(),
                     msg.chat.clone(),
                     msg.thread.clone(),
                 );
-                self.sessions.lock().await.remove(&key);
-                let _ = adapter
-                    .send(
-                        &msg.chat,
-                        msg.thread.as_deref(),
-                        "new session will start on your next message",
-                    )
+                self.detach_conversation(&key, adapter.channel().as_str())
                     .await;
-                true
-            }
-            "/restart" => {
-                let key: ConvKey = (
-                    msg.workspace_id.clone(),
-                    msg.chat.clone(),
-                    msg.thread.clone(),
-                );
-                self.sessions.lock().await.remove(&key);
-                let _ = adapter
-                    .send(
-                        &msg.chat,
-                        msg.thread.as_deref(),
-                        "session restarted — next message starts a new session",
-                    )
-                    .await;
+                let reply = if cmd == "/new" {
+                    "new session will start on your next message"
+                } else {
+                    "session restarted — next message starts a new session"
+                };
+                let _ = adapter.send(&msg.chat, msg.thread.as_deref(), reply).await;
                 true
             }
             "/who" => {
-                let ws_id: Id = msg.workspace_id.clone();
-                let sessions = match self.manager.list_by_workspace(&ws_id).await {
-                    Ok(list) => list,
-                    Err(e) => {
-                        warn!("bridge /who: {e}");
-                        let _ = adapter
-                            .send(&msg.chat, msg.thread.as_deref(), "Error listing sessions.")
-                            .await;
-                        return true;
-                    }
-                };
                 let key: ConvKey = (
                     msg.workspace_id.clone(),
                     msg.chat.clone(),
                     msg.thread.clone(),
                 );
-                let bound_id = self.sessions.lock().await.get(&key).cloned();
+                let bound_id = {
+                    let mut guard = self.sessions.lock().await;
+                    self.lookup_live_session(&mut guard, &key, adapter.channel().as_str())
+                        .await
+                };
                 let reply = match bound_id {
                     None => "No session is mapped to this conversation.".to_string(),
-                    Some(sid) => match sessions.iter().find(|s| s.id == sid) {
-                        Some(s) => {
+                    Some(sid) => match self.manager.get(&sid).await {
+                        Ok(s) => {
                             let title = if s.title.is_empty() {
                                 s.id.as_str()
                             } else {
@@ -868,8 +898,8 @@ impl Bridge {
                             };
                             format!("This conversation is mapped to: {} — {:?}", title, s.status)
                         }
-                        None => {
-                            format!("Mapped to session {} (not found in listing)", sid.as_str())
+                        Err(_) => {
+                            format!("Mapped to session {} (not found)", sid.as_str())
                         }
                     },
                 };
@@ -950,6 +980,29 @@ mod tests {
         // A user-started session is never a channel conversation.
         let plain = session(serde_json::json!({}), SessionStatus::Idle, false);
         assert!(!session_matches_conversation(&plain, "slack", "D0BK", None));
+    }
+
+    #[test]
+    fn detached_session_no_longer_matches_its_conversation() {
+        // `/new` / `/restart` stamp `channel_detached` so the map-miss meta
+        // fallback can't route the next message back into the old agent.
+        let detached = session(
+            serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK",
+                               "thread": "1789.51", "channel_detached": true}),
+            SessionStatus::Idle,
+            false,
+        );
+        assert!(!session_matches_conversation(
+            &detached,
+            "slack",
+            "D0BK",
+            Some("1789.51")
+        ));
+        // …but it is still listed as one of this chat's sessions.
+        assert!(session_in_chat(&detached, "slack", "D0BK"));
+        assert!(!session_in_chat(&detached, "slack", "C0AA"));
+        let plain = session(serde_json::json!({}), SessionStatus::Idle, false);
+        assert!(!session_in_chat(&plain, "slack", "D0BK"));
     }
 
     #[test]

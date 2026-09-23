@@ -487,10 +487,10 @@ Send these as a message in the chat/thread:
 | Command | Effect |
 |---|---|
 | `/help` | Show the command list. |
-| `/sessions` | List this workspace's agent sessions + status. |
-| `/who` | Show which session this conversation is mapped to. |
+| `/sessions` | List the live agent sessions **this chat** started + status (never other sessions' titles). |
+| `/who` | Show which session this conversation is mapped to (same map-then-meta lookup as routing, so it survives a daemon restart). |
 | `/stop` | Kill the session bound to this chat/thread and drop the mapping. |
-| `/new` | Drop the mapping so the **next** message starts a fresh session. |
+| `/new` | Detach the bound session (`meta.channel_detached = true`, it keeps running in the app and is reaped later) so the **next** message starts a fresh session. |
 | `/restart` | Same as `/new` (next message starts fresh). |
 
 ---
