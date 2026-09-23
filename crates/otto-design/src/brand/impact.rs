@@ -306,31 +306,34 @@ mod tests {
         }))
     }
 
+    /// Built from JSON so read-only joined fields (`#[serde(default)]`) that
+    /// the store adds over time never break the fixture.
     fn art(id: &str, studio: &str, minute: u32) -> DesignArtifact {
         let t = Utc.with_ymd_and_hms(2026, 9, 23, 12, minute, 0).unwrap();
-        DesignArtifact {
-            id: id.into(),
-            project_id: None,
-            workspace_id: "w".into(),
-            studio: studio.into(),
-            format: "otto-site".into(),
-            mime: "application/vnd.otto.site+json".into(),
-            title: id.into(),
-            status: "draft".into(),
-            head_version_id: None,
-            head_seq: None,
-            approved_version_id: None,
-            tags: vec![],
-            thumb_blob: None,
-            meta: Value::Null,
-            source_kind: None,
-            source_id: None,
-            created_by: "u".into(),
-            created_by_kind: "user".into(),
-            created_session_id: None,
-            created_at: t,
-            updated_at: t,
-        }
+        serde_json::from_value(json!({
+            "id": id,
+            "project_id": null,
+            "workspace_id": "w",
+            "studio": studio,
+            "format": "otto-site",
+            "mime": "application/vnd.otto.site+json",
+            "title": id,
+            "status": "draft",
+            "head_version_id": null,
+            "head_seq": null,
+            "approved_version_id": null,
+            "tags": [],
+            "thumb_blob": null,
+            "meta": null,
+            "source_kind": null,
+            "source_id": null,
+            "created_by": "u",
+            "created_by_kind": "user",
+            "created_session_id": null,
+            "created_at": t,
+            "updated_at": t
+        }))
+        .unwrap()
     }
 
     #[test]
