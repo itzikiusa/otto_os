@@ -521,7 +521,7 @@
       if (ci < 0) return null;
       const v = liveRows[rowIdx][ci];
       if (v === null || v === undefined) return null; // no row referenced
-      conds.push(`${qid(engine, refCol)} = ${valueLiteral(engine, v)}`);
+      conds.push(`${qid(engine, refCol)} = ${valueLiteral(engine, v, result.columns[ci]?.type_hint)}`);
     }
     if (conds.length === 0) return null;
     const ref = fk.ref_schema

@@ -1888,9 +1888,9 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
         return int_to_json(v);
     }
-    // Unsigned BIGINT.
+    // Unsigned BIGINT (exact digits beyond 2^53 — see `types::u64_to_json`).
     if let Ok(v) = row.try_get::<Option<u64>, _>(idx) {
-        return v.map(Value::from).unwrap_or(Value::Null);
+        return v.map(types::u64_to_json).unwrap_or(Value::Null);
     }
     // Floating point / decimal-as-f64.
     if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
@@ -1981,9 +1981,10 @@ fn raw_cell_fallback(
     }
 }
 
-/// Pure shaping of an optional integer into a JSON value (Null if absent).
+/// Pure shaping of an optional integer into a JSON value (Null if absent);
+/// beyond ±(2^53 − 1) its exact digits as a string (see `types::i64_to_json`).
 fn int_to_json(v: Option<i64>) -> Value {
-    v.map(Value::from).unwrap_or(Value::Null)
+    v.map(types::i64_to_json).unwrap_or(Value::Null)
 }
 
 /// Pure shaping of an optional string into a JSON value (Null if absent).

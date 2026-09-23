@@ -1632,7 +1632,8 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
         return v.map(Value::from).unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-        return v.map(Value::from).unwrap_or(Value::Null);
+        // INT8: exact digits beyond 2^53 (see `types::i64_to_json`).
+        return v.map(types::i64_to_json).unwrap_or(Value::Null);
     }
     if let Ok(v) = row.try_get::<Option<i16>, _>(idx) {
         return v.map(|n| Value::from(n as i64)).unwrap_or(Value::Null);

@@ -851,7 +851,8 @@ export class EditFlow {
     if (this.editPkCols.length === 1) {
       const pk = this.editPkCols[0];
       const ci = this.result!.columns.findIndex((c) => c.name === pk);
-      const list = idxs.map((i) => valueLiteral(this.engine, this.liveRows[i][ci])).join(', ');
+      const typeHint = this.result!.columns[ci]?.type_hint;
+      const list = idxs.map((i) => valueLiteral(this.engine, this.liveRows[i][ci], typeHint)).join(', ');
       where = `${ctx.qid(pk)} IN (${list})`;
     } else {
       where = idxs.map((i) => `(${whereByPk(ctx, i)})`).join(' OR ');

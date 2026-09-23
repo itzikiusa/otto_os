@@ -1601,6 +1601,33 @@ pub struct MongoshInfo {
 /// Re-export for drivers.
 pub type DbResult<T> = Result<T>;
 
+/// The largest integer an IEEE-754 double — what the UI's `JSON.parse` turns
+/// every JSON number into — represents exactly: 2^53 − 1.
+pub const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// A 64-bit integer cell as JSON without losing precision on the way to the
+/// UI: a number while a double holds it exactly, else its exact decimal
+/// STRING. A rounded snowflake id displayed the wrong value, and an edit or
+/// delete keyed on it targeted a neighbouring row (or silently none). The UI
+/// emits an integer column's digit string back unquoted, so the round trip is
+/// exact. (ClickHouse already quotes 64-bit integers; Mongo uses `$numberLong`.)
+pub fn i64_to_json(n: i64) -> Value {
+    if (-MAX_SAFE_JSON_INTEGER..=MAX_SAFE_JSON_INTEGER).contains(&n) {
+        Value::from(n)
+    } else {
+        Value::String(n.to_string())
+    }
+}
+
+/// [`i64_to_json`] for unsigned 64-bit integers (MySQL `BIGINT UNSIGNED`).
+pub fn u64_to_json(n: u64) -> Value {
+    if n <= MAX_SAFE_JSON_INTEGER as u64 {
+        Value::from(n)
+    } else {
+        Value::String(n.to_string())
+    }
+}
+
 /// Hard per-cell size cap. A single LONGTEXT/bytea/JSON cell larger than this
 /// would freeze the webview grid and bloat the WS payload; such a cell is
 /// truncated with a marker while the query still succeeds. Shared by every SQL
@@ -1632,6 +1659,26 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_integers_keep_every_digit() {
+        assert_eq!(i64_to_json(42), serde_json::json!(42));
+        assert_eq!(
+            i64_to_json(MAX_SAFE_JSON_INTEGER),
+            serde_json::json!(9_007_199_254_740_991_i64)
+        );
+        assert_eq!(
+            i64_to_json(9_007_199_254_740_993),
+            Value::String("9007199254740993".into())
+        );
+        assert_eq!(
+            i64_to_json(-9_007_199_254_740_993),
+            Value::String("-9007199254740993".into())
+        );
+        assert_eq!(i64_to_json(i64::MIN), Value::String(i64::MIN.to_string()));
+        assert_eq!(u64_to_json(7), serde_json::json!(7));
+        assert_eq!(u64_to_json(u64::MAX), Value::String(u64::MAX.to_string()));
+    }
 
     /// One parse of the overloaded `node`: tagged paths are read as paths,
     /// anything else is a plain name — including names the old path parser
