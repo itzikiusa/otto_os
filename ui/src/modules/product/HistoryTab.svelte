@@ -201,7 +201,7 @@
     padding: 8px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .label {
     font-size: 11px;
@@ -313,9 +313,9 @@
   .sec-source   { background: color-mix(in srgb, #60a5fa 18%, transparent); color: #3b82f6; }
   .sec-analysis { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .sec-questions { background: color-mix(in srgb, #a78bfa 18%, transparent); color: #7c3aed; }
-  .sec-notes    { background: color-mix(in srgb, #34d399 18%, transparent); color: #059669; }
-  .sec-rewrite  { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
-  .sec-tests    { background: color-mix(in srgb, #10b981 18%, transparent); color: #047857; }
+  .sec-notes    { background: color-mix(in srgb, var(--success) 18%, transparent); color: #059669; }
+  .sec-rewrite  { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .sec-tests    { background: color-mix(in srgb, var(--success) 18%, transparent); color: #047857; }
   .sec-publish  { background: color-mix(in srgb, #f97316 18%, transparent); color: #c2410c; }
   .sec-inject   { background: color-mix(in srgb, #e879f9 18%, transparent); color: #a21caf; }
   .sec-watch    { background: color-mix(in srgb, #64748b 18%, transparent); color: #475569; }

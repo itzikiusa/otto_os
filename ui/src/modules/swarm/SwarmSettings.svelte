@@ -374,7 +374,7 @@
   .toggle.on {
     background: #7ee787;
     color: #0a0a0a;
-    border-color: #7ee787;
+    border-color: var(--success);
     font-weight: 600;
   }
   .form {

@@ -213,7 +213,7 @@
     grid-column: 1 / -1;
   }
   .card.warn-card {
-    border-color: color-mix(in srgb, #f5a623 50%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 50%, transparent);
   }
   .card .k {
     font-size: 11px;
@@ -226,7 +226,7 @@
     font-weight: 600;
   }
   .card .v.warn-v {
-    color: #f5a623;
+    color: var(--warning);
   }
   .card .v small {
     font-size: 13px;

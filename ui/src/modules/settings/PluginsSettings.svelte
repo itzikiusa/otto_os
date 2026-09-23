@@ -169,7 +169,7 @@
     padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg-elev, transparent);
+    background: var(--surface-2);
     color: var(--text);
     font-size: 13px;
   }
@@ -177,7 +177,7 @@
     padding: 7px 12px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg-elev, transparent);
+    background: var(--surface-2);
     color: var(--text);
     font-size: 13px;
     cursor: pointer;
@@ -188,15 +188,15 @@
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .btn.danger {
-    color: #e5484d;
+    color: var(--danger);
   }
   .btn:disabled {
     opacity: 0.5;
     cursor: default;
   }
   .error {
-    color: #e5484d;
-    border: 1px solid color-mix(in srgb, #e5484d 40%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 6px;
     padding: 8px 12px;
     margin-bottom: 12px;

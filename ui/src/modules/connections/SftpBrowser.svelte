@@ -497,7 +497,7 @@
     font-size: 12.5px;
   }
   .err {
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .viewer {
     max-height: 60vh;

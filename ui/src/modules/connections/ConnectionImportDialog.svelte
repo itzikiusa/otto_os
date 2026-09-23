@@ -508,14 +508,14 @@
     gap: 4px;
     padding: 8px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, #b8860b 10%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .prev-warn-line {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 11.5px;
-    color: #b8860b;
+    color: var(--warning);
     line-height: 1.4;
   }
   .prev-toolbar {
@@ -631,8 +631,8 @@
     white-space: nowrap;
   }
   .pill.warn {
-    color: #b8860b;
-    background: color-mix(in srgb, #b8860b 14%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 14%, transparent);
   }
   .pill.skip {
     color: var(--text-dim);

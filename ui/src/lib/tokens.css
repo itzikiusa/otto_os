@@ -1,25 +1,83 @@
 /* Otto design tokens. Themes: native | pro-dark | warm. Scheme: light | dark
    (data-scheme on <html>; "auto" resolves via prefers-color-scheme in app code).
-   The terminal palette is set separately in Terminal.svelte per theme. */
+   The terminal palette is set separately in Terminal.svelte per theme.
+
+   Only use names defined in this file (or app.css) — `npm run check` runs
+   scripts/ui-guards.mjs, which fails on a var(--x) that is defined nowhere.
+   Canonical set: --bg --bg-sidebar --surface --surface-2 --surface-3 --border
+   --border-strong --hover --text --text-dim --accent(-soft/-text/-solid/
+   -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
+   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow. */
 
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+
+  /* Type scale. 11px is the floor for anything a user has to read; smaller
+     sizes are for decorative counters only. The shared primitives in app.css
+     use these; modules migrate onto them over time. */
+  --fs-xs: 11px;
+  --fs-s: 12px;
+  --fs-m: 13px;
+  --fs-l: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
 
   --radius-s: 5px;
   --radius-m: 8px;
   --radius-l: 12px;
 
   --accent: #0a84ff;
+  /* Text/icon colour on an --accent-solid fill (see the warm/dark override). */
   --accent-contrast: #ffffff;
 
+  /* Status INDICATOR colours (dots, bars, rails). Dark-scheme values here;
+     the light scheme swaps in darker ones below so they also pass as text. */
   --status-working: #28c840;
   --status-idle: #98989f;
   --status-exited: #ff5f57;
   /* Amber "warning/attention" status (ahead-behind, dirty, pending, warn
-     severity). Single value like the others — readable on both schemes. */
+     severity). */
   --status-warn: #e0a000;
   --status-warn-soft: rgba(224, 160, 0, 0.16);
+
+  /* Semantic tones (dark-scheme defaults; light values below). The bare name
+     is TEXT-SAFE: >= 4.5:1 on --bg, --surface, --surface-2 and on its own
+     -soft tint in every theme. Use -soft for tinted backgrounds/chips and
+     --danger-solid for a filled destructive button carrying white text. */
+  --danger: #ff8a80;
+  --warning: #e3b341;
+  --success: #56d06c;
+  --info: #6cb2ff;
+  --danger-solid: #c42b22;
+
+  /* Derived tokens. Declared once: they resolve on <html> against whichever
+     theme block (or custom accent) is active, so every theme gets them. */
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
+  --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
+  --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
+  --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Accent as TEXT (links, accent labels): pulled toward --text so it clears
+     4.5:1 in every theme, a user-picked custom accent included. */
+  --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
+  /* Accent as a FILL under --accent-contrast text (primary buttons). */
+  --accent-solid: color-mix(in srgb, var(--accent) 84%, black);
+  --hover: color-mix(in srgb, var(--text) 7%, transparent);
+  --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+/* Light-scheme tones (Pro Dark is always dark, whatever the scheme says). */
+html[data-scheme='light']:not([data-theme='pro-dark']) {
+  --danger: #b3261e;
+  --warning: #8a5100;
+  --success: #17702f;
+  --info: #0858b8;
+  --status-working: #17702f;
+  --status-idle: #69696e;
+  --status-exited: #b3261e;
+  --status-warn: #8a5100;
+  --status-warn-soft: rgba(138, 81, 0, 0.12);
 }
 
 /* ---------- Native theme (default) ---------- */
@@ -29,9 +87,10 @@ html[data-theme='native'][data-scheme='light'] {
   --bg-sidebar: #ececf1;
   --surface: #ffffff;
   --surface-2: #f0f0f4;
+  --surface-3: #e6e6ec;
   --border: rgba(0, 0, 0, 0.1);
   --text: #1d1d1f;
-  --text-dim: #6e6e73;
+  --text-dim: #69696e;
   --term-bg: #fbfbfd;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
 }
@@ -41,9 +100,10 @@ html[data-theme='native'][data-scheme='dark'] {
   --bg-sidebar: #232328;
   --surface: #2a2a30;
   --surface-2: #323238;
+  --surface-3: #3a3a41;
   --border: rgba(255, 255, 255, 0.1);
   --text: #f2f2f5;
-  --text-dim: #98989f;
+  --text-dim: #9f9fa6;
   --term-bg: #131318;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
@@ -56,6 +116,7 @@ html[data-theme='pro-dark'][data-scheme='dark'] {
   --bg-sidebar: #1c1c23;
   --surface: #1f1f27;
   --surface-2: #26262f;
+  --surface-3: #2e2e38;
   --border: rgba(255, 255, 255, 0.08);
   --text: #e8e8ee;
   --text-dim: #9a9aa8;
@@ -71,6 +132,7 @@ html[data-theme='warm'][data-scheme='light'] {
   --bg-sidebar: #f3f1ed;
   --surface: #ffffff;
   --surface-2: #f0ede8;
+  --surface-3: #e7e3dc;
   --border: rgba(60, 50, 30, 0.12);
   --text: #3d3a35;
   --text-dim: #6b6760;
@@ -84,12 +146,17 @@ html[data-theme='warm'][data-scheme='dark'] {
   --bg-sidebar: #262420;
   --surface: #2c2a25;
   --surface-2: #33312b;
+  --surface-3: #3b3832;
   --border: rgba(255, 245, 225, 0.1);
   --text: #e8e4da;
   --text-dim: #a09a8e;
   --term-bg: #1a1916;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
   --accent: #2bb673;
+  /* White on this bright green is 2.61:1 — fill with the accent itself and
+     put dark text on it instead (6.8:1). */
+  --accent-solid: var(--accent);
+  --accent-contrast: #0f1a14;
 }
 
 /* Sidebar translucency (vibrancy shows through in the Tauri window). */

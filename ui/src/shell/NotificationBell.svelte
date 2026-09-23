@@ -345,13 +345,13 @@
     background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
   .notice.sev-warn.unread {
-    background: color-mix(in srgb, #febc2e 9%, transparent);
+    background: color-mix(in srgb, var(--warning) 9%, transparent);
   }
   .notice.sev-error.unread {
     background: color-mix(in srgb, var(--status-exited) 9%, transparent);
   }
   .notice.sev-warn {
-    border-inline-start-color: #febc2e;
+    border-inline-start-color: var(--warning);
   }
   .notice.sev-error {
     border-inline-start-color: var(--status-exited);
@@ -366,7 +366,7 @@
     background: var(--accent);
   }
   .sev-warn .sev-dot {
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .sev-error .sev-dot {
     background: var(--status-exited);

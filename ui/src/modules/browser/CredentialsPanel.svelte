@@ -453,8 +453,8 @@
   .warning {
     margin: 0;
     font-size: 0.76rem;
-    color: var(--warning, #b45309);
-    background: var(--warning-bg, rgba(180, 83, 9, 0.1));
+    color: var(--warning);
+    background: var(--warning-soft);
     border-radius: var(--radius-s);
     padding: 0.4rem 0.55rem;
   }

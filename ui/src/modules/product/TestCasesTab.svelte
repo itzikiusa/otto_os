@@ -1016,7 +1016,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* ── Generate panel ──────────────────────────────────────────── */
@@ -1227,8 +1227,8 @@
     color: #2563eb;
   }
   .cat-error {
-    background: color-mix(in srgb, #ef4444 16%, transparent);
-    color: #b91c1c;
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    color: var(--danger);
   }
   .cat-edge {
     background: color-mix(in srgb, #a78bfa 16%, transparent);
@@ -1253,7 +1253,7 @@
     padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .bulk-check-all {
     display: flex;
@@ -1279,11 +1279,11 @@
   }
   .case-card.case-approved {
     border-color: color-mix(in srgb, var(--status-working) 30%, var(--border));
-    background: color-mix(in srgb, var(--status-working) 4%, var(--surface-raised, var(--surface)));
+    background: color-mix(in srgb, var(--status-working) 4%, var(--surface));
   }
   .case-card.case-selected {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent) 5%, var(--surface-raised, var(--surface)));
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface));
   }
   .case-card.drag-over {
     border-color: var(--accent);
@@ -1346,12 +1346,12 @@
     border-radius: 999px;
   }
   .pri-high {
-    background: color-mix(in srgb, #ef4444 16%, transparent);
-    color: #b91c1c;
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    color: var(--danger);
   }
   .pri-medium {
-    background: color-mix(in srgb, #f59e0b 16%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
+    color: var(--warning);
   }
   .pri-low {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1373,12 +1373,12 @@
     color: var(--status-working);
   }
   .pill-changes {
-    background: color-mix(in srgb, #f59e0b 16%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
+    color: var(--warning);
   }
   .pill-rejected {
-    background: color-mix(in srgb, #ef4444 16%, transparent);
-    color: #b91c1c;
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    color: var(--danger);
   }
   .pill-draft {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -1425,12 +1425,12 @@
     background: color-mix(in srgb, var(--status-working) 16%, transparent);
   }
   .case-btn.changes {
-    border-color: color-mix(in srgb, #f59e0b 50%, var(--border));
-    color: #b45309;
-    background: color-mix(in srgb, #f59e0b 8%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
   }
   .case-btn.changes:hover:not(:disabled) {
-    background: color-mix(in srgb, #f59e0b 16%, transparent);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
   }
   .case-btn.edit {
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
@@ -1447,14 +1447,14 @@
     gap: 6px;
     align-items: flex-start;
     font-size: 12px;
-    background: color-mix(in srgb, #f59e0b 8%, transparent);
-    border: 1px solid color-mix(in srgb, #f59e0b 25%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
     border-radius: var(--radius-s);
     padding: 6px 10px;
   }
   .rn-label {
     font-weight: 700;
-    color: #b45309;
+    color: var(--warning);
     flex-shrink: 0;
   }
   .rn-body {

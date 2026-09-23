@@ -341,7 +341,7 @@
     display: inline-flex;
   }
   .mode-btn:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .mode-btn.refine-on {
     border-color: var(--accent, #7a9cff);

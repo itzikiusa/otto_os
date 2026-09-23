@@ -309,7 +309,7 @@
   .select,
   .input {
     width: 100%;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);

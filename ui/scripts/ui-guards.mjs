@@ -1,12 +1,23 @@
 #!/usr/bin/env node
 // Static UI guards, run first by `npm run check` (so CI enforces them too).
-// Pure Node, no dependencies. Each rule was born from a real bug:
+// Pure Node, no dependencies. Two rules, both born from real bugs:
 //
 // 1. No native dialogs. window.confirm()/prompt()/alert() silently return
 //    false/null/undefined inside the Tauri WKWebView, so a "Delete?" guarded
 //    by confirm() is a no-op in the desktop app. Use `confirmer.ask()` /
 //    `confirmer.promptText()` / `confirmer.choose()` (lib/confirm.svelte.ts)
 //    or a toast instead.
+//
+// 2. No undefined CSS custom properties. Every `var(--x)` must name a
+//    property that is DEFINED somewhere under src/ — a global token in
+//    lib/tokens.css / app.css, a component-local `--x: …` declaration, a
+//    `style:--x` / `--x=` prop, or a JS `setProperty('--x', …)`. This applies
+//    even when the var() carries a fallback: a fallback on a token that never
+//    exists is what always renders, and those fallbacks were hard-coded for
+//    one scheme (dark hex in light mode and vice versa). If a component wants
+//    an optional knob, declare its default on the component's root element
+//    (`--knob: 8px;`) — that counts as a definition. Properties owned by
+//    third-party libraries are listed in EXTERNAL_PREFIXES.
 //
 // Escape hatch for a deliberate exception: put `ui-guards: allow` in a
 // comment on the same line.
@@ -17,6 +28,9 @@ import { fileURLToPath } from 'node:url';
 
 const UI = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(UI, 'src');
+
+/** Custom properties set by libraries we style against, not by our code. */
+const EXTERNAL_PREFIXES = ['--xy-'];
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -70,10 +84,37 @@ for (const f of files) {
   }
 }
 
+// ---------- rule 2: undefined CSS custom properties ----------
+const DEFS = [
+  /(--[\w-]+)\s*:/g, // CSS declaration / inline style="--x: …"
+  /['"`](--[\w-]+)['"`]\s*[:,)]/g, // setProperty('--x', …) / { '--x': … }
+  /style:(--[\w-]+)/g, // Svelte style directive
+  /\s(--[\w-]+)=/g, // Svelte component custom-property prop
+];
+const defsOf = (text) => new Set([...DEFS].flatMap((re) => [...text.matchAll(re)].map((m) => m[1])));
+// .html files under src/ are standalone documents (export/design templates):
+// they neither see the app's tokens nor define any for it.
+const isDoc = (f) => f.path.endsWith('.html');
+const appDefined = new Set(files.filter((f) => !isDoc(f)).flatMap((f) => [...defsOf(f.text)]));
+
+const USE = /var\(\s*(--[\w-]+)/g;
+for (const f of files) {
+  const code = stripComments(f.text);
+  const defined = isDoc(f) ? defsOf(f.text) : appDefined;
+  for (const m of code.matchAll(USE)) {
+    const name = m[1];
+    if (defined.has(name) || EXTERNAL_PREFIXES.some((p) => name.startsWith(p))) continue;
+    if (allowed(f.text, m.index)) continue;
+    problems.push(
+      `${f.rel}:${lineOf(f.text, m.index)}  var(${name}) — defined nowhere under src/; use a token from lib/tokens.css (or declare it locally)`,
+    );
+  }
+}
+
 if (problems.length) {
   console.error(`ui-guards: ${problems.length} problem(s)\n`);
   for (const p of problems) console.error('  ' + p);
   console.error('\nSee the header of ui/scripts/ui-guards.mjs for the rules.');
   process.exit(1);
 }
-console.log(`ui-guards: ok (${files.length} files; no native dialogs)`);
+console.log(`ui-guards: ok (${files.length} files; no native dialogs, no undefined CSS vars)`);

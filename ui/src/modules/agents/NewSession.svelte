@@ -808,8 +808,8 @@
     line-height: 1;
   }
   .dir-remove:hover {
-    color: var(--danger, #e5534b);
-    background: color-mix(in srgb, var(--danger, #e5534b) 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .dir-add {
     display: flex;

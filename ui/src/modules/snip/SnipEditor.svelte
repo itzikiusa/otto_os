@@ -661,7 +661,7 @@
     color: var(--accent);
   }
   .snip-copied.bad {
-    color: #e5484d;
+    color: var(--danger);
   }
   .snip-body {
     position: relative;

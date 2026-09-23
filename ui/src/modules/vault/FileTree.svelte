@@ -382,7 +382,7 @@
     white-space: nowrap;
   }
   .row:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .row.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);

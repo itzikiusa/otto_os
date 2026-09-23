@@ -547,8 +547,8 @@
     cursor: not-allowed;
   }
   .apply-btn.danger {
-    background: var(--danger, #ef4444);
-    border-color: var(--danger, #ef4444);
+    background: var(--danger-solid);
+    border-color: var(--danger-solid);
   }
 
   /* ── Applied (sticky confirmation) row ──────────────────────────────────── */

@@ -95,7 +95,7 @@
     user-select: none;
   }
   .btn.danger {
-    background: var(--danger, #e5534b);
+    background: var(--danger-solid);
     color: #fff;
     border-color: transparent;
   }

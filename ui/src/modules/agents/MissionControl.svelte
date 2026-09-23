@@ -771,7 +771,7 @@
     padding: 1px 5px;
   }
   .meta-tag.cost {
-    color: #f59e0b;
+    color: var(--warning);
   }
   .meta-tag.age {
     color: var(--text-dim);

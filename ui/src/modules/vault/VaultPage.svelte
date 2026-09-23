@@ -549,7 +549,7 @@
     cursor: pointer;
   }
   .tool:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .tool.active {
     border-color: var(--accent, #7a9cff);
@@ -583,7 +583,7 @@
     cursor: pointer;
   }
   .left-modes button:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .left-modes button.active {
     color: var(--accent, #9ab4ff);
@@ -636,7 +636,7 @@
     max-width: 220px;
   }
   .vtab:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .vtab.active {
     color: var(--text);
@@ -664,7 +664,7 @@
     padding: 0;
   }
   .vtab-close:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.2));
+    background: var(--hover);
     color: var(--text);
   }
   .center-empty {

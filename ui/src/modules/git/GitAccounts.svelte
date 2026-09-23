@@ -438,7 +438,7 @@
     word-break: break-word;
   }
   .test-result.ok {
-    color: var(--status-running, #3fb950);
+    color: var(--success);
   }
   .test-result.bad {
     color: var(--status-exited, #f85149);

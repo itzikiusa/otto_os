@@ -324,7 +324,7 @@
   .error-msg {
     padding: 12px;
     font-size: 12px;
-    color: var(--danger, #e05252);
+    color: var(--danger);
   }
 
   .empty-note {

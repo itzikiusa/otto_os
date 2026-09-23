@@ -1005,9 +1005,9 @@
     gap: 10px;
     padding: 7px 14px;
     font-size: 12.5px;
-    background: color-mix(in srgb, #e0a000 18%, var(--surface));
+    background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--text);
-    border-bottom: 1px solid color-mix(in srgb, #e0a000 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
     z-index: 5;
   }
   .pb-dismiss {
@@ -1043,7 +1043,7 @@
     flex-shrink: 0;
   }
   .imp-countdown.imp-urgent {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 600;
   }
   .content {

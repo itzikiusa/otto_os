@@ -393,7 +393,7 @@
     background: transparent;
     font: inherit;
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text-dim);
     cursor: pointer;
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
@@ -515,7 +515,7 @@
     border-color: currentColor;
   }
   .chip.kind.monthly {
-    color: var(--status-info, #4a9eff);
+    color: var(--info);
     border-color: currentColor;
   }
 
@@ -564,8 +564,8 @@
     gap: 14px;
     padding: 16px 18px;
     margin: 10px 0;
-    border-inline-start: 3px solid var(--warn, #d08a18);
-    background: color-mix(in srgb, var(--warn, #d08a18) 10%, transparent);
+    border-inline-start: 3px solid var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
     border-radius: var(--radius-m, 8px);
     color: var(--text);
     font-size: 13px;

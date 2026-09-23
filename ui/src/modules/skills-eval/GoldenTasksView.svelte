@@ -477,11 +477,11 @@
   }
   /* Run / pass affordance: high-contrast light-green. */
   .btn.gt-run {
-    color: #7ee787;
-    border-color: color-mix(in srgb, #7ee787 45%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 45%, transparent);
   }
   .btn.gt-run:hover {
-    background: color-mix(in srgb, #7ee787 16%, transparent);
+    background: color-mix(in srgb, var(--success) 16%, transparent);
   }
   .gt-badge {
     font-size: 9.5px;
@@ -493,9 +493,9 @@
     flex-shrink: 0;
   }
   .gt-badge.regression {
-    color: #f5a623;
-    background: color-mix(in srgb, #f5a623 20%, transparent);
-    border: 1px solid color-mix(in srgb, #f5a623 42%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
   }
   .gt-badge.muted {
     color: var(--text-dim);

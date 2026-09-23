@@ -910,8 +910,8 @@
     color: var(--text-dim);
   }
   .delete-btn:hover {
-    background: color-mix(in srgb, #ef4444 15%, transparent) !important;
-    color: #ef4444 !important;
+    background: color-mix(in srgb, var(--danger) 15%, transparent) !important;
+    color: var(--danger) !important;
   }
   /* ── Epic tree rows ─────────────────────────────────────────── */
   .row-menu-btn {
@@ -1102,8 +1102,8 @@
     color: var(--text-dim);
   }
   .stage-review {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .stage-approved {
     background: color-mix(in srgb, var(--status-working) 18%, transparent);

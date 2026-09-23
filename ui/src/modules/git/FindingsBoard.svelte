@@ -345,7 +345,7 @@
   .fb-pill.active {
     background: #7ee787;
     color: #000;
-    border-color: #7ee787;
+    border-color: var(--success);
     font-weight: 600;
   }
 
@@ -393,7 +393,7 @@
   .fb-reviewer { font-size: 11px; }
   .fb-artifact {
     font-size: 10px;
-    background: color-mix(in srgb, #7ee787 16%, transparent);
+    background: color-mix(in srgb, var(--success) 16%, transparent);
     color: var(--text);
   }
   .fb-jira { text-decoration: none; }

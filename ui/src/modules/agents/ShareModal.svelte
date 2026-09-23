@@ -414,7 +414,7 @@
     align-items: center;
     gap: 5px;
     font-size: 11.5px;
-    color: #f59e0b;
+    color: var(--warning);
     padding: 4px 0;
   }
   .sm-sender-warn a {
@@ -519,7 +519,7 @@
     margin: 0;
   }
   .sm-role-note.editor {
-    color: color-mix(in srgb, #f59e0b 80%, var(--text));
+    color: color-mix(in srgb, var(--warning) 80%, var(--text));
   }
 
   /* ── Shares section header ── */
@@ -552,10 +552,10 @@
     cursor: not-allowed;
   }
   .sm-link-btn.danger {
-    color: #ef4444;
+    color: var(--danger);
   }
   .sm-link-btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 12%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
 
   /* ── Shares list ── */
@@ -619,8 +619,8 @@
     color: var(--text-dim);
   }
   .sm-share-role.editor {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #f59e0b;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .sm-share-meta {
     display: flex;
@@ -636,11 +636,11 @@
   .sm-revoke-btn {
     font-size: 11px;
     padding: 3px 8px;
-    color: #ef4444;
-    border-color: color-mix(in srgb, #ef4444 35%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
   .sm-revoke-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .sm-revoke-btn:disabled {
     opacity: 0.5;

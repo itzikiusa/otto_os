@@ -85,7 +85,7 @@
     color: var(--text);
   }
   .hit:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .hit.reserved {
     opacity: 0.7;

@@ -280,13 +280,13 @@
 
 <style>
   .dv {
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.45;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
-    background: var(--surface-1, var(--surface-2));
+    background: var(--surface);
   }
   .dv-row {
     display: flex;

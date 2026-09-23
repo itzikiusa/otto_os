@@ -3521,7 +3521,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
   }
   .ctx-files > summary {
     display: flex;
@@ -3555,7 +3555,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
     flex-shrink: 0;
   }
   .final-output > summary {
@@ -3574,7 +3574,7 @@
     height: 320px;
     border: none;
     border-top: 1px solid var(--border);
-    background: var(--surface-1, #1a1a1a);
+    background: #1a1a1a; /* FINAL_OUTPUT_CSS in the srcdoc is dark-only */
   }
   .tl-label {
     display: inline-flex;
@@ -3905,7 +3905,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }
   .ri-head {
@@ -3960,7 +3960,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-dim);
@@ -3970,7 +3970,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: var(--warn-bg, rgba(240, 192, 64, 0.12));
+    background: var(--warning-soft);
     border-bottom: 1px solid var(--border);
     font-size: 12.5px;
     color: var(--text);

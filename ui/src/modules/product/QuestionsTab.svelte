@@ -544,7 +544,7 @@
     min-width: 8px;
   }
   .filter-sel {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -622,7 +622,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 12px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -723,8 +723,8 @@
   .cat-scope   { background: color-mix(in srgb, #3b82f6 18%, transparent); color: #60a5fa; }
   .cat-data    { background: color-mix(in srgb, #8b5cf6 18%, transparent); color: #a78bfa; }
   .cat-ux      { background: color-mix(in srgb, #ec4899 18%, transparent); color: #f472b6; }
-  .cat-edge    { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #fbbf24; }
-  .cat-dep     { background: color-mix(in srgb, #10b981 18%, transparent); color: #34d399; }
+  .cat-edge    { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .cat-dep     { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
   .cat-other   { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
   /* ── Status pills ────────────────────────────────────────────────── */
@@ -738,7 +738,7 @@
   }
   .pill-open      { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
   .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-  .pill-answered  { background: color-mix(in srgb, #10b981 18%, transparent); color: #34d399; }
+  .pill-answered  { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
   .pill-discarded { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
   /* ── Per-question action buttons ─────────────────────────────────── */
@@ -769,14 +769,14 @@
     cursor: not-allowed;
   }
   .warn-btn:hover:not(:disabled) {
-    border-color: #f59e0b;
-    color: #b45309;
-    background: color-mix(in srgb, #f59e0b 10%, transparent);
+    border-color: var(--warning);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .danger-btn:hover:not(:disabled) {
-    border-color: #ef4444;
-    color: #b91c1c;
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
 
   /* ── Phone: the row-actions wrap below the text automatically (see `.q-body`
@@ -862,7 +862,7 @@
     z-index: 200;
   }
   .modal-box {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     width: 480px;
@@ -921,7 +921,7 @@
     color: var(--text-dim);
   }
   .req {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 700;
   }
   .form-textarea,

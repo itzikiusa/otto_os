@@ -628,7 +628,7 @@
     z-index: 20;
     padding: 3px 10px;
     font-size: 11px;
-    font-family: var(--font-sans, system-ui, sans-serif);
+    font-family: var(--font-ui);
     font-weight: 500;
     color: #e2e8f0;
     background: #2d5eff;

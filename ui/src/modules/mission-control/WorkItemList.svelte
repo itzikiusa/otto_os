@@ -82,7 +82,7 @@
   .wi-row.active {
     background: #7ee787;
     color: #0a0a0a;
-    border-color: #2ea043;
+    border-color: var(--success);
   }
   .wi-row.active .wi-sub,
   .wi-row.active .wi-time {

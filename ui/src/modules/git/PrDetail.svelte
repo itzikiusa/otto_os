@@ -636,7 +636,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, var(--dim));
+    color: var(--text-dim);
     margin-bottom: 8px;
   }
   .reviewer-row {
