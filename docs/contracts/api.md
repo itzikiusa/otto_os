@@ -3045,7 +3045,7 @@ content save commits an immutable **version** (bytes in the content-addressed
 blob store `<data>/design/blobs/<sha256>`, dedup'd); **links** are extracted
 from each document's `otto://design/<id>[@approved|@latest|@v<n>][#node]`
 references on every save, plus explicit links; **signals** capture design
-decisions (captured only — nothing learns from them in Phase 0). Crate
+decisions (the suggest-only Learning v1 below turns repeated ones into team-rule proposals). Crate
 `otto-design` (router + service + store); tables from the `design_graph`
 migration; the FTS5 index `design_search_fts` is created at runtime (LIKE
 fallback). Feature guide: `docs/features/design-hall.md`.
@@ -3091,7 +3091,7 @@ Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
 | DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
 | GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
 | GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
-| POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_rejected`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`; payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
+| POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist); payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
 | POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
 | POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
 
@@ -3110,13 +3110,92 @@ and stored with `broken:true` (never a crash); render links that would close a
 cycle are reported in `cycles` and not stored; chains deeper than 4 are
 reported in `depth_exceeded`.
 
-**MCP (read-only, agents find + cite earlier work).** Governed catalog
+### Design assist — agent turns, variants, learned rules
+
+One agent-turn pipeline for every studio and format
+(`crates/otto-server/src/design_assist.rs`; building blocks in
+`otto_design::{variants, cite, learn}` and `otto_improve::design`). Same RBAC
+as above (`/design/*`: GET = design View, else design Edit) plus the workspace
+role from the artifact (or the `workspace_id`). Types: `DesignAssist*`,
+`DesignVariant*`, `DesignLearned*`, `DesignRuleCandidate` in
+`ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/assist | ws editor | `DesignAssistReq {prompt, mode? (generate\|refine (default)\|critique\|a11y), selection? (≤ 4 KB JSON), references? (≤ 8 × `<id>` / `<id>@v12` / `otto://design/<id>[@v12]`), provider?, model?}` | **202** `DesignAssistTurn` once the agent session is live (≤ 20 s; `session_id` may still be `null`). The turn runs on the working copy `<data>/design/<id>/work/` (materialized from the head; a diverging, never-committed working copy is renamed `*.pre-assist-<turn>.bak` first) with `CONTEXT.md`, `refs/R<n>.json` (+ `.png` thumbnails) and `render/current.png`; each valid mid-turn save emits `design_artifact_updated {change:"live"}`; the result is validated per format (UTF-8 / JSON object / `scene3d` schema; an `otto-canvas` whiteboard edits its inner `source.mmd` / `source.d2` / `source.excalidraw.json`) and committed as ONE version (`kind:"agent"`, `author_kind:"agent"`, `session_id`, the agent's one-line summary as `message`, `provenance` below). Completion: `design_assist_updated`. 400 empty prompt / bad mode / binary format / > 8 references; 403/404 on a reference; **409 while another turn or variants run holds the artifact**; `a11y` fixes in place, `critique` never edits (findings in the turn) |
+| GET /api/v1/design/artifacts/{id}/assist | ws viewer | — | `DesignAssistTurn[]` — recent turns (in memory, ≤ 20, newest first; empty after a daemon restart) |
+| POST /api/v1/design/artifacts/{id}/variants | ws editor | `DesignVariantsReq {prompt, n? (1..=4, default 3), references?, selection?, provider?, providers? (cycled per variant), model?, directions? (cycled; default `defaults` · `explore` · `calm` · `story`)}` | **202** `DesignVariantRun {run_id, status:"running", turns}` — n parallel FRESH turns in `<data>/design/<id>/variants/<run>/<k>/`, each committed on branch `variant/<run>/<k>` (`parent_version_id` = the head it started from) WITHOUT moving the head or touching the working copy. `design_variants_ready` fires when all finished. 400 `n` out of range; 409 busy |
+| GET /api/v1/design/artifacts/{id}/variants | ws viewer | — | `DesignVariantRun[]` (≤ 10 runs, newest first) — `versions` (persisted), `accepted_version_id`, `status` `running`\|`ready`\|`accepted`, live `turns` |
+| POST /api/v1/design/artifacts/{id}/variants/{version}/accept | ws editor | `{force?}` (body optional); `{version}` = variant version id / `v12` / `12` | `DesignVariantAcceptResp {artifact, version, run_id, accepted_version_id, rejected_version_ids}` — **fast-forwards main**: a new main version (`kind:"agent"`, `provenance.accepted_variant`) carrying the variant's bytes, guarded on the head the run started from (**409** when main moved — pass `force` to apply on top — when a variant of the run was already accepted, or while an agent still works on the artifact); records `variant_accepted` (payload `run_id, k, direction, main_version_id, rejected_version_ids`) and one `variant_rejected` per sibling, then runs a learning pass in the background. 400 when the version is not a variant |
+| GET /api/v1/design/learned | ws viewer | `?workspace_id=` (required) | `DesignLearnedResp {workspace_id, mode (suggest\|off), skill:"design-team-style", skill_path, active, pending, history, candidates}` — `active` = the rule lines of the skill (with the applied edit + evidence), `pending` / `history` = the improvement edits of that skill, `candidates` = what the extractor sees now (read-only) |
+| POST /api/v1/design/learned/extract | ws editor | `{workspace_id}` | `DesignLearnExtractResp {mode, run_id, proposed, skipped, candidates}` — proposes every READY candidate as a **pending** improvement edit (never auto-applied; no-op when the workspace setting `design_learning` is `"off"`); emits `design_learning_update {kind:"rule_proposed"}` when anything was proposed |
+
+**Turn lifecycle.** `starting` → `running` (session live) → `done` (committed)
+\| `unchanged` (no change / critique) \| `conflict` (a human saved while the
+agent worked: the head is never clobbered — the draft is committed as the side
+version `variant/<turn_id>/1`, acceptable via `…/variants/{v}/accept` with
+`force`) \| `failed` (agent error, invalid document — nothing committed, the
+working copy is restored to the head). Caps: one run per artifact, 20 min per
+turn (the session is killed past it), ≤ 4 variants. A main turn resumes the
+artifact's assist session (`meta.assist = {session_id, provider}`) when the
+provider matches; variants always start fresh sessions
+(`meta.source = "design_assist"`).
+
+**Context brief** (`CONTEXT.md`, deterministic, ≤ 16 KB): the artifact, the
+story it `implements` (key, title, source/AC excerpt ≤ 2.5 K chars), Uses /
+Used-in links (≤ 12 each, only artifacts the caller can view), the brand kit
+(the project's `brand_kit_id`, else a `uses_tokens` link; tokens ≤ 3 K chars),
+the references `[R1..Rn]` (≤ 8: the request's `references` first, then
+explicit `references`/`derived_from` links, then library search in the
+artifact's workspace — the title, then the prompt's 3 most salient terms;
+each at the named version, else approved, else head), the approved team rules
+(the `design-team-style` skill's rule lines, ≤ 20) and ≤ 6 memories from the
+`design` collection of `otto-memory`. The prompt repeats the reference list and
+the rules and inlines the bundled `otto-design-2d` / `otto-design-3d` skill
+(never modified).
+
+**Provenance** (`version.provenance`, ≤ 16 KB): `assist {turn_id, mode,
+branch, direction, provider, session_id}`, `prompt_summary` (≤ 280 chars),
+`references_offered [{label, artifact_id, version_id, seq, title, source}]`,
+`references_cited [{label, artifact_id, version_id, seq}]` — only citations
+VERIFIED against the offered set (inline `[R1]` / `[R1, R3]` markers in the
+reply, plus `refs` of an optional `provenance.json` the agent writes:
+`"R2"`, `"<id>@v12"`, `"otto://design/<id>@v3"`; a never-offered label, an
+unknown artifact or a different version is dropped) —
+`citations_unverified`, `why`, `brand_kit {artifact_id, version_id, seq}`,
+`team_rules` (keys), `selection` (≤ 1 K chars). Each committed turn records an
+`agent_draft` signal, and each verified citation on main becomes an explicit
+`references` link (pinned to the cited version).
+
+**Learning v1 (suggest-only).** `otto_design::learn::extract` groups the last
+90 days of the workspace's signals: a variant `direction` chosen
+(`variant_accepted`/`variant_chosen`) more often than rejected, a reject
+`reason` chip (`variant_rejected`, `other` ignored), the same property changed
+right after agent drafts (`edit_after_draft` changed paths, last two segments,
+per format), an accepted `a11y_fix` rule. Ready = ≥ 3 signals across ≥ 2
+artifacts. Ready candidates go to otto-improve's `design` evidence source
+(`learning_checkpoints` source `design:<workspace>:<key>`): each becomes a
+PENDING edit of the workspace skill `design-team-style` (one
+`- [rule:<key>] <text>` line; resolved like every skill edit — the library
+entry when present, else `<root>/.claude/skills/design-team-style/SKILL.md`).
+Approve / reject / rollback stay human-only through `POST
+/improvement/edits/{id}/approve|reject|rollback`; a decided rule is never
+re-proposed, a `conflict` one is (against the current file).
+
+**MCP.** Reads (agents find + cite earlier work) — governed catalog
 (`otto_server::mcp_outward`, default-enabled): `otto.design_list`,
 `otto.design_get`, `otto.design_links`, `otto.design_search` → the GET routes
 above (`design_get` → `GET /design/artifacts/{id}?content=true[&version=]`).
 The per-session stdio server (`ottod mcp-tools`) serves the same four natively
 as `design_list` / `design_get` / `design_links` / `design_search` (aliased so
-the governed twins are not advertised twice).
+the governed twins are not advertised twice). Writes — `otto.design_assist`
+(→ `POST /design/artifacts/{id}/assist`) and `otto.design_link` (→ `POST
+/design/artifacts/{id}/links`): mutating + DANGEROUS (off by default,
+approval-gated unless the operator exempts that tool via
+`approval_exempt_tools`), scoped to the TARGET artifact's workspace (the
+server overwrites any `workspace_id` before the token-pin check, audit and
+approval), exposed on stdio only through the governed bridge as
+`otto_design_assist` / `otto_design_link`. No tool approves a version.
 
 ## Discovery Chat
 

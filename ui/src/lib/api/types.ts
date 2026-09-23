@@ -1280,12 +1280,41 @@ export type OttoEvent =
       reason: DesignLinkUpdateReason;
     }
   | {
-      /** Design Hall learning loop: a design signal was captured. */
+      /** Design Hall learning loop: a design signal was captured, or
+       *  (`kind: 'rule_proposed'`) new team rules await approval. */
       type: 'design_learning_update';
       workspace_id: Id;
-      kind: DesignSignalKind;
+      kind: DesignSignalKind | 'rule_proposed';
       signal_id: Id | null;
       artifact_id: Id | null;
+    }
+  | {
+      /** Design Hall: a design-assist turn changed state (`running` once its
+       *  session is live — attach the shell — then one terminal state). A
+       *  committed main turn also emits `design_artifact_updated`. Fetch the
+       *  full turn from `GET /design/artifacts/{artifact_id}/assist`. */
+      type: 'design_assist_updated';
+      workspace_id: Id;
+      artifact_id: Id;
+      turn_id: Id;
+      status: DesignAssistStatus;
+      mode: DesignAssistMode | 'variant';
+      /** `main` or `variant/<run>/<k>`. */
+      branch: string;
+      session_id: Id | null;
+      version_id: Id | null;
+      error: string | null;
+    }
+  | {
+      /** Design Hall: every turn of a variants run finished; `version_ids` are
+       *  the committed variant versions (head untouched). */
+      type: 'design_variants_ready';
+      workspace_id: Id;
+      artifact_id: Id;
+      run_id: Id;
+      base_version_id: Id | null;
+      version_ids: Id[];
+      failed: number;
     }
   | {
       /** The DB Assistant agent session became live (turn start) — the embedded
@@ -8871,7 +8900,11 @@ export type DesignLinkDstKind =
 export type DesignLinkPolicy = 'follow_approved' | 'follow_latest' | 'pinned';
 export type DesignSignalKind =
   | 'variant_chosen'
+  /** Server-recorded when `POST …/variants/{v}/accept` fast-forwards main. */
+  | 'variant_accepted'
   | 'variant_rejected'
+  /** A design-assist turn committed a version (main or a variant branch). */
+  | 'agent_draft'
   | 'edit_after_draft'
   | 'review_comment'
   | 'critique_finding'
@@ -8886,7 +8919,10 @@ export type DesignArtifactChange =
   | 'meta'
   | 'approved'
   | 'archived'
-  | 'deleted';
+  | 'deleted'
+  /** An UNCOMMITTED, validated mid-turn edit by a design-assist agent
+   *  (`version_id: null`); the turn's commit follows as `content`. */
+  | 'live';
 export type DesignLinkUpdateReason =
   | 'created'
   | 'deleted'
@@ -9164,4 +9200,197 @@ export interface DesignPruneReq {
   /** Dry run unless true. */
   apply?: boolean;
   window_secs?: number;
+}
+
+// ---- Design assist (the unified agent turn, variants, learned rules) ------
+// Mirrors crates/otto-server/src/design_assist.rs + otto-design cite/learn.
+
+/** `POST /design/artifacts/{id}/assist` modes (`variant` is `/variants` only). */
+export type DesignAssistMode = 'generate' | 'refine' | 'critique' | 'a11y';
+export type DesignAssistStatus =
+  | 'starting'
+  | 'running'
+  /** A version was committed. */
+  | 'done'
+  /** The agent changed nothing (always for a critique). */
+  | 'unchanged'
+  /** The head moved while the agent worked: its draft was kept as the side
+   *  version `variant/<turn_id>/1` (accept it via `…/variants/{v}/accept`). */
+  | 'conflict'
+  | 'failed';
+
+/** A reference offered to a turn as `[R<n>]`. */
+export interface DesignOfferedRef {
+  /** `R1`, `R2`, … */
+  label: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+  title: string;
+  studio: DesignStudio | string;
+  format: string;
+  status: DesignStatus | string;
+  /** Why it was offered. */
+  source: 'explicit' | 'link' | 'search';
+}
+
+/** A citation the server verified against the offered set. */
+export interface DesignCitedRef {
+  label: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+}
+
+export interface DesignAssistReq {
+  prompt: string;
+  /** Default `refine`. */
+  mode?: DesignAssistMode;
+  /** The focused node/section, e.g. `{node_id: 'hero'}` (≤ 4 KB JSON). */
+  selection?: Record<string, unknown>;
+  /** `<artifact_id>`, `<artifact_id>@v12` or `otto://design/<id>[@v12]` (≤ 8). */
+  references?: string[];
+  /** Provider for a NEW assist session (a resumed one keeps its own). */
+  provider?: string;
+  model?: string;
+}
+
+/** One design-assist agent turn (main or one variant). */
+export interface DesignAssistTurn {
+  turn_id: Id;
+  artifact_id: Id;
+  workspace_id: Id;
+  mode: DesignAssistMode | 'variant';
+  status: DesignAssistStatus;
+  /** `main` or `variant/<run>/<k>`. */
+  branch: string;
+  /** Variant direction label (`defaults`, `explore`, `calm`, `story`, or custom). */
+  direction: string | null;
+  provider: string;
+  session_id: Id | null;
+  base_version_id: Id | null;
+  version_id: Id | null;
+  references: DesignOfferedRef[];
+  cited: DesignCitedRef[];
+  /** Citations the agent made that could not be verified (not in provenance). */
+  unverified_citations: string[];
+  /** Keys of the approved team rules the turn was given. */
+  team_rules: string[];
+  /** Critique / a11y findings (`{severity?, rule?, message?, node_id?, fix?, fixed?}`). */
+  findings: Record<string, unknown>[];
+  /** The agent's one-line summary. */
+  message: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface DesignVariantsReq {
+  prompt: string;
+  /** 1..=4 (default 3). */
+  n?: number;
+  references?: string[];
+  selection?: Record<string, unknown>;
+  provider?: string;
+  /** Per-variant providers, cycled (overrides `provider`). */
+  providers?: string[];
+  model?: string;
+  /** Custom direction per variant, cycled; default defaults/explore/calm/story. */
+  directions?: string[];
+}
+
+export interface DesignVariantRun {
+  run_id: Id;
+  artifact_id: Id;
+  base_version_id: Id | null;
+  status: 'running' | 'ready' | 'accepted';
+  /** Committed variant versions (branch `variant/<run_id>/<k>`), k ascending. */
+  versions: DesignVersion[];
+  /** The accepted VARIANT version, once one was. */
+  accepted_version_id: Id | null;
+  /** Live turn states (in memory; empty after a daemon restart). */
+  turns: DesignAssistTurn[];
+}
+
+export interface DesignVariantAcceptReq {
+  /** Accept even though main moved since the variants were drawn. */
+  force?: boolean;
+}
+
+export interface DesignVariantAcceptResp {
+  artifact: DesignArtifact;
+  /** The new main version (head) carrying the variant's bytes. */
+  version: DesignVersion;
+  run_id: Id;
+  accepted_version_id: Id;
+  rejected_version_ids: Id[];
+}
+
+/** A candidate team rule from the deterministic signal extractor. */
+export interface DesignRuleCandidate {
+  /** e.g. `variant_direction:bold`, `edit_property:scene3d:material.color`. */
+  key: string;
+  kind: 'variant_preference' | 'reject_reason' | 'edit_after_draft' | 'a11y';
+  rule: string;
+  rationale: string;
+  /** Evidence: design signal ids. */
+  signal_ids: Id[];
+  signal_count: number;
+  artifact_count: number;
+  /** Meets the thresholds (≥ 3 signals across ≥ 2 artifacts) → proposed. */
+  ready: boolean;
+}
+
+export interface DesignRuleLine {
+  key: string;
+  rule: string;
+}
+
+/** An active learned rule (a line of the `design-team-style` skill). */
+export interface DesignLearnedRule {
+  key: string;
+  rule: string;
+  /** The applied improvement edit that added it (roll back via
+   *  `POST /improvement/edits/{edit_id}/rollback`). */
+  edit_id: Id | null;
+  evidence: Id[];
+  applied_at: string | null;
+}
+
+/** One improvement edit of the design skill (approve / reject via
+ *  `POST /improvement/edits/{edit_id}/approve|reject`). */
+export interface DesignLearnedEdit {
+  edit_id: Id;
+  status: 'pending' | 'applied' | 'rejected' | 'rolled_back' | 'conflict';
+  rules: DesignRuleLine[];
+  rationale: string;
+  evidence: Id[];
+  created_at: string;
+  applied_at: string | null;
+  actor: string | null;
+}
+
+export interface DesignLearnedResp {
+  workspace_id: Id;
+  /** Workspace setting `design_learning` (`off`) — default `suggest`. */
+  mode: 'suggest' | 'off';
+  skill: string;
+  skill_path: string;
+  active: DesignLearnedRule[];
+  pending: DesignLearnedEdit[];
+  history: DesignLearnedEdit[];
+  candidates: DesignRuleCandidate[];
+}
+
+export interface DesignLearnExtractReq {
+  workspace_id: Id;
+}
+
+export interface DesignLearnExtractResp {
+  mode: 'suggest' | 'off';
+  run_id: Id | null;
+  /** Newly proposed (pending) improvement edit ids. */
+  proposed: Id[];
+  skipped: number;
+  candidates: DesignRuleCandidate[];
 }
