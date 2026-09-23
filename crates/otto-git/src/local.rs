@@ -3475,7 +3475,11 @@ pub async fn clone_repo(
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Own process group (git + its `git-remote-https`/`ssh` helpers) so a
+        // stall can be killed as a whole; never outlive the caller either.
+        .process_group(0)
+        .kill_on_drop(true);
     if let Some(a) = &askpass {
         for (k, v) in a.envs() {
             cmd.env(k, v);
@@ -3494,11 +3498,25 @@ pub async fn clone_repo(
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut last_line = String::new();
+    // A clone may legitimately take long, but not SILENTLY: `--progress`
+    // reports every second or so. No output for this long (a dead VPN, a
+    // server that stopped sending) ends the clone instead of hanging the
+    // clone task forever — the one git spawn here that had no bound.
+    let idle = std::time::Duration::from_secs(env_secs("OTTO_GIT_CLONE_IDLE_SECS", 300));
     loop {
-        let n = stderr
-            .read(&mut chunk)
-            .await
-            .map_err(|e| Error::Internal(format!("clone read: {e}")))?;
+        let n = match tokio::time::timeout(idle, stderr.read(&mut chunk)).await {
+            Ok(read) => read.map_err(|e| Error::Internal(format!("clone read: {e}")))?,
+            Err(_) => {
+                if let Some(pid) = child.id() {
+                    kill_group(pid as libc::pid_t).await;
+                }
+                let _ = child.wait().await;
+                return Err(Error::Upstream(format!(
+                    "git clone stalled: no progress for {}s (last: {last_line})",
+                    idle.as_secs()
+                )));
+            }
+        };
         if n == 0 {
             break;
         }
