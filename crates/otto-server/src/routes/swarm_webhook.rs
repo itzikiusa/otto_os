@@ -107,10 +107,10 @@ fn first_goal_with_verify_cmd(goals: &[WebhookGoalReq]) -> Option<usize> {
 /// or id. `None` = not a registered repo → the request is refused.
 fn match_registered_repo(repos: &[otto_core::domain::Repo], wanted: &str) -> Option<String> {
     let norm = |p: &str| p.trim().trim_end_matches('/').to_string();
-    let wanted_path = norm(&otto_core::paths::expand_tilde(wanted));
+    let wanted_path = norm(otto_core::paths::expand_tilde(wanted).as_str());
     repos
         .iter()
-        .find(|r| norm(&r.path) == wanted_path || r.name == wanted || r.id == wanted)
+        .find(|r| norm(r.path.as_str()) == wanted_path || r.name == wanted || r.id == wanted)
         .map(|r| r.path.clone())
 }
 
