@@ -1382,6 +1382,15 @@ optional allowed caller ids (matched against the request's `user`).
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
 
+PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
+workspace) when the integration's inbound listener token — the Slack **app** token, or
+the Telegram bot token (the request's value, else the stored one) — is already used by
+another workspace's **enabled** integration of the same channel. One Slack app / Telegram
+bot can feed only one workspace: Slack delivers each event to just one Socket Mode
+connection, and two Telegram pollers fight over `getUpdates`. The refusal happens before
+any token is stored. (The daemon also skips a duplicate listener at runtime if such
+state already exists, logging a warning.)
+
 ### Inbound webhook trigger
 
 Public-by-key endpoint that turns an external HTTP `POST` into an agent session
