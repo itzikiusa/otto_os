@@ -455,7 +455,7 @@ impl BrandModel {
                 if stack.is_empty() {
                     continue;
                 }
-                let weights = o
+                let weights: Vec<u16> = o
                     .get("weights")
                     .and_then(Value::as_array)
                     .map(|ws| ws.iter().filter_map(weight).take(9).collect())
