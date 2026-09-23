@@ -101,6 +101,12 @@ pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
              this statement is classified as a write/DDL"
         )));
     }
+    if engine == Engine::Redis && crate::types::redis_uses_keys(statement) {
+        return Err(Error::Forbidden(format!(
+            "{MCP_READ_ONLY_PREFIX}KEYS blocks the Redis server while it scans every key; \
+             use SCAN with MATCH and COUNT instead"
+        )));
+    }
     Ok(())
 }
 
@@ -1236,11 +1242,16 @@ impl DbViewerService {
         }
         // Non-browsable kinds never reach `run`, but guard defensively: if we
         // can't map to an engine we can't classify, so treat it as a write.
-        let is_write = match Engine::from_kind(conn.kind) {
+        let engine = Engine::from_kind(conn.kind);
+        let is_write = match engine {
             Some(engine) => statement_is_write(engine, &req.statement),
             None => true,
         };
-        if !is_write {
+        // `KEYS` is a read that blocks the whole Redis server while it walks
+        // every key: on a guarded connection it needs the same confirmation.
+        let blocking_keys =
+            engine == Some(Engine::Redis) && crate::types::redis_uses_keys(&req.statement);
+        if !is_write && !blocking_keys {
             return Ok(());
         }
         let reason = if conn.environment.is_production() {
@@ -1248,6 +1259,12 @@ impl DbViewerService {
         } else {
             format!("read-only connection '{}'", conn.name)
         };
+        if !is_write {
+            return Err(Error::Conflict(format!(
+                "{WRITE_BLOCKED_PREFIX}KEYS blocks the Redis server while it scans every key \
+                 on this {reason}; use SCAN with MATCH/COUNT, or confirm to run it"
+            )));
+        }
         Err(Error::Conflict(format!(
             "{WRITE_BLOCKED_PREFIX}this is a {reason}; confirm the write to run it"
         )))
@@ -2736,6 +2753,21 @@ mod tests {
             ensure_read_only(Engine::Redis, "DEL k").unwrap_err(),
             Error::Forbidden(_)
         ));
+    }
+
+    /// `KEYS` walks the whole keyspace in one blocking call: an agent must use
+    /// SCAN instead (other reads, including SCAN, still pass).
+    #[test]
+    fn ensure_read_only_refuses_redis_keys_over_mcp() {
+        for stmt in ["KEYS *", "keys session:*", "GET a\nKEYS *"] {
+            let err = ensure_read_only(Engine::Redis, stmt).unwrap_err();
+            assert!(
+                matches!(&err, Error::Forbidden(m) if m.contains("SCAN")),
+                "{stmt:?}: {err:?}"
+            );
+        }
+        assert!(ensure_read_only(Engine::Redis, "SCAN 0 MATCH session:* COUNT 100").is_ok());
+        assert!(ensure_read_only(Engine::Redis, "# KEYS *\nGET a").is_ok());
     }
 
     #[test]

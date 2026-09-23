@@ -1529,6 +1529,21 @@ fn redis_is_write(statement: &str) -> bool {
     false
 }
 
+/// True when any command line is `KEYS`. It is a read, but it walks the whole
+/// keyspace in one blocking call — a classic cause of production outages — so
+/// guarded connections ask for confirmation and the MCP path refuses it in
+/// favour of `SCAN`.
+pub fn redis_uses_keys(statement: &str) -> bool {
+    statement.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_whitespace()
+                .next()
+                .is_some_and(|cmd| cmd.eq_ignore_ascii_case("KEYS"))
+    })
+}
+
 /// Read-only Redis commands (conservative subset — anything not listed counts
 /// as a write, including admin/scripting commands like EVAL we can't vet).
 ///

@@ -2455,7 +2455,7 @@ class DatabaseStore {
         // guarded connection. Ask for a typed confirmation and, if granted,
         // retry with the explicit confirm flag.
         if (isWriteBlocked(e)) {
-          const ok = await this.confirmGuardedWrite();
+          const ok = await this.confirmGuardedWrite(e);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
             this.clearPending(t);
@@ -2538,17 +2538,24 @@ class DatabaseStore {
    * production is a deliberate, explicit act. Returns true only on an exact,
    * case-insensitive match.
    */
-  private async confirmGuardedWrite(): Promise<boolean> {
+  private async confirmGuardedWrite(blocked?: unknown): Promise<boolean> {
     const conn = this.selectedConn;
     if (!conn) return false;
     const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
+    // Redis `KEYS` is gated too — not a write, but it blocks the whole server
+    // while it walks every key; say that instead of "can modify data".
+    const blockingKeys = blocked instanceof ApiError && blocked.message.includes('KEYS blocks');
     const typed = await confirmer.promptText(
-      `You are about to run a WRITE / schema change on the ${label} connection ` +
-        `"${conn.name}". This can modify or destroy data. Type the connection ` +
-        `name to confirm.`,
+      blockingKeys
+        ? `KEYS blocks the Redis server while it scans every key on the ${label} ` +
+            `connection "${conn.name}" — prefer SCAN with MATCH/COUNT. Type the ` +
+            `connection name to run it anyway.`
+        : `You are about to run a WRITE / schema change on the ${label} connection ` +
+            `"${conn.name}". This can modify or destroy data. Type the connection ` +
+            `name to confirm.`,
       {
-        title: '⚠ Confirm production write',
-        confirmLabel: 'Run write',
+        title: blockingKeys ? '⚠ Confirm blocking command' : '⚠ Confirm production write',
+        confirmLabel: blockingKeys ? 'Run KEYS' : 'Run write',
         placeholder: conn.name,
       },
     );
@@ -2580,7 +2587,7 @@ class DatabaseStore {
       return await post(false);
     } catch (e) {
       if (isWriteBlocked(e)) {
-        const ok = await this.confirmGuardedWrite();
+        const ok = await this.confirmGuardedWrite(e);
         if (!ok) return null;
         return await post(true);
       }
