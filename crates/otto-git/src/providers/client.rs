@@ -1,5 +1,6 @@
 //! Shared HTTP layer for provider clients: one reqwest client with a 20s
-//! timeout, a single retry on a rate limit / 5xx, and uniform error mapping
+//! timeout, a single retry on a rate limit / 5xx (reads only — a write that
+//! drew a 5xx may already have landed), and uniform error mapping
 //! into `Error::Upstream` carrying the HTTP status plus the provider's
 //! message field when parseable.
 //!
@@ -195,6 +196,12 @@ fn rate_limit_wait(status: u16, headers: &reqwest::header::HeaderMap) -> Option<
     Some(Duration::from_secs(1))
 }
 
+/// True for the methods a 5xx may re-send: reads, which cannot duplicate or
+/// half-apply anything at the forge.
+fn is_idempotent_read(m: &reqwest::Method) -> bool {
+    *m == reqwest::Method::GET || *m == reqwest::Method::HEAD
+}
+
 /// The one error text for a quota refusal — kept in one place so the handler,
 /// the docs and the troubleshooting table all say the same thing.
 fn rate_limited_err(provider: &str, wait: Duration) -> Error {
@@ -227,8 +234,8 @@ impl Http {
         &self.client
     }
 
-    /// Send with one retry on a short rate limit / 5xx; returns the successful
-    /// response.
+    /// Send with one retry on a short rate limit / failed connect, or a 5xx
+    /// on a READ; returns the successful response.
     pub async fn send(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         self.send_classified(rb, false).await
     }
@@ -242,17 +249,39 @@ impl Http {
 
     /// Shared body of [`send`](Self::send) / [`send_checked`](Self::send_checked):
     /// one retry (the forge's own `retry-after` for a quota refusal, a flat
-    /// 700 ms for a 5xx), then status classification.
+    /// 700 ms for a 5xx or a failed connect), then status classification.
+    ///
+    /// A 5xx is retried for READS only (GET/HEAD). For a write it does not
+    /// mean "not done": GitHub commits a comment / merge / new PR and THEN
+    /// answers 502, so a re-send posted the comment twice, turned a merge
+    /// that landed into a reported failure (405 "not mergeable") and a
+    /// created PR into 422 "already exists" (skipping the after-create
+    /// steps). A write is re-sent only when the forge provably did nothing:
+    /// a quota refusal (429 / quota-403) or a connection that never opened.
     async fn send_classified(
         &self,
         rb: reqwest::RequestBuilder,
         allow_304: bool,
     ) -> Result<reqwest::Response> {
-        let retry = rb.try_clone();
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("{}: {e}", self.provider)))?;
+        let mut retry = rb.try_clone();
+        let idempotent = rb
+            .try_clone()
+            .and_then(|c| c.build().ok())
+            .is_some_and(|req| is_idempotent_read(req.method()));
+        let resp = match rb.send().await {
+            Ok(resp) => resp,
+            // Never connected ⇒ nothing reached the forge: safe for any method.
+            Err(e) if e.is_connect() => match retry.take() {
+                Some(rb2) => {
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                    rb2.send()
+                        .await
+                        .map_err(|e| Error::Upstream(format!("{}: {e}", self.provider)))?
+                }
+                None => return Err(Error::Upstream(format!("{}: {e}", self.provider))),
+            },
+            Err(e) => return Err(Error::Upstream(format!("{}: {e}", self.provider))),
+        };
 
         let status = resp.status();
         // Read the verdict off the headers BEFORE the match: the arms move
@@ -275,7 +304,7 @@ impl Http {
                     None => resp,
                 }
             }
-            None if status.is_server_error() => match retry {
+            None if status.is_server_error() && idempotent => match retry {
                 Some(rb2) => {
                     tokio::time::sleep(Duration::from_millis(700)).await;
                     rb2.send()
@@ -589,7 +618,7 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, CachedGet,
+        cache_key, extract_auth, insert_into, rate_limit_wait, read_from, CachedGet, Http,
         CACHE_MAX_ENTRIES, SHORT_TTL,
     };
     use std::collections::HashMap;
@@ -795,5 +824,58 @@ mod tests {
         assert!(rate_limit_wait(403, &reqwest::header::HeaderMap::new()).is_none());
         assert!(rate_limit_wait(404, &headers(&[("retry-after", "5")])).is_none());
         assert!(rate_limit_wait(200, &reqwest::header::HeaderMap::new()).is_none());
+    }
+
+    // -- 5xx retry policy --------------------------------------------------
+
+    /// A write that drew a 502 may already have landed (GitHub commits, then
+    /// fails the response): re-sending posted comments twice and reported
+    /// landed merges as failures. Reads keep their single retry.
+    #[tokio::test]
+    async fn server_error_retries_reads_but_never_writes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/comment"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/merge"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/read"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/read"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        let http = Http::new("github");
+        let post = http
+            .client()
+            .post(format!("{}/comment", server.uri()))
+            .json(&serde_json::json!({ "body": "hi" }));
+        assert!(http.send(post).await.is_err());
+        let put = http
+            .client()
+            .put(format!("{}/merge", server.uri()))
+            .json(&serde_json::json!({ "merge_method": "merge" }));
+        assert!(http.send(put).await.is_err());
+        let get = http.client().get(format!("{}/read", server.uri()));
+        assert_eq!(http.text(get).await.unwrap(), "ok");
+
+        let reqs = server.received_requests().await.unwrap();
+        let count = |m: &str| reqs.iter().filter(|r| r.method.as_str() == m).count();
+        assert_eq!(count("POST"), 1, "a 5xx write is never re-sent");
+        assert_eq!(count("PUT"), 1, "a 5xx write is never re-sent");
+        assert_eq!(count("GET"), 2, "a 5xx read is retried exactly once");
     }
 }
