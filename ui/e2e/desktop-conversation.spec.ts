@@ -43,6 +43,18 @@ let sessionId = '';
 
 const conv = (page: Page) => page.locator('.conv[data-loaded="true"]');
 
+/** The draft mirrored to sessionStorage for `id`. The store namespaces the key
+ *  by identity (`otto_chat_draft:["<base,user>","<session>"]`) so a draft never
+ *  leaks across a server/user switch; the spec only needs this session's entry. */
+const storedDraft = (page: Page, id: string) => page.evaluate((sid) => {
+  const suffix = `,${JSON.stringify(sid)}]`;
+  for (let i = 0; i < sessionStorage.length; i++) {
+    const k = sessionStorage.key(i)!;
+    if (k.startsWith('otto_chat_draft:[') && k.endsWith(suffix)) return sessionStorage.getItem(k);
+  }
+  return null;
+}, id);
+
 test.beforeEach(async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
   const fixture = pickFixture();
@@ -130,7 +142,7 @@ test('a pending send cannot erase a reopened session draft', async ({ page }) =>
   await completed;
   expect(inputCalls).toBe(1);
   await expect(composer).toHaveValue('New work after reopening');
-  await expect.poll(() => page.evaluate((id) => sessionStorage.getItem(`otto_chat_draft:${id}`), sessionId)).toBe('New work after reopening');
+  await expect.poll(() => storedDraft(page, sessionId)).toBe('New work after reopening');
   await page.reload();
   await expect(composer).toHaveValue('New work after reopening');
 });
