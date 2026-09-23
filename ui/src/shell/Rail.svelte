@@ -162,6 +162,7 @@
     border-radius: var(--radius-s);
     color: var(--text-dim);
     cursor: pointer;
+    flex-shrink: 0;
     transition: background 130ms ease-out, color 130ms ease-out;
   }
   .rail-btn:hover {
@@ -170,12 +171,9 @@
   }
   /* Same selection language as the Navigator: accent tint + accent glyph + a
      short accent bar at the rail's inline-start edge. */
-  .rail-btn {
-    flex-shrink: 0;
-  }
   .rail-btn.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .rail-modules .rail-btn.active::before {
     content: '';

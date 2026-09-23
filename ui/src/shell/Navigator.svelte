@@ -1198,7 +1198,7 @@
      inline-start edge and an accent icon. The label stays --text, which clears
      contrast on the tint in every theme × scheme. */
   .nav-item.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     font-weight: 600;
   }
@@ -1215,12 +1215,12 @@
     border-radius: 2px 0 0 2px;
   }
   .nav-item.active > :global(svg) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Agents' row carries trailing toggles (select / sort / all-workspaces /
      fold): tint the WHOLE row so the selection doesn't stop short of them. */
   .nav-item-row:has(> .nav-item.active) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-radius: var(--radius-s);
   }
   .nav-item-row > .nav-item.active {
@@ -1545,7 +1545,7 @@
   }
   .task-chip.active {
     color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .task-chip.done {
     color: var(--status-working, #3fb950);
