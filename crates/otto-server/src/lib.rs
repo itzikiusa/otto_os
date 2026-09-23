@@ -21,6 +21,7 @@ pub mod db_assist;
 pub mod db_drafter;
 pub mod design_blender;
 pub mod design_format;
+pub mod design_hall;
 pub mod design_scene3d;
 pub mod error;
 pub mod eval_lab_routes;
