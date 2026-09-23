@@ -3427,7 +3427,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
-| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB. 40 MB body cap (base64 inflation) |
 | 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
