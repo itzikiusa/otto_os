@@ -1,7 +1,8 @@
 //! File assets are addressed by trusted root labels, never archive-supplied
 //! absolute destination paths. All descendant opens refuse symlinks.
 use super::{
-    digest, invalid, ArchiveFile, ArchiveRoot, StateArchive, MAX_ARCHIVE_BYTES, MAX_FILE_BYTES,
+    digest, invalid, ArchiveFile, ArchiveRoot, ArchiveRow, StateArchive, MAX_ARCHIVE_BYTES,
+    MAX_FILE_BYTES,
 };
 use crate::error::ApiResult;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -10,8 +11,9 @@ use rustix::{
     fs::{self, AtFlags, FileType, Mode, OFlags},
     io::Errno,
 };
+use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     path::Path,
 };
@@ -26,6 +28,153 @@ pub const DATA_ROOTS: &[&str] = &[
     "personal",
     "insights",
 ];
+/// The Design Hall blob store (`<data>/design/blobs/<sha256>`), relative to
+/// the data dir. NOT a [`DATA_ROOTS`] entry — it is never walked wholesale:
+/// only the blobs the saved `design_versions` / `design_artifacts` rows
+/// reference are archived, after every other root and best-effort within the
+/// remaining size budget (see [`design_blob_files`]).
+pub const DESIGN_BLOBS_DIR: &str = "design/blobs";
+pub const DESIGN_BLOBS_ROOT_ID: &str = "data-design/blobs";
+/// Room kept free under [`MAX_ARCHIVE_BYTES`] for the JSON envelope when
+/// design blobs fill the budget (records, manifests, per-file keys).
+const DESIGN_BLOB_HEADROOM: usize = 8 * 1024 * 1024;
+/// JSON bytes one archived file costs besides its base64 content.
+const ARCHIVE_FILE_OVERHEAD: usize = 256;
+
+pub fn design_blobs_root() -> ArchiveRoot {
+    ArchiveRoot {
+        id: DESIGN_BLOBS_ROOT_ID.into(),
+        kind: "data".into(),
+        owner_id: Some(DESIGN_BLOBS_DIR.into()),
+    }
+}
+
+/// A design blob name: exactly 64 lowercase hex chars (its sha256).
+pub fn is_blob_name(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Every blob the saved design rows point at: version bytes
+/// (`design_versions.blob_sha256`) and thumbnails (`design_artifacts.thumb_blob`).
+pub fn design_blob_refs(records: &BTreeMap<String, Vec<ArchiveRow>>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (table, column) in [
+        ("design_versions", "blob_sha256"),
+        ("design_artifacts", "thumb_blob"),
+    ] {
+        for row in records.get(table).into_iter().flatten() {
+            if let Some(sha) = row
+                .get(column)
+                .and_then(Value::as_str)
+                .filter(|s| is_blob_name(s))
+            {
+                out.insert(sha.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Archive the referenced design blobs, BEST-EFFORT: a blob that would push
+/// the archive past `MAX_ARCHIVE_BYTES` (minus headroom) — or is over the
+/// per-file cap — is skipped, and so is a missing / unreadable / corrupt one
+/// (its bytes must still hash to its name); each kind of skip is summarized
+/// in ONE `excluded` note (+ a warning log) instead of failing the export —
+/// the design rows stay restorable, their skipped content degrades to a clear
+/// "design blob … not found". Returns how many blobs were archived.
+pub fn design_blob_files(
+    data_dir: &Path,
+    shas: &BTreeSet<String>,
+    output: &mut Vec<ArchiveFile>,
+    excluded: &mut Vec<String>,
+    bytes: &mut usize,
+) -> ApiResult<usize> {
+    if shas.is_empty() {
+        return Ok(0);
+    }
+    let dir = data_dir.join(DESIGN_BLOBS_DIR);
+    let fd = match fs::open(dir.as_path(), flags(), Mode::empty()) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => {
+            excluded.push(format!(
+                "design blobs: {} referenced blob(s) not archived — <data>/{DESIGN_BLOBS_DIR} is missing",
+                shas.len()
+            ));
+            return Ok(0);
+        }
+        Err(e) => return Err(err(e)),
+    };
+    let budget = MAX_ARCHIVE_BYTES.saturating_sub(DESIGN_BLOB_HEADROOM);
+    let (mut archived, mut missing, mut over, mut over_bytes) = (0usize, 0usize, 0usize, 0usize);
+    for sha in shas.iter().filter(|s| is_blob_name(s)) {
+        let stat = match fs::statat(&fd, sha.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(_) => {
+                missing += 1;
+                continue;
+            }
+        };
+        let size = usize::try_from(stat.st_size).unwrap_or(usize::MAX);
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            missing += 1;
+            continue;
+        }
+        if size > MAX_FILE_BYTES
+            || bytes.saturating_add(size.div_ceil(3) * 4 + ARCHIVE_FILE_OVERHEAD) > budget
+        {
+            over += 1;
+            over_bytes = over_bytes.saturating_add(size);
+            continue;
+        }
+        let Ok(file) = fs::openat(
+            &fd,
+            sha.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) else {
+            missing += 1;
+            continue;
+        };
+        let mut data = Vec::new();
+        let read = std::fs::File::from(file)
+            .take((MAX_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut data);
+        // Immutable, content-addressed: the bytes must hash to the name.
+        if read.is_err() || data.len() != size || digest(&data) != *sha {
+            missing += 1;
+            continue;
+        }
+        *bytes += data.len().div_ceil(3) * 4 + ARCHIVE_FILE_OVERHEAD;
+        output.push(ArchiveFile {
+            root: DESIGN_BLOBS_ROOT_ID.into(),
+            path: sha.clone(),
+            sha256: sha.clone(),
+            content_base64: STANDARD.encode(&data),
+        });
+        archived += 1;
+    }
+    if over > 0 {
+        tracing::warn!(
+            skipped = over,
+            bytes = over_bytes,
+            "saved-state archive: design blobs skipped to stay under the archive cap"
+        );
+        excluded.push(format!(
+            "design blobs: {over} of {} skipped (~{} MiB) to stay under the 256 MiB archive cap — back up <data>/{DESIGN_BLOBS_DIR} with the data dir",
+            shas.len(),
+            over_bytes.div_ceil(1024 * 1024)
+        ));
+    }
+    if missing > 0 {
+        excluded.push(format!(
+            "design blobs: {missing} referenced blob(s) missing, unreadable or corrupt in <data>/{DESIGN_BLOBS_DIR}"
+        ));
+    }
+    Ok(archived)
+}
+
 fn err(e: impl std::fmt::Display) -> crate::error::ApiError {
     invalid(&format!("Archive asset: {e}"))
 }
@@ -184,7 +333,8 @@ pub fn root_relative(root: &ArchiveRoot, restore_id: &str) -> ApiResult<String> 
                 .owner_id
                 .as_deref()
                 .ok_or_else(|| invalid("Missing data root name"))?;
-            if !DATA_ROOTS.contains(&directory) || root.id != format!("data-{directory}") {
+            let known = DATA_ROOTS.contains(&directory) || directory == DESIGN_BLOBS_DIR;
+            if !known || root.id != format!("data-{directory}") {
                 return Err(invalid("Unknown managed asset root"));
             }
             Ok(directory.into())
@@ -220,6 +370,12 @@ pub fn validate_files(archive: &StateArchive) -> ApiResult<()> {
             return Err(invalid(
                 "Credential files and Git metadata cannot be imported",
             ));
+        }
+        // Design blobs restore under their content hash only.
+        if file.root == DESIGN_BLOBS_ROOT_ID
+            && !(is_blob_name(&file.path) && file.path == file.sha256)
+        {
+            return Err(invalid("A design blob must be named by its sha256"));
         }
         if !paths.insert((&file.root, &file.path)) {
             return Err(invalid("Duplicate archive file"));

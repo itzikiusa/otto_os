@@ -4443,7 +4443,13 @@ archive carries explicit `excluded` and `reconnect` lists.
   inactive and imported users cannot authenticate until configured explicitly.
 
 Encoded archives are bounded to 256 MiB and individual files to 64 MiB. An
-oversize export/import fails explicitly; it is not silently truncated. A
+oversize export/import fails explicitly; it is not silently truncated — with
+one exception: the Design Hall blob root `data-design/blobs`
+(`owner_id: "design/blobs"`, files named by their sha256) is filled last and
+best-effort with only the blobs the saved `design_*` rows reference; blobs
+that don't fit the remaining budget (or are missing/corrupt) are skipped and
+summarized in `excluded`. On restore an existing blob of the same name is
+identical by construction and is kept without a conflict. A
 format/schema mismatch, invalid path/hash, stale preview, or incompatible
 references prevents restore. Use legacy settings import/restore for format 1
 files; its workspace-name manifest does not contain workspace data.

@@ -358,8 +358,11 @@ with people.
   …/thumbnail` (PNG or WebP, ≤ 2 MB; never bumps `updated_at`). Agents only
   get PNG thumbnails (`render/current.png`, `refs/R<n>.png`) — a WebP one is
   not offered to them.
-- Design blobs are not part of the saved-state archive's file roots yet (the
-  DB rows are); back up `<data>/design/` with the data dir.
+- The saved-state archive carries the design rows and — best-effort, last,
+  within the 256 MiB budget — the blobs they reference (versions +
+  thumbnails; see `docs/features/state-archive.md`). Skipped blobs are listed
+  in the archive's `excluded` notes; working copies (`<id>/work/`) are not
+  archived (they are re-materialized from the head).
 - Content caps: 25 MB raw per version, 4 MB inline in live events, 256 KiB
   inline in `design_get`.
 
