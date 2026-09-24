@@ -3995,6 +3995,134 @@ from `/summarize`), passing it here skips the extra fetch and uses it
 verbatim, but `url` is then validated as a well-formed URL (`400` otherwise)
 since that path never reaches the netguard-checked fetch.
 
+## Browser — remote live view (daemon-owned Chromium)
+
+A **live** tab (`BrowserTab.mode == "live"`) runs on one of two engines. The
+engine is a property of the tab's *live session*, not of the tab row (no
+migration: `browser_tabs.mode` stays `reader|live`):
+
+- `native` — the desktop app's per-tab WKWebView (`apps/desktop/src-tauri/src/browser.rs`).
+  No daemon state; desktop-only.
+- `remote` — a **daemon-owned Chromium** (`otto_browser::live`). The page is
+  rendered by the daemon and streamed to the viewer as a CDP screencast over
+  `WS /ws/browser/{tab_id}/live` (`docs/contracts/ws.md` §1b); the viewer's
+  mouse/keyboard/IME/paste input is sent back and dispatched with CDP
+  `Input.*`. Works in the desktop app, the PWA and remote web sessions alike.
+
+**Engine binary (pluggable, downloaded on first use — never bundled).** Two
+Chrome for Testing builds are pinned in code (`otto_browser::live::install::PINS`:
+version, URL and sha256 per build, matching Playwright's pinned CfT version):
+
+| `build` | What | Download |
+|---|---|---|
+| `chrome` (**default**) | full Chrome for Testing, run in Chrome's new headless mode (`--headless=new`) — full fidelity (codecs, fewer headless-detection breakages) | ~180 MB (179 277 110 bytes for 149.0.7827.55) |
+| `chrome-headless-shell` | the lighter headless-only shell | ~98 MB (98 043 456 bytes) |
+
+Nothing is downloaded until a user explicitly calls `POST /browser/live/install`
+(the Browser page's "Enable remote live view" flow). The archive is streamed to
+`<data>/browser/chromium/<version>/<build>.zip.part` (netguarded client, 400 MB
+cap), its **sha256 verified against the pinned value** (mismatch → deleted,
+`failed`), then extracted (`ditto -x -k`) into
+`<data>/browser/chromium/<version>/<build>/`. A build whose checksum is not
+pinned in this daemon build refuses to install (fail closed;
+`OTTO_CHROME_SHA256_CHROME` / `OTTO_CHROME_SHA256_HEADLESS_SHELL` may supply the
+64-hex pin for a build that ships without one). `OTTO_CHROME_BIN` points the
+runtime at an existing binary instead (dev/test escape hatch, like
+`OTTO_LIGHTPANDA_BIN`). Progress is broadcast as
+`browser_engine_install_updated` (ws.md). mac-arm64 only for now
+(`platform_supported:false` elsewhere).
+
+**Headed mode** (`settings.headed`, off by default — "Show the window on this
+Mac"): the same `chrome` build launched with a visible window on the daemon's
+Mac; it is still screencast-streamed. Requires `build == "chrome"`.
+
+**Process + isolation model.** Chromium is launched by the daemon with
+`--remote-debugging-pipe` (CDP over fds 3/4 — **no TCP debugging port** is ever
+opened), a private `--user-data-dir`, no first-run/sync/extensions/background
+networking, and downloads denied or redirected to a quarantine folder. Each
+**ephemeral** live session (the default `profile:"ephemeral"`) gets its own
+CDP `browserContext` (`Target.createBrowserContext`, disposed on close — cookies
+never outlive the session or cross sessions). A **named profile** (`profile:
+"<name>"`, `[a-z0-9_-]{1,40}`) is a persistent cookie jar scoped to
+`(workspace, owner, name)`: its own Chromium process with
+`--user-data-dir=<data>/browser/profiles/<workspace>/<owner>/<name>/`, so two
+users (or two workspaces) never share cookies. Resource caps: at most
+`settings.max_sessions` live sessions daemon-wide (429 beyond), at most 4
+Chromium processes; a session with no viewer and no activity for
+`settings.idle_timeout_secs` is closed; a process with no sessions exits after
+60 s; a crashed process is restarted on next use (its sessions report
+`state:"crashed"`).
+
+**SSRF guard for the whole session.** Every request the page makes — each
+navigation, redirect hop, subresource, XHR/fetch, WebSocket and service-worker
+fetch — is paused with CDP `Fetch` interception and vetted through
+`otto-netguard` (same `request_allowed` rule as the reader engine: http(s)/ws(s)
+only, no loopback/private/link-local/metadata; `data:`/`blob:`/`about:` pass)
+for as long as the session lives, not just until `load`. A refused document
+request surfaces as a WS `blocked` frame; a refused subresource simply fails.
+Residual: Chromium resolves names itself, so a request is vetted on the
+daemon's resolution of the host (DNS-rebinding window documented, as for
+Lightpanda).
+
+**Outward actions.** While the **agent** drives (see control below), a
+state-changing document request (a form submit / any non-GET navigation) is held
+at the `Fetch` stage, a **viewport screenshot is captured before it proceeds**,
+and an approval (`kind:"browser_action"`, `requested_by_kind:"agent"`) is filed
+in the MCP approvals queue (`/mcp/approvals`) with the origin, method, target
+host and the screenshot's path. The request continues only when approved
+(denied/expired → failed, WS `approval` frame either way). Human-driven input is
+the human's own action and is never gated.
+
+**Control lock (take over / hand back).** `controller ∈ none|human|agent`. A human
+viewer's first input while `none` makes them the driver; `take_over` always
+succeeds for an editor (the agent is preempted and its actions pause);
+`hand_back` returns control to a waiting agent (else `none`). Human input while
+the agent drives is refused (`not_driver`) until the viewer takes over. When the
+last human-driving viewer disconnects, control is released.
+
+**Downloads.** Blocked (`settings.downloads == "block"`) or saved into the
+per-profile quarantine folder `<data>/browser/downloads/<profile-key>/` (never
+opened or executed; `com.apple.quarantine` set) — WS `download` frame either
+way.
+
+**Audit.** Every main-frame navigation the session commits is written to the
+audit log (`action:"browser.live.navigate"`, target = tab id, detail `{host,
+workspace_id, profile, driver}` — host only, never the path/query); session
+open/close, take-over/hand-back and engine installs are audited too
+(`browser.live.open|close|control`, `browser.engine.install`).
+
+**Auth.** Feature-gated by `Feature::Browser`; the tab's workspace role is
+checked on every route (IDOR guard: by-id routes load the tab first). A live
+session is private to its **owner** (the user who opened it) — only the owner,
+a workspace Admin, or root may see, attach to or drive it; everyone else gets
+404. Share-scoped and MCP-only tokens are refused on the WS.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/browser/live/status | Browser View | — | `BrowserLiveStatus` — per-build install state (+ approximate download size), current settings, the running install job, process/session counts |
+| PUT /api/v1/browser/live/settings | Browser Admin | `BrowserLiveSettings` (partial) | `BrowserLiveSettings` — 400 on `headed:true` with `build:"chrome-headless-shell"`, unknown build, or out-of-range caps. Stored in the settings KV under `browser_live`. Applies to newly started Chromium processes |
+| POST /api/v1/browser/live/install | Browser Admin | `{build?}` (default: the configured build) | 202 `BrowserEngineInstallJob` — starts the one-time download (409 while another install runs; 200 with `state:"installed"` when already present; 400 when the build's checksum isn't pinned or the platform is unsupported) |
+| GET /api/v1/workspaces/{wid}/browser/live | ws viewer · Browser View | — | `BrowserLiveSession[]` — the caller's own live sessions in `wid` (all of them for a ws Admin/root) |
+| POST /api/v1/browser/tabs/{id}/live | ws editor · Browser Edit | `BrowserLiveCreateReq` `{engine?:"remote", viewport?, profile?, url?}` | `BrowserLiveSession` — opens (or re-attaches to the caller's existing) remote session for the tab and sets the tab's `mode` to `live`. Navigates to `url` (default: the tab's `url`; netguard-checked → 400). 409 `engine_not_installed` when no Chromium build is installed, 409 when another user owns the tab's live session, 429 at the session cap, 502 when Chromium fails to launch. `engine:"native"` → 400 (a native tab needs no daemon session) |
+| GET /api/v1/browser/tabs/{id}/live | ws viewer · Browser View | — | `BrowserLiveSession` (404 when none, or not visible to the caller) |
+| DELETE /api/v1/browser/tabs/{id}/live | ws editor · Browser Edit | — | 204 — closes the session; an ephemeral context (and its cookies) is disposed |
+| POST /api/v1/browser/tabs/{id}/live/nav | ws editor · Browser Edit | `BrowserLiveNavReq` `{action:"goto"\|"back"\|"forward"\|"reload"\|"stop", url?}` | `BrowserLiveSession` — `goto` requires `url` (netguard-checked → 400) |
+| POST /api/v1/browser/tabs/{id}/live/control | ws editor · Browser Edit | `{action:"take_over"\|"hand_back"}` | `BrowserLiveSession` |
+| POST /api/v1/browser/tabs/{id}/live/screenshot | ws editor · Browser Edit | `BrowserScreenshotReq` `{mode?:"viewport"\|"full_page"\|"element", selector?, format?:"png"\|"jpeg", quality?}` | the image bytes (`image/png` / `image/jpeg`); `X-Otto-Page-Url` header carries the page URL. `element` requires `selector` (404 when it matches nothing). Full-page captures are capped at 16 384 px tall |
+| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (or `?token=`) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
+
+`BrowserLiveSession {tab_id, workspace_id, owner_id, engine:"remote", build,
+version, profile, headed, state:"starting"|"ready"|"crashed"|"closed", url,
+title, loading, can_go_back, can_go_forward, viewport:{width, height,
+device_scale_factor}, controller:"none"|"human"|"agent", controller_user_id,
+viewers, created_at, last_activity_at}`.
+
+The screenshot + navigation surface is also exposed in-process
+(`otto_browser::live::LiveRuntime` — `screenshot`, `navigate`, `agent_acquire`,
+`agent_release`, plus the `ApprovalGate` / `LiveAudit` hooks) for Design Hall
+renders and the browser MCP tools, which reuse the same session, guard, lock
+and approval gate.
+
 ## AWS console (`/aws/*`)
 
 Browse and operate AWS from Otto through the **`aws` CLI v2** (no SDK): S3
