@@ -80,6 +80,10 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // kind is gated individually by its own feature, so the page itself is safe
   // for any role.
   { id: 'home', icon: 'home', label: 'Home', group: 'work', keywords: 'dashboard overview boxes views' },
+  // Assistant — Otto's personal assistant: one front door that chats (rendered
+  // from the CLI transcript), remembers, reminds, runs tasks and delegates to
+  // Personal Agents, asking before anything leaves the Mac. `#/assistant`.
+  { id: 'assistant', icon: 'assistant', label: 'Assistant', group: 'work', keywords: 'otto personal assistant chat ask remember remind reminder memory tasks approvals needs you' },
   { id: 'agents', icon: 'terminal', label: 'Agents', group: 'work', feature: 'agents', special: true, keywords: 'sessions terminal claude codex shell' },
   // History — every past Claude/Codex conversation (Otto sessions + transcripts
   // found on disk), read-only, resumable. Lives in the Agents group and shares

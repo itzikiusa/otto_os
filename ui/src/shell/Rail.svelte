@@ -5,6 +5,7 @@
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { tick } from 'svelte';
@@ -84,6 +85,9 @@
           <Icon name={m.icon} />
           {#if m.id === 'agents' && ws.workingCount > 0}
             <span class="rail-badge">{ws.workingCount}</span>
+          {/if}
+          {#if m.id === 'assistant' && assistant.needsYouCount > 0}
+            <span class="rail-badge needs" title={`${assistant.needsYouCount} waiting on you`}>{assistant.needsYouCount}</span>
           {/if}
         </button>
       {/each}
@@ -201,6 +205,10 @@
     font-weight: 700;
     display: grid;
     place-items: center;
+  }
+  .rail-badge.needs {
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .avatar {
     width: 22px;

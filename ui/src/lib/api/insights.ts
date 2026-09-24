@@ -31,4 +31,19 @@ export const insightsApi = {
    */
   reportUrl: (htmlPath: string): Promise<string> =>
     authedBlobUrl(`/insights/report?path=${encodeURIComponent(htmlPath)}`),
+
+  /**
+   * Read any artifact under the insights dir as text — the report HTML, its
+   * sibling `summary-*.md` / `metrics-*.json`, or `index.json`. Same
+   * path-gated endpoint as `reportUrl` (the daemon refuses anything outside
+   * the insights directory); the blob URL is revoked before returning.
+   */
+  readText: async (path: string): Promise<string> => {
+    const url = await authedBlobUrl(`/insights/report?path=${encodeURIComponent(path)}`);
+    try {
+      return await (await fetch(url)).text();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
 };
