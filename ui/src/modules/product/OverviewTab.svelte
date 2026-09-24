@@ -1144,9 +1144,9 @@
     <div class="toolbar">
       <!-- Version picker -->
       <div class="version-sel">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label class="ver-label">Version</label>
+        <label class="ver-label" for="ov-version-select">Version</label>
         <select
+          id="ov-version-select"
           class="ver-select"
           onchange={onVersionChange}
           onfocus={loadVersions}

@@ -862,11 +862,15 @@
     {:else}
       <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
            the list takes the full sidebar height instead of a capped section. -->
-      <div class="side-switch" role="tablist">
-        <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
-        <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
-        <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
-        <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+      <div class="side-switch">
+        <!-- The tabs get their own tablist: the strip also carries plain
+             buttons (Refresh, Hide sidebar), which a tablist may not own. -->
+        <div class="ss-tabs" role="tablist" aria-label="Sidebar view">
+          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
+          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+        </div>
         <span class="grow"></span>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
@@ -1286,11 +1290,12 @@
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
-  <div class="type-chips" role="tablist" aria-label="Filter by connection type">
+  <div class="type-chips" role="group" aria-label="Filter by connection type">
     {#each FILTER_CHIPS as chip (chip.id)}
       <button
         class="type-chip"
         class:on={filterKind === chip.id}
+        aria-pressed={filterKind === chip.id}
         data-testid="connhub-filter-{chip.id}"
         onclick={() => setFilter(chip.id)}
       >{chip.label}</button>
@@ -1816,6 +1821,7 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  .ss-tabs { display: contents; }
   .side-switch {
     display: flex;
     align-items: center;
