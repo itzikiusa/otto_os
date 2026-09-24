@@ -50,7 +50,9 @@ impl Paused {
     }
 
     pub fn is_document(&self) -> bool {
-        self.resource_type.as_deref().is_none_or(|t| t == "Document")
+        self.resource_type
+            .as_deref()
+            .is_none_or(|t| t == "Document")
     }
 }
 
@@ -64,7 +66,9 @@ pub enum Decision {
     Continue,
     /// Refused by the SSRF guard; `document` = a navigation / redirect hop
     /// (surfaced to viewers as a `blocked` frame).
-    Fail { document: bool },
+    Fail {
+        document: bool,
+    },
     /// An agent-driven outward document request: screenshot + approval first.
     HoldOutward,
 }
@@ -210,7 +214,10 @@ mod tests {
     #[test]
     fn origins_and_hosts_never_leak_paths() {
         assert_eq!(origin_key("https://a.example/x?y"), "https://a.example:443");
-        assert_eq!(display_origin("https://a.example:8443/x?y"), "https://a.example:8443");
+        assert_eq!(
+            display_origin("https://a.example:8443/x?y"),
+            "https://a.example:8443"
+        );
         assert_eq!(host_of("https://a.example/secret?token=1"), "a.example");
         assert_eq!(host_of("nonsense"), "");
     }

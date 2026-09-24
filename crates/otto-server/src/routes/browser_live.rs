@@ -38,9 +38,9 @@ use otto_browser::live::protocol::MAX_CLIENT_FRAME_BYTES;
 use otto_browser::live::session::validate_nav_url;
 use otto_browser::live::{
     ClientMsg, ControlAction, ControllerKind, InstallJob, InstallState, LiveAudit, LiveError,
-    LiveHooks, LiveRuntime, LiveSession, LiveSessionInfo, LiveSettingsPatch, NavAction,
-    OpenParams, OutwardAction, ScreenshotRequest, ServerMsg, ViewerOut, Viewport,
-    EPHEMERAL_PROFILE, SETTINGS_KEY,
+    LiveHooks, LiveRuntime, LiveSession, LiveSessionInfo, LiveSettingsPatch, NavAction, OpenParams,
+    OutwardAction, ScreenshotRequest, ServerMsg, ViewerOut, Viewport, EPHEMERAL_PROFILE,
+    SETTINGS_KEY,
 };
 use otto_core::api::Problem;
 use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
@@ -135,7 +135,10 @@ impl LiveHooks for ServerLiveHooks {
             if a.page_title.is_empty() {
                 String::new()
             } else {
-                format!(", page \"{}\"", a.page_title.chars().take(120).collect::<String>())
+                format!(
+                    ", page \"{}\"",
+                    a.page_title.chars().take(120).collect::<String>()
+                )
             }
         );
         if let Some(p) = &a.screenshot_path {
@@ -511,9 +514,7 @@ async fn open_live(
         tab_id: tab.id.clone(),
         workspace_id: tab.workspace_id.clone(),
         owner_id: user.id.clone(),
-        profile: req
-            .profile
-            .unwrap_or_else(|| EPHEMERAL_PROFILE.to_string()),
+        profile: req.profile.unwrap_or_else(|| EPHEMERAL_PROFILE.to_string()),
         viewport: req.viewport.unwrap_or_default(),
         url,
     };
@@ -700,7 +701,11 @@ pub fn viewer_grant(
     }
 }
 
-async fn grant_for(ctx: &ServerCtx, token: &str, session: &LiveSession) -> (ViewerGrant, Option<User>) {
+async fn grant_for(
+    ctx: &ServerCtx,
+    token: &str,
+    session: &LiveSession,
+) -> (ViewerGrant, Option<User>) {
     let Ok(auth) = ctx.authenticator.authenticate(token).await else {
         return (ViewerGrant::Denied, None);
     };

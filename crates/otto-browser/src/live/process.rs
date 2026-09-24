@@ -104,7 +104,11 @@ impl ProcessKey {
     }
 }
 
-pub fn ephemeral_downloads_dir(data_dir: &std::path::Path, workspace: &str, owner: &str) -> PathBuf {
+pub fn ephemeral_downloads_dir(
+    data_dir: &std::path::Path,
+    workspace: &str,
+    owner: &str,
+) -> PathBuf {
     data_dir
         .join("browser")
         .join("downloads")
@@ -212,9 +216,16 @@ impl ChromeProcess {
         downloads_dir: &std::path::Path,
     ) -> Result<(String, bool), LiveError> {
         let v = conn
-            .call_with_timeout("Browser.getVersion", json!({}), None, Duration::from_secs(20))
+            .call_with_timeout(
+                "Browser.getVersion",
+                json!({}),
+                None,
+                Duration::from_secs(20),
+            )
             .await
-            .map_err(|e| LiveError::Engine(format!("chromium did not answer on the CDP pipe: {e}")))?;
+            .map_err(|e| {
+                LiveError::Engine(format!("chromium did not answer on the CDP pipe: {e}"))
+            })?;
         let product = v.get("product").and_then(Value::as_str).unwrap_or("");
         let version = product.split('/').nth(1).unwrap_or(product).to_string();
         conn.call("Target.setDiscoverTargets", json!({"discover": true}), None)
@@ -233,9 +244,13 @@ impl ChromeProcess {
                 "browser live: browser-level Fetch.enable refused; guarding per target instead"
             );
         }
-        conn.call("Browser.setDownloadBehavior", download_behavior(policy, downloads_dir, None), None)
-            .await
-            .map_err(|e| LiveError::Engine(format!("Browser.setDownloadBehavior: {e}")))?;
+        conn.call(
+            "Browser.setDownloadBehavior",
+            download_behavior(policy, downloads_dir, None),
+            None,
+        )
+        .await
+        .map_err(|e| LiveError::Engine(format!("Browser.setDownloadBehavior: {e}")))?;
         Ok((version, browser_fetch))
     }
 
@@ -569,7 +584,10 @@ impl ChromeProcess {
     }
 }
 
-async fn event_loop(proc: Weak<ChromeProcess>, mut events: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>) {
+async fn event_loop(
+    proc: Weak<ChromeProcess>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>,
+) {
     while let Some(ev) = events.recv().await {
         let Some(p) = proc.upgrade() else {
             return;
@@ -585,7 +603,11 @@ async fn event_loop(proc: Weak<ChromeProcess>, mut events: tokio::sync::mpsc::Un
 
 /// `Browser.setDownloadBehavior` params for a policy (optionally for one
 /// browser context).
-pub fn download_behavior(policy: DownloadPolicy, dir: &std::path::Path, context_id: Option<&str>) -> Value {
+pub fn download_behavior(
+    policy: DownloadPolicy,
+    dir: &std::path::Path,
+    context_id: Option<&str>,
+) -> Value {
     let mut v = match policy {
         DownloadPolicy::Block => json!({"behavior": "deny", "eventsEnabled": true}),
         DownloadPolicy::Quarantine => {
@@ -615,7 +637,13 @@ pub fn sanitize_filename(raw: &str) -> String {
     let s: String = raw
         .chars()
         .filter(|c| !c.is_control())
-        .map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' {
+                '_'
+            } else {
+                c
+            }
+        })
         .take(200)
         .collect();
     let s = s.trim().trim_start_matches('.').to_string();
@@ -666,9 +694,7 @@ mod tests {
         );
         // Hostile ids can't escape the profiles root.
         let evil = ProcessKey::for_profile("../..", "..", "x");
-        assert!(evil
-            .user_data_dir(d)
-            .starts_with("/data/browser/profiles/"));
+        assert!(evil.user_data_dir(d).starts_with("/data/browser/profiles/"));
         assert!(!evil.user_data_dir(d).to_string_lossy().contains(".."));
         assert_ne!(a.downloads_dir(d), b.downloads_dir(d));
     }

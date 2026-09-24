@@ -324,8 +324,12 @@ mod tests {
 
         let c2 = conn.clone();
         let call = tokio::spawn(async move {
-            c2.call("Page.navigate", json!({"url": "https://example.com/"}), Some("S1"))
-                .await
+            c2.call(
+                "Page.navigate",
+                json!({"url": "https://example.com/"}),
+                Some("S1"),
+            )
+            .await
         });
         let cmd = read_frame(&mut their_r).await;
         assert_eq!(cmd["method"], "Page.navigate");

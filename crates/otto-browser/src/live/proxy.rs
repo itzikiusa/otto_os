@@ -173,10 +173,13 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S) -> std::io:
             let mut name = vec![0u8; len[0] as usize];
             s.read_exact(&mut name).await?;
             let port = read_port(s).await?;
-            let host = String::from_utf8(name)
-                .map_err(|_| std::io::Error::other("non-utf8 host"))?;
+            let host =
+                String::from_utf8(name).map_err(|_| std::io::Error::other("non-utf8 host"))?;
             // A literal inside the domain field is vetted as an IP.
-            match host.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+            match host
+                .trim_matches(|c| c == '[' || c == ']')
+                .parse::<IpAddr>()
+            {
                 Ok(ip) => Target::Ip(ip, port),
                 Err(_) => Target::Domain(host, port),
             }
@@ -225,10 +228,7 @@ mod tests {
         let mut req = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
         req.extend_from_slice(&80u16.to_be_bytes());
         let (t, _) = run_handshake(req).await;
-        assert_eq!(
-            t.unwrap(),
-            Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 80)
-        );
+        assert_eq!(t.unwrap(), Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 80));
 
         // An IP literal smuggled in the domain field is still an IP.
         let mut req = vec![5, 1, 0, 5, 1, 0, 3, 15];
@@ -250,18 +250,30 @@ mod tests {
 
     #[tokio::test]
     async fn vetting_blocks_internal_targets() {
-        assert!(vet(&Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 7700)).await.is_err());
-        assert!(vet(&Target::Ip("169.254.169.254".parse().unwrap(), 80)).await.is_err());
-        assert!(vet(&Target::Ip("10.1.2.3".parse().unwrap(), 443)).await.is_err());
+        assert!(vet(&Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 7700))
+            .await
+            .is_err());
+        assert!(vet(&Target::Ip("169.254.169.254".parse().unwrap(), 80))
+            .await
+            .is_err());
+        assert!(vet(&Target::Ip("10.1.2.3".parse().unwrap(), 443))
+            .await
+            .is_err());
         assert!(vet(&Target::Ip("::1".parse().unwrap(), 443)).await.is_err());
-        assert!(vet(&Target::Domain("localhost".into(), 7700)).await.is_err());
-        assert!(vet(&Target::Ip("8.8.8.8".parse().unwrap(), 443)).await.is_ok());
+        assert!(vet(&Target::Domain("localhost".into(), 7700))
+            .await
+            .is_err());
+        assert!(vet(&Target::Ip("8.8.8.8".parse().unwrap(), 443))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn the_proxy_refuses_a_loopback_connect_end_to_end() {
         let proxy = GuardProxy::start().await.unwrap();
-        let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).await.unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", proxy.port()))
+            .await
+            .unwrap();
         let mut req = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
         req.extend_from_slice(&7700u16.to_be_bytes());
         s.write_all(&req).await.unwrap();

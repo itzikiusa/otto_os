@@ -100,7 +100,9 @@ impl LiveSettings {
     /// Range + combination rules (the PUT's 400s).
     pub fn validate(&self) -> Result<(), String> {
         if self.headed && !self.build.supports_headed() {
-            return Err("headed mode needs the full \"chrome\" build, not chrome-headless-shell".into());
+            return Err(
+                "headed mode needs the full \"chrome\" build, not chrome-headless-shell".into(),
+            );
         }
         if !(1..=16).contains(&self.max_sessions) {
             return Err("max_sessions must be between 1 and 16".into());

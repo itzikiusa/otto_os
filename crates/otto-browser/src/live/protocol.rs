@@ -213,7 +213,9 @@ impl ServerMsg {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{\"type\":\"error\",\"code\":\"bad_frame\",\"message\":\"encode\"}".into())
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            "{\"type\":\"error\",\"code\":\"bad_frame\",\"message\":\"encode\"}".into()
+        })
     }
 }
 

@@ -140,7 +140,8 @@ pub fn managed_exe(data_dir: &Path, pin: &Pin) -> PathBuf {
 /// Installed = the executable exists AND the verified-install marker is
 /// present (a half-extracted dir from a crash doesn't count).
 pub fn is_installed(data_dir: &Path, pin: &Pin) -> bool {
-    managed_exe(data_dir, pin).is_file() && build_dir(data_dir, pin).join(INSTALLED_MARKER).is_file()
+    managed_exe(data_dir, pin).is_file()
+        && build_dir(data_dir, pin).join(INSTALLED_MARKER).is_file()
 }
 
 /// Where a binary came from.
@@ -370,10 +371,7 @@ async fn install_inner(
     let (len, mut stream) = fetcher.open(pin.url).await?;
     if let Some(n) = len {
         if n != pin.size || n > MAX_DOWNLOAD_BYTES {
-            return Err(format!(
-                "unexpected archive size {n} (pinned {})",
-                pin.size
-            ));
+            return Err(format!("unexpected archive size {n} (pinned {})", pin.size));
         }
     }
     let mut file = tokio::fs::File::create(part)
@@ -400,7 +398,9 @@ async fn install_inner(
             progress(job);
         }
     }
-    file.flush().await.map_err(|e| format!("flush archive: {e}"))?;
+    file.flush()
+        .await
+        .map_err(|e| format!("flush archive: {e}"))?;
     drop(file);
     progress(job);
 
@@ -611,7 +611,9 @@ mod tests {
         for b in ChromeBuild::ALL {
             let p = pin_for(b, "mac-arm64").expect("pinned");
             assert_eq!(p.version, CFT_VERSION);
-            assert!(p.url.starts_with("https://storage.googleapis.com/chrome-for-testing-public/"));
+            assert!(p
+                .url
+                .starts_with("https://storage.googleapis.com/chrome-for-testing-public/"));
             assert!(p.url.contains(CFT_VERSION));
             assert!(p.size > 50_000_000 && p.size < MAX_DOWNLOAD_BYTES);
             // Either a real sha256 or empty (install refused) — never junk.

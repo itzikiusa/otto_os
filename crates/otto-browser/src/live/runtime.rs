@@ -146,10 +146,7 @@ impl LiveRuntime {
     }
 
     pub fn settings(&self) -> LiveSettings {
-        self.settings
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.settings.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Replace the settings (validated by the caller). Running processes keep
@@ -166,8 +163,7 @@ impl LiveRuntime {
             .iter()
             .filter_map(|b| {
                 let pin = pin_for(*b, platform.unwrap_or("mac-arm64"))?;
-                let resolved = platform
-                    .and(resolve_binary(&self.data_dir, *b));
+                let resolved = platform.and(resolve_binary(&self.data_dir, *b));
                 Some(BuildStatus {
                     build: *b,
                     version: pin.version.to_string(),
@@ -181,7 +177,13 @@ impl LiveRuntime {
                 })
             })
             .collect();
-        let processes = self.procs.lock().await.values().filter(|p| !p.is_dead()).count();
+        let processes = self
+            .procs
+            .lock()
+            .await
+            .values()
+            .filter(|p| !p.is_dead())
+            .count();
         LiveStatus {
             platform_supported: platform.is_some(),
             builds,
@@ -214,7 +216,9 @@ impl LiveRuntime {
             ))
         })?;
         if self.installing.swap(true, Ordering::SeqCst) {
-            return Err(LiveError::Conflict("an engine download is already running".into()));
+            return Err(LiveError::Conflict(
+                "an engine download is already running".into(),
+            ));
         }
         let job = InstallJob::new(&pin);
         if let Ok(mut j) = self.install.lock() {
@@ -287,7 +291,10 @@ impl LiveRuntime {
 
     /// Open (or re-attach to the owner's existing) session for a tab.
     /// `Ok((session, created))`.
-    pub async fn open(self: &Arc<Self>, p: OpenParams) -> Result<(Arc<LiveSession>, bool), LiveError> {
+    pub async fn open(
+        self: &Arc<Self>,
+        p: OpenParams,
+    ) -> Result<(Arc<LiveSession>, bool), LiveError> {
         self.ensure_janitor();
         if !valid_profile_name(&p.profile) {
             return Err(LiveError::Invalid(
@@ -325,7 +332,8 @@ impl LiveRuntime {
         };
         let key = ProcessKey::for_profile(&p.workspace_id, &p.owner_id, &p.profile);
         let proc = self.process_for(key, binary, &settings).await?;
-        let session = LiveSession::create(proc, p, self.data_dir.clone(), self.hooks.clone()).await?;
+        let session =
+            LiveSession::create(proc, p, self.data_dir.clone(), self.hooks.clone()).await?;
         if let Ok(mut s) = self.sessions.lock() {
             s.insert(session.tab_id.clone(), session.clone());
         }
@@ -475,8 +483,7 @@ impl LiveRuntime {
                 .filter(|(_, p)| {
                     p.is_dead()
                         || (p.session_count() == 0
-                            && p
-                                .empty_for(now)
+                            && p.empty_for(now)
                                 .is_some_and(|d| d >= Duration::from_secs(PROCESS_IDLE_EXIT_SECS)))
                 })
                 .map(|(k, _)| k.clone())
@@ -498,7 +505,8 @@ impl LiveRuntime {
         for t in tabs {
             self.close(&t, "closed").await;
         }
-        let procs: Vec<Arc<ChromeProcess>> = self.procs.lock().await.drain().map(|(_, p)| p).collect();
+        let procs: Vec<Arc<ChromeProcess>> =
+            self.procs.lock().await.drain().map(|(_, p)| p).collect();
         for p in procs {
             p.shutdown().await;
         }
@@ -516,7 +524,11 @@ mod tests {
     use crate::live::hooks::NoopHooks;
 
     fn rt(dir: &std::path::Path) -> Arc<LiveRuntime> {
-        LiveRuntime::new(dir.to_path_buf(), Arc::new(NoopHooks), LiveSettings::default())
+        LiveRuntime::new(
+            dir.to_path_buf(),
+            Arc::new(NoopHooks),
+            LiveSettings::default(),
+        )
     }
 
     fn params(profile: &str) -> OpenParams {

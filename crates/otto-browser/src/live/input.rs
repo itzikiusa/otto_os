@@ -279,17 +279,47 @@ mod tests {
 
     #[test]
     fn mouse_events_map_to_cdp() {
-        let (m, p) = mouse(MouseAction::Down, 10.5, 20.0, MouseButton::Left, 1, 2, 0.0, 0.0, MOD_SHIFT);
+        let (m, p) = mouse(
+            MouseAction::Down,
+            10.5,
+            20.0,
+            MouseButton::Left,
+            1,
+            2,
+            0.0,
+            0.0,
+            MOD_SHIFT,
+        );
         assert_eq!(m, "Input.dispatchMouseEvent");
         assert_eq!(p["type"], "mousePressed");
         assert_eq!(p["button"], "left");
         assert_eq!(p["clickCount"], 2);
         assert_eq!(p["modifiers"], 8);
-        let (_, p) = mouse(MouseAction::Wheel, 1.0, 1.0, MouseButton::None, 0, 0, 0.0, 1e9, 0);
+        let (_, p) = mouse(
+            MouseAction::Wheel,
+            1.0,
+            1.0,
+            MouseButton::None,
+            0,
+            0,
+            0.0,
+            1e9,
+            0,
+        );
         assert_eq!(p["type"], "mouseWheel");
         assert_eq!(p["deltaY"], 10_000.0);
         assert!(p.get("clickCount").is_none());
-        let (_, p) = mouse(MouseAction::Move, f64::NAN, -5.0, MouseButton::None, 0, 0, 0.0, 0.0, 0xFF);
+        let (_, p) = mouse(
+            MouseAction::Move,
+            f64::NAN,
+            -5.0,
+            MouseButton::None,
+            0,
+            0,
+            0.0,
+            0.0,
+            0xFF,
+        );
         assert_eq!(p["x"], 0.0);
         assert_eq!(p["y"], 0.0);
         assert_eq!(p["modifiers"], 0xF);
@@ -312,18 +342,45 @@ mod tests {
         assert_eq!(p["type"], "keyDown");
         assert_eq!(p["text"], "\r");
         assert_eq!(p["windowsVirtualKeyCode"], 13);
-        let (_, p) = key(KeyAction::Down, "ArrowLeft", "ArrowLeft", None, None, 0, false, 0);
+        let (_, p) = key(
+            KeyAction::Down,
+            "ArrowLeft",
+            "ArrowLeft",
+            None,
+            None,
+            0,
+            false,
+            0,
+        );
         assert_eq!(p["type"], "rawKeyDown");
         assert_eq!(p["windowsVirtualKeyCode"], 37);
     }
 
     #[test]
     fn shortcuts_become_editing_commands_without_text() {
-        let (_, p) = key(KeyAction::Down, "a", "KeyA", Some("a"), None, 0, false, MOD_META);
+        let (_, p) = key(
+            KeyAction::Down,
+            "a",
+            "KeyA",
+            Some("a"),
+            None,
+            0,
+            false,
+            MOD_META,
+        );
         assert_eq!(p["type"], "rawKeyDown");
         assert!(p.get("text").is_none());
         assert_eq!(p["commands"], json!(["selectAll"]));
-        let (_, p) = key(KeyAction::Down, "z", "KeyZ", None, None, 0, false, MOD_CTRL | MOD_SHIFT);
+        let (_, p) = key(
+            KeyAction::Down,
+            "z",
+            "KeyZ",
+            None,
+            None,
+            0,
+            false,
+            MOD_CTRL | MOD_SHIFT,
+        );
         assert_eq!(p["commands"], json!(["redo"]));
         assert_eq!(editing_command("KeyA", MOD_META | MOD_ALT), None);
         assert_eq!(editing_command("KeyA", 0), None);

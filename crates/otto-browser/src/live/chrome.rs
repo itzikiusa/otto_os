@@ -182,12 +182,18 @@ mod tests {
         let a = chrome_args(&spec(ChromeBuild::Chrome, false));
         assert!(a.contains(&"--remote-debugging-pipe".to_string()));
         assert!(!a.iter().any(|x| x.starts_with("--remote-debugging-port")));
-        assert!(!a.iter().any(|x| x.starts_with("--remote-debugging-address")));
+        assert!(!a
+            .iter()
+            .any(|x| x.starts_with("--remote-debugging-address")));
         // Chrome's own sandbox is never disabled.
-        assert!(!a.iter().any(|x| x == "--no-sandbox" || x == "--disable-web-security"));
+        assert!(!a
+            .iter()
+            .any(|x| x == "--no-sandbox" || x == "--disable-web-security"));
         assert!(a.contains(&"--user-data-dir=/data/browser/profiles/w/u/p".to_string()));
         assert!(a.contains(&"--use-mock-keychain".to_string()));
-        assert!(a.iter().any(|x| x.starts_with("--proxy-server=socks5://127.0.0.1:")));
+        assert!(a
+            .iter()
+            .any(|x| x.starts_with("--proxy-server=socks5://127.0.0.1:")));
         assert_eq!(a.last().map(String::as_str), Some("about:blank"));
     }
 
@@ -244,7 +250,8 @@ mod tests {
         // Write a "reply-shaped" frame: the echo makes the conn resolve it.
         let conn = launched.conn.clone();
         let call = tokio::spawn(async move {
-            conn.call("Browser.getVersion", serde_json::json!({}), None).await
+            conn.call("Browser.getVersion", serde_json::json!({}), None)
+                .await
         });
         // The echoed command has an `id` → it is treated as the reply (with
         // no `result`), so the call resolves to Null.

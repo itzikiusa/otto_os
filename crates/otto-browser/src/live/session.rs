@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::control::{ControlError, ControlLock};
 use super::conn::CdpEvent;
+use super::control::{ControlError, ControlLock};
 use super::flow::{Adaptive, ViewerFlow};
 use super::guard::{self, Paused};
 use super::hooks::{LiveAudit, LiveHooks, OutwardAction};
@@ -159,7 +159,8 @@ pub fn screenshot_params(format: ImageFormat, quality: Option<u8>, clip: Option<
     if let Some(c) = clip {
         let w = c.width.clamp(1.0, MAX_CAPTURE_PX);
         let h = c.height.clamp(1.0, MAX_CAPTURE_PX);
-        p["clip"] = json!({"x": c.x.max(0.0), "y": c.y.max(0.0), "width": w, "height": h, "scale": 1});
+        p["clip"] =
+            json!({"x": c.x.max(0.0), "y": c.y.max(0.0), "width": w, "height": h, "scale": 1});
         p["captureBeyondViewport"] = json!(true);
     }
     p
@@ -215,7 +216,11 @@ impl LiveSession {
 
         let context_id = if ephemeral {
             let r = conn
-                .call("Target.createBrowserContext", json!({"disposeOnDetach": true}), None)
+                .call(
+                    "Target.createBrowserContext",
+                    json!({"disposeOnDetach": true}),
+                    None,
+                )
                 .await
                 .map_err(cdp_live)?;
             Some(
@@ -239,7 +244,11 @@ impl LiveSession {
             Err(e) => {
                 if let Some(ctx) = &context_id {
                     let _ = conn
-                        .call("Target.disposeBrowserContext", json!({"browserContextId": ctx}), None)
+                        .call(
+                            "Target.disposeBrowserContext",
+                            json!({"browserContextId": ctx}),
+                            None,
+                        )
                         .await;
                 }
                 return Err(e);
@@ -370,14 +379,26 @@ impl LiveSession {
             .await
             .map_err(cdp_live)?;
         let _ = conn
-            .call("Page.setInterceptFileChooserDialog", json!({"enabled": true}), sid)
+            .call(
+                "Page.setInterceptFileChooserDialog",
+                json!({"enabled": true}),
+                sid,
+            )
             .await;
         let _ = conn
-            .call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}), sid)
+            .call(
+                "Emulation.setFocusEmulationEnabled",
+                json!({"enabled": true}),
+                sid,
+            )
             .await;
-        conn.call("Emulation.setDeviceMetricsOverride", metrics_params(vp), sid)
-            .await
-            .map_err(cdp_live)?;
+        conn.call(
+            "Emulation.setDeviceMetricsOverride",
+            metrics_params(vp),
+            sid,
+        )
+        .await
+        .map_err(cdp_live)?;
         Ok(())
     }
 
@@ -524,7 +545,11 @@ impl LiveSession {
     }
 
     /// Attach a viewer (the WS task). `can_drive` = Edit + ws editor.
-    pub fn attach(self: &Arc<Self>, user_id: &str, can_drive: bool) -> Result<ViewerHandle, LiveError> {
+    pub fn attach(
+        self: &Arc<Self>,
+        user_id: &str,
+        can_drive: bool,
+    ) -> Result<ViewerHandle, LiveError> {
         if !self.is_live() {
             return Err(LiveError::NotFound);
         }
@@ -649,16 +674,16 @@ impl LiveSession {
         let Some(sc_sid) = params["sessionId"].as_i64() else {
             return;
         };
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD
-            .decode(params["data"].as_str().unwrap_or(""))
+        let Ok(bytes) =
+            base64::engine::general_purpose::STANDARD.decode(params["data"].as_str().unwrap_or(""))
         else {
             self.ack_chrome(sc_sid);
             return;
         };
         let md = &params["metadata"];
         let f = |k: &str| md[k].as_f64().unwrap_or(0.0);
-        let (w, h) = jpeg_size(&bytes)
-            .unwrap_or((f("deviceWidth") as u32, f("deviceHeight") as u32));
+        let (w, h) =
+            jpeg_size(&bytes).unwrap_or((f("deviceWidth") as u32, f("deviceHeight") as u32));
         let seq = self.frame_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let header = FrameHeader {
             seq,
@@ -797,7 +822,10 @@ impl LiveSession {
                     Err(_) => {
                         self.send_to(
                             viewer_id,
-                            ServerMsg::error("not_driver", "the agent is driving — take over first"),
+                            ServerMsg::error(
+                                "not_driver",
+                                "the agent is driving — take over first",
+                            ),
                         );
                         return;
                     }
@@ -843,7 +871,15 @@ impl LiveSession {
                     return Ok(());
                 }
                 call(input::mouse(
-                    action, x, y, button, buttons, click_count, delta_x, delta_y, modifiers,
+                    action,
+                    x,
+                    y,
+                    button,
+                    buttons,
+                    click_count,
+                    delta_x,
+                    delta_y,
+                    modifiers,
                 ))
                 .await?;
                 if is_move {
@@ -880,7 +916,14 @@ impl LiveSession {
                 text,
                 selection_start,
                 selection_end,
-            } => call(input::ime_composition(&text, selection_start, selection_end)).await,
+            } => {
+                call(input::ime_composition(
+                    &text,
+                    selection_start,
+                    selection_end,
+                ))
+                .await
+            }
             ClientMsg::Nav { action, url } => self.navigate(action, url).await,
             ClientMsg::Resize {
                 width,
@@ -957,7 +1000,10 @@ impl LiveSession {
                 )
                 .await;
             let Ok(v) = r else { return };
-            let css = v.pointer("/result/value").and_then(Value::as_str).unwrap_or("default");
+            let css = v
+                .pointer("/result/value")
+                .and_then(Value::as_str)
+                .unwrap_or("default");
             let cursor = input::normalize_cursor(css);
             let changed = match s.inner.lock() {
                 Ok(mut i) if i.cursor != cursor => {
@@ -981,7 +1027,8 @@ impl LiveSession {
         let sid = Some(self.sid.as_str());
         match action {
             NavAction::Goto => {
-                let url = url.ok_or_else(|| LiveError::Invalid("url is required for goto".into()))?;
+                let url =
+                    url.ok_or_else(|| LiveError::Invalid("url is required for goto".into()))?;
                 let url = validate_nav_url(&url).await?;
                 let r = conn
                     .call("Page.navigate", json!({"url": url}), sid)
@@ -1002,15 +1049,23 @@ impl LiveSession {
                     .map_err(cdp_live)?;
                 let idx = h["currentIndex"].as_i64().unwrap_or(0);
                 let entries = h["entries"].as_array().cloned().unwrap_or_default();
-                let target = if action == NavAction::Back { idx - 1 } else { idx + 1 };
+                let target = if action == NavAction::Back {
+                    idx - 1
+                } else {
+                    idx + 1
+                };
                 if target < 0 || target as usize >= entries.len() {
                     return Ok(()); // nothing there — a no-op, like the browser
                 }
                 let entry_id = entries[target as usize]["id"].as_i64().unwrap_or(0);
-                conn.call("Page.navigateToHistoryEntry", json!({"entryId": entry_id}), sid)
-                    .await
-                    .map(|_| ())
-                    .map_err(cdp_live)
+                conn.call(
+                    "Page.navigateToHistoryEntry",
+                    json!({"entryId": entry_id}),
+                    sid,
+                )
+                .await
+                .map(|_| ())
+                .map_err(cdp_live)
             }
             NavAction::Reload => conn
                 .call("Page.reload", json!({}), sid)
@@ -1099,7 +1154,9 @@ impl LiveSession {
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| LiveError::Invalid("selector is required for an element screenshot".into()))?;
+                    .ok_or_else(|| {
+                        LiveError::Invalid("selector is required for an element screenshot".into())
+                    })?;
                 if sel.len() > 1000 {
                     return Err(LiveError::Invalid("selector too long".into()));
                 }
@@ -1401,7 +1458,9 @@ impl LiveSession {
                         json!({"host": guard::host_of(&url), "driver": driver}),
                     );
                 }
-                self.refresh_history().await;
+                // Off the event loop: frames and paused requests keep flowing.
+                let me = self.clone();
+                tokio::spawn(async move { me.refresh_history().await });
             }
             "Page.navigatedWithinDocument" => {
                 if p["frameId"].as_str() != Some(self.target_id.as_str()) {
@@ -1413,7 +1472,9 @@ impl LiveSession {
                     }
                 }
                 self.broadcast_state();
-                self.refresh_history().await;
+                // Off the event loop: frames and paused requests keep flowing.
+                let me = self.clone();
+                tokio::spawn(async move { me.refresh_history().await });
             }
             "Page.frameStartedLoading" | "Page.frameStoppedLoading" => {
                 if p["frameId"].as_str() != Some(self.target_id.as_str()) {
@@ -1441,7 +1502,12 @@ impl LiveSession {
                 };
                 self.broadcast_msg(ServerMsg::Dialog {
                     dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
-                    message: p["message"].as_str().unwrap_or("").chars().take(4000).collect(),
+                    message: p["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(4000)
+                        .collect(),
                     default_prompt: p["defaultPrompt"].as_str().unwrap_or("").to_string(),
                     url: p["url"].as_str().unwrap_or("").to_string(),
                 });
@@ -1554,8 +1620,8 @@ pub fn metrics_params(vp: Viewport) -> Value {
 /// Fetch pump + guard proxy re-vet every hop afterwards).
 pub async fn validate_nav_url(raw: &str) -> Result<String, LiveError> {
     let trimmed = raw.trim();
-    let parsed = reqwest::Url::parse(trimmed)
-        .map_err(|_| LiveError::Invalid("not a valid URL".into()))?;
+    let parsed =
+        reqwest::Url::parse(trimmed).map_err(|_| LiveError::Invalid("not a valid URL".into()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(LiveError::Invalid("only http(s) URLs can be opened".into()));
     }
