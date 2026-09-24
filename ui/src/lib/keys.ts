@@ -45,10 +45,15 @@ export const keyContext: {
   openFind: (() => void) | null;
   /** The in-app floating bar has focus: ⌃1–⌃4 switch ITS spaces. */
   barFocused: boolean;
+  /** A mounted page may claim ⌘-chords before the global map sees them (the
+   *  API client's ⌘T new request tab / ⌘D duplicate). Return true when handled;
+   *  the page clears it on unmount. */
+  pageChords: ((e: KeyboardEvent) => boolean) | null;
 } = {
   terminalFocused: false,
   openFind: null,
   barFocused: false,
+  pageChords: null,
 };
 
 /** `index` is the 1-based session number for the `jumpSession` action. */
@@ -118,6 +123,9 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     }
 
     if (!mod) return;
+    // Page-scoped chords (e.g. the API client's ⌘D) win over the global map
+    // while that page is mounted — outside a terminal, which owns its keys.
+    if (!term && !e.altKey && keyContext.pageChords?.(e)) return;
     // No global chord uses ⌥ as a modifier — match exactly so an ⌥-augmented
     // combo never triggers the plain-⌘ action (e.g. ⌥⌘T must not fire ⌘T's
     // "new session"; the DB editor binds ⌥⌘T for a new query tab).
@@ -306,6 +314,15 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘⌥↓', label: 'Move pane down' },
       { keys: '⌘⌥S', label: 'Swap pane with next' },
       { keys: '⌘F', label: 'Find (terminal / page)' },
+    ],
+  },
+  {
+    category: 'API client (on the API page)',
+    bindings: [
+      { keys: '⌘↵', label: 'Send the request' },
+      { keys: '⌘S', label: 'Save the request' },
+      { keys: '⌘T', label: 'New request tab (instead of a new session)' },
+      { keys: '⌘D', label: 'Duplicate the request (instead of a split)' },
     ],
   },
   {

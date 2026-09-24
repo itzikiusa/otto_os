@@ -42,14 +42,32 @@ workspace selection shows nothing to load.
 
 | Surface | File | What you get |
 |---|---|---|
-| **Full page** | `ui/src/modules/api/ApiPage.svelte` | Left sidebar (Collections / Automations / History / Env tabs) + a center column with request **tabs**, the request **builder**, and the **response** viewer stacked vertically. |
-| **Right-side panel** | `ui/src/modules/api/ApiPanel.svelte` | A compact version: a "Load…" dropdown (saved requests + recent history), the same builder (compact), a foldable environment section, and the response viewer. Reuses the same store, so the page and panel edit the *same* draft. |
+| **Full page** | `ui/src/modules/api/ApiPage.svelte` | Page header with the **environment switcher**, **Import…**, **Sync with Git…** and **New request**; a left pane that *lists* (Collections · Automations · History); a main area that *edits* — request tabs with the request editor over the response, or the **Environments** editor, or an **automation** editor. |
+| **Right-side panel** | `ui/src/modules/api/ApiPanel.svelte` | A compact version: a "Load…" dropdown (saved requests + recent history), the same editor (compact), a foldable environment section, and the response viewer. Reuses the same store, so the page and panel edit the *same* draft. |
 
-Center column (full page):
+A workspace with nothing in it (no saved requests, collections, history or
+edited tab) opens on a **"Create your first request"** state with *New
+request*, *Import from curl, Postman or OpenAPI…* and *Try an example request*.
+On a phone the list and the editor are two screens (a back button in the
+header returns to the list).
 
-- **Request tabs** — open many drafts at once; `+` (or `⌘T`) opens a new one,
-  `×` closes one. Each tab shows the method + a label (the saved name, else
-  `METHOD /path`, else `New Request`).
+Header:
+
+- **Environment ▾** — always visible; shows the active environment. The menu
+  switches environments, opens **Manage environments…** (the Environments
+  editor in the main area) and creates a new one.
+- **Import…** — one sheet for a pasted `curl` command, a Postman / OpenAPI /
+  HAR file, or a whole Postman account.
+- **Sync with Git…** — the git sync sheet (see [Import / export](#import--export)).
+- **New request** (`⌘T` on this page) — the one primary action.
+
+Main area (full page):
+
+- **Tabs** — open many drafts at once; `+` (or `⌘T`) opens a new one (an
+  untouched blank tab is reused), `×` closes one. Each tab shows the method + a
+  label (the saved name, else `METHOD /path`, else `New Request`) and a dot
+  while it has unsaved changes. The Environments editor and an open automation
+  appear as an extra tab; clicking a request tab returns to it.
   Open tabs **persist across app restarts**: the full drafts (method, URL,
   headers, query, body, auth, scripts, settings) + the active index are saved
   per-workspace in the browser's localStorage (`otto_api_tabs_v1:<workspace>`,
@@ -60,12 +78,15 @@ Center column (full page):
 - **Builder pane** — `RequestBuilder.svelte`.
 - **Response pane** — `ResponseViewer.svelte`.
 
-Sidebar tabs:
+Left pane (a three-way segmented control that never wraps):
 
 - **Collections** — `CollectionsTree.svelte`
-- **Automations** — `AutomationsView.svelte`
+- **Automations** — `AutomationsView.svelte` (the list; the editor is
+  `AutomationEditor.svelte` in the main area)
 - **History** — `HistoryList.svelte`
-- **Env** — `EnvSelector.svelte` (a dot appears on the tab when an environment is active)
+
+Environments are edited in `EnvironmentsView.svelte` (main area);
+`EnvSelector.svelte` is the compact panel's picker.
 
 Everything for the current workspace is loaded together (collections, requests,
 environments, history) plus automations when the page mounts or the workspace
@@ -80,28 +101,33 @@ via `parent_id` (a collection inside a collection is shown as a "folder").
 
 ### Collections tree (`CollectionsTree.svelte`)
 
-- **New request** (`+`) — opens a blank draft tab. (Available to everyone,
-  including Viewers — but a Viewer can't *save* it.)
-- **New collection** / **New folder** — Editor only. "New folder" on a collection
-  row creates a child collection under it.
-- **Rename** / **Delete** collection — Editor only. Deleting a collection removes
-  its descendant folders too; **requests inside become ungrouped, not deleted**
-  (confirmed both client-side and server-side).
+- **Search** — every word must match a request's method, name or URL, or a
+  collection's name (ancestor folders stay visible).
+- **New collection** (folder icon next to search) — Editor only.
+- **Row menu** (`⋯` on hover, or right-click) on a collection/folder: **New
+  request here** (opens a tab the save sheet files into that folder), **New
+  folder…**, **Export as OpenAPI**, **Rename…**, **Delete…** — deleting removes
+  descendant folders too; **requests inside become ungrouped, not deleted**
+  (confirmed both client-side and server-side). On a request: **Open**,
+  **Delete…**.
 - **Ungrouped** — requests with no `collection_id` are listed under an "Ungrouped"
   header at the bottom.
-- **Request rows** — click to load the request into the builder; the trash icon
-  (Editor only, appears on hover) deletes it after a confirm.
-- Collections sort by `position` then name; requests likewise.
+- **Request rows** — click to open the request (an already-open or edited tab is
+  never overwritten; it opens in a new tab).
+- Collections sort by `position` then name; requests likewise. Folder counts
+  include nested requests.
 
 ### Saving a request
 
-From the builder, **Save** (`⌘S`):
+**Save** (`⌘S`) in the request header row:
 
-1. Prompts for a request **name** (prefilled with the saved name, or `METHOD URL`).
-2. If any collections exist, prompts which collection to save into (type the
-   number from the list, or leave blank for ungrouped). An already-saved request
-   keeps its existing collection unless you change it.
-3. Viewers are refused with a "Read-only" toast.
+1. A request that is already saved is saved in place (name edits included).
+2. A new request opens the **Save request** sheet: a **Name** and **Save to** —
+   every collection and folder as a `Parent / Child` path, *No collection*, or
+   *New collection…* (created on the spot).
+3. **⋯ → Save as a copy…** duplicates the request (stored Keychain credentials
+   are not copied) and opens the sheet.
+4. Viewers are refused with a "Read-only" toast.
 
 > **What gets saved:** A saved request persists `name`, `method`, `url`,
 > `headers`, `query`, `body_mode`, `body`, `auth`, the **SSH tunnel** choice
@@ -113,18 +139,22 @@ From the builder, **Save** (`⌘S`):
 
 ### Import / export
 
-- **Import** (Editor only) — file picker accepting `.json/.har/.yaml/.yml`. The
+- **Import…** (header) — one sheet with three ways in: a pasted **curl
+  command** (opens as a new unsaved tab), a **File** (Editor only), or a
+  **Postman account** (every collection and environment via the Postman API).
+  The file picker accepts `.json/.har/.yaml/.yml`. The
   format is auto-detected and parsed **client-side** into a new collection (with
   nested folders):
   - **Postman v2.1** (`info` + `item[]`)
   - **OpenAPI 3 / Swagger** (`openapi`/`swagger`)
   - **HAR** (`log.entries`)
   Anything else throws "Unrecognized format".
-- **Export OpenAPI** — per-collection download icon. Calls
+- **Export as OpenAPI** — in a collection's row menu. Calls
   `GET …/collections/{id}/openapi` and saves the returned OpenAPI 3 JSON as
   `<name>.openapi.json`.
-- **Git sync** (Editor only, branch icon) — pull/push Postman collection files
-  to/from a git repo connected to the workspace:
+- **Sync with Git…** (header, Editor only) — pull/push Postman collection
+  files to/from a git repo connected to the workspace. The sheet states which
+  repository and branch the commit goes to and that secrets export as `***`:
   - **Pull** imports every recognized collection file (stored under
     `collections/`) via `POST /repos/{id}/api-collections/pull`.
   - **Commit & Push** exports each *root* collection to a
@@ -138,6 +168,16 @@ From the builder, **Save** (`⌘S`):
 
 `RequestBuilder.svelte`. Shared by the full page and the compact panel.
 
+### Header row
+
+- **Name** — edit it in place (placeholder: `METHOD /path`), next to where the
+  request is saved (`Payments API / Customers`, *Ungrouped*, or *Not saved*)
+  and an *Edited* marker.
+- **Save** (`⌘S`) — see [Saving a request](#saving-a-request).
+- **⋯** — Duplicate (`⌘D` on this page), Save as a copy…, Copy as curl,
+  Generate code…, Import from curl…, Session variables…, Cookie jar…, Delete
+  request….
+
 ### Transport kind
 
 A selector chooses the transport: **HTTP · SSE · WebSocket · gRPC**. The tab
@@ -145,16 +185,25 @@ strip and URL bar change with it:
 
 | Kind | Method shown | Tabs available | How it runs |
 |---|---|---|---|
-| **HTTP** | yes | Params, Authorization, Headers, Body, Scripts, Docs, Settings | `POST …/execute` |
+| **HTTP** | yes | Params, Headers, Body, Auth, Scripts, Docs, Settings | `POST …/execute` |
 | **SSE** | yes | (same as HTTP) | Streaming relay over `ws://…/ws/api-client/stream` |
-| **WebSocket** | no | Headers, Authorization, Settings | Streaming relay (same socket) |
+| **WebSocket** | no | Params, Headers, Auth, Settings | Streaming relay (same socket) |
 | **gRPC** | no | Message, Metadata | `POST …/grpc/invoke` |
+
+Tabs show what they hold (`Params 2`, `Body JSON`, `Auth Bearer`) and open
+with a one-line explanation of what the tab does. ←/→ move between them.
 
 ### URL bar
 
 - **Method** — `GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS` (HTTP/SSE only).
-- **URL** — `{{var}}` tokens are highlighted live. Placeholder hints differ by
-  kind (`https://…`, `wss://…`, `https://grpc…:443`).
+- **URL** — `{{var}}` tokens are highlighted live (amber when the variable is
+  not set). Placeholder hints differ by kind (`https://…`, `wss://…`,
+  `https://grpc…:443`).
+- **Variables line** — under the URL, every `{{variable}}` the request uses
+  (URL, params, headers, body, auth) with what it resolves to, in the daemon's
+  order: *generated* (built-ins), a session value, the active environment's
+  value, *secret* (Keychain, never shown), or *not set* (sent literally). Each
+  chip's tooltip says where the value comes from.
   - **Paste a `curl …` command into the URL field** and it is imported
     automatically (parsed by the daemon).
   - **Enter** sends the request; **⌘↵** also sends from anywhere.
@@ -162,16 +211,17 @@ strip and URL bar change with it:
 - **Stop** appears while an HTTP request is in flight or a stream is connected;
   it aborts the request / disconnects.
 
-### Toolbar
+### ⋯ menu tools
 
-- **Import curl** — paste box; parses via `POST /api-client/import-curl`.
+- **Import from curl…** — the Import sheet's curl tab; parses via `POST /api-client/import-curl`.
 - **Copy as curl** — builds a `curl` string from the current draft (client-side).
-- **Code** — generate a request snippet in **cURL, JavaScript (fetch), TypeScript
-  (fetch), Python (requests), or Go (net/http)** and copy it.
-- **Cookies** — opens this workspace's cookie jar (see [§6](#6-sending--reading-responses)).
-- **Vars** — session/runtime variables editor (see [§5](#5-environments--variables)).
-- **Active environment** chip — shows the active env name.
-- **Save** — save the draft (see [§3](#3-collections--requests)).
+- **Generate code…** — a request snippet in **cURL, JavaScript (fetch),
+  TypeScript (fetch), Python (requests), or Go (net/http)**; stored secrets
+  appear as `***`.
+- **Cookie jar…** — this workspace's cookie jar (see [§6](#6-sending--reading-responses)).
+- **Session variables…** — session/runtime variables editor (see [§5](#5-environments--variables)).
+- The **private addresses** workspace toggle lives in the Settings tab
+  (*Workspace* section), and the blocked-address error offers it too.
 
 ### Tabs
 
@@ -183,30 +233,31 @@ key, value, and remove. Disabled or empty-key rows are dropped before sending.
 (`Content-Type`, `Accept`, `Accept-Encoding`, `Cache-Control`, `Authorization`,
 …).
 
-**Body** — Postman-style radio modes:
+**Body** — a **Body type** picker (each type explains itself under the picker):
 
-| Mode | Wire format | Notes |
+| Body type (stored mode) | Wire format | Notes |
 |---|---|---|
-| **none** | — | no body |
-| **form-data** (`multipart`) | `multipart/form-data` | key/value rows; each row can be **Text** or **File**. Files are read to base64 in the browser and reassembled server-side; the daemon sets the boundary. |
-| **x-www-form-urlencoded** (`form`) | `application/x-www-form-urlencoded` | key/value rows encoded as `k=v&…`. |
-| **raw** | text | sub-type dropdown: **Text / JavaScript / JSON / HTML / XML** — drives the editor language and the auto Content-Type. |
-| **binary** | — | **shown but disabled** (not supported). |
-| **GraphQL** | `application/json` | a Query editor + a separate **Variables (JSON)** editor; **Introspect schema** lists types/fields. The query + variables are wrapped into `{ "query", "variables" }` at send time. |
+| **No body** (`none`) | — | no body |
+| **JSON** (`json`) | `application/json` | code editor; **Format JSON** pretty-prints. |
+| **Text / XML / HTML** (`raw`) | text | a **Format** picker: **Plain text / JavaScript / HTML / XML** — drives the editor language and the auto Content-Type. |
+| **Form (URL-encoded)** (`form`) | `application/x-www-form-urlencoded` | key/value rows encoded as `k=v&…`. |
+| **Multipart form (files)** (`multipart`) | `multipart/form-data` | key/value rows; each row can be **Text** or **File**. Files are read to base64 in the browser and reassembled server-side; the daemon sets the boundary. |
+| **GraphQL** (`graphql`) | `application/json` | a Query editor + a separate **Variables (JSON)** editor; **Load schema from server** lists types/fields. The query + variables are wrapped into `{ "query", "variables" }` at send time. |
 
-The Content-Type header is auto-managed: choosing a body mode sets the implied
-Content-Type, and only overwrites a value you didn't hand-type.
-**Beautify** pretty-prints JSON/XML/HTML raw bodies.
+A single-file binary body is not supported (the old disabled *binary* radio
+is gone). The Content-Type header is auto-managed: choosing a body type sets
+the implied Content-Type, and only overwrites a value you didn't hand-type.
 
-**Authorization** — type selector:
+**Auth** — a **Type** picker with a one-line explanation, and a note that
+tokens and passwords move to the Keychain on save:
 
 | Type | Fields | Effect on the wire |
 |---|---|---|
-| **none** | — | nothing added |
-| **bearer** | Token | `Authorization: Bearer <token>` |
-| **basic** | Username, Password | `Authorization: Basic base64(user:pass)` |
-| **api key** | Key, Value, **Add to: Header \| Query param** | header or query param |
-| **oauth2** | Grant (Client Credentials / Password / Refresh Token), Token URL, Client ID/Secret, Username/Password (password grant), Refresh Token (refresh grant), Scope | **Get New Token** calls `POST …/oauth2/token` server-side; the returned `access_token` is stored on the draft and attached as `Authorization: <token_type> <access_token>`. |
+| **No auth** | — | nothing added |
+| **Bearer token** | Token | `Authorization: Bearer <token>` |
+| **Basic auth** | Username, Password | `Authorization: Basic base64(user:pass)` |
+| **API key** | Key name, Value, **Send as: a header \| a query parameter** | header or query param |
+| **OAuth 2.0** | How to sign in (in the browser / client credentials / username and password / refresh token), Token URL, Client ID/secret, Username/Password, Refresh token, Scope | **Get token** calls `POST …/oauth2/token` server-side; the returned `access_token` is stored on the draft and attached as `Authorization: <token_type> <access_token>`. |
 
 All auth fields accept `{{var}}` substitution.
 **Authorization Code + PKCE** adds the browser consent flow described below; the three server-side grants remain available.
@@ -270,21 +321,28 @@ JSON request, **Metadata** holds headers. **Invoke** calls `…/grpc/invoke`.
 
 ### Browser OAuth and saved gRPC
 
-Choose **Authorization Code + PKCE (browser)** under Authorization, enter the authorization URL, token URL and client ID, and register the displayed callback with the provider. **Get New Token** saves the request, opens the system browser, exchanges the returned code using S256 PKCE, and stores access/refresh tokens in Keychain. The callback runs on the daemon host; the browser must reach that host's loopback address. Flows expire after ten minutes and each state can be used once. Public provider URLs require HTTPS; loopback development endpoints may use HTTP when local access is enabled. Changing request authorization while the browser is open rejects completion rather than replacing newer credentials. A pending flow is not resumed after quitting the application or daemon.
+Choose **Authorization Code + PKCE (browser)** under Authorization, enter the authorization URL, token URL and client ID, and register the displayed callback with the provider. **Get token** saves the request, opens the system browser, exchanges the returned code using S256 PKCE, and stores access/refresh tokens in Keychain. The callback runs on the daemon host; the browser must reach that host's loopback address. Flows expire after ten minutes and each state can be used once. Public provider URLs require HTTPS; loopback development endpoints may use HTTP when local access is enabled. Changing request authorization while the browser is open rejects completion rather than replacing newer credentials. A pending flow is not resumed after quitting the application or daemon.
 
 Saved gRPC requests retain `.proto` text and the selected method in `extras.grpc`; reload and Invoke use those fields. **Re-parse** rebuilds the method chooser when needed. Saved extras are limited to 256 KiB. Clearing scripts/settings/docs saves an explicit `{v:1}` so old extras are removed.
 
 ## 5. Environments & variables
 
-`EnvSelector.svelte`. Environments are named bags of string key/value variables,
-scoped to the workspace. Exactly one can be **active** at a time.
+`EnvironmentsView.svelte` (main area; `EnvSelector.svelte` in the compact
+panel). Environments are named bags of string key/value variables, scoped to
+the workspace. Exactly one can be **active** at a time.
 
-- **New / Rename / Delete** environment — Editor only.
-- **Activate** — the radio on each row sets it active
-  (`POST …/environments/{id}/activate`); the active env's name shows as a chip in
-  the builder toolbar and a dot on the sidebar Env tab.
-- **Edit variables** — inline key/value rows (Editor, full page only). Empty keys
-  are dropped on save.
+- **Switch** — the header's **Environment ▾** menu (always visible) or **Make
+  active** in the editor (`POST …/environments/{id}/activate`).
+- **New environment** / **⋯ → Rename…, Delete…** — Editor only. Delete says
+  how many Keychain secrets go with it.
+- **Variables table** — Name · Value · Secret, one row per variable; typing
+  into the trailing blank row adds another. **Save changes** is enabled once
+  something changed; switching environments with unsaved edits asks first.
+- **Secret** (lock toggle) — the value moves to the Keychain on save and renders
+  masked afterwards; making a stored secret plain asks first (the stored value
+  is deleted unless retyped).
+- **⋯ → Secure plaintext secrets…** — the one-pass Keychain sweep (see
+  [§11](#11-security)), with a confirmation that says what moves.
 
 ### Substitution (`{{var}}`)
 
@@ -313,34 +371,45 @@ client, records a history entry, and returns the response.
 
 ### Response header
 
-- **Status pill** — colored by class (2xx green / 3xx accent / 4xx orange / 5xx
-  red), with status text.
-- **Timing** — `duration_ms`. **Size** — human-readable. **Content-Type**.
-- **Save** — download the response body to disk (uses the full base64 bytes;
-  filename from `Content-Disposition` when present, else `response.<ext>`).
-- **To agent** — send the response (status/content-type/body) to a running agent
-  session via the context-packet dialog.
+- **Status chip** — toned by class (2xx success / 3xx info / 4xx warning / 5xx
+  danger) with the status text; the tooltip names the class in words.
+- **Time** and **size** chips, then the **Content-Type**.
+- **Copy** — the body as shown (pretty, raw or filtered).
+- **⋯** — **Add to Docs as example** (appends the status and body to the
+  request's Docs; kept once the request is saved), **Download response…** (the
+  full base64 bytes; filename from `Content-Disposition` when present, else
+  `response.<ext>`), **Send to an agent…** (the context-packet dialog).
+- **Before the first send** the pane says how to send (`⌘↵`) and what you'll see.
+- **When a send fails** the pane shows the failure in place of the old
+  response: what happened, the daemon's message, and a next step — a blocked
+  private address offers *Allow private addresses…* (workspace admin, with a
+  confirmation), a timeout links to the Settings tab.
 
 ### Body tab
 
-- **Pretty / Raw** toggle. JSON is pretty-printed (memoized, size-gated: bodies
-  over **256 KB** are shown raw to avoid blocking the UI).
-- **JSONPath filter** — for JSON bodies, a `$.a.b[0].c`-style filter narrows the
+- **Pretty · Raw · Tree · Preview**. JSON is pretty-printed (memoized,
+  size-gated: bodies over **256 KB** are shown raw to avoid blocking the UI).
+  **Tree** is a collapsible JSON tree (first two levels open) with **Find a
+  key or value** — matches are highlighted and their parents opened;
+  right-click a node to copy its JSONPath or value. **Preview** renders HTML in
+  a sandboxed frame (no scripts) and shows images.
+- **JSONPath filter** — in Pretty view, a `$.a.b[0].c`-style filter narrows the
   view (debounced).
-- **Images** (`image/*`) are previewed inline from the base64 body.
-- **Truncation** — text display is capped at **512 KB**; a banner says "Showing
-  the first 512 KB… use **Save** to get the full response."
+- **Truncation** — text display is capped at **512 KB**; a notice says "Showing
+  the first 512 KB… Download the response from ⋯ to get all of it."
 - **Too large** — bodies over **25 MB** are not inlined at all; a panel explains
   this (re-run against a smaller payload to inspect inline).
 
 ### Other tabs
 
-- **Headers** — full response header table.
-- **Trace** — per-phase steps: Request → Sent → Waiting (TTFB, incl. connect +
+- **Headers** — full response header table (with a count on the tab).
+- **Cookies** — present when the response set cookies: name, value and
+  attributes parsed from `Set-Cookie`.
+- **Timeline** — per-phase steps: Request → Sent → Waiting (TTFB, incl. connect +
   TLS) → Redirected (if any) → Downloaded → Completed, each with timings.
-- **Tests** — present when a post-response script ran: per-test pass/fail (`✓/✕`,
-  `passed/total` badge) plus a **Console** of `console.*` + `[pre]`/`[test]`
-  logs.
+- **Tests** — present when a post-response script ran: per-test *Passed* /
+  *Failed* with a `passed/total` count, plus a **Console** of `console.*` +
+  `[pre]`/`[test]` logs.
 
 ### Streaming (SSE / WebSocket)
 
@@ -362,15 +431,18 @@ The store keeps at most 1000 messages / 4 MiB of text; each displayed message is
 `HistoryList.svelte`. Every executed HTTP request (success *or* failure) is
 recorded per-workspace.
 
-- Rows show method, URL, status (color-classed; null for network failures), and
-  a formatted timestamp; the list is virtualized.
-- **Click a row** to reload its request snapshot into the builder
+- Rows show the method and path, then the host, a status chip (*No response*
+  for network failures) and a relative time (absolute time in the tooltip);
+  the list is virtualized.
+- **Click a row** to open its request snapshot in a tab — it is not re-sent
   (`loadHistoryIntoDraft`). The snapshot captures method/url/headers/query/
   body_mode/body/auth as executed.
-- **Clear history** empties the workspace's history (`DELETE …/history`, Editor).
+- **⋯ → Retention…** opens a sheet (keep the newest N / delete after D days; 0 =
+  no limit); the current policy is shown under the search. **⋯ → Clear
+  history…** empties the workspace's history (`DELETE …/history`, Editor).
 - History is bounded server-side: default **100**, max **500** entries returned.
 - Agent executions carry `request.source = {kind:"agent", session_id}` and show an
-  `agent` chip. Use the **Agent runs** filter to show only those rows.
+  *Agent* chip. Use the **Agent runs only** filter to show only those rows.
 - New rows refresh live through the workspace-scoped `api_history_appended`
   WebSocket event; no page reload is needed.
 - The history API also accepts `q`, `status`, `request_id`, and
@@ -389,25 +461,32 @@ variables for later steps (request chaining).
 
 ### Authoring
 
-- **New / Rename / Delete** automation — Editor only. The selected automation
-  loads into a working copy (edits aren't live until **Save**).
+- The left pane lists automations (with step counts) and **New automation**;
+  selecting one opens `AutomationEditor.svelte` in the main area as a working
+  copy (edits aren't live until **Save**; the title shows *edited*). **⋯ →
+  Rename… / Delete…** — Editor only.
 - **Add step** — appends a step bound to a saved request (you must have at least
-  one saved request). Reorder with up/down; remove with the trash icon.
-- **Per-step assertions** — each is `kind` + `op` + `value` (+ a `path` for
-  `json_path`):
-  - **kind**: `status`, `json_path`, `duration_ms`
-  - **op**: `eq`, `ne`, `contains`, `lt`, `gt`
-  - With **no assertions**, the step passes on any successful (2xx) response.
-- **Per-step extracts** — `JSONPath → var`: pull a value from the response body
-  into a `{{var}}` available to subsequent steps. (Incomplete rows — missing path
-  or var — are dropped on save.)
+  one saved request), pre-filled with the check *Status code is less than 400*.
+  Reorder with ↑/↓; remove with the trash icon.
+- **Check that** (assertions) — each is `kind` + `op` + `value` (+ a `path` for
+  `json_path`), shown in words:
+  - **kind**: *Status code* (`status`), *JSON value at* (`json_path`),
+    *Response time (ms)* (`duration_ms`)
+  - **op**: *equals*, *does not equal*, *contains*, *is less than*, *is greater
+    than* (`eq`, `ne`, `contains`, `lt`, `gt`)
+  - With **no checks**, the step passes on any successful (2xx) response.
+- **Save for later steps** (extracts) — *Take `$.path` as `{{name}}`*: pull a
+  value from the response body into a `{{var}}` available to subsequent steps.
+  (Incomplete rows — missing path or name — are dropped on save.)
+- After **Run**, the page scrolls to the report; a *Last run passed / failed ·
+  n/m* chip next to Run jumps back to it.
 
 ### Running
 
 **Run** (saves first if dirty) starts `POST …/automations/{id}/runs`, then polls the saved report. The daemon:
 
 - Seeds variables from the explicitly selected environment (or the active environment at start).
-- Pins the saved request definitions and runs steps in order through the shared HTTP send path. **Stop on first failure** is optional; otherwise all steps run. Errors are retained in the report.
+- Pins the saved request definitions and runs steps in order through the shared HTTP send path. **Stop at the first failed step** is optional; otherwise all steps run. Errors are retained in the report.
 - Evaluates assertions against status / duration / the JSON body, then applies
   extractions into the chained map for later steps.
 - Returns a report: an overall pass/fail banner (`passed = every step ok`),
@@ -420,7 +499,7 @@ Extracted variables are local to the run; saved environment values are not modif
 > step's assertions and affect its pass/fail), **Settings** and **GraphQL
 > variables**. Runs accept an explicit environment id or use the active environment at start. Non-HTTP transports (SSE/WS/gRPC) are not runnable in automations.
 
-Use **Dataset rows (JSON)** to provide an array of objects. Each row overlays the selected environment independently; extracted variables chain only within that row. Dataset values stay in memory. Runs accept at most 1 MiB of dataset JSON and 1000 total step executions.
+Use **Run once per data row (advanced)** to provide an array of objects. Each row overlays the selected environment independently; extracted variables chain only within that row. Dataset values stay in memory. Runs accept at most 1 MiB of dataset JSON and 1000 total step executions.
 
 **Run history** retains the latest 50 reports with **Load older runs** pagination, request versions at start, row indices, status, assertions and errors. Each completed step also gets a correlated request-history row. Completed results are saved before the next request starts. **Cancel run** stops waiting on the active request and skips remaining work; a request already sent may have reached its server. After daemon restart unfinished runs become `interrupted`, retain completed steps, and are never automatically replayed. Cancellation and restarting are separate actions.
 
@@ -512,7 +591,7 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
   reassembled by the daemon with a guessed MIME type).
 - Use **auth helpers**: Bearer, Basic, API-key (header or query), and OAuth2
   (client-credentials / password / refresh-token grants) with a server-side
-  **Get New Token**.
+  **Get token**.
 - Run **GraphQL** (query + JSON variables) and **introspect** a schema.
 - Open **Server-Sent Events** and **WebSocket** streams (bridged through the
   daemon), including sending WS messages live.
@@ -683,7 +762,7 @@ scripts it did not intend to change.
 | Auth field shows "•••••• stored in Keychain" | The value was migrated to the macOS Keychain; it is used at execute time. Type into the field to replace it. |
 | Saved request lost its body type as form-data | form-data/multipart and raw sub-types are encoded into `body`/headers; the stored `body_mode` is `none/json/raw/form/graphql` only. |
 | `client-streaming gRPC methods are not supported` | Only unary and server-streaming gRPC are implemented. |
-| OAuth2 "Get New Token" fails | Check the **Token URL** and grant; for browser authorization register the displayed loopback callback, then use Authorization Code + PKCE. Expired, declined, or changed-request flows must be restarted. |
+| OAuth2 "Get token" fails | Check the **Token URL** and grant; for browser authorization register the displayed loopback callback, then use Authorization Code + PKCE. Expired, declined, or changed-request flows must be restarted. |
 | Streamed log seems to drop messages | The console caps at the **last 500** messages. |
 | Big response shows a "too large"/"truncated" banner | >25 MB isn't inlined; text >512 KB is truncated for display — use **Save** for the full body. |
 | Import says "Unrecognized format" | Only Postman v2.1, OpenAPI 3/Swagger, and HAR JSON are recognized. |
@@ -708,7 +787,9 @@ scripts it did not intend to change.
 | Area | File(s) |
 |---|---|
 | UI page / panel | `ui/src/modules/api/ApiPage.svelte`, `ApiPanel.svelte` |
-| Builder / response / sidebar | `RequestBuilder.svelte`, `ResponseViewer.svelte`, `CollectionsTree.svelte`, `EnvSelector.svelte`, `HistoryList.svelte`, `AutomationsView.svelte` |
+| Editor / response / left pane | `RequestBuilder.svelte`, `ResponseViewer.svelte` (+ `JsonTree.svelte`), `CollectionsTree.svelte`, `HistoryList.svelte`, `AutomationsView.svelte` |
+| Main-area editors / sheets | `EnvironmentsView.svelte`, `AutomationEditor.svelte`, `SaveRequestDialog.svelte`, `ImportDialog.svelte`, `GitSyncDialog.svelte`, `RetentionDialog.svelte` (compact panel: `EnvSelector.svelte`) |
+| Plain-language helpers | `ui/src/lib/api/apiVars.ts` (variable resolution, method/status tones), `ui/src/lib/api/jsonTree.ts` |
 | UI store / scripts / import / codegen | `ui/src/lib/stores/apiClient.svelte.ts`, `apiStream.svelte.ts`, `ui/src/lib/api/scripts.ts`, `importers.ts`, `codegen.ts` |
 | Backend (REST) | `crates/otto-server/src/routes/api_client.rs`, `grpc.rs`, `api_stream.rs` |
 | SSRF guard | `crates/otto-netguard/src/lib.rs` |

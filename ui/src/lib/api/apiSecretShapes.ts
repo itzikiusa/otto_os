@@ -108,3 +108,26 @@ export function unmaskHistory(
   const query = rows(snap.query, saved?.query);
   return { auth: a as unknown as ApiAuth, headers, query, blanked };
 }
+
+/** Copy of a draft for "Duplicate": Keychain markers belong to the ORIGINAL
+ *  request's Keychain item, so they are blanked (the person re-enters them, or
+ *  keeps using `{{variables}}`); plaintext and `{{var}}` values are kept.
+ *  `blanked` reports whether anything was cleared. */
+export function forDuplicate<T extends SecretBearing>(d: T): T & { blanked: boolean } {
+  let blanked = false;
+  const auth = { ...d.auth } as Record<string, unknown>;
+  for (const m of SECRET_MEMBERS[d.auth.type] ?? []) {
+    const v = auth[m];
+    if (typeof v === 'object' && v !== null && typeof (v as { $secret?: unknown }).$secret === 'string') {
+      auth[m] = '';
+      blanked = true;
+    }
+  }
+  return {
+    ...d,
+    auth: auth as unknown as ApiAuth,
+    headers: d.headers.map((r) => ({ ...r })),
+    query: d.query.map((r) => ({ ...r })),
+    blanked,
+  };
+}

@@ -1,85 +1,24 @@
 <script lang="ts">
-  // Collections + nested folders (parent_id) + saved requests. Click a request
-  // to load it into the builder; new/rename/delete collections; export a
-  // collection to an OpenAPI 3 document.
+  // Saved requests, grouped into collections and nested folders (parent_id).
+  // Click a request to open it (an already-open or edited tab is never
+  // overwritten — see apiClient.placeDraft). Row actions live in one ⋯ /
+  // right-click menu per row instead of four always-visible icons.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
+  import MethodTag from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { detectAndParse } from '../../lib/api/importers';
-  import type { ApiCollection, ApiRequest, Repo } from '../../lib/api/types';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import type { ApiCollection, ApiRequest } from '../../lib/api/types';
 
-  async function importFile(input: HTMLInputElement): Promise<void> {
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-    // Close the dialog as soon as a file is picked — the import itself can
-    // take a moment (folders + requests are created one by one) and progress
-    // is reported via toasts, not the dialog.
-    postmanOpen = false;
-    try {
-      const parsed = detectAndParse(await file.text(), file.name);
-      await apiClient.importParsed(parsed);
-    } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
-    }
+  interface Props {
+    /** A request was opened / created (the page shows the editor). */
+    onopen?: () => void;
   }
-
-  // ── Postman account sync (fetch ALL collections via the Postman API) ───────
-  let postmanOpen = $state(false);
-  let pmKey = $state('');
-  let pmRemember = $state(true);
-  let pmBusy = $state(false);
-
-  async function runPostmanSync(): Promise<void> {
-    pmBusy = true;
-    try {
-      const ok = await apiClient.postmanSync(pmKey.trim(), pmRemember);
-      if (ok) {
-        postmanOpen = false;
-        pmKey = '';
-      }
-    } finally {
-      pmBusy = false;
-    }
-  }
-
-  // ── Git sync ────────────────────────────────────────────────────────────────
-  let gitOpen = $state(false);
-  let repos = $state<Repo[]>([]);
-  let repoId = $state('');
-  let commitMsg = $state('Update API collections');
-  let branch = $state('');
-  let syncing = $state(false);
-
-  async function toggleGit(): Promise<void> {
-    gitOpen = !gitOpen;
-    if (gitOpen && repos.length === 0 && ws.currentId) {
-      try {
-        repos = await api.get<Repo[]>(`/workspaces/${ws.currentId}/repos`);
-        if (repos.length && !repoId) repoId = repos[0].id;
-      } catch (e) {
-        toasts.error('Could not load repos', e instanceof Error ? e.message : String(e));
-      }
-    }
-  }
-  async function gitPull(): Promise<void> {
-    if (!repoId) return;
-    syncing = true;
-    await apiClient.gitPullCollections(repoId);
-    syncing = false;
-  }
-  async function gitPush(): Promise<void> {
-    if (!repoId) return;
-    syncing = true;
-    const ok = await apiClient.gitPushCollections(repoId, commitMsg, branch.trim() || null);
-    syncing = false;
-    if (ok) gitOpen = false;
-  }
+  let { onopen }: Props = $props();
 
   interface TreeNode {
     col: ApiCollection;
@@ -102,6 +41,9 @@
     return matchesTokens(`${r.method} ${r.name} ${r.url}`.toLowerCase());
   }
 
+  function countAll(node: TreeNode): number {
+    return node.items.length + node.children.reduce((n, c) => n + countAll(c), 0);
+  }
   function buildTree(parentId: string | null): TreeNode[] {
     return apiClient.collections
       .filter((c) => (c.parent_id ?? null) === parentId)
@@ -135,6 +77,7 @@
       .filter((r) => !r.collection_id && (tokens.length === 0 || requestMatches(r)))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
+  const isEmpty = $derived(apiClient.collections.length === 0 && apiClient.requests.length === 0);
 
   function toggle(id: string): void {
     collapsed[id] = !collapsed[id];
@@ -147,13 +90,13 @@
       confirmLabel: 'Create',
     });
     if (!name) return;
-    await apiClient.saveCollection({ name, parent_id: parentId }, undefined);
+    const saved = await apiClient.saveCollection({ name, parent_id: parentId }, undefined);
+    if (saved && parentId) collapsed[parentId] = false;
   }
 
   async function renameCollection(col: ApiCollection): Promise<void> {
-    if (!canEdit) return;
-    const name = await confirmer.promptText('Rename collection', {
-      title: 'Rename collection',
+    const name = await confirmer.promptText('Name', {
+      title: col.parent_id ? 'Rename folder' : 'Rename collection',
       confirmLabel: 'Rename',
       initial: col.name,
     });
@@ -162,22 +105,28 @@
   }
 
   async function deleteCollection(col: ApiCollection): Promise<void> {
-    if (!canEdit) return;
+    const kind = col.parent_id ? 'folder' : 'collection';
     if (!(await confirmer.ask(
-      `Delete collection “${col.name}”? Folders inside are removed too; their requests become ungrouped.`,
-      { title: 'Delete collection' },
+      `Delete ${kind} “${col.name}”? Folders inside it are deleted too. Its requests are kept and move to “Ungrouped”.`,
+      { title: `Delete ${kind}` },
     ))) return;
     await apiClient.deleteCollection(col.id);
   }
 
   async function deleteRequest(r: ApiRequest): Promise<void> {
-    if (!canEdit) return;
-    if (!(await confirmer.ask(`Delete request “${r.name}”?`, { title: 'Delete request' }))) return;
+    if (!(await confirmer.ask(`Delete the saved request “${r.name}”? Its stored credentials are removed from the Keychain. History entries stay.`, { title: 'Delete request' }))) return;
     await apiClient.deleteRequest(r.id);
   }
 
   function openRequest(r: ApiRequest): void {
     apiClient.loadRequestIntoDraft(r);
+    onopen?.();
+  }
+
+  function newRequestIn(col: ApiCollection): void {
+    collapsed[col.id] = false;
+    apiClient.newDraft(col.id);
+    onopen?.();
   }
 
   // Export the collection to OpenAPI: fetch the JSON and download it.
@@ -185,9 +134,7 @@
     const wsId = ws.currentId;
     if (!wsId) return;
     try {
-      const spec = await api.get<unknown>(
-        `/workspaces/${wsId}/api-client/collections/${col.id}/openapi`,
-      );
+      const spec = await api.get<unknown>(`/workspaces/${wsId}/api-client/collections/${col.id}/openapi`);
       const blob = new Blob([JSON.stringify(spec, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -197,90 +144,86 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toasts.success('Exported OpenAPI', col.name);
+      toasts.success('Exported as OpenAPI', a.download);
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t export the collection', e instanceof Error ? e.message : String(e));
     }
+  }
+
+  function collectionMenu(e: MouseEvent | KeyboardEvent, col: ApiCollection): void {
+    const items: MenuItem[] = [
+      { label: 'New request here', icon: 'plus', action: () => newRequestIn(col) },
+      ...(canEdit ? [{ label: 'New folder…', icon: 'folder', action: () => void newCollection(col.id) }] : []),
+      { label: 'Export as OpenAPI', icon: 'download', action: () => void exportOpenApi(col) },
+      ...(canEdit
+        ? [
+            { separator: true },
+            { label: 'Rename…', icon: 'edit', action: () => void renameCollection(col) },
+            { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteCollection(col) },
+          ]
+        : []),
+    ];
+    ctxMenu.show(e, items);
+  }
+
+  function requestMenu(e: MouseEvent | KeyboardEvent, r: ApiRequest): void {
+    const items: MenuItem[] = [
+      { label: 'Open', icon: 'external', action: () => openRequest(r) },
+      ...(canEdit
+        ? [{ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteRequest(r) }]
+        : []),
+    ];
+    ctxMenu.show(e, items);
   }
 </script>
 
 <div class="tree-wrap">
-  <div class="tree-head">
-    <span class="tree-title">Collections</span>
-    <div class="row">
-      <button class="icon-btn" title="New request" aria-label="New request" onclick={() => apiClient.newDraft()}>
-        <Icon name="plus" size={13} />
-      </button>
-      {#if canEdit}
-        <button class="icon-btn" title="New collection" aria-label="New collection" onclick={() => newCollection(null)}>
-          <Icon name="folder" size={13} />
-        </button>
-        <button class="icon-btn" title="Import from Postman account or a file" aria-label="Import collections" onclick={() => (postmanOpen = true)}>
-          <Icon name="external" size={13} />
-        </button>
-        <button class="icon-btn" class:active={gitOpen} title="Sync with Git" aria-label="Sync collections with Git" onclick={toggleGit}>
-          <Icon name="branch" size={13} />
-        </button>
-      {/if}
-    </div>
-  </div>
-
-  {#if gitOpen}
-    <div class="git-sync">
-      {#if repos.length === 0}
-        <div class="git-empty">No git repos connected in this workspace. Add one in the Git tab.</div>
-      {:else}
-        <select class="input git-repo" value={repoId} onchange={(e) => (repoId = (e.currentTarget as HTMLSelectElement).value)} aria-label="Repository">
-          {#each repos as r (r.id)}<option value={r.id}>{r.name}</option>{/each}
-        </select>
-        <div class="git-row">
-          <input class="input git-msg" bind:value={commitMsg} placeholder="Commit message" />
-          <input class="input git-branch" bind:value={branch} placeholder="branch (optional)" />
-        </div>
-        <div class="git-actions">
-          <button class="btn small ghost" onclick={gitPull} disabled={syncing}>
-            <Icon name="refresh" size={11} />Pull
-          </button>
-          <button class="btn small primary" onclick={gitPush} disabled={syncing}>
-            <Icon name="branch" size={11} />Commit &amp; Push
-          </button>
-        </div>
-        <div class="git-hint">Collections are stored as Postman files under <code>collections/</code>. Use a branch to open a PR afterwards from the Git tab.</div>
-      {/if}
-    </div>
-  {/if}
-
-  {#if apiClient.collections.length > 0 || apiClient.requests.length > 0}
-    <div class="list-search">
+  <div class="tree-tools">
+    <label class="search">
       <Icon name="search" size={12} />
       <input
-        class="list-search-input"
-        placeholder="Search by name, URL, method…"
+        placeholder="Search requests"
         bind:value={search}
         aria-label="Search collections and requests"
+        disabled={isEmpty}
       />
       {#if search}
-        <button class="icon-btn" onclick={() => (search = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+        <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}
-    </div>
-  {/if}
+    </label>
+    {#if canEdit}
+      <button class="icon-btn" title="New collection" aria-label="New collection" onclick={() => newCollection(null)}>
+        <Icon name="folder" size={14} />
+      </button>
+    {/if}
+  </div>
 
-  {#if apiClient.collections.length === 0 && apiClient.requests.length === 0}
+  {#if apiClient.loadError && isEmpty}
+    <div class="state err" role="alert">
+      <Icon name="warning" size={14} />
+      <div class="grow">
+        <div>Couldn’t load saved requests.</div>
+        <div class="dim-line">{apiClient.loadError}</div>
+      </div>
+      <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
+    </div>
+  {:else if apiClient.loading && isEmpty}
+    <div class="state dim" role="status">Loading saved requests…</div>
+  {:else if isEmpty}
     <EmptyState
       icon="folder"
-      title="No saved requests"
-      body="Save the current request from the builder, or create a collection to organize them."
-      actionLabel={canEdit ? 'New collection' : undefined}
-      onaction={canEdit ? () => newCollection(null) : undefined}
+      title="No saved requests yet"
+      body="Press ⌘S in a request to save it here. Collections group requests by API or feature."
     >
       {#if canEdit}
-        <button class="btn ghost empty-import" onclick={() => (postmanOpen = true)}>
-          <Icon name="external" size={12} />Import from Postman…
-        </button>
+        <button class="btn ghost small" onclick={() => newCollection(null)}><Icon name="folder" size={12} />New collection</button>
       {/if}
     </EmptyState>
   {:else if tokens.length > 0 && tree.length === 0 && ungrouped.length === 0}
-    <div class="no-match">No requests match “{search.trim()}”.</div>
+    <div class="state no-match">
+      No requests match “{search.trim()}”.
+      <button class="btn ghost small" onclick={() => (search = '')}>Clear search</button>
+    </div>
   {:else}
     <div class="tree">
       {#each tree as node (node.col.id)}
@@ -288,14 +231,9 @@
       {/each}
 
       {#if ungrouped.length > 0}
-        <div class="col-head plain">
-          <span class="caret-spacer"></span>
-          <Icon name="box" size={12} />
-          <span class="col-name grow">Ungrouped</span>
-          <span class="count">{ungrouped.length}</span>
-        </div>
+        <div class="section-title ungrouped">Ungrouped</div>
         {#each ungrouped as r (r.id)}
-          {@render requestRow(r, 1)}
+          {@render requestRow(r, 0)}
         {/each}
       {/if}
     </div>
@@ -305,305 +243,207 @@
 {#snippet collectionNode(node: TreeNode, depth: number)}
   <!-- While filtering, force branches open so matches are never hidden. -->
   {@const isOpen = tokens.length > 0 || !collapsed[node.col.id]}
-  <div class="col-head" style="padding-left: {depth * 14 + 4}px">
-    <button class="caret" onclick={() => toggle(node.col.id)} aria-label="Toggle collection">
+  <div class="col-head" style:padding-inline-start="{depth * 14 + 2}px">
+    <button class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
       <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+      <Icon name="folder" size={14} />
+      <span class="col-name" title={node.col.name}>{node.col.name}</span>
+      <span class="count" title="{countAll(node)} requests">{countAll(node)}</span>
     </button>
-    <Icon name="folder" size={13} />
-    <span class="col-name grow ellipsis" title={node.col.name}>{node.col.name}</span>
-    <span class="count">{node.items.length}</span>
-    {#if canEdit}
-      <button class="icon-btn" title="New folder" aria-label="New folder" onclick={() => newCollection(node.col.id)}><Icon name="plus" size={12} /></button>
-    {/if}
-    <button class="icon-btn" title="Export OpenAPI" aria-label="Export OpenAPI" onclick={() => exportOpenApi(node.col)}><Icon name="external" size={12} /></button>
-    {#if canEdit}
-      <button class="icon-btn" title="Rename" aria-label="Rename" onclick={() => renameCollection(node.col)}><Icon name="edit" size={12} /></button>
-      <button class="icon-btn" title="Delete" aria-label="Delete" onclick={() => deleteCollection(node.col)}><Icon name="trash" size={12} /></button>
-    {/if}
+    <button class="icon-btn row-more" title="Actions for {node.col.name}" aria-label="Actions for {node.col.name}" onclick={(e) => collectionMenu(e, node.col)}>
+      <Icon name="more" size={14} />
+    </button>
   </div>
   {#if isOpen}
-    {#each node.items as r (r.id)}
-      {@render requestRow(r, depth + 1)}
-    {/each}
     {#each node.children as child (child.col.id)}
       {@render collectionNode(child, depth + 1)}
     {/each}
+    {#each node.items as r (r.id)}
+      {@render requestRow(r, depth + 1)}
+    {/each}
+    {#if node.items.length === 0 && node.children.length === 0 && tokens.length === 0}
+      <button class="empty-folder" style:padding-inline-start="{(depth + 1) * 14 + 22}px" onclick={() => newRequestIn(node.col)}>
+        Empty — add a request
+      </button>
+    {/if}
   {/if}
 {/snippet}
 
 {#snippet requestRow(r: ApiRequest, depth: number)}
-  <div
-    class="req-row"
-    class:active={apiClient.draft.requestId === r.id}
-    style="padding-left: {depth * 14 + 8}px"
-  >
-    <button class="req-open grow" onclick={() => openRequest(r)} title={r.url}>
-      <span class="rm rm-{r.method.toLowerCase()}">{r.method}</span>
-      <span class="rname ellipsis">{r.name}</span>
+  <div class="req-row" class:active={apiClient.draft.requestId === r.id} style:padding-inline-start="{depth * 14 + 20}px">
+    <button class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={apiClient.draft.requestId === r.id ? 'true' : undefined}>
+      <MethodTag method={r.method} fixed />
+      <span class="rname">{r.name}</span>
     </button>
-    {#if canEdit}
-      <button class="icon-btn row-del" title="Delete" aria-label="Delete request" onclick={() => deleteRequest(r)}><Icon name="trash" size={11} /></button>
-    {/if}
+    <button class="icon-btn row-more" title="Actions for {r.name}" aria-label="Actions for {r.name}" onclick={(e) => requestMenu(e, r)}>
+      <Icon name="more" size={14} />
+    </button>
   </div>
 {/snippet}
 
-{#if postmanOpen}
-  <Modal title="Import from Postman" width={480} onclose={() => (postmanOpen = false)}>
-    <div class="pm-body">
-      <p class="pm-hint">
-        Sync your whole Postman account in one shot — Otto fetches <strong>every
-        collection and environment</strong> via the Postman API. Create a key at
-        <em>postman.co → Settings → API keys</em>.
-      </p>
-      <input
-        class="input"
-        type="password"
-        placeholder="Postman API key (PMAK-…) — blank to reuse a remembered key"
-        bind:value={pmKey}
-        aria-label="Postman API key"
-      />
-      <label class="pm-remember">
-        <input type="checkbox" bind:checked={pmRemember} />
-        Remember this key in the macOS Keychain
-      </label>
-      <div class="pm-or">…or import a single exported file (Postman / OpenAPI / HAR):</div>
-      <label class="btn ghost pm-file">
-        <Icon name="external" size={12} />Choose file…
-        <input type="file" accept=".json,.har,.yaml,.yml" hidden onchange={(e) => importFile(e.currentTarget as HTMLInputElement)} />
-      </label>
-    </div>
-    {#snippet footer()}
-      <button class="btn" onclick={() => (postmanOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={runPostmanSync} disabled={pmBusy}>
-        {pmBusy ? 'Syncing…' : 'Fetch & import all'}
-      </button>
-    {/snippet}
-  </Modal>
-{/if}
-
 <style>
-  .empty-import {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 8px;
-    cursor: pointer;
-  }
-  /* ── Postman import dialog ─────────────────────────────────────────────── */
-  .pm-body {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .pm-hint {
-    margin: 0;
-    font-size: 12px;
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
-  .pm-remember {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .pm-or {
-    margin-top: 4px;
-    font-size: 11.5px;
-    color: var(--text-dim);
-  }
-  /* File-input label styled as a button (a real <button> can't host an input). */
-  .pm-file {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    align-self: flex-start;
-    cursor: pointer;
-  }
-  .git-sync {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-  }
-  .git-empty,
-  .git-hint {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .git-repo {
-    width: 100%;
-  }
-  .git-row {
-    display: flex;
-    gap: 6px;
-  }
-  .git-msg {
-    flex: 1;
-    min-width: 0;
-  }
-  .git-branch {
-    flex: 0 0 110px;
-    min-width: 0;
-  }
-  .git-actions {
-    display: flex;
-    gap: 6px;
-    justify-content: flex-end;
-  }
-  .icon-btn.active {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
   .tree-wrap {
     display: flex;
     flex-direction: column;
     min-height: 0;
+    gap: 8px;
   }
-  .list-search {
+  .tree-tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .search {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 0 2px 6px;
+    height: 27px;
+    padding: 0 4px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
     color: var(--text-dim);
   }
-  .list-search-input {
+  .search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .search input {
     flex: 1;
     min-width: 0;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
+    border: none;
+    background: transparent;
     color: var(--text);
-    border-radius: var(--radius-s);
-    padding: 4px 7px;
-    font-size: 11.5px;
-  }
-  .list-search-input:focus {
+    font-size: var(--fs-m);
     outline: none;
-    border-color: var(--accent);
+  }
+  .search input::placeholder {
+    color: var(--text-dim);
+  }
+  .clear {
+    width: 20px;
+    height: 20px;
+  }
+  .state {
+    font-size: var(--fs-s);
+    padding: 8px 4px;
+  }
+  .state.dim,
+  .no-match {
+    color: var(--text-dim);
   }
   .no-match {
-    font-size: 12px;
-    color: var(--text-dim);
-    padding: 8px 2px;
-  }
-  .tree-head {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 2px 6px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
   }
-  .tree-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .state.err {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--text);
+  }
+  .state.err :global(svg) {
+    color: var(--danger);
+    margin-top: 2px;
+  }
+  .dim-line {
     color: var(--text-dim);
+    font-size: var(--fs-xs);
+    word-break: break-word;
   }
   .tree {
     display: flex;
     flex-direction: column;
     gap: 1px;
   }
-  .col-head {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding-inline-end: 4px;
-    border-radius: var(--radius-s);
+  .ungrouped {
+    margin: 12px 0 4px 4px;
   }
-  .col-head:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-  }
-  .col-head.plain {
-    margin-top: 6px;
-  }
-  .col-name {
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .col-head.plain .col-name {
-    text-transform: uppercase;
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-  }
-  .caret {
-    display: grid;
-    place-items: center;
-    width: 16px;
-    height: 16px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .caret-spacer {
-    width: 16px;
-    flex-shrink: 0;
-  }
-  .count {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    min-width: 14px;
-    text-align: center;
-  }
+  .col-head,
   .req-row {
     display: flex;
     align-items: center;
-    gap: 4px;
-    height: 26px;
-    padding-inline-end: 6px;
+    min-height: 28px;
+    padding-inline-end: 2px;
     border-radius: var(--radius-s);
   }
+  .col-head:hover,
   .req-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
   .req-row.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
+  .col-toggle,
   .req-open {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
-    gap: 7px;
-    min-width: 0;
+    gap: 6px;
+    height: 28px;
+    padding: 0 4px;
     border: none;
     background: transparent;
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    height: 100%;
+    font-size: var(--fs-m);
+    border-radius: var(--radius-s);
   }
-  .rm {
-    font-size: 9.5px;
-    font-weight: 700;
-    font-family: var(--font-mono);
+  .col-toggle {
     color: var(--text-dim);
-    width: 38px;
-    flex-shrink: 0;
   }
-  .rm-get { color: var(--status-working); }
-  .rm-post { color: var(--accent-text); }
-  .rm-put,
-  .rm-patch { color: #d2691e; }
-  .rm-delete { color: var(--status-exited); }
-  .rname {
-    font-size: 12px;
+  .col-name {
+    color: var(--text);
+    font-weight: 500;
     min-width: 0;
-  }
-  .row-del {
-    opacity: 0;
-  }
-  .req-row:hover .row-del {
-    opacity: 1;
-  }
-  .ellipsis {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .count {
+    margin-inline-start: auto;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .rname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-more {
+    opacity: 0;
+  }
+  .col-head:hover .row-more,
+  .req-row:hover .row-more,
+  .row-more:focus-visible,
+  .req-row.active .row-more {
+    opacity: 1;
+  }
+  .empty-folder {
+    height: 26px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+    text-align: start;
+    cursor: pointer;
+    border-radius: var(--radius-s);
+  }
+  .empty-folder:hover {
+    color: var(--accent-text);
+    background: var(--hover);
+  }
+  @media (max-width: 1024px) {
+    .row-more {
+      opacity: 1;
+    }
   }
 </style>

@@ -150,7 +150,7 @@
                 {#if env.is_active}<Icon name="check" size={10} />{/if}
               </span>
               <span class="env-name ellipsis grow">{env.name}</span>
-              <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} vars{#if env.secret_keys.length}&nbsp;· {env.secret_keys.length} 🔒{/if}</span>
+              <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} variables{#if env.secret_keys.length} · {env.secret_keys.length} secret{/if}</span>
             </button>
             {#if !compact && canEdit}
               <button class="icon-btn" title="Edit variables" aria-label="Edit variables" onclick={() => startEdit(env)}><Icon name="edit" size={12} /></button>
@@ -210,7 +210,7 @@
     color: var(--accent-text);
   }
   .env-title {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -262,7 +262,7 @@
     border-color: var(--accent);
   }
   .env-name {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     min-width: 0;
   }
@@ -296,7 +296,7 @@
     gap: 6px;
   }
   .empty-mini {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 8px 2px;
     line-height: 1.5;
