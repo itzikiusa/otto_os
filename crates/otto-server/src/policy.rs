@@ -130,7 +130,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         p,
         "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities"
     ) || p.starts_with("/auth/tokens/")
-        || p == "/auth/provider-accounts" || p.starts_with("/auth/provider-accounts/")
+        || p == "/auth/provider-accounts"
+        || p.starts_with("/auth/provider-accounts/")
         || p.starts_with("/auth/shares")
     {
         return Exempt;
@@ -172,6 +173,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Host filesystem access: authenticated; OS permissions enforced by I/O.
     // Share/MCP endpoint scopes are still checked before this exemption.
     if matches!(p, "/fs/browse" | "/fs/read") {
+        return Exempt;
+    }
+    // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
+    // and not feature-gated HERE because it spans many features — every lookup
+    // it performs is a self-call of that kind's own list route AS the caller,
+    // which that route's policy entry + handler RBAC re-authorize, so it can
+    // never show more than the caller could already list. Share-link and
+    // MCP-restricted tokens are refused in-handler (and by the scope guards).
+    // Only GET is mounted (other verbs 405 at the router).
+    if p == "/refs/directory" || p == "/refs/resolve" {
         return Exempt;
     }
     // Static catalogs (no per-user data; safe to read for any authed user).
@@ -439,7 +450,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, if get { View } else { Edit });
     }
 
-    if p == "/workspaces/{id}/network-profiles" || p.starts_with("/network-profiles/") || p == "/sessions/{id}/network" {
+    if p == "/workspaces/{id}/network-profiles"
+        || p.starts_with("/network-profiles/")
+        || p == "/sessions/{id}/network"
+    {
         return Require(Connections, if get { View } else { Edit });
     }
 
@@ -1242,7 +1256,10 @@ mod tests {
             Require(Design, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/design/artifacts/{id}/versions/{v}/content"),
+            pol(
+                Method::GET,
+                "/api/v1/design/artifacts/{id}/versions/{v}/content"
+            ),
             Require(Design, View)
         );
         for path in [
@@ -1262,7 +1279,10 @@ mod tests {
             (Method::POST, "/api/v1/design/artifacts/{id}/versions"),
             (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
             (Method::POST, "/api/v1/design/artifacts/{id}/links"),
-            (Method::DELETE, "/api/v1/design/artifacts/{id}/links/{link_id}"),
+            (
+                Method::DELETE,
+                "/api/v1/design/artifacts/{id}/links/{link_id}",
+            ),
             (Method::POST, "/api/v1/design/signals"),
             // design_assist.rs — agent turns, variants, learned rules.
             (Method::POST, "/api/v1/design/artifacts/{id}/assist"),
@@ -1728,6 +1748,10 @@ mod tests {
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
+        // Agent discovery: every lookup is a self-call re-authorized by the
+        // listed kind's own route, so the discovery route itself is exempt.
+        assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);
+        assert_eq!(pol(Method::GET, "/api/v1/refs/resolve"), Exempt);
         // Per-user email sender (Gmail App Password → Keychain): self-owned.
         assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
         assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);
