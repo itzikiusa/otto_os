@@ -129,6 +129,12 @@ test('undo/redo, color choice, select + delete', async ({ page }) => {
   await canvas.click({ position: { x: 150, y: 130 } });
   await page.keyboard.press('Delete');
   await expect(editor).toHaveAttribute('data-count', '0');
+
+  // The toolbar "Delete…" (the whole snip) asks first; Cancel keeps it.
+  await page.locator('[data-act="delete-snip"]').click();
+  await expect(page.locator('.cf-msg')).toContainText('Delete this snip');
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  await expect(canvas).toBeVisible();
 });
 
 test('copy endpoint prefers annotated; list + delete round-trip', async () => {
