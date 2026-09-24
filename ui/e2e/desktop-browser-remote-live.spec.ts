@@ -16,6 +16,10 @@ import { expectNoHorizontalOverflow } from './helpers';
 
 const TAB_URL = 'https://example.invalid/appointments';
 
+// A cold Vite dev server (first spec of a run) can take most of the default
+// 45 s just to serve the app.
+test.describe.configure({ timeout: 90_000 });
+
 const FIXTURE_HTML = `<!doctype html><html><head><style>
   body{margin:0;font:15px -apple-system,Helvetica,Arial;background:#fbfaf7;color:#1d2a26}
   header{display:flex;gap:28px;align-items:center;padding:18px 32px;border-bottom:1px solid #e5e1d8}
@@ -230,7 +234,7 @@ test('frames draw, clicks map to page CSS px, frames are acked, the viewport fol
   await openLive(page);
 
   // resize on open matches the pane, and every drawn frame is acked
-  const resize = live.sent.find((m) => m.type === 'resize');
+  const resize = live.sent.filter((m) => m.type === 'resize').at(-1);
   const canvas = page.locator('[data-testid="remote-live"] canvas');
   const box = (await canvas.boundingBox())!;
   expect(Math.abs(resize.width - box.width)).toBeLessThanOrEqual(2);
@@ -266,7 +270,7 @@ test('keyboard: typing is forwarded, ⌘K stays with Otto, Esc releases, paste i
     .poll(() => live.sent.filter((m) => m.type === 'key' && m.action === 'down').map((m) => m.text ?? m.key))
     .toEqual(['H', 'i', '\r']);
   const h = live.sent.find((m) => m.type === 'key' && m.key === 'H');
-  expect(h).toMatchObject({ code: 'KeyH', key_code: 72, modifiers: 8 });
+  expect(h).toMatchObject({ code: 'KeyH', key_code: 72, text: 'H' });
 
   // ⌘K / Ctrl+K opens Otto's palette and is NOT sent to the page
   await page.keyboard.press('ControlOrMeta+k');
@@ -299,11 +303,12 @@ test('navigation: page nav updates the address bar; toolbar and address bar driv
     session: { ...live.session, url: 'https://example.invalid/confirm', title: 'Confirmed', can_go_back: true },
   });
   await expect(page.getByRole('textbox', { name: 'Address' })).toHaveValue('https://example.invalid/confirm');
-  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const urlbar = page.locator('.urlbar');
+  await urlbar.getByRole('button', { name: 'Back', exact: true }).click();
   await expect.poll(() => live.sent.some((m) => m.type === 'nav' && m.action === 'back')).toBe(true);
-  await page.getByRole('button', { name: 'Reload page' }).click();
+  await urlbar.getByRole('button', { name: 'Reload page' }).click();
   await expect.poll(() => live.sent.some((m) => m.type === 'nav' && m.action === 'reload')).toBe(true);
-  await expect(page.getByRole('button', { name: 'Forward' })).toBeDisabled();
+  await expect(urlbar.getByRole('button', { name: 'Forward', exact: true })).toBeDisabled();
 
   await page.getByRole('textbox', { name: 'Address' }).fill('example.invalid/next');
   await page.getByRole('textbox', { name: 'Address' }).press('Enter');

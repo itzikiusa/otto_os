@@ -143,7 +143,14 @@
   // ── connection ─────────────────────────────────────────────────────────
 
   function currentViewport(): ViewportRequest {
-    return viewportFor(box.width > 0 ? box : { width: 1280, height: 800 }, window.devicePixelRatio || 1);
+    let size = box;
+    // Before the ResizeObserver's first callback (the session is opened on
+    // mount), measure directly so the first frames already fit the pane.
+    if (!(size.width > 0) && surfaceEl) {
+      const r = surfaceEl.getBoundingClientRect();
+      size = { width: r.width, height: r.height };
+    }
+    return viewportFor(size.width > 0 ? size : { width: 1280, height: 800 }, window.devicePixelRatio || 1);
   }
 
   async function connect(t: BrowserTab): Promise<void> {
