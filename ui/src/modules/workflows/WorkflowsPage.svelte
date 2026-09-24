@@ -342,17 +342,36 @@
     popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
   }
 
+  // The workspace `workflows` belongs to, and a token so a slow load for a
+  // workspace we've since left can't land over the current one.
+  let wfFor: string | null = null;
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const wsId = ws.currentId;
+    const seq = ++loadSeq;
+    // Never list another workspace's rows under this one — neither while this
+    // one loads nor, silently, after its load fails.
+    if (wfFor !== wsId) {
+      workflows = [];
+      wfError = null;
+      wfFor = wsId;
+      if (current && current.workspace_id !== wsId) {
+        current = null;
+        graph = { nodes: [], edges: [] };
+      }
+    }
     wfLoading = true;
     try {
       if (types.length === 0) types = await api.get<NodeTypeSpec[]>('/workflows/node-types');
       if (templates.length === 0) templates = await api.get<WorkflowTemplate[]>('/workflows/templates');
-      workflows = await api.get<Workflow[]>(`/workspaces/${ws.currentId}/workflows`);
+      const rows = await api.get<Workflow[]>(`/workspaces/${wsId}/workflows`);
+      if (seq !== loadSeq) return;
+      workflows = rows;
       wfError = null;
     } catch (e) {
-      wfError = loadErrorText(e);
+      if (seq === loadSeq) wfError = loadErrorText(e);
     } finally {
-      wfLoading = false;
+      if (seq === loadSeq) wfLoading = false;
     }
   }
 
@@ -1568,9 +1587,13 @@
           {/if}
         </div>
       {/each}
-      {#if workflows.length === 0}
-        <!-- The main pane owns Retry; the rail just mustn't claim "none". -->
-        <LoadState what="workflows" variant="compact" loading={wfLoading} error={wfError} empty>
+      {#if workflows.length > 0 && wfError}
+        <!-- Rows from the last good load, flagged as such. -->
+        <LoadState what="workflows" variant="compact" error={wfError} onretry={() => void load()} />
+      {:else if workflows.length === 0 && (!wfError || current)}
+        <!-- A failed load is said ONCE: the main pane owns it (with Retry)
+             unless a workflow is open there, then the rail does. -->
+        <LoadState what="workflows" variant="compact" loading={wfLoading} error={wfError} empty onretry={() => void load()}>
           {#snippet emptyView()}<p class="empty">No workflows yet — describe one above.</p>{/snippet}
         </LoadState>
       {/if}
