@@ -92,7 +92,6 @@
     "src/modules/product/MockupAssistPanel.svelte": 8,
     "src/modules/product/MockupLivePreview.svelte": 4,
     "src/modules/product/MockupViewer.svelte": 3,
-    "src/modules/product/OverviewTab.svelte": 1,
     "src/modules/product/PublishDialog.svelte": 3,
     "src/modules/product/QuestionsTab.svelte": 6,
     "src/modules/product/RefineChat.svelte": 1,

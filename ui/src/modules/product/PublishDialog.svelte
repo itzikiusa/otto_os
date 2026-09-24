@@ -61,9 +61,17 @@
   const storyTitle = $derived(product.detail?.story.title ?? '');
   const isDraft = $derived(product.detail?.story.source_kind === 'draft');
   let previewBody = $state<string | null>(null); // null = loading
+  // Converting a Confluence RFC → story: the daemon prepends a "> RFC: <url>"
+  // reference line to the Jira description (`publish_as_story`), so the
+  // preview shows it too — the confirm must match what is actually sent.
+  const rfcRef = $derived.by(() => {
+    const s = product.detail?.story;
+    return mode === 'story' && s?.source_kind === 'confluence' && s.url ? `> RFC: ${s.url}` : '';
+  });
   const PREVIEW_LINES = 6;
   const previewLines = $derived.by(() => {
-    const lines = (previewBody ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+    const body = rfcRef ? `${rfcRef}\n\n${previewBody ?? ''}` : (previewBody ?? '');
+    const lines = body.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
     return { head: lines.slice(0, PREVIEW_LINES), more: Math.max(0, lines.length - PREVIEW_LINES) };
   });
 

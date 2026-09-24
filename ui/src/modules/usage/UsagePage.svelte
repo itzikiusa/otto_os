@@ -196,13 +196,15 @@
   const AXIS_B = 22;  // bottom margin for x-axis labels
 
   const dailyCosts = $derived((usage.summary?.daily ?? []).map((d) => d.cost_usd));
-  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0.001));
+  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0));
   const dailyDays = $derived(usage.summary?.daily ?? []);
 
   // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value.
+  // The step never drops below one cent: sub-cent steps all format as
+  // "<$0.01", so a near-zero window used to print the same label three times.
   const yTicks = $derived.by(() => {
     const top = dailyMaxCost;
-    const raw = top / 3;
+    const raw = Math.max(top / 3, 0.01);
     // Pick a magnitude step that gives readable labels.
     const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
     const nice = Math.ceil(raw / mag) * mag;
@@ -572,7 +574,9 @@
               </button>
             {/if}
           </div>
-          {#if usage.summary && usage.summary.daily.length > 0}
+          {#if usage.summary && usage.summary.daily.length > 0 && dailyMaxCost === 0}
+            <p class="dim small" data-testid="daily-cost-empty">No spend recorded in this window.</p>
+          {:else if usage.summary && usage.summary.daily.length > 0}
             {@const days = dailyDays}
             {@const n = days.length}
             <svg

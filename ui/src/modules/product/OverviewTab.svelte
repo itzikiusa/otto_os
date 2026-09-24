@@ -1113,10 +1113,10 @@
       {/if}
     {/if}
     <div class="field-editor-actions">
-      <button class="field-save-btn" onclick={() => saveField(ef)} disabled={fieldSaving}>
+      <button class="btn small primary" onclick={() => saveField(ef)} disabled={fieldSaving}>
         {fieldSaving ? 'Saving…' : 'Save'}
       </button>
-      <button class="field-cancel-btn" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
+      <button class="btn small" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
     </div>
   </div>
 {/snippet}
@@ -1164,10 +1164,10 @@
               else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
             }}
           />
-          <button class="field-save-btn" onclick={saveTitle} disabled={titleSaving}>
+          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving}>
             {titleSaving ? 'Saving…' : 'Save'}
           </button>
-          <button class="field-cancel-btn" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
+          <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
         </div>
       {:else}
         <div class="title-row">
@@ -1462,10 +1462,10 @@
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
                 ></textarea>
                 <div class="desc-editor-actions">
-                  <button class="field-save-btn" onclick={saveDesc} disabled={descSaving}>
+                  <button class="btn small primary" onclick={saveDesc} disabled={descSaving}>
                     {descSaving ? 'Saving…' : 'Save'}
                   </button>
-                  <button class="field-cancel-btn" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
+                  <button class="btn small" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
                 </div>
               </div>
             {:else if renderedBody}
@@ -2767,38 +2767,6 @@
     display: flex;
     gap: 6px;
   }
-  .field-save-btn,
-  .field-cancel-btn {
-    height: 24px;
-    padding: 0 10px;
-    border-radius: var(--radius-s);
-    font-size: 11.5px;
-    cursor: pointer;
-    transition: background 100ms, color 100ms;
-  }
-  .field-save-btn {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--bg, #fff);
-  }
-  .field-save-btn:hover:not(:disabled) {
-    filter: brightness(1.08);
-  }
-  .field-cancel-btn {
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-  }
-  .field-cancel-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .field-save-btn:disabled,
-  .field-cancel-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   /* ── Description edit (Jira-style inline editor) ───────────────── */
   .desc-header {
     display: flex;
