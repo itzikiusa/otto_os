@@ -38,6 +38,22 @@ export async function openPage(page: Page, id: string): Promise<void> {
 }
 
 /**
+ * Open the API page and make sure the request editor is showing. A workspace
+ * with nothing in it (no saved requests, history or edited tab) opens on the
+ * "Create your first request" onboarding state; this clicks through it.
+ */
+export async function openApiEditor(page: Page): Promise<void> {
+  await openPage(page, 'api');
+  const url = page.getByLabel('Request URL', { exact: true });
+  const onboarding = page.getByText('Create your first request', { exact: true });
+  await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  if (await onboarding.isVisible()) {
+    await page.getByRole('button', { name: 'New request', exact: true }).first().click();
+  }
+  await expect(url).toBeVisible();
+}
+
+/**
  * Assert the page does not overflow the viewport horizontally. A small
  * tolerance absorbs sub-pixel rounding. This is the core check for the "content
  * runs past the right edge / is clipped" class of bugs.

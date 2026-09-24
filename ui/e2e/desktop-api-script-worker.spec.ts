@@ -1,6 +1,6 @@
 import {test,expect,type Page} from '@playwright/test';
 import {apiCtx,seedWorkspace} from './seed';
-import {openPage} from './helpers';
+import {openApiEditor} from './helpers';
 
 async function setScript(page: Page, code: string, post=false) {
   await page.locator('.builder').getByRole('tab',{name:'Scripts',exact:true}).click();
@@ -16,7 +16,7 @@ test('infinite interactive scripts stay cancellable without freezing the page', 
     await page.addInitScript(id=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');},ws);
     let sends=0;
     await page.route('**/api/v1/workspaces/*/api-client/execute',route=>{sends++;return route.fulfill({json:{status:200,status_text:'OK',headers:[],body:'{"ok":true}',duration_ms:1,size_bytes:11}});});
-    await openPage(page,'api');await page.getByLabel('Request URL').fill('https://example.test/worker');
+    await openApiEditor(page);await page.getByLabel('Request URL').fill('https://example.test/worker');
     await setScript(page,'while(true){}');
     await page.locator('.builder').getByRole('button',{name:'Send',exact:true}).click();
     const cancel=page.getByTitle('Cancel in-flight request');

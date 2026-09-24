@@ -50,11 +50,11 @@ async function historyFixture(page: Page, deferred = false) {
   }, workspaceId);
   await openPage(page, 'api');
   await page.getByRole('tab', { name: 'History', exact: true }).click();
-  await expect(page.locator('.hist-row').getByText(summary.url, { exact: true })).toBeVisible();
+  await expect(page.locator(`.hist-row[data-url="${summary.url}"]`)).toBeVisible();
   return {
     calls, summary, snapshot, release, detailStarted,
     delivered: () => delivered,
-    select: () => page.locator('.hist-row').filter({ hasText: summary.url }).click(),
+    select: () => page.locator(`.hist-row[data-url="${summary.url}"]`).click(),
   };
 }
 
