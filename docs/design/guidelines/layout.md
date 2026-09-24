@@ -45,11 +45,13 @@ The parts of the shell:
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
   exception is **Agents**, whose session `TabBar` is its top row; it has a
   right panel (⌘J) for Browser, Outputs and similar.
-- **Overlays.** ⌘K `Palette`, the `?` `ShortcutsOverlay`, `Modal` sheets, the
+- **Overlays.** The floating bar (§7, ⌘K on desktop), the `Palette` sheet
+  (phone/tablet, ⌘I), the `?` `ShortcutsOverlay`, `Modal` sheets, the
   global `ContextMenu` and `Toasts` are all mounted once in `shell/App.svelte`.
 - **Notification bell.** It lives in the sidebar. It used to float over pages
   and cost every page a 42 px "bell gutter", which is now removed. Don't
-  reintroduce floating page-level chrome.
+  reintroduce floating page-level chrome — the one exception is the shell's
+  floating command bar (§7), which docks out of the way.
 - **Phone.** A mobile top bar (44 px, title from `moduleLabel()`), the content,
   and `BottomNav` (56 px). The `Drawer` holds the Navigator.
 
@@ -469,43 +471,88 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
 
 ## 7. Floating command bar
 
-A single glass pill for Home and canvas/studio surfaces, inspired by cnvs.dev.
-**TBD:** the shared `FloatingBar.svelte` is being built; the desktop app already
-hosts it in its own ⌥Space panel window (`#/bar`). Until it lands in-page,
-don't build a one-off.
+Otto's front door, inspired by cnvs.dev: **one** shared component,
+`lib/components/FloatingBar.svelte`, in two hosts.
 
 ```
-                 ╭──────────────────────────────────────────────────────────╮
-                 │ ✦  Type or speak…            ⌘K │ claude · Sonnet ▾ │ 01 02 03 04 │
-                 ╰──────────────────────────────────────────────────────────╯
-                                  (bottom-centre, above the status bar)
+            ┌──────────────────────────────────────────────────────────┐
+            │  (results · Ask Otto row · or the space's thread)        │  ← grows UPWARD,
+            ├──────────────────────────────────────────────────────────┤    same glass
+            │ ✦  Type or speak…        ⌘K │ (◉ default ▾) │ 01 02 03 04 │ 🎙 │
+            └──────────────────────────────────────────────────────────┘
+                           (bottom-centre, 16 px above the status bar)
 ```
 
-**Anatomy.** A single glass pill (`--radius-l` or pill; `--glass-tint-bar` +
-`--glass-blur`, `--glass-border`, `--glass-shadow`) containing:
+**Anatomy.** One glass surface (`--bg-sidebar` at 78% + blur, `--border`,
+`--shadow`; a pill at rest, `--radius-l` + 6 px once it opens). The panel above
+the pill is drawn in the SAME surface — never a second glass layer.
 
-1. An input: "Type or speak…". It routes to **Ask Otto** (the existing ⌘I flow)
-   or to the surface's agent. There is no second command system.
-2. A `⌘K` hint that opens the **existing** palette (`registry.all`). The bar is
-   a doorway to the palette, not a replacement.
-3. A model/agent picker (reuse `ModelPicker` / `ProviderIcon`).
-4. **Numbered spaces 01–04.** On Home these are Home's spaces: read and switch
-   them through `spaces` (`lib/stores/spaces.svelte.ts`: `active`, `names`,
-   `select(i)`, `spaceNumber(i)`), never through Home's own store. On a studio
-   they map to pages or boards. `⌃1…⌃4` already jumps between session tabs
-   (`lib/keys.ts`), so in-page switching needs another chord.
+1. **Input** "Type or speak…" — a `combobox` driving a `listbox` with
+   `aria-activedescendant`. Typing ranks the palette's own commands
+   (`registry.all`, frecency — `lib/commandSearch.ts`), then an **Ask Otto**
+   row, then workspace search hits. When the query reads like a command
+   ("go to git") the command is the Enter default; free text defaults to Ask
+   Otto. `⌘↵` always asks.
+2. **Ask Otto** goes through `ask(text, space)` in `lib/ask.ts` — today the ⌘I
+   orchestrator engine (`lib/orchestrate.ts`, shared with the palette). The
+   answer lands in the space's thread, attributed ("✦ Ask Otto · planner"). A
+   planned change stays a draft with **Run plan / Cancel**; a permanent delete
+   asks first. The assistant-threads work swaps the one `ask` binding.
+3. **Model chip** — the space's agent + model; opens the space settings
+   (name, workspace, agent, `ModelPicker`) in the panel, not a popover.
+4. **Spaces 01–04** — four pinned contexts (default Personal · Work ·
+   Research · Home), each remembering a name, a workspace (or "follow Otto"),
+   agent + model and its last 20 turns. **Home's spaces are the same
+   four:** `lib/stores/spaces.svelte.ts` reads and switches the bar's active
+   space, and Home's view names are the space names (renaming either renames
+   both). `⌃1–⌃4` inside the bar only
+   (`keyContext.barFocused` stops the global "jump to session N"); clicking
+   the active number opens its settings. Stored per device
+   (`otto_bar_spaces`), shared by both hosts. In the main window, switching to
+   a space pinned to a workspace selects that workspace.
+5. **Mic** — `aria-disabled` with an honest tooltip until voice ships. Never
+   fake it.
+
+**Hosts.**
+
+- **In-app** (`shell/App.svelte`, desktop width, not pop-outs): **⌘K focuses
+  the bar** — it is the desktop command surface. The `Palette` sheet remains
+  for phone/tablet, a hidden bar, and ⌘I (the full plain-English sheet).
+- **⌥Space panel** (`#/bar`, `modules/desktop/BarHost.svelte`): the page is
+  transparent over native HUD glass; it calls `bar.resize(h)` so the window
+  grows upward (cap 560 px), `bar.hide()` on Esc, focuses on
+  `otto://bar-shown`, and "Open in Otto" → `openInOtto(route)`. Its commands
+  come from the API (Go to, sessions, repos) since no shell registers any.
+
+**It never sits on the user's work.** Presence (`barPresence` in
+`lib/floatingBar.ts`, user setting in Settings → Appearance → Floating bar):
+
+| State | When | Looks like |
+|---|---|---|
+| `full` | focused/open, Home, or "Always full" | the whole pill |
+| `rest` | idle on other pages | a 260 px "✦ Type or speak… ⌘K" pill |
+| `dock` | scrolling, or a terminal / editor / other field has focus, or "Docked" | a 20 px chip *inside the status bar* — covers no content, takes no keys |
+| `away` | a Modal, sheet or the palette is up | hidden and `inert` |
+| `off` | "Hidden" | not mounted; ⌘K opens the palette |
+
+While the bar can rest over content it sets `--fb-clearance` on the content
+column; `PageBody` (and Home) pad their scroll end by it so the last row can
+always scroll clear. The panel is clamped to the window (`panelBudget`) and
+scrolls; e2e asserts it with `expectFullyInViewport`
+(`ui/e2e/desktop-floating-bar.spec.ts`).
 
 **Rules:**
 
-- One per surface. Never on list/detail, settings or workbench pages, which
-  have a `PageHeader` and need their full height for data.
-- At most 720 px wide, centred, with 16 px clearance above the status bar or
-  bottom nav. It is clamped into the viewport like any floating UI.
-- It is chrome, so vibrancy is allowed (see
-  [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)).
-  Use the glass tokens, and keep the opaque fallback.
-- Keyboard: `Esc` blurs it, `Enter` sends, and `⌘K` still opens the palette.
-  The pill is never the only way to reach an action.
+- One bar per window. Don't build a second command system or a page-level
+  floating bar; register ⌘K commands and they appear in it.
+- At most 720 px wide, centred, 16 px above the status bar. Never on phone.
+- Glass rules from [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop):
+  78% tint (it floats over content, not the banded backdrop), opaque
+  `--surface` fallback without `backdrop-filter`, opaque under reduced
+  transparency. Motion off under reduced motion.
+- Keyboard: `Esc` clears the query, then closes (the panel hides the window);
+  `Enter` runs the selection; `↑↓` wrap. The pill is never the only way to
+  reach an action.
 
 **Ambient backdrop.** Shipped: see
 [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).

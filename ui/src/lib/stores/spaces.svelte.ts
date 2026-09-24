@@ -1,60 +1,35 @@
 // Spaces 01–04: the one shared notion of "which space am I in" for the Home
-// desktop (its up-to-four views) and the floating "type or speak" bar's
-// 01 02 03 04 switcher. Tiny on purpose — Home owns what a space CONTAINS
-// (modules/home/home.svelte.ts); this store only carries the active index and
-// the names, so the bar can show and switch spaces without importing Home.
+// desktop (its up-to-four views) and the floating "type or speak" bar. The
+// floating bar owns the four spaces (lib/stores/bar.svelte.ts: name,
+// workspace, agent, thread; `otto_bar_spaces`, synced across windows); this is
+// the thin view Home uses of them, so Home's 01–04 and the bar's 01–04 are the
+// same spaces:
 //
-// Persisted per device in localStorage and synced across windows through the
-// `storage` event, so the desktop shell's separate bar window and the main
-// window agree without a round-trip.
+//   • the ACTIVE space is the bar's — Home shows view N while the bar is on N
+//     (clamped to the views Home has), and switching on Home switches the bar;
+//   • Home's view names ARE the space names — Home publishes them here, and a
+//     rename in the bar comes back to Home (HomePage.svelte).
+//
+// Home still owns what a space contains (modules/home/home.svelte.ts).
 
-export const SPACE_COUNT = 4;
+import { barStore } from './bar.svelte';
+import { MAX_SPACE_NAME, SPACE_COUNT, clampSpace, spaceLabel } from '../floatingBar';
 
-const LS = {
-  active: 'otto_space_active',
-  names: 'otto_space_names',
-  /** Home's pre-spaces key, read once as a fallback. */
-  legacyActive: 'otto_home_active',
-};
-
-function lsGet(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function lsSet(key: string, val: string): void {
-  try {
-    localStorage.setItem(key, val);
-  } catch {
-    /* private mode */
-  }
-}
-
-function clampIndex(n: number): number {
-  return Number.isFinite(n) ? Math.min(SPACE_COUNT - 1, Math.max(0, Math.trunc(n))) : 0;
-}
-
-function readNames(): string[] {
-  try {
-    const v: unknown = JSON.parse(lsGet(LS.names) ?? '[]');
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, SPACE_COUNT) : [];
-  } catch {
-    return [];
-  }
-}
+export { SPACE_COUNT };
 
 /** `0` → `"01"`: how a space is numbered everywhere (Home, the bar). */
-export function spaceNumber(index: number): string {
-  return String(index + 1).padStart(2, '0');
-}
+export const spaceNumber = spaceLabel;
 
-class SpacesStore {
+class SpacesView {
   /** Active space, 0-based. */
-  active = $state(clampIndex(Number(lsGet(LS.active) ?? lsGet(LS.legacyActive) ?? 0)));
-  /** Names of the spaces that exist (length 0–4); Home publishes them. */
-  names: string[] = $state(readNames());
+  get active(): number {
+    return barStore.state.active;
+  }
+
+  /** The four space names, in order. */
+  get names(): string[] {
+    return barStore.state.spaces.map((s) => s.name);
+  }
 
   /** Label for space `i`: its name, else "Space 01". */
   label(i: number): string {
@@ -62,27 +37,19 @@ class SpacesStore {
   }
 
   select(i: number): void {
-    const n = clampIndex(i);
-    if (n === this.active) return;
-    this.active = n;
-    lsSet(LS.active, String(n));
+    if (clampSpace(i) !== barStore.state.active) barStore.setActive(i);
   }
 
+  /** Home publishes its view names: space i takes view i's name. Spaces Home
+   *  has no view for keep theirs. */
   setNames(names: string[]): void {
-    const next = names.slice(0, SPACE_COUNT);
-    if (next.length === this.names.length && next.every((n, i) => n === this.names[i])) return;
-    this.names = next;
-    lsSet(LS.names, JSON.stringify(next));
-  }
-
-  constructor() {
-    if (typeof window === 'undefined') return;
-    // Another window (the bar panel, a pop-out) switched space or renamed one.
-    window.addEventListener('storage', (e) => {
-      if (e.key === LS.active && e.newValue != null) this.active = clampIndex(Number(e.newValue));
-      else if (e.key === LS.names) this.names = readNames();
+    names.slice(0, SPACE_COUNT).forEach((raw, i) => {
+      const name = raw.trim().slice(0, MAX_SPACE_NAME);
+      if (name && barStore.state.spaces[i] && barStore.state.spaces[i].name !== name) {
+        barStore.patchSpace(i, { name });
+      }
     });
   }
 }
 
-export const spaces = new SpacesStore();
+export const spaces = new SpacesView();

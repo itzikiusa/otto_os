@@ -27,6 +27,8 @@
   import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
+  import FloatingBar from '../lib/components/FloatingBar.svelte';
+  import { barStore } from '../lib/stores/bar.svelte';
   import ShortcutsOverlay from './ShortcutsOverlay.svelte';
   import Handover from '../modules/agents/Handover.svelte';
   import AttachIssue from '../modules/agents/AttachIssue.svelte';
@@ -354,7 +356,10 @@
     return installKeyMap((action, _e, index) => {
       switch (action) {
         case 'palette':
+          // Desktop: ⌘K focuses the floating bar (the one command surface).
+          // Phone/tablet, pop-outs and a hidden bar keep the palette sheet.
           if (ui.paletteOpen) ui.paletteOpen = false;
+          else if (barStore.mounted) barStore.requestFocus();
           else ui.openPalette('commands');
           break;
         case 'askOtto':
@@ -584,6 +589,20 @@
     return unreg;
   });
 
+  // ---- palette commands: repos ("open repo <name>") ----
+  $effect(() => {
+    return registry.register(
+      'repos',
+      git.repos.map((r) => ({
+        id: `repo.${r.id}`,
+        title: `Open Repo: ${r.name}`,
+        group: 'Git',
+        keywords: `repository ${r.path}`,
+        run: () => router.go(`git/${r.id}`),
+      })),
+    );
+  });
+
   // ---- palette commands: connections ("connect <name>") ----
   $effect(() => {
     const wsId = ws.currentId;
@@ -798,6 +817,12 @@
 
     <div class="center">
       {@render centerContent()}
+      {#if !isPopout && viewport.isDesktop}
+        <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
+             centre over the content column, docking into the status bar
+             while you scroll or type elsewhere. -->
+        <FloatingBar host="app" />
+      {/if}
     </div>
 
     <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in

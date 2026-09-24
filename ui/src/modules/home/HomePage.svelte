@@ -6,6 +6,7 @@
   // views, shared with the floating bar through lib/stores/spaces.svelte.ts;
   // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
   // zooms to fill the page. Layout is per device (see home.svelte.ts).
+  import { untrack } from 'svelte';
   import { fly } from 'svelte/transition';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -77,7 +78,7 @@
 
   // ── Views ────────────────────────────────────────────────────────────────
   async function addView(): Promise<void> {
-    const name = await confirmer.promptText('Space name', { title: `New space ${spaceNumber(home.views.length)}`, confirmLabel: 'Create', initial: `Space ${home.views.length + 1}` });
+    const name = await confirmer.promptText('Space name', { title: `New space ${spaceNumber(home.views.length)}`, confirmLabel: 'Create', initial: spaces.label(home.views.length) });
     if (name) home.addView(name);
   }
   async function renameView(): Promise<void> {
@@ -111,6 +112,17 @@
     lastSpace = s;
     home.zoomedId = null;
     home.rotationEpoch += 1;
+  });
+
+  // A space renamed in the floating bar renames Home's view too (Home's own
+  // renames reach the bar through home.svelte.ts → spaces.setNames).
+  $effect(() => {
+    const names = spaces.names;
+    untrack(() => {
+      home.views.forEach((v, i) => {
+        if (names[i] && names[i] !== v.name) home.renameView(v.id, names[i]);
+      });
+    });
   });
 
   function addBox(kind: HomeBoxKind): void {
@@ -384,14 +396,15 @@
     position: absolute;
     inset: 0;
     overflow-y: auto;
-    /* Edges line up with the toolbar title (20px inset). */
-    padding: 22px 20px 28px;
+    /* Edges line up with the toolbar title (20px inset); the bottom clears
+       the floating bar when it overlays the page (--fb-clearance). */
+    padding: 22px 20px max(28px, var(--fb-clearance, 0px));
     display: flex;
     flex-direction: column;
     gap: 22px;
   }
   .desk.phone {
-    padding: 16px 14px 24px;
+    padding: 16px 14px max(24px, var(--fb-clearance, 0px));
     gap: 16px;
   }
   .view {

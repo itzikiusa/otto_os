@@ -87,7 +87,8 @@ The user also pointed to two outside references:
 The ambient backdrop and the glass chrome are shipped
 ([foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)),
 and Home is the desktop they frame ([layout.md → Home](./layout.md#home-the-desktop)).
-The floating command bar is written up in
+The floating command bar is **built**: one shared `FloatingBar` over the content
+column and in the ⌥Space panel; see
 [layout.md → Floating command bar](./layout.md#7-floating-command-bar). None of
 it is a licence to put glass behind list, detail or settings content.
 

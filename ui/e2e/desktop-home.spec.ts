@@ -24,8 +24,7 @@ async function boot(page: Page, route = 'home'): Promise<void> {
     sessionStorage.setItem('otto_e2e_home_reset', '1');
     localStorage.removeItem('otto_home_views');
     localStorage.removeItem('otto_home_active');
-    localStorage.removeItem('otto_space_active');
-    localStorage.removeItem('otto_space_names');
+    localStorage.removeItem('otto_bar_spaces');
     localStorage.removeItem('otto_home_rotate');
   }, wsId);
   await page.goto(`/#/${route}`);
@@ -81,8 +80,9 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   await expect(today.locator('.hello')).toContainText(/Good (morning|afternoon|evening)/);
   await expect(today.locator('.gcard')).toHaveCount(4);
   await expect(today.locator('.gcard[data-card="needs"]')).toContainText('Needs you');
-  // The spaces store publishes the names for the floating bar.
-  expect(await page.evaluate(() => localStorage.getItem('otto_space_names'))).toBe('["Overview"]');
+  // Home's spaces are the floating bar's: space 01 takes the view's name.
+  const barSpaces = () => page.evaluate(() => JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}'));
+  await expect.poll(async () => (await barSpaces()).spaces?.[0]?.name).toBe('Overview');
 });
 
 test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', async ({ page }) => {
@@ -105,8 +105,20 @@ test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', as
   await expect(current(page)).toHaveAccessibleName('Overview');
   await page.getByRole('tab', { name: 'Second' }).click();
   await expect(current(page)).toHaveAccessibleName('Second');
-  // The shared spaces store follows (the floating bar reads it).
-  expect(await page.evaluate(() => localStorage.getItem('otto_space_active'))).toBe('1');
+  // The floating bar follows: its active space is Home's.
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}').active)).toBe(1);
+  // …and the other way round: the bar's 01 brings Home back to space 01.
+  await page.evaluate(() => {
+    const raw = JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}');
+    raw.active = 0;
+    const v = JSON.stringify(raw);
+    localStorage.setItem('otto_bar_spaces', v);
+    // What another window's write looks like here (the ⌥Space panel).
+    window.dispatchEvent(new StorageEvent('storage', { key: 'otto_bar_spaces', newValue: v }));
+  });
+  await expect(current(page)).toHaveAccessibleName('Overview');
+  await page.getByRole('tab', { name: 'Second' }).click();
+  await expect(current(page)).toHaveAccessibleName('Second');
   // Rename via the space menu.
   await page.getByRole('button', { name: 'Space options' }).click();
   await page.getByRole('menuitem', { name: /Rename space/ }).click();
@@ -216,7 +228,7 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   expect(await boxes.nth(0).evaluate((el) => (el as HTMLElement).style.gridColumn)).toBe('span 5');
 });
 
-test('Go to Home is in the palette and the page never overflows horizontally', async ({ page }) => {
+test('Go to Home is one ⌘K away and the page never overflows horizontally', async ({ page }) => {
   await boot(page, 'agents');
   await page.keyboard.press('Meta+k');
   await page.keyboard.type('go to home');

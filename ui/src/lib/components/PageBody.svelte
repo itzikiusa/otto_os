@@ -40,7 +40,10 @@
     flex-direction: column;
   }
   .page-body.padded {
-    padding: 18px 20px 40px;
+    /* --fb-clearance: the floating bar's height while it can rest over the
+       content column (set by FloatingBar.svelte), so the end of a scrolling
+       page always scrolls clear of the pill. */
+    padding: 18px 20px max(40px, var(--fb-clearance, 0px));
   }
   .page-body.fill {
     overflow: hidden;

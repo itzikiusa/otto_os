@@ -192,7 +192,9 @@ class HomeStore {
   goTo(i: number): void {
     if (this.views.length === 0) return;
     const n = ((i % this.views.length) + this.views.length) % this.views.length;
-    if (n === this.activeIndex) return;
+    // Compare with the RAW shared index: the bar may sit on a space past
+    // Home's last view (shown clamped); picking that view re-syncs the bar.
+    if (n === spaces.active) return;
     this.slideDir = n > this.activeIndex ? 1 : -1;
     this.activeIndex = n;
     this.zoomedId = null;

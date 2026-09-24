@@ -328,6 +328,7 @@ the existing layers. Don't invent a number.
 |---|---|---|
 | In-pane stacking | 1–10 | sticky headers, resize handles, the right-panel edge (5) |
 | Mobile chrome | 60 / 90–93 | `BottomNav` (60, sheet 92–93), `Drawer` (90–91) |
+| Floating bar | 40 | `FloatingBar` over the content column (below every sheet and menu) |
 | Command surfaces | 150 | `Palette`, `ShortcutsOverlay` |
 | Sheets | 200 | `Modal` (and so `ConfirmDialog`) |
 | Toasts | 300 | `Toasts` |
