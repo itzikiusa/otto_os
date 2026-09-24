@@ -1,9 +1,11 @@
 <script lang="ts">
-  // Home: a personal dashboard of up to 4 views, each a 12-column grid of up
-  // to 8 live boxes (Agents, Mission Control, DB dashboards, Kubernetes,
-  // Insights, Usage). Views slide (arrows, dots, ←/→, swipe) and auto-rotate
-  // every 30 s; any box zooms to fill the page. Layout is per device (see
-  // home.svelte.ts).
+  // Home: Otto's one "desktop". The ambient backdrop fills the page; on it sit
+  // a greeting + today's glance cards (HomeToday) and the active space's
+  // widgets — up to 8 live boxes (Agents, Mission Control, DB dashboards,
+  // Kubernetes, Insights, Usage) on a 12-column grid. Spaces 01–04 are Home's
+  // views, shared with the floating bar through lib/stores/spaces.svelte.ts;
+  // they slide (tabs, ←/→, swipe, ⌘K) and can cycle every 30 s. Any widget
+  // zooms to fill the page. Layout is per device (see home.svelte.ts).
   import { fly } from 'svelte/transition';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -16,6 +18,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import HomeBox from './HomeBox.svelte';
+  import HomeToday from './HomeToday.svelte';
+  import { spaces, spaceNumber } from '../../lib/stores/spaces.svelte';
   import { home, MAX_BOXES, MAX_VIEWS, ROTATE_MS, ROW_PX, GAP_PX } from './home.svelte';
   import { HOME_KINDS, type HomeBoxKind } from './kinds';
 
@@ -73,30 +77,41 @@
 
   // ── Views ────────────────────────────────────────────────────────────────
   async function addView(): Promise<void> {
-    const name = await confirmer.promptText('View name', { title: 'New view', confirmLabel: 'Create', initial: `View ${home.views.length + 1}` });
+    const name = await confirmer.promptText('Space name', { title: `New space ${spaceNumber(home.views.length)}`, confirmLabel: 'Create', initial: `Space ${home.views.length + 1}` });
     if (name) home.addView(name);
   }
   async function renameView(): Promise<void> {
     const v = home.active;
     if (!v) return;
-    const name = await confirmer.promptText('Rename view', { title: 'Rename view', confirmLabel: 'Rename', initial: v.name });
+    const name = await confirmer.promptText('Space name', { title: 'Rename space', confirmLabel: 'Rename', initial: v.name });
     if (name && name !== v.name) home.renameView(v.id, name);
   }
   async function removeView(): Promise<void> {
     const v = home.active;
     if (!v) return;
-    if (await confirmer.ask(`Delete view “${v.name}” and its ${v.boxes.length} box${v.boxes.length === 1 ? '' : 'es'}?`, { title: 'Delete view' })) {
+    if (await confirmer.ask(`Delete space “${v.name}” and its ${v.boxes.length} widget${v.boxes.length === 1 ? '' : 's'}?`, { title: 'Delete space' })) {
       home.removeView(v.id);
     }
   }
   function viewMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, [
-      { label: 'Rename view…', icon: 'edit', action: () => void renameView() },
-      { label: 'Add view', icon: 'plus', disabled: home.views.length >= MAX_VIEWS, action: () => void addView() },
+      { label: 'Rename space…', icon: 'edit', action: () => void renameView() },
+      { label: 'Add space', icon: 'plus', disabled: home.views.length >= MAX_VIEWS, action: () => void addView() },
       { separator: true },
-      { label: 'Delete view', icon: 'trash', danger: true, action: () => void removeView() },
+      { label: 'Delete space', icon: 'trash', danger: true, disabled: home.views.length <= 1, action: () => void removeView() },
     ]);
   }
+
+  // The floating bar (another window, or this one) switched space: restart
+  // the rotation countdown like any manual navigation.
+  let lastSpace = spaces.active;
+  $effect(() => {
+    const s = spaces.active;
+    if (s === lastSpace) return;
+    lastSpace = s;
+    home.zoomedId = null;
+    home.rotationEpoch += 1;
+  });
 
   function addBox(kind: HomeBoxKind): void {
     const v = home.active;
@@ -115,18 +130,19 @@
     dragId = null;
   }
 
-  // ⌘K: switch views / toggle rotation from anywhere on the page.
+  // ⌘K: switch spaces / toggle cycling from anywhere on the page.
   $effect(() => {
     const cmds = home.views.map((v, i) => ({
       id: `home.view-${v.id}`,
-      title: `Home: show “${v.name}”`,
+      title: `Home: space ${spaceNumber(i)} · ${v.name}`,
       group: 'Home',
-      keywords: 'home dashboard view slide',
+      keywords: `home desktop space view slide ${spaceNumber(i)} ${i + 1}`,
       run: () => home.goTo(i),
     }));
     const unreg = registry.register('home', [
       ...cmds,
-      { id: 'home.rotate', title: home.autoRotate ? 'Home: pause auto-rotation' : 'Home: resume auto-rotation', group: 'Home', keywords: 'home dashboard slide auto rotate 30 seconds', run: () => home.setAutoRotate(!home.autoRotate) },
+      { id: 'home.add-widget', title: 'Home: add widget…', group: 'Home', keywords: 'home desktop widget box add pin', run: () => (picking = true) },
+      { id: 'home.rotate', title: home.autoRotate ? 'Home: stop cycling spaces' : 'Home: cycle spaces every 30 s', group: 'Home', keywords: 'home dashboard slide auto rotate 30 seconds spaces', run: () => home.setAutoRotate(!home.autoRotate) },
     ]);
     return unreg;
   });
@@ -140,33 +156,33 @@
 <div class="home" role="region" aria-label="Home dashboard" ontouchstart={onTouchStart} ontouchend={onTouchEnd}>
   <PageHeader title="Home">
     {#snippet tabs()}
-      <div class="bar">
-        {#if home.views.length > 1}
-          <button class="icon-btn" onclick={() => home.prev()} title="Previous view (←)" aria-label="Previous view"><Icon name="chevronLeft" size={14} /></button>
-        {/if}
-        <button class="vname" onclick={viewMenu} oncontextmenu={viewMenu} title="View options">
-          <span class="ellipsis">{home.active?.name ?? 'Home'}</span>
-          <Icon name="chevronDown" size={11} />
-        </button>
-        {#if home.views.length > 1}
-          <button class="icon-btn" onclick={() => home.next()} title="Next view (→)" aria-label="Next view"><Icon name="chevronRight" size={14} /></button>
-        {/if}
-        <div class="dots" role="tablist" aria-label="Views">
+      <div class="spaces-bar">
+        <div class="spaces segmented" role="tablist" aria-label="Spaces">
           {#each home.views as v, i (v.id)}
             <button
-              class="dot"
-              class:on={i === home.activeIndex}
+              class="space"
+              class:active={i === home.activeIndex}
               role="tab"
               aria-selected={i === home.activeIndex}
               aria-label={v.name}
-              title={v.name}
+              title="Space {spaceNumber(i)} · {v.name}"
               onclick={() => home.goTo(i)}
-            ></button>
+              oncontextmenu={(e) => {
+                home.goTo(i);
+                viewMenu(e);
+              }}
+            >
+              <span class="num">{spaceNumber(i)}</span>
+              {#if i === home.activeIndex}<span class="sname">{v.name}</span>{/if}
+            </button>
           {/each}
         </div>
         {#if home.views.length < MAX_VIEWS}
           <!-- Outside the tablist: a tablist may only contain tabs (axe aria-required-children). -->
-          <button class="dot add" onclick={addView} title="Add view" aria-label="Add view"><Icon name="plus" size={9} /></button>
+          <button class="icon-btn" onclick={addView} title="Add space" aria-label="Add space"><Icon name="plus" size={14} /></button>
+        {/if}
+        {#if home.active}
+          <button class="icon-btn" onclick={viewMenu} title="Space options" aria-label="Space options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
         {/if}
       </div>
     {/snippet}
@@ -176,19 +192,20 @@
           class="btn small ghost rot"
           class:on={home.autoRotate}
           onclick={() => home.setAutoRotate(!home.autoRotate)}
-          title={home.autoRotate ? 'Auto-rotate every 30 s — click to pause' : 'Auto-rotate is paused — click to resume'}
+          title={home.autoRotate ? 'Cycling spaces every 30 s — click to pause' : 'Space cycling is paused — click to resume'}
           aria-pressed={home.autoRotate}
-          aria-label="Auto-rotate views"
-          data-label={home.autoRotate ? 'Pause auto-rotate' : 'Resume auto-rotate'}
+          aria-label="Auto-rotate spaces"
+          data-label={home.autoRotate ? 'Pause cycling spaces' : 'Cycle spaces every 30 s'}
+          data-icon={home.autoRotate ? 'refresh' : 'play'}
         >
-          <Icon name={home.autoRotate ? 'refresh' : 'play'} size={11} />
+          <Icon name={home.autoRotate ? 'refresh' : 'play'} size={12} />
           {home.autoRotate ? '30s' : 'Paused'}
         </button>
       {/if}
-      <!-- One primary per page: an empty view's EmptyState owns "Add a box". -->
+      <!-- One primary per page: an empty space's EmptyState owns "Add widget". -->
       {#if home.active && home.active.boxes.length > 0}
-        <button class="btn small primary" onclick={() => (picking = true)} disabled={full} title={full ? `A view holds at most ${MAX_BOXES} boxes` : 'Add a box to this view'}>
-          <Icon name="plus" size={11} />Add box
+        <button class="btn small primary" onclick={() => (picking = true)} disabled={full} title={full ? `A space holds at most ${MAX_BOXES} widgets` : 'Add a widget to this space'}>
+          <Icon name="plus" size={12} />Add widget
         </button>
       {/if}
     {/snippet}
@@ -198,8 +215,6 @@
     {#key home.rotationEpoch}
       <div class="progress" aria-hidden="true"><i style:animation-duration="{ROTATE_MS}ms"></i></div>
     {/key}
-  {:else}
-    <div class="progress idle" aria-hidden="true"></div>
   {/if}
 
   <div class="stage">
@@ -207,29 +222,51 @@
       <div class="zoom">
         <HomeBox box={home.zoomed} viewId={home.active.id} zoomed />
       </div>
-    {:else if home.active}
-      {#key home.active.id}
-        <div
-          class="view"
-          class:phone={viewport.isPhone}
-          in:fly={{ x: 48 * home.slideDir, duration: 220 }}
-          style:--row="{ROW_PX}px"
-          style:--gap="{GAP_PX}px"
-        >
-          {#if home.active.boxes.length === 0}
-            <div class="empty">
-              <EmptyState variant="page" icon="grid" title="This view is empty" body="Add up to {MAX_BOXES} boxes — resize them from the corner, drag the grip to reorder, double-click a header to zoom." actionLabel="Add a box" actionIcon="plus" onaction={() => (picking = true)} />
-            </div>
-          {:else}
-            {#each home.active.boxes as b, i (b.id)}
-              <HomeBox box={b} viewId={home.active.id} index={i} count={home.active.boxes.length} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
-            {/each}
-          {/if}
-        </div>
-      {/key}
     {:else}
-      <div class="empty">
-        <EmptyState variant="page" icon="grid" title="No views yet" body="Create a view, then fill it with boxes." actionLabel="Add view" actionIcon="plus" onaction={addView} />
+      <div class="desk" class:phone={viewport.isPhone}>
+        <HomeToday />
+        {#if home.active}
+          {#key home.active.id}
+            <div
+              class="view"
+              class:phone={viewport.isPhone}
+              in:fly={{ x: 48 * home.slideDir, duration: 220 }}
+              style:--row="{ROW_PX}px"
+              style:--gap="{GAP_PX}px"
+              aria-label="Space {spaceNumber(home.activeIndex)} · {home.active.name}"
+            >
+              {#if home.active.boxes.length === 0}
+                <div class="empty">
+                  <EmptyState
+                    variant="page"
+                    icon="grid"
+                    title="This space is empty"
+                    body="Pin live widgets here: your agents, Mission Control, usage, clusters or a database dashboard. Resize from the corner, drag the grip to reorder."
+                    actionLabel="Add widget"
+                    actionIcon="plus"
+                    onaction={() => (picking = true)}
+                  >
+                    {#if kinds.length}
+                      <div class="quick" aria-label="Quick add">
+                        {#each kinds.slice(0, 4) as k (k.kind)}
+                          <button class="chip quick-chip" onclick={() => addBox(k.kind)}><Icon name={k.icon} size={12} />{k.label}</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </EmptyState>
+                </div>
+              {:else}
+                {#each home.active.boxes as b, i (b.id)}
+                  <HomeBox box={b} viewId={home.active.id} index={i} count={home.active.boxes.length} ondragbox={(id) => (dragId = id)} ondropon={dropOn} />
+                {/each}
+              {/if}
+            </div>
+          {/key}
+        {:else}
+          <div class="empty">
+            <EmptyState variant="page" icon="grid" title="No spaces yet" body="Create a space, then pin widgets to it." actionLabel="Add space" actionIcon="plus" onaction={addView} />
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -237,7 +274,7 @@
 </div>
 
 {#if picking}
-  <Modal title="Add box" width={520} onclose={() => (picking = false)}>
+  <Modal title="Add widget" width={520} onclose={() => (picking = false)}>
     <div class="kinds">
       {#each kinds as k (k.kind)}
         <button class="kind" onclick={() => addBox(k.kind)}>
@@ -248,76 +285,56 @@
           </span>
         </button>
       {:else}
-        <p class="dim">No box kinds are available to your role.</p>
+        <p class="dim">No widgets are available to your role.</p>
       {/each}
     </div>
   </Modal>
 {/if}
 
 <style>
+  /* The desktop: the ambient backdrop painted full-bleed under the widgets
+     (fixed to the viewport, so it continues seamlessly into the toolbar and
+     sidebar glass). "None" — or reduced transparency — leaves plain --bg. */
   .home {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    background: var(--bg);
+    background-color: var(--bg);
+    background-image: var(--ambient-image);
+    background-attachment: fixed;
+    background-size: cover;
+    background-position: center;
   }
-  .bar {
+  .spaces-bar {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     flex: none;
   }
-  .vname {
+  .spaces .space {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    max-width: 240px;
-    padding: 4px 8px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    border-radius: var(--radius-s);
-    cursor: pointer;
+    min-width: 30px;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
   }
-  .vname:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  .spaces .num {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.02em;
   }
-  .dots {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-inline-start: 6px;
-  }
-  .dot {
-    width: 9px;
-    height: 9px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--text-dim) 40%, transparent);
-    cursor: pointer;
-    transition: background 130ms ease-out, transform 130ms ease-out;
-  }
-  .dot.on {
-    background: var(--accent);
-    transform: scale(1.25);
-  }
-  .dot.add {
-    display: grid;
-    place-items: center;
-    width: 14px;
-    height: 14px;
-    background: transparent;
-    border: 1px dashed var(--text-dim);
-    color: var(--text-dim);
-  }
-  .dot.add:hover {
+  .spaces .space.active .num {
     color: var(--accent-text);
-    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .sname {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
   }
   .rot {
     gap: 4px;
@@ -325,22 +342,17 @@
   .rot.on {
     color: var(--accent-text);
   }
+  /* Cycling countdown: a hairline under the toolbar, only while cycling. */
   .progress {
     height: 2px;
     flex: none;
-    background: color-mix(in srgb, var(--border) 60%, transparent);
     overflow: hidden;
-  }
-  /* Only a rotating view shows a track; idle, it would read as a second,
-     heavier header border. */
-  .progress.idle {
-    background: transparent;
   }
   .progress i {
     display: block;
     height: 100%;
     width: 100%;
-    background: var(--accent);
+    background: color-mix(in srgb, var(--accent) 70%, transparent);
     transform-origin: left;
     animation: fill linear forwards;
   }
@@ -355,18 +367,34 @@
       transform: scaleX(1);
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .progress i {
+      animation: none;
+      transform: scaleX(1);
+      opacity: 0.4;
+    }
+  }
   .stage {
     position: relative;
     flex: 1;
     min-height: 0;
     overflow: hidden;
   }
-  .view {
+  .desk {
     position: absolute;
     inset: 0;
     overflow-y: auto;
-    /* Box edges line up with the header title (20px inset). */
-    padding: 16px 20px 20px;
+    /* Edges line up with the toolbar title (20px inset). */
+    padding: 22px 20px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .desk.phone {
+    padding: 16px 14px 24px;
+    gap: 16px;
+  }
+  .view {
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
     grid-auto-rows: var(--row);
@@ -384,7 +412,31 @@
   }
   .empty {
     grid-column: 1 / -1;
-    grid-row: span 6;
+    grid-row: span 5;
+    display: grid;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--shadow-card);
+  }
+  .quick {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .quick-chip {
+    height: 24px;
+    padding: 0 10px;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .quick-chip:hover {
+    border-color: var(--border-strong);
+    background: var(--hover);
   }
   .kinds {
     display: grid;
@@ -424,20 +476,15 @@
     min-width: 0;
   }
   .kt b {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
   }
   .kt small {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.35;
   }
   .dim {
     color: var(--text-dim);
-    font-size: 12px;
-  }
-  .ellipsis {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    font-size: var(--fs-s);
   }
 </style>
