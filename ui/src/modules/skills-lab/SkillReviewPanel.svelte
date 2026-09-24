@@ -11,6 +11,7 @@
   import { skillReviewBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
@@ -235,7 +236,7 @@
 
 <div class="lab-review" data-testid="skill-review">
   <aside class="lr-side">
-    <button class="btn primary block" onclick={newReview} data-testid="new-skill-review">+ New review</button>
+    <button class="btn small primary block" onclick={newReview} data-testid="new-skill-review"><Icon name="plus" size={12} /> New review</button>
     {#if reviews.length === 0}
       <p class="lr-empty">No skill reviews yet.</p>
     {:else}
@@ -457,22 +458,24 @@
 </div>
 
 <style>
-  .lab-review { display: grid; grid-template-columns: 260px 1fr; gap: 12px; height: 100%; min-height: 0; }
-  .lr-side { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+  /* Same shell as Skills: a surface list pane with a hairline, content beside it. */
+  .lab-review { display: grid; grid-template-columns: 280px 1fr; height: 100%; min-height: 0; }
+  .lr-side { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 10px 8px; background: var(--surface); border-inline-end: 1px solid var(--border); }
   .block { width: 100%; }
-  .lr-empty { color: var(--text-dim); font-size: 12.5px; padding: 8px; }
+  .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
   .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-list li { display: flex; align-items: center; gap: 4px; }
   .lr-item {
-    flex: 1; min-width: 0; text-align: left; background: transparent; border: 1px solid var(--border);
+    flex: 1; min-width: 0; text-align: start; background: transparent; border: 1px solid transparent;
     border-radius: var(--radius-m); padding: 7px 9px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
   }
-  .lr-item.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .lr-item-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lr-item:hover { background: var(--hover); }
+  .lr-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
+  .lr-item-name { font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-item-meta { display: flex; align-items: center; gap: 6px; }
   .lr-src { font-size: var(--fs-xs); }
   .lr-del { flex-shrink: 0; }
-  .lr-main { overflow-y: auto; min-height: 0; }
+  .lr-main { overflow-y: auto; min-height: 0; padding: 16px 20px; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
   .lr-form h3 { margin: 0; }
   .lr-hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin: 0; }
@@ -546,7 +549,8 @@
   .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
   .mono { font-family: var(--font-mono, monospace); }
 
-  @media (max-width: 900px) {
-    .lab-review { grid-template-columns: 1fr; }
+  @media (max-width: 1024px) {
+    .lab-review { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .lr-side { max-height: 40vh; border-inline-end: none; border-bottom: 1px solid var(--border); }
   }
 </style>

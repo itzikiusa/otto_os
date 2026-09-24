@@ -23,6 +23,14 @@ scraper = "0.20"
 # Tree type scraper's `Html` is built on (transitive via scraper already, but
 # Rust requires a direct dependency to name `ego_tree::NodeRef` ourselves).
 ego-tree = "0.6"
+# Remote live view (`live` module): screencast frames arrive base64-encoded,
+# the Chromium download is sha256-verified, timestamps on the wire.
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+# `dup2` of the CDP pipe onto fds 3/4 in the Chromium child (pre_exec).
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }

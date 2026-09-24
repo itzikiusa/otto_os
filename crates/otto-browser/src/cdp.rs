@@ -146,9 +146,20 @@ impl CdpClient {
     }
 
     pub async fn create_target(&self, url: &str) -> Result<String, CdpError> {
-        let result = self
-            .call("Target.createTarget", json!({"url": url}), None)
-            .await?;
+        self.create_target_in(url, None).await
+    }
+
+    /// `Target.createTarget`, inside `browser_context_id` when given.
+    pub async fn create_target_in(
+        &self,
+        url: &str,
+        browser_context_id: Option<&str>,
+    ) -> Result<String, CdpError> {
+        let mut params = json!({"url": url});
+        if let Some(ctx) = browser_context_id {
+            params["browserContextId"] = json!(ctx);
+        }
+        let result = self.call("Target.createTarget", params, None).await?;
         result
             .get("targetId")
             .and_then(Value::as_str)
@@ -337,6 +348,30 @@ impl CdpClient {
             .and_then(|r| r.get("value"))
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    /// A fresh, isolated browser context (own cookie jar / storage).
+    pub async fn create_browser_context(&self) -> Result<String, CdpError> {
+        let result = self
+            .call("Target.createBrowserContext", json!({}), None)
+            .await?;
+        result
+            .get("browserContextId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CdpError::Protocol("Target.createBrowserContext: no browserContextId".into())
+            })
+    }
+
+    pub async fn dispose_browser_context(&self, id: &str) -> Result<(), CdpError> {
+        self.call(
+            "Target.disposeBrowserContext",
+            json!({"browserContextId": id}),
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn close_target(&self, target_id: &str) -> Result<(), CdpError> {
@@ -544,8 +579,42 @@ impl LightpandaEngine {
         Ok(html)
     }
 
+    /// Every page load runs in its OWN browser context, disposed afterwards:
+    /// before this, `createTarget` never passed a `browserContextId`, so
+    /// cookies a page (or a `login()`) set landed in the sidecar's shared
+    /// default context — potentially visible to another workspace's/user's
+    /// later fetches. Reads fall back to the connection's default context
+    /// when the engine refuses `Target.createBrowserContext` (logged);
+    /// `login()` never does (see [`Self::login_flow_inner`]).
     async fn drive(&self, client: &CdpClient, url: &str) -> Result<String, EngineError> {
-        let target_id = client.create_target("about:blank").await.map_err(cdp_err)?;
+        let ctx = match client.create_browser_context().await {
+            Ok(id) => Some(id),
+            Err(CdpError::Protocol(e)) => {
+                tracing::warn!(
+                    "browser: lightpanda refused Target.createBrowserContext ({e}); \
+                     reading in the connection's default context"
+                );
+                None
+            }
+            Err(e) => return Err(cdp_err(e)),
+        };
+        let result = self.drive_in(client, url, ctx.as_deref()).await;
+        if let Some(id) = &ctx {
+            let _ = client.dispose_browser_context(id).await;
+        }
+        result
+    }
+
+    async fn drive_in(
+        &self,
+        client: &CdpClient,
+        url: &str,
+        ctx: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let target_id = client
+            .create_target_in("about:blank", ctx)
+            .await
+            .map_err(cdp_err)?;
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
         if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
@@ -588,7 +657,22 @@ impl LightpandaEngine {
         password: &str,
     ) -> Result<bool, EngineError> {
         let client = CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?;
-        let result = self.drive_login(&client, url, username, password).await;
+        // A credential is only ever typed into a throwaway, isolated context —
+        // never the sidecar's shared default one (whose cookies another
+        // workspace's fetch could later see). No isolation → no login.
+        let ctx = match client.create_browser_context().await {
+            Ok(id) => id,
+            Err(e) => {
+                client.close().await;
+                return Err(EngineError::Unavailable(format!(
+                    "lightpanda cannot create an isolated browser context for sign-in: {e}"
+                )));
+            }
+        };
+        let result = self
+            .drive_login(&client, url, username, password, &ctx)
+            .await;
+        let _ = client.dispose_browser_context(&ctx).await;
         // Deterministic cleanup on every path, same as `navigate_and_snapshot_inner`.
         client.close().await;
         result
@@ -600,8 +684,12 @@ impl LightpandaEngine {
         url: &str,
         username: &str,
         password: &str,
+        ctx: &str,
     ) -> Result<bool, EngineError> {
-        let target_id = client.create_target("about:blank").await.map_err(cdp_err)?;
+        let target_id = client
+            .create_target_in("about:blank", Some(ctx))
+            .await
+            .map_err(cdp_err)?;
         let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
         client.enable_page(&session_id).await.map_err(cdp_err)?;
         if let Err(e) = self.navigate_guarded(client, &session_id, url).await {
@@ -903,5 +991,101 @@ mod tests {
             .interception_unsupported
             .store(true, Ordering::Relaxed);
         assert!(fixture.is_usable());
+    }
+
+    /// A scripted lightpanda stand-in on a loopback WebSocket: answers the
+    /// handful of CDP calls the engine makes and records every method (and
+    /// the `createTarget` params), so the per-call context isolation is
+    /// asserted without a real sidecar.
+    async fn fake_lightpanda(
+        support_contexts: bool,
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::default();
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let log = log2.clone();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(Message::Text(t))) = ws.next().await {
+                        let v: Value = serde_json::from_str(&t).unwrap();
+                        let method = v["method"].as_str().unwrap_or("").to_string();
+                        log.lock().unwrap().push((method.clone(), v["params"].clone()));
+                        let id = v["id"].clone();
+                        let reply = match method.as_str() {
+                            "Target.createBrowserContext" if !support_contexts => json!({
+                                "id": id, "error": {"code": -32601, "message": "unsupported"}
+                            }),
+                            "Target.createBrowserContext" => {
+                                json!({"id": id, "result": {"browserContextId": "CTX1"}})
+                            }
+                            "Target.createTarget" => json!({"id": id, "result": {"targetId": "T1"}}),
+                            "Target.attachToTarget" => json!({"id": id, "result": {"sessionId": "S1"}}),
+                            "Runtime.evaluate" => {
+                                let expr = v["params"]["expression"].as_str().unwrap_or("");
+                                let value = if expr == "location.href" {
+                                    json!("https://8.8.8.8/")
+                                } else {
+                                    json!("<html><head><title>ok</title></head><body>hi</body></html>")
+                                };
+                                json!({"id": id, "result": {"result": {"value": value}}})
+                            }
+                            _ => json!({"id": id, "result": {}}),
+                        };
+                        ws.send(Message::Text(reply.to_string())).await.unwrap();
+                        if method == "Page.navigate" {
+                            let ev = json!({"method": "Page.loadEventFired", "sessionId": "S1", "params": {}});
+                            ws.send(Message::Text(ev.to_string())).await.unwrap();
+                        }
+                    }
+                });
+            }
+        });
+        (format!("ws://127.0.0.1:{port}"), log)
+    }
+
+    #[tokio::test]
+    async fn every_fetch_runs_in_its_own_disposed_browser_context() {
+        let (url, log) = fake_lightpanda(true).await;
+        let engine = LightpandaEngine::new(url);
+        let page = engine.fetch_page("https://8.8.8.8/").await.unwrap();
+        assert_eq!(page.title, "ok");
+        let log = log.lock().unwrap().clone();
+        let pos = |m: &str| log.iter().position(|(x, _)| x == m);
+        let created = pos("Target.createBrowserContext").expect("context created");
+        let target = pos("Target.createTarget").expect("target created");
+        assert!(created < target);
+        assert_eq!(log[target].1["browserContextId"], "CTX1");
+        let disposed = log
+            .iter()
+            .find(|(m, _)| m == "Target.disposeBrowserContext")
+            .expect("context disposed");
+        assert_eq!(disposed.1["browserContextId"], "CTX1");
+    }
+
+    #[tokio::test]
+    async fn reads_fall_back_but_login_refuses_without_context_isolation() {
+        let (url, log) = fake_lightpanda(false).await;
+        let engine = LightpandaEngine::new(url.clone());
+        // A read still works in the connection's default context.
+        assert!(engine.fetch_page("https://8.8.8.8/").await.is_ok());
+        let target = log
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(m, _)| m == "Target.createTarget")
+            .cloned()
+            .unwrap();
+        assert!(target.1.get("browserContextId").is_none());
+        // A credential is never typed into a shared context.
+        let engine = LightpandaEngine::new(url);
+        let err = engine
+            .login("https://8.8.8.8/", "user", "secret")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Unavailable(_)));
+        assert!(!err.to_string().contains("secret"));
     }
 }
