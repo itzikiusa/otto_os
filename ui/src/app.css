@@ -469,3 +469,20 @@ html[data-scheme='dark'] .hljs-built_in,
 html[data-scheme='dark'] .hljs-type {
   color: #56c8d8;
 }
+
+/* Reduced motion, app-wide (foundations §8): with the OS setting on, every
+   animation and transition collapses to an instant change. Live-state
+   pulses/shimmers stop instead of looping; nothing that conveys state relies
+   on motion alone. A component may still ship a more specific override. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}

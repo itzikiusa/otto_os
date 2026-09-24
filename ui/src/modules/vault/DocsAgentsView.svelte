@@ -11,6 +11,7 @@
   // the 1.5s poll timer and stops it once nothing is active.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
   import { contextApi } from '../../lib/api/context';
@@ -1008,24 +1009,9 @@
 </div>
 
 {#if skillView}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="skill-overlay" onclick={() => (skillView = null)}>
-    <div
-      class="skill-dialog"
-      role="dialog"
-      tabindex="-1"
-      aria-label="Skill {skillView.name}"
-      onclick={(e) => e.stopPropagation()}
-    >
-      <div class="skill-dialog-head">
-        <h3><Icon name="function" size={14} /> {skillView.name}</h3>
-        <button class="icon-btn" title="Close" onclick={() => (skillView = null)}>
-          <Icon name="x" size={13} />
-        </button>
-      </div>
-      <pre class="skill-body">{skillView.body}</pre>
-    </div>
-  </div>
+  <Modal title="Skill {skillView.name}" width={760} onclose={() => (skillView = null)}>
+    <pre class="skill-body">{skillView.body}</pre>
+  </Modal>
 {/if}
 
 <style>
@@ -1120,43 +1106,8 @@
     border-color: var(--accent, #7a9cff);
     color: var(--accent, #9ab4ff);
   }
-  .skill-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    z-index: 95;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 5vh 16px;
-  }
-  .skill-dialog {
-    width: min(760px, 94vw);
-    max-height: 88vh;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .skill-dialog-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-  .skill-dialog-head h3 {
-    margin: 0;
-    font-size: 13.5px;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-  }
   .skill-body {
     margin: 0;
-    padding: 14px 16px;
     overflow: auto;
     font-size: 12px;
     line-height: 1.55;

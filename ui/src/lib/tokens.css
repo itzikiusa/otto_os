@@ -27,6 +27,22 @@
   --radius-m: 8px;
   --radius-l: 12px;
 
+  /* Layers (docs/design/guidelines/foundations.md §6). Floating UI picks one
+     of these instead of inventing a number; scripts/ui-guards.mjs ratchets
+     z-index literals outside 0–10 (in-pane stacking). Nothing exceeds
+     --z-overlay-max. */
+  --z-sticky: 10; /* in-pane: sticky headers, resize handles */
+  --z-floating-bar: 40; /* FloatingBar over the content column */
+  --z-mobile-nav: 60; /* BottomNav */
+  --z-drawer: 90; /* Drawer (+1 panel), BottomNav "More" sheet (+2/+3) */
+  --z-command: 150; /* Palette, ShortcutsOverlay */
+  --z-modal: 200; /* Modal (and ConfirmDialog) */
+  --z-toast: 300; /* Toasts */
+  --z-find: 9000; /* FindInPage */
+  --z-popover-backdrop: 9998; /* ContextMenu / popover click-catcher */
+  --z-popover: 9999; /* ContextMenu, NotificationBell panel — above sheets */
+  --z-overlay-max: 9999;
+
   --accent: #0a84ff;
   /* Text/icon colour on an --accent-solid fill (see the warm/dark override). */
   --accent-contrast: #ffffff;

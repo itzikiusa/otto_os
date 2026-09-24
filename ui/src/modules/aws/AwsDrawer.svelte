@@ -3,9 +3,13 @@
   // look as the Kubernetes ResourceDrawer: header (state pill + name + id,
   // close), tab strip, scrollable body. Desktop: a fixed-width column next to
   // the table; phone: a full-screen sheet. Esc closes; ←/→ move between tabs.
+  // The phone sheet sits on the Modal layer (above BottomNav) and registers
+  // with ui.pushModal() so the native browser webview hides under it.
   import type { Snippet } from 'svelte';
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   interface Props {
     /** Small uppercase kind label ("instance", "db instance"). */
@@ -25,10 +29,24 @@
   let { kind, name, id = '', status = '', statusClass = '', tabs, tab, ontab, onclose, children }: Props =
     $props();
 
+  let drawerEl = $state<HTMLElement | null>(null);
+
+  // Phone: a full-screen sheet is a modal overlay — register it (untracked:
+  // pushModal reads the counter it bumps) and move focus into it.
+  $effect(() => {
+    if (!viewport.isPhone) return;
+    untrack(() => ui.pushModal());
+    queueMicrotask(() => drawerEl?.querySelector<HTMLElement>('.dr-close')?.focus());
+    return () => untrack(() => ui.popModal());
+  });
+
   function onKey(e: KeyboardEvent): void {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    // A dialog stacked over the drawer (confirm, picker) owns its own Esc.
+    const modals = document.querySelectorAll('[aria-modal="true"]');
+    if (Array.from(modals).some((m) => m !== drawerEl)) return;
     e.stopPropagation();
     onclose();
   }
@@ -43,7 +61,15 @@
 
 <svelte:window onkeydown={onKey} />
 
-<aside class="drawer" class:sheet={viewport.isPhone} aria-label="{kind} details" data-testid="aws-drawer">
+<aside
+  bind:this={drawerEl}
+  class="drawer"
+  class:sheet={viewport.isPhone}
+  role={viewport.isPhone ? 'dialog' : undefined}
+  aria-modal={viewport.isPhone ? 'true' : undefined}
+  aria-label="{kind} details"
+  data-testid="aws-drawer"
+>
   <header class="dr-head">
     <div class="dr-title">
       <span class="dr-kind">{kind}</span>
@@ -51,7 +77,7 @@
       {#if id && id !== name}<span class="dr-id mono" title={id}>{id}</span>{/if}
       {#if status}<span class="pill {statusClass}">{status}</span>{/if}
     </div>
-    <button class="icon-btn" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
+    <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
     {#each tabs as t, i (t.id)}
@@ -86,7 +112,8 @@
   .drawer.sheet {
     position: fixed;
     inset: 0;
-    z-index: 40;
+    /* The Modal layer: above BottomNav and its More sheet. */
+    z-index: var(--z-modal);
     width: auto;
     max-width: none;
     border-left: none;

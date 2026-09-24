@@ -125,7 +125,7 @@
     background: var(--bg-sidebar);
     /* iOS home-indicator safe area. */
     padding-bottom: env(safe-area-inset-bottom, 0);
-    z-index: 60;
+    z-index: var(--z-mobile-nav);
   }
   .bn-btn {
     flex: 1;
@@ -183,14 +183,14 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
-    z-index: 92;
+    z-index: calc(var(--z-drawer) + 2);
   }
   .more-sheet {
     position: fixed;
     inset-inline-start: 0;
     inset-inline-end: 0;
     bottom: 0;
-    z-index: 93;
+    z-index: calc(var(--z-drawer) + 3);
     background: var(--bg);
     border-top: 1px solid var(--border);
     border-radius: 14px 14px 0 0;
@@ -198,7 +198,7 @@
     padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0));
     /* The grid is data-driven (all overflow modules + every installed plugin):
        cap the sheet so it never grows past the top edge and scroll inside. */
-    max-height: calc(100vh - 48px);
+    max-height: calc(100% - 48px); /* % of the window — vh is the screen's in WKWebView */
     display: flex;
     flex-direction: column;
   }

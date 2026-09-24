@@ -321,19 +321,20 @@ Don't stack shadows, add coloured glows, or invent a fourth level.
 
 ## 6. Layers (z-index)
 
-There are no z-index tokens yet (**Proposed:** `--z-*`). Put new UI in one of
-the existing layers. Don't invent a number.
+The layers are `--z-*` tokens in `lib/tokens.css`. Put new UI in one of them
+(`z-index: var(--z-modal)`); don't invent a number. `npm run check` ratchets
+z-index literals outside the in-pane range (−1…10).
 
-| Layer | Value | Who |
+| Layer | Token (value) | Who |
 |---|---|---|
-| In-pane stacking | 1–10 | sticky headers, resize handles, the right-panel edge (5) |
-| Mobile chrome | 60 / 90–93 | `BottomNav` (60, sheet 92–93), `Drawer` (90–91) |
-| Floating bar | 40 | `FloatingBar` over the content column (below every sheet and menu) |
-| Command surfaces | 150 | `Palette`, `ShortcutsOverlay` |
-| Sheets | 200 | `Modal` (and so `ConfirmDialog`) |
-| Toasts | 300 | `Toasts` |
-| Find bar | 9000 | `FindInPage` |
-| Menus | 9998–9999 | `ContextMenu` backdrop and menu, `NotificationBell` popover |
+| In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5) |
+| Floating bar | `--z-floating-bar` (40) | `FloatingBar` over the content column (below every sheet and menu) |
+| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1…+3) | `BottomNav` (sheet at drawer +2/+3), `Drawer` (90–91) |
+| Command surfaces | `--z-command` (150) | `Palette`, `ShortcutsOverlay` |
+| Sheets | `--z-modal` (200) | `Modal` (and so `ConfirmDialog`) |
+| Toasts | `--z-toast` (300) | `Toasts` |
+| Find bar | `--z-find` (9000) | `FindInPage` |
+| Menus | `--z-popover-backdrop` (9998), `--z-popover` (9999) | `ContextMenu` backdrop and menu, `NotificationBell` popover |
 
 Rules:
 
@@ -343,7 +344,7 @@ Rules:
   browser webview paints over them.
 - A menu opened from inside a Modal still goes through `ctxMenu`, which sits
   above sheets.
-- Nothing goes above 9999.
+- Nothing goes above `--z-overlay-max` (9999).
 
 ---
 
@@ -468,10 +469,11 @@ Rules:
   now, or loading. A finished or failed item stops animating.
 - Don't animate data changes: rows arriving, numbers ticking. Update them in
   place.
-- **Reduced motion.** There is no global rule yet (**TBD:** one global
-  `@media (prefers-reduced-motion: reduce)` override in `app.css`). Until then,
-  every new `animation` and every transition longer than 200 ms ships its own
-  override:
+- **Reduced motion.** `app.css` has one global
+  `@media (prefers-reduced-motion: reduce)` override that collapses every
+  animation and transition to an instant change. A component that needs a
+  different reduced-motion treatment (hide a pulse, keep a static state) still
+  ships its own override:
 
   ```css
   @media (prefers-reduced-motion: reduce) {

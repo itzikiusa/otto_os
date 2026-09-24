@@ -7,8 +7,8 @@
   // changes, not as a statement to parse; editing the statement does not
   // update the table (it describes what the builder produced).
   import Icon from '../../lib/components/Icon.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import type { DiffLine } from './EditFlow.svelte';
-  import { dialogKeys } from './dialog-keys';
 
   /** Rows shown before the table folds the rest into a count. */
   const DIFF_MAX = 200;
@@ -30,37 +30,23 @@
   const multiRow = $derived(new Set(lines.map((d) => d.row)).size > 1);
   const OP_LABEL: Record<DiffLine['op'], string> = { set: '$set', unset: '$unset', rename: '$rename', cell: 'set' };
 
+  // Esc (and the ✕) is the shared Modal's; a running statement can't be
+  // dismissed mid-flight.
+  function close(): void {
+    if (!running) onclose();
+  }
+
   function onReviewKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onclose();
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       onrun();
     }
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="cell-viewer-backdrop"
-  role="presentation"
-  onclick={(e) => {
-    if (e.target === e.currentTarget) onclose();
-  }}
-  onkeydown={onReviewKeydown}
->
-  <div
-    class="review-modal"
-    role="dialog"
-    aria-modal="true"
-    aria-label={title}
-    use:dialogKeys={onclose}
-  >
-    <div class="cv-head">
-      <span>{title}</span>
-      <button class="icon-btn" onclick={onclose} disabled={running} aria-label="Close">✕</button>
-    </div>
+<Modal {title} width={640} onclose={close}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="review-modal" onkeydown={onReviewKeydown}>
     <div class="review-body">
       {#if lines.length > 0}
         <div class="review-diff-wrap">
@@ -114,7 +100,7 @@
       </button>
     </div>
   </div>
-</div>
+</Modal>
 
 <style>
   /* Scoped copy of the shared dialog rules (see CellViewer.svelte). */
@@ -135,36 +121,13 @@
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent-text);
   }
-  .cell-viewer-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 250;
-    background: rgba(0, 0, 0, 0.4);
-    display: grid;
-    place-items: center;
-  }
-  .cv-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-    font-weight: 600;
-  }
   /* ── Review-SQL modal ── */
   .review-modal {
-    width: min(640px, 92vw);
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
-    overflow: hidden;
+    gap: 10px;
   }
   .review-body {
-    padding: 12px 14px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -277,7 +240,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    padding-top: 10px;
     border-top: 1px solid var(--border);
   }
   .review-kbd {

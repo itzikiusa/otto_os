@@ -88,14 +88,14 @@ test('narrow column panes shed the segmented control and keep every button in th
     await page.locator('[data-view-mini]').first().click();
     const menu = page.locator('.ctx-menu');
     await expectFullyInViewport(page, menu, 'view menu');
-    await menu.getByRole('menuitem', { name: 'Chat', exact: true }).click();
+    await menu.getByRole('menuitemcheckbox', { name: 'Chat', exact: true }).click();
   } else {
     // Tier 6: the view rows live in the ⋯ menu.
     const more = page.locator('button[title="More…"]').first();
     await more.click();
     const menu = page.locator('.ctx-menu');
     await expectFullyInViewport(page, menu, 'pane overflow menu');
-    await menu.getByRole('menuitem', { name: 'View: Chat' }).click();
+    await menu.getByRole('menuitemcheckbox', { name: 'View: Chat' }).click();
   }
   await expect(page.locator('.pane-body[data-view="chat"]').first()).toBeVisible({ timeout: 15_000 });
 

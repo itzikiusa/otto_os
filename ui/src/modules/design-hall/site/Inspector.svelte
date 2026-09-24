@@ -164,16 +164,10 @@
     setProp('src', `otto://design/${embedRef.id}${sel}`);
   }
 
-  /** A stand-in event anchored under the clicked control (menus open after an await). */
-  function anchorOf(e: MouseEvent): MouseEvent {
-    const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
-    const r = el?.getBoundingClientRect();
-    return {
-      clientX: r ? r.left : e.clientX,
-      clientY: r ? r.bottom + 4 : e.clientY,
-      preventDefault() {},
-      stopPropagation() {},
-    } as unknown as MouseEvent;
+  /** The clicked control, captured before the await (currentTarget is gone
+   *  after it) so the menu still opens under it. */
+  function anchorOf(e: MouseEvent): HTMLElement | null {
+    return e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
   }
 
   async function choose(kind: '3d' | 'image', e: MouseEvent, apply: (uri: string) => void): Promise<void> {
@@ -191,7 +185,7 @@
           action: () => apply(kind === '3d' ? `otto://design/${a.id}@approved` : `otto://design/${a.id}`),
         }))
       : [{ label: kind === '3d' ? 'No 3D artifacts in this workspace yet' : 'No images in this workspace yet', disabled: true }];
-    ctxMenu.show(anchor, items, { filter: items.length > 8, filterPlaceholder: 'Filter by title', maxVisible: 12 });
+    ctxMenu.showAt(anchor, items, { filter: items.length > 8, filterPlaceholder: 'Filter by title', maxVisible: 12 });
   }
 
   function addMedia(kind: 'embed/3d' | 'embed/image', e: MouseEvent): void {
@@ -254,7 +248,7 @@
       });
     }
     if (!items.length) items.push({ label: 'No brand kits in this workspace yet', disabled: true });
-    ctxMenu.show(anchor, items);
+    ctxMenu.showAt(anchor, items);
   }
 
   const errors = $derived(findings.filter((f) => f.level === 'error').length);

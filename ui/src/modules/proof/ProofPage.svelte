@@ -221,12 +221,11 @@
   }
 
   // ---- pack-level actions --------------------------------------------------
-  // Anchored under the button (not at the cursor); ctxMenu clamps it.
+  // Anchored under the button (not at the cursor); ctxMenu clamps it. When
+  // the button is collapsed into the header's ⋯ menu, showAt falls back to
+  // that ⋯ button.
   function openAddMenu(e: MouseEvent): void {
-    let r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    // Collapsed into the header's ⋯ menu: anchor to that button instead.
-    if (r.width === 0) r = document.querySelector('.ph-more')?.getBoundingClientRect() ?? r;
-    ctxMenu.show({ preventDefault() {}, stopPropagation() {}, clientX: r.left, clientY: r.bottom + 4 } as unknown as MouseEvent, [
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
       { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },

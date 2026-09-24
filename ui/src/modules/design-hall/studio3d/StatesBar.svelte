@@ -74,7 +74,8 @@
       },
       { separator: true },
       ...EASINGS.map<MenuItem>((ez) => ({
-        label: `${(st.easing ?? 'ease-in-out') === ez ? '✓ ' : ''}Easing: ${ez}`,
+        label: `Easing: ${ez}`,
+        checked: (st.easing ?? 'ease-in-out') === ez,
         disabled: readonly,
         action: () => onchange(setStateTiming(doc, st.id, { easing: ez })),
       })),

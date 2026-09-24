@@ -23,6 +23,7 @@
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
 
   // -- pane widths (drag-resizable, persisted) ---------------------------------
   const LEFT_W_KEY = 'otto_vault_left_w';
@@ -423,36 +424,34 @@
 </div>
 
 {#if createOpen}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (createOpen = false)}>
-    <div class="dialog" role="dialog" tabindex="-1" aria-label="Add vault" onclick={(e) => e.stopPropagation()}>
-      <h3>Add a vault</h3>
-      <label class="fld">
+  <Modal title="Add a vault" onclose={() => (createOpen = false)}>
+    <div class="av-body">
+      <label class="av-fld">
         <span>Name</span>
         <input bind:value={cName} placeholder="Team Docs" />
       </label>
-      <label class="fld">
+      <label class="av-fld">
         <span>Folder (blank → create under ~/.otto/vault; a new path is created)</span>
         <div class="pathrow">
           <input bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" />
-          <button class="browse" type="button" onclick={() => (browsing = true)}>Browse…</button>
+          <button class="btn" type="button" onclick={() => (browsing = true)}>Browse…</button>
         </div>
       </label>
-      <label class="chk">
+      <label class="av-chk">
         <input type="checkbox" bind:checked={cOkf} />
         OKF vault (Open Knowledge Format validation + templates)
       </label>
       {#if createError}
-        <div class="err" role="alert">{createError}</div>
+        <div class="av-err" role="alert">{createError}</div>
       {/if}
-      <div class="actions">
-        <button onclick={() => (createOpen = false)}>Cancel</button>
-        <button class="primary" disabled={!cName.trim() || creating} onclick={() => void submitCreate()}>
-          {creating ? 'Adding…' : 'Add vault'}
-        </button>
-      </div>
     </div>
-  </div>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (createOpen = false)}>Cancel</button>
+      <button class="btn primary" disabled={!cName.trim() || creating} onclick={() => void submitCreate()}>
+        {creating ? 'Adding…' : 'Add vault'}
+      </button>
+    {/snippet}
+  </Modal>
 {/if}
 
 {#if browsing}
@@ -727,53 +726,24 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .actions .primary {
-    background: var(--accent, #4c6fff);
-    border: none;
-    color: var(--accent-contrast, #fff);
-    border-radius: 8px;
-    padding: 8px 18px;
-    font-size: 13px;
-    cursor: pointer;
-    align-self: center;
-  }
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    z-index: 90;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-    padding-top: 16vh;
-  }
-  .dialog {
-    width: min(460px, 92vw);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
+  .av-body {
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
-  .dialog h3 {
-    margin: 0;
-    font-size: 14px;
-  }
-  .fld {
+  .av-fld {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .fld input {
+  .av-fld input {
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     padding: 8px 10px;
   }
   .pathrow {
@@ -784,47 +754,21 @@
     flex: 1;
     min-width: 0;
   }
-  .browse {
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    border-radius: 7px;
-    padding: 0 12px;
-    cursor: pointer;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-  .err {
-    color: var(--status-exited);
-    font-size: 12px;
-    border: 1px solid rgba(214, 86, 72, 0.4);
-    background: rgba(214, 86, 72, 0.08);
-    border-radius: 7px;
+  .av-err {
+    color: var(--danger);
+    font-size: var(--fs-s);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    background: var(--danger-soft);
+    border-radius: var(--radius-s);
     padding: 6px 10px;
     word-break: break-word;
   }
-  .chk {
+  .av-chk {
     display: flex;
     gap: 8px;
     align-items: center;
-    font-size: 12.5px;
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-  .actions button {
-    border: 1px solid var(--border);
-    background: var(--surface-2);
+    font-size: var(--fs-s);
     color: var(--text);
-    border-radius: 7px;
-    padding: 6px 14px;
-    cursor: pointer;
-    font-size: 12.5px;
-  }
-  .actions .primary:disabled {
-    opacity: 0.5;
   }
 
   /* Mid widths (narrow desktop / tablet portrait / phone landscape): the

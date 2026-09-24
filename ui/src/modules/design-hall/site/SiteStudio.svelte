@@ -508,7 +508,7 @@
   function zoomMenu(e: MouseEvent): void {
     ctxMenu.show(
       e,
-      ZOOMS.map((z) => ({ label: z === 'fit' ? 'Fit' : `${z}%`, icon: zoom === z ? 'check' : undefined, action: () => (zoom = z) })),
+      ZOOMS.map((z) => ({ label: z === 'fit' ? 'Fit' : `${z}%`, checked: zoom === z, action: () => (zoom = z) })),
     );
   }
 </script>

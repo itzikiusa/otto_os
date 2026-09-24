@@ -228,13 +228,9 @@
         for (const b of inner) items.push(rowFor(b));
       }
     }
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    // Anchor under the button, right-aligned-ish; ContextMenu clamps into the
-    // viewport after it measures itself.
-    ctxMenu.show(
-      { preventDefault() {}, stopPropagation() {}, clientX: r.right - 180, clientY: r.bottom + 4 } as unknown as MouseEvent,
-      items,
-    );
+    // Directly under the button, end edges aligned (mirrored in RTL);
+    // ContextMenu measures the real menu and clamps it into the viewport.
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
   }
 </script>
 

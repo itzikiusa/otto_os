@@ -3,9 +3,9 @@
   // object; Save builds a Mongo replaceOne (or a per-changed-column SQL UPDATE)
   // and opens the normal review modal. With `rowIdx === -1` it is the INSERT
   // editor (insertOne / INSERT from the typed JSON). Mounted by ResultsGrid
-  // while `flow.docEditor` is set.
+  // while `flow.docEditor` is set, inside the shared Modal.
+  import Modal from '../../lib/components/Modal.svelte';
   import type { EditFlow } from './EditFlow.svelte';
-  import { dialogKeys } from './dialog-keys';
 
   interface Props {
     flow: EditFlow;
@@ -15,35 +15,22 @@
 </script>
 
 {#if flow.docEditor}
-  <div
-    class="cell-viewer-backdrop"
-    role="presentation"
-    onclick={(e) => {
-      if (e.target === e.currentTarget) flow.docEditor = null;
-    }}
-  >
-    <div
-      class="cell-viewer"
-      role="dialog"
-      aria-modal="true"
-      aria-label={inserting ? 'Insert document' : 'Edit document'}
-      use:dialogKeys={() => (flow.docEditor = null)}
-    >
-      <div class="cv-head">
+  <Modal title={inserting ? 'Insert document' : 'Edit document'} width={720} onclose={() => (flow.docEditor = null)}>
+    <div class="cell-viewer">
+      <p class="cv-hint">
         {#if inserting}
-          <span>Insert document <span class="dim">— {flow.engine === 'mongodb' ? 'insertOne' : 'INSERT'} is reviewed before it runs</span></span>
+          {flow.engine === 'mongodb' ? 'insertOne' : 'INSERT'} is reviewed before it runs.
         {:else}
-          <span>Edit document <span class="dim">— row is replaced/updated after review</span></span>
+          The row is replaced/updated after review.
         {/if}
-        <span class="grow"></span>
-        <button class="icon-btn" onclick={() => (flow.docEditor = null)} aria-label="Close">✕</button>
-      </div>
+      </p>
       <!-- svelte-ignore a11y_autofocus -->
       <textarea
         class="cv-edit mono"
         bind:value={flow.docEditor.draft}
         spellcheck="false"
         autofocus
+        aria-label="Document JSON"
         onkeydown={(e) => {
           if (e.key === 'Escape') { e.stopPropagation(); flow.docEditor = null; }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) flow.saveDocEdit();
@@ -56,44 +43,26 @@
         <button class="btn small primary" onclick={() => flow.saveDocEdit()} title="Validate and review the statement (⌘⏎)">Save…</button>
       </div>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
   /* Scoped copy of the shared dialog rules (see CellViewer.svelte). */
-  .cell-viewer-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 250;
-    background: rgba(0, 0, 0, 0.4);
-    display: grid;
-    place-items: center;
-  }
   .cell-viewer {
-    width: min(720px, 90vw);
-    max-height: 80vh;
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
-    overflow: hidden;
+    gap: 8px;
+    min-height: 0;
   }
-  .cv-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-    font-weight: 600;
+  .cv-hint {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   /* In-viewer editor (JSON/long text): fills the same band as .cv-body. */
   .cv-edit {
     flex: 1;
     min-height: 220px;
-    margin: 10px 14px 0;
     padding: 10px;
     font-size: 12px;
     line-height: 1.55;
@@ -108,7 +77,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
   }
   .cv-err {
     color: var(--status-exited);
