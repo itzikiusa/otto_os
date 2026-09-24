@@ -41,6 +41,7 @@
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { startWindowDrag } from '../windowDrag';
+  import { isPopout } from '../desktop';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
 
   interface Props {
@@ -90,7 +91,8 @@
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
-  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded);
+  // A pop-out window's traffic lights live in its own title strip (shell).
+  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded && !isPopout);
   // A phone row has no room for title + tabs + actions: tabs drop to the
   // second row there regardless of the requested placement.
   const tabsBelow = $derived(!!tabs && (tabsPlacement === 'below' || viewport.isPhone));

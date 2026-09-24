@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Otto uses the microphone only while you hold the talk shortcut or the mic button, to hear what you ask the assistant.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Otto turns what you say to the assistant into text on this Mac.</string>
+</dict>
+</plist>
