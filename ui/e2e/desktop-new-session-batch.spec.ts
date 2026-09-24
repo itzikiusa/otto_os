@@ -62,7 +62,7 @@ test.describe('new-session batch', () => {
     await shell.locator('.card-main').click();
     await expect(shell.locator('.count')).toHaveText('1');
     // A single session reads as it always did — no batch language.
-    await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start Session', exact: true })).toBeVisible();
 
     // Ask for three of them.
     await dialog.getByLabel('One more shell session').click();
