@@ -11,6 +11,7 @@
 import { api } from '../api/client';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
+import { loadErrorText } from '../loadError';
 import { assistToNodes, emptyScene, parseScene } from '../../modules/canvas/scene';
 import type {
   AssistMode,
@@ -65,7 +66,10 @@ class CanvasStore {
   saving = $state(false);
   savedAt = $state<number | null>(null);
   dirty = $state(false);
+  /** Why the last `open()` failed (rendered inline with Retry by CanvasPage). */
   loadError = $state<string | null>(null);
+  /** The scene id that `loadError` belongs to — what Retry re-opens. */
+  loadErrorId = $state<string | null>(null);
 
   #history: string[] = [];
   #future: string[] = [];
@@ -87,7 +91,7 @@ class CanvasStore {
     try {
       this.scenes = await api.get<CanvasSceneSummary[]>(`/canvas/scenes`);
     } catch (e) {
-      this.listError = e instanceof Error ? e.message : String(e);
+      this.listError = loadErrorText(e);
       throw e;
     } finally {
       this.listLoading = false;
@@ -108,6 +112,7 @@ class CanvasStore {
 
   async open(id: string): Promise<void> {
     this.loadError = null;
+    this.loadErrorId = null;
     try {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
       this.currentId = row.id;
@@ -131,7 +136,8 @@ class CanvasStore {
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
     } catch (e) {
-      this.loadError = e instanceof Error ? e.message : String(e);
+      this.loadError = loadErrorText(e);
+      this.loadErrorId = id;
       throw e;
     }
   }

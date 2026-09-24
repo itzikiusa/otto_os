@@ -3,6 +3,7 @@
   // (a folder path like "Platform/Staging" → sections + sub-sections), with
   // search, New, click-to-open, inline RENAME, MOVE-to-section, and delete.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -136,10 +137,21 @@
   </div>
 
   <div class="rows">
-    {#if canvas.listLoading && !canvas.scenes.length}
+    {#if canvas.listError}
+      <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
+      <LoadState
+        what="scenes"
+        variant="compact"
+        loading={canvas.listLoading}
+        error={canvas.listError}
+        empty={!canvas.scenes.length}
+        onretry={() => void canvas.loadScenes().catch(() => {})}
+      />
+    {/if}
+    {#if canvas.listError && !canvas.scenes.length}
+      <!-- rendered above -->
+    {:else if canvas.listLoading && !canvas.scenes.length}
       <div class="hint">Loading…</div>
-    {:else if canvas.listError}
-      <div class="hint err">{canvas.listError}</div>
     {:else if !rows.length}
       <div class="hint">{filter ? 'No matches.' : 'No scenes yet.'}</div>
     {:else}
@@ -162,12 +174,12 @@
               class="row"
               class:active={canvas.currentId === s.id}
               class:nested={section !== ''}
-              onclick={() => void canvas.open(s.id)}
+              onclick={() => void canvas.open(s.id).catch(() => {})}
               role="button"
               tabindex="0"
               ondblclick={(e) => rename(e, s)}
               onkeydown={(e) => {
-                if (e.key === 'Enter') void canvas.open(s.id);
+                if (e.key === 'Enter') void canvas.open(s.id).catch(() => {});
               }}
             >
               <div class="meta">
@@ -242,9 +254,6 @@
     color: var(--text-dim);
     font-size: 12.5px;
     text-align: center;
-  }
-  .hint.err {
-    color: var(--status-exited);
   }
   .section-head {
     width: 100%;
