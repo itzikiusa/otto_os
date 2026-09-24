@@ -592,7 +592,7 @@
   }
   .mut {
     margin-inline-start: 8px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 16%, transparent);

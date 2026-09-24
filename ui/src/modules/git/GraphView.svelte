@@ -2769,7 +2769,9 @@
              commit text. Sticky so it survives scrolling a long history. -->
         <div class="graph-head" aria-hidden="true">
           <span class="gh-branch">BRANCH / TAG</span>
-          <span class="gh-graph" style="width: {gutterWidth}px">GRAPH</span>
+          <!-- The label is hidden (not clipped to "GRA") when a 1-lane gutter is
+               too narrow to hold it at the readable size. -->
+          <span class="gh-graph" class:gh-label-hidden={gutterWidth < 40} style="width: {gutterWidth}px" title="Graph">GRAPH</span>
           <span class="gh-msg">COMMIT MESSAGE</span>
         </div>
         <!-- WIP row (GitKraken-style): uncommitted changes pinned above the
@@ -3345,7 +3347,7 @@
     margin-inline-start: auto;
     background: var(--surface-2);
     border-radius: 999px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     font-weight: 600;
     letter-spacing: 0;
@@ -3519,7 +3521,7 @@
   /* Inline "open worktree" affordance next to the branch / worktree name. */
   .wt-open-hint {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.02em;
     color: var(--worktree-text);
@@ -3539,7 +3541,7 @@
   }
   .ref-upstream {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     max-width: 90px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3600,9 +3602,9 @@
     padding-inline-end: 12px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     color: var(--text-dim);
     user-select: none;
   }
@@ -3618,6 +3620,10 @@
     flex-shrink: 0;
     overflow: hidden;
     white-space: nowrap;
+    text-align: center;
+  }
+  .graph-head .gh-label-hidden {
+    visibility: hidden;
   }
   .graph-head .gh-msg {
     flex: 1;
@@ -3726,7 +3732,7 @@
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 5px;
     border-radius: 3px;
@@ -3759,7 +3765,7 @@
      branch chip so the HEAD commit is unmistakable. */
   .head-badge {
     flex-shrink: 0;
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     font-weight: 800;
     letter-spacing: 0.06em;
     line-height: 1;
@@ -3804,7 +3810,7 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 3px;
@@ -3926,7 +3932,7 @@
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     line-height: 1;
     padding: 2px 5px;
@@ -3968,7 +3974,7 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   }
   .ref-pop-group {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -4004,7 +4010,7 @@
   }
   .ref-pop-tag {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -4073,7 +4079,7 @@
   }
   .stash-branch {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     max-width: 80px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -4083,12 +4089,12 @@
   .wt-dirty {
     flex-shrink: 0;
     color: var(--warning);
-    font-size: 8px;
+    font-size: var(--fs-xs);
     line-height: 1;
   }
   .wt-flag {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .wt-flag.sub-warn {
@@ -4354,7 +4360,7 @@
     padding: 0 5px 0 3px;
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     user-select: none;
     vertical-align: top;
     border-inline-end: 1px solid var(--border);

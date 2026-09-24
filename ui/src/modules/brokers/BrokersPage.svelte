@@ -525,7 +525,7 @@
       if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
     }}
     class:drop={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedClusterId}
-    style="padding-left: {depth * 14 + 6}px"
+    style="padding-inline-start: {depth * 14 + 6}px"
     draggable="true"
     ondragstart={(e) => {
       draggedSectionId = node.sec.id;
@@ -571,7 +571,7 @@
   <div
     class="cluster"
     class:sel={brokers.selectedId === c.id}
-    style="padding-left: {depth * 14 + 6}px"
+    style="padding-inline-start: {depth * 14 + 6}px"
     draggable="true"
     ondragstart={(e) => {
       draggedClusterId = c.id;
