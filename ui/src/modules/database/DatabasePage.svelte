@@ -902,12 +902,12 @@
            another side tab). With the list already on screen there is no
            button — "Show connections" next to the visible list was noise. -->
       <EmptyState
-        variant="page"
+        variant={viewport.isPhone ? 'panel' : 'page'}
         icon="db"
         title="Open a connection"
         body={database.connections.length === 0 && brokers.clusters.length === 0
           ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
-          : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
+          : `Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
         actionLabel={database.connections.length === 0 && brokers.clusters.length === 0
           ? auth.isRoot ? 'New connection' : undefined
           : database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
