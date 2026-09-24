@@ -826,8 +826,10 @@
 
   <!-- Phone-only quick-action bar: exposes ⌘K/⌘T/⌘W/⌘F/⌘⇧B to touch users
        who can't produce those chords. Wired to the exact same functions the
-       keyboard map calls; desktop is completely unaffected. -->
-  {#if viewport.isPhone}
+       keyboard map calls; desktop is completely unaffected. Session verbs, so
+       it rides with the Agents page only — elsewhere it was a third chrome row
+       (the palette stays one tap away under BottomNav → More). -->
+  {#if viewport.isPhone && moduleName === 'agents'}
     <MobileActionBar
       onpalette={mobileOpenPalette}
       onnewSession={mobileNewSession}
@@ -854,7 +856,11 @@
     <BottomNav />
   {/if}
 
-  <StatusBar />
+  <!-- The phone already spends a top bar + bottom nav on chrome; the status
+       bar only earns its row there when the event stream needs attention. -->
+  {#if !viewport.isPhone || events.state !== 'connected'}
+    <StatusBar />
+  {/if}
 </div>
 
 <!-- Phone: Navigator lives in a LEFT drawer with its own open-state
