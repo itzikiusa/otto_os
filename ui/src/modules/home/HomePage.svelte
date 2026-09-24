@@ -380,7 +380,7 @@
   .zoom {
     position: absolute;
     inset: 0;
-    padding: 16px 20px 20px;
+    padding: 16px;
   }
   .empty {
     grid-column: 1 / -1;
