@@ -455,8 +455,14 @@ class ApiClientStore {
   /** In-flight send. */
   sending = $state(false);
   loading = $state(false);
-  /** Why the last loadAll() failed (shown inline with Retry); null when fine. */
-  loadError: string | null = $state(null);
+  /** Why the collections + requests lists couldn't load (the sidebar tree's
+   *  inline error with Retry); null when fine. Scoped per list so a failed
+   *  environments refresh can never paint "Couldn't load" over the tree. */
+  requestsLoadError: string | null = $state(null);
+  /** Same, for the environments list (EnvironmentsView). */
+  envLoadError: string | null = $state(null);
+  /** Either list failed — gates onboarding (a failed load is not "empty"). */
+  loadError: string | null = $derived(this.requestsLoadError ?? this.envLoadError);
   /** AbortController for the currently in-flight execute() call; null when idle. */
   private _abortCtrl: AbortController | null = null;
   private _executeTab: string | null = null;
@@ -493,7 +499,8 @@ class ApiClientStore {
     // the fetches below fail — the drafts are device-local, not server data).
     this.restoreTabs(wid);
     this.loading = true;
-    this.loadError = null;
+    this.requestsLoadError = null;
+    this.envLoadError = null;
     try {
       const [collections, requests, environments] = await Promise.all([
         api.get<ApiCollection[]>(`${base}/collections`),
@@ -515,7 +522,10 @@ class ApiClientStore {
         this.persistTabs();
       }
     } catch (e) {
-      if (this.wsId() === wid) this.loadError = errMsg(e);
+      if (this.wsId() === wid) {
+        this.requestsLoadError = errMsg(e);
+        this.envLoadError = errMsg(e);
+      }
     } finally {
       if (this.wsId() === wid) this.loading = false;
     }
@@ -536,12 +546,14 @@ class ApiClientStore {
   }
 
   /** A single-list refresh (after an action) failed. With nothing on screen it
-   *  becomes the inline `loadError` (Retry = loadAll) — an empty sidebar must
+   *  becomes THAT list's inline error (Retry = loadAll) — an empty sidebar must
    *  never read as "No saved requests yet"; over live rows the rows stay and
-   *  the failed refresh is reported as the action result it followed. */
-  private refreshFailed(what: string, empty: boolean, e: unknown): void {
-    if (empty) this.loadError = errMsg(e);
-    else toasts.error(`Could not refresh ${what}`, errMsg(e));
+   *  the failed refresh is reported as the action result it followed. The
+   *  list's next successful load clears its error. */
+  private refreshFailed(what: string, list: 'requests' | 'environments', empty: boolean, e: unknown): void {
+    if (!empty) toasts.error(`Could not refresh ${what}`, errMsg(e));
+    else if (list === 'environments') this.envLoadError = errMsg(e);
+    else this.requestsLoadError = errMsg(e);
   }
 
   async loadCollections(): Promise<void> {
@@ -549,8 +561,9 @@ class ApiClientStore {
     if (!base) return;
     try {
       this.collections = await api.get<ApiCollection[]>(`${base}/collections`);
+      this.requestsLoadError = null;
     } catch (e) {
-      this.refreshFailed('collections', this.collections.length === 0 && this.requests.length === 0, e);
+      this.refreshFailed('collections', 'requests', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
@@ -559,8 +572,9 @@ class ApiClientStore {
     if (!base) return;
     try {
       this.requests = await api.get<ApiRequest[]>(`${base}/requests`);
+      this.requestsLoadError = null;
     } catch (e) {
-      this.refreshFailed('requests', this.collections.length === 0 && this.requests.length === 0, e);
+      this.refreshFailed('requests', 'requests', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
@@ -569,8 +583,9 @@ class ApiClientStore {
     if (!base) return;
     try {
       this.environments = await api.get<ApiEnvironment[]>(`${base}/environments`);
+      this.envLoadError = null;
     } catch (e) {
-      this.refreshFailed('environments', this.environments.length === 0, e);
+      this.refreshFailed('environments', 'environments', this.environments.length === 0, e);
     }
   }
 

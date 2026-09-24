@@ -33,7 +33,7 @@
 
 <div class="panel">
   {#if apiClient.historyLoadingId}<span class="note" role="status">Loading history request…</span>{/if}
-  {#if apiClient.loadError}
+  {#if apiClient.requestsLoadError}
     <div class="note err" role="alert">
       Couldn’t load saved requests. <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
     </div>
