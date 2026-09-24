@@ -229,8 +229,11 @@
 
   // (Re)connect whenever the tab changes; tear down on unmount. The session
   // itself stays on the daemon (idle-reaped) so coming back re-attaches.
+  // Keyed on the id — the tab OBJECT is replaced on every navigation
+  // (trackLiveNav), which must not look like a tab switch.
+  const tabId = $derived(tab.id);
   $effect(() => {
-    const id = tab.id;
+    const id = tabId;
     untrack(() => {
       conn = INITIAL;
       session = null;
@@ -873,19 +876,19 @@
     ></textarea>
   </div>
 
-  <!-- chrome over the frame -->
+  <!-- chrome over the frame: ONE quiet status chip in the bottom corner, so
+       the page's own header (logo, nav) is never covered -->
   <div class="badge" class:warn={conn.status !== 'live'} data-testid="live-badge">
     <span class="dot" aria-hidden="true"></span>
     <span>{statusText}</span>
     {#if conn.status === 'live' && engineLabel}<span class="dim">· {engineLabel}</span>{/if}
     {#if conn.status === 'live' && session && session.viewers > 1}<span class="dim">· {session.viewers} watching</span>{/if}
+    {#if conn.status === 'live' && hasFrame}
+      <span class="dim meter" data-testid="live-meter" title="Frames per second · input-to-frame latency">
+        · {fps > 0 ? `${fps} fps` : 'idle'}{#if meter.latencyMs !== null} · {meter.latencyMs} ms{/if}
+      </span>
+    {/if}
   </div>
-
-  {#if conn.status === 'live' && hasFrame}
-    <div class="meter" data-testid="live-meter" title="Frames per second · input-to-frame latency">
-      {fps} fps{#if meter.latencyMs !== null} · {meter.latencyMs} ms{/if}
-    </div>
-  {/if}
 
   {#if kbdFocused}
     <div class="hint" role="status">
@@ -1046,8 +1049,8 @@
   }
   .badge {
     position: absolute;
-    inset-inline-start: 10px;
-    top: 10px;
+    inset-inline-end: 10px;
+    bottom: 10px;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1060,8 +1063,8 @@
     font-size: var(--fs-xs);
     pointer-events: none;
   }
-  .drive-bar ~ .badge,
-  .drive-bar ~ .kbd-btn {
+  .drive-bar ~ .kbd-btn,
+  .drive-bar ~ .hint {
     top: 46px;
   }
   .badge .dot {
@@ -1077,23 +1080,14 @@
     color: var(--text-dim);
   }
   .meter {
-    position: absolute;
-    inset-inline-end: 10px;
-    bottom: 10px;
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
-    pointer-events: none;
   }
   .hint {
     position: absolute;
     inset-inline: 0;
-    bottom: 10px;
+    top: 10px;
     width: fit-content;
-    max-width: calc(100% - 24px);
+    max-width: calc(100% - 120px);
     margin-inline: auto;
     padding: 2px 10px;
     border-radius: 999px;
@@ -1157,7 +1151,7 @@
   .banner {
     position: absolute;
     inset-inline: 12px;
-    top: 42px;
+    top: 12px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1172,7 +1166,7 @@
     border-color: color-mix(in srgb, var(--info) 35%, transparent);
   }
   .drive-bar ~ .banner {
-    top: 78px;
+    top: 48px;
   }
   .banner > :global(svg) {
     color: var(--warning);
@@ -1194,15 +1188,15 @@
   .card-host {
     position: absolute;
     inset-inline-start: 16px;
-    top: 44px;
-    bottom: 16px;
+    top: 16px;
+    bottom: 44px;
     max-width: calc(100% - 32px);
     display: flex;
     align-items: flex-start;
     pointer-events: none;
   }
   .drive-bar ~ .card-host {
-    top: 80px;
+    top: 52px;
   }
   .card-host > :global(*) {
     pointer-events: auto;
@@ -1212,7 +1206,7 @@
     .drive-bar ~ .card-host {
       inset-inline: 8px;
       top: 8px;
-      bottom: 8px;
+      bottom: 40px;
       max-width: none;
       align-items: flex-end;
     }

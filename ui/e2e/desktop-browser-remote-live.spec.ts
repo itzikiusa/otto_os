@@ -218,7 +218,8 @@ test('engine missing: asks first, names the size, lighter option, then downloads
 
   await page.goto('/#/browser');
   const setup = page.getByTestId('live-engine-setup');
-  await expect(setup.getByRole('heading', { name: 'Enable live browsing' })).toBeVisible({ timeout: 15_000 });
+  // (generous: this is often the first spec a cold Vite server serves)
+  await expect(setup.getByRole('heading', { name: 'Enable live browsing' })).toBeVisible({ timeout: 45_000 });
   // Nothing was downloaded just by opening the tab.
   expect(installBody).toBeNull();
   await expect(setup.getByRole('button', { name: 'Download Chrome (180 MB)' })).toBeVisible();

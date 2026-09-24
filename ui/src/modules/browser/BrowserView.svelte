@@ -99,9 +99,12 @@
   let remoteView = $state<ReturnType<typeof RemoteLiveView> | null>(null);
   let remoteState: LiveViewState | null = $state(null);
   let urlEl = $state<HTMLInputElement | null>(null);
+  // A primitive, so a nav that replaces the tab object (trackLiveNav) doesn't
+  // look like a tab switch.
+  const activeRemoteId = $derived(activeRemote?.id ?? null);
   $effect(() => {
     // The reported state belongs to one tab's session.
-    const _id = activeRemote?.id;
+    const _id = activeRemoteId;
     remoteState = null;
   });
 
