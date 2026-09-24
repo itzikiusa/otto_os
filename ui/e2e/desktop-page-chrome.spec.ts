@@ -19,6 +19,7 @@ const V1 = '/api/v1';
 
 const ROUTES = [
   'home',
+  'assistant',
   'history',
   'run-with-otto',
   'mission-control',
@@ -47,6 +48,7 @@ const ROUTES = [
   'walkthroughs',
   'settings/appearance',
   'settings/users',
+  'settings/assistant',
   'brokers',
 ];
 

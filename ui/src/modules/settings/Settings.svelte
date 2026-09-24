@@ -26,6 +26,7 @@
   import EmailSenderSetup from './EmailSenderSetup.svelte';
   import PersonalAccessTokens from './PersonalAccessTokens.svelte';
   import BackupRestore from './BackupRestore.svelte';
+  import AssistantSettings from './AssistantSettings.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -69,6 +70,7 @@
       {
         label: 'Agents',
         items: [
+          { id: 'assistant', label: 'Assistant' },
           ...(auth.can('settings', 'admin') ? [{ id: 'providers', label: 'Providers' }] : []),
           { id: 'context-soul', label: 'Workspace context' },
           { id: 'self-improvement', label: 'Self-Improvement' },
@@ -149,6 +151,8 @@
       <IssueAccounts />
     {:else if page === 'channels'}
       <Channels />
+    {:else if page === 'assistant'}
+      <AssistantSettings />
     {:else if page === 'notifications'}
       <Notifications />
     {:else if page === 'self-improvement'}
