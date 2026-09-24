@@ -2,11 +2,11 @@
   // PublishDialog — shared modal for both "Publish as Jira Story" and
   // "Publish as Confluence RFC" actions. Also used for "Convert RFC → Story".
   import Modal from '../../lib/components/Modal.svelte';
-  import { api } from '../../lib/api/client';
+  import { api, ApiError } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { IssueAccount, IssueProject } from '../../lib/api/types';
-  import type { ConfluenceSpace } from './types';
+  import type { ConfluenceSpace, ProductStoryVersion } from './types';
 
   interface Props {
     mode: 'story' | 'rfc';
@@ -37,13 +37,66 @@
 
   // ── Submit ────────────────────────────────────────────────────────────────
   let submitting = $state(false);
+  // Errors are a human title plus the raw cause as a dim detail line — never
+  // the bare exception text on its own.
   let formError = $state('');
+  let formErrorDetail = $state('');
 
-  const title = $derived(mode === 'story' ? 'Publish as Jira Story' : 'Publish as Confluence RFC');
+  function setError(what: string, e: unknown): void {
+    const raw = e instanceof Error ? e.message : String(e);
+    let why = '';
+    if (e instanceof ApiError) {
+      if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira.';
+      else if (e.status === 404) why = ' The project, space or parent page was not found.';
+      else if (e.status === 409) why = ' It conflicts with the current state on the server.';
+    } else if (e instanceof TypeError) why = " Otto can't reach the daemon.";
+    formError = `${what}.${why}`;
+    formErrorDetail = raw;
+  }
 
-  // Load accounts on mount.
+  const title = $derived(mode === 'story' ? 'Publish as Jira story' : 'Publish as Confluence RFC');
+
+  // ── Preview: WHAT is sent (the same version the daemon publishes — newest
+  // suggested, else draft, else source; mirrors `best_content_version`). ─────
+  const storyTitle = $derived(product.detail?.story.title ?? '');
+  const isDraft = $derived(product.detail?.story.source_kind === 'draft');
+  let previewBody = $state<string | null>(null); // null = loading
+  const PREVIEW_LINES = 6;
+  const previewLines = $derived.by(() => {
+    const lines = (previewBody ?? '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+    return { head: lines.slice(0, PREVIEW_LINES), more: Math.max(0, lines.length - PREVIEW_LINES) };
+  });
+
+  async function loadPreview(sid: string | null): Promise<void> {
+    if (!sid) { previewBody = ''; return; }
+    try {
+      const vs = await api.get<ProductStoryVersion[]>(`/product/stories/${sid}/versions`);
+      const pick = vs.find((v) => v.kind === 'suggested') ?? vs.find((v) => v.kind === 'draft') ?? vs.find((v) => v.kind === 'source');
+      if (!pick) { previewBody = ''; return; }
+      previewBody = pick.body_md ? pick.body_md : (await product.getVersion(pick.id)).body_md;
+    } catch {
+      previewBody = '';
+    }
+  }
+
+  // ── WHO sees it ───────────────────────────────────────────────────────────
+  const visibility = $derived.by(() => {
+    if (mode === 'story') {
+      const p = projects.find((x) => x.key === projectKey);
+      return p
+        ? `Creates a ${issueType || 'Story'} in ${p.name} (${p.key}), visible to everyone with access to that Jira project.`
+        : '';
+    }
+    const sp = spaces.find((x) => x.key === spaceKey);
+    return sp
+      ? `Creates a page in the ${sp.name} (${sp.key}) space${parentId.trim() ? `, under page ${parentId.trim()}` : ''}, visible to everyone who can view that space.`
+      : '';
+  });
+
+  // Load accounts + the preview on mount.
   $effect(() => {
     void loadAccounts();
+    void loadPreview(product.selectedId);
   });
 
   async function loadAccounts(): Promise<void> {
@@ -55,7 +108,7 @@
         await onAccountChange();
       }
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      setError("Couldn't load your Jira / Confluence accounts", e);
     } finally {
       accountsLoading = false;
     }
@@ -82,7 +135,7 @@
         await loadIssueTypes();
       }
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      setError("Couldn't load Jira projects", e);
     } finally {
       projectsLoading = false;
     }
@@ -114,7 +167,7 @@
       );
       if (spaces.length > 0) spaceKey = spaces[0].key;
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      setError("Couldn't load Confluence spaces", e);
     } finally {
       spacesLoading = false;
     }
@@ -122,6 +175,7 @@
 
   async function submit(): Promise<void> {
     formError = '';
+    formErrorDetail = '';
     if (!accountId) { formError = 'Select an account.'; return; }
 
     submitting = true;
@@ -133,7 +187,7 @@
           project_key: projectKey,
           issue_type: issueType || 'Story',
         });
-        toasts.success('Published as Jira Story', detail.story.title);
+        toasts.success('Published as Jira story', detail.story.title);
         // Select the resulting story.
         if (detail.story.id !== product.selectedId) {
           await product.select(detail.story.id);
@@ -150,7 +204,7 @@
       }
       onclose();
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      setError(mode === 'story' ? "Couldn't publish to Jira" : "Couldn't publish to Confluence", e);
     } finally {
       submitting = false;
     }
@@ -162,7 +216,7 @@
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
     {:else if accounts.length === 0}
-      <div class="no-accounts">No issue accounts configured. Add one in Settings → Jira / Confluence.</div>
+      <div class="no-accounts">No Jira or Confluence account yet. Add one in Settings → Integrations → Jira.</div>
     {:else}
       <!-- Account -->
       <div class="field">
@@ -279,8 +333,33 @@
         </div>
       {/if}
 
+      <!-- What is sent + who sees it (outward-facing confirm, patterns.md §5). -->
+      <div class="pd-preview" data-testid="publish-preview">
+        <div class="label">What is published</div>
+        <div class="pd-preview-title">{(mode === 'rfc' && rfcTitle.trim()) || storyTitle || 'Untitled'}</div>
+        {#if previewBody === null}
+          <div class="loading-inline">Loading the content…</div>
+        {:else if previewLines.head.length === 0}
+          <div class="loading-inline">No body — only the title is published.</div>
+        {:else}
+          <pre class="pd-preview-body">{previewLines.head.join('\n')}</pre>
+          {#if previewLines.more > 0}
+            <div class="pd-preview-more">+{previewLines.more} more line{previewLines.more === 1 ? '' : 's'}</div>
+          {/if}
+        {/if}
+        {#if visibility}
+          <div class="pd-visibility" data-testid="publish-visibility">{visibility}</div>
+        {/if}
+        {#if isDraft}
+          <div class="pd-visibility">This draft becomes the published {mode === 'story' ? 'issue' : 'page'}.</div>
+        {/if}
+      </div>
+
       {#if formError}
-        <div class="field-error">{formError}</div>
+        <div class="field-error">
+          {formError}
+          {#if formErrorDetail}<div class="pd-error-detail">{formErrorDetail}</div>{/if}
+        </div>
       {/if}
     {/if}
   {/snippet}
@@ -292,7 +371,7 @@
       onclick={submit}
       disabled={submitting || accountsLoading || accounts.length === 0}
     >
-      {submitting ? 'Publishing…' : (mode === 'story' ? 'Publish Story' : 'Publish RFC')}
+      {submitting ? 'Publishing…' : (mode === 'story' ? 'Publish story' : 'Publish RFC')}
     </button>
   {/snippet}
 </Modal>
@@ -356,6 +435,45 @@
   .input:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+  .pd-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+  }
+  .pd-preview-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .pd-preview-body {
+    margin: 0;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .pd-preview-more,
+  .pd-visibility,
+  .pd-error-detail {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .pd-visibility {
+    margin-top: 4px;
+  }
+  .pd-error-detail {
+    margin-top: 4px;
+    overflow-wrap: anywhere;
   }
   .field-error {
     font-size: 12px;
