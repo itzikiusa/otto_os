@@ -24,6 +24,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { buildSelector } from './selector';
   import type { BrowserPage } from '../../lib/api/types';
 
@@ -118,9 +119,12 @@
   {:else if error}
     <div class="error">{error}</div>
   {:else if !page}
-    <div class="empty">
-      <p>Enter a URL above to fetch it in reader mode.</p>
-    </div>
+    <EmptyState
+      variant="page"
+      icon="compass"
+      title="Open a page"
+      body="Enter a URL above to read it here. Mark passages to hand them to an agent."
+    />
   {:else}
     {#if page.degraded}
       <div class="degraded">
@@ -191,11 +195,6 @@
     border-radius: var(--radius-s);
     padding: 0.6rem 0.75rem;
     font-size: 0.85rem;
-  }
-  .empty {
-    color: var(--text-dim);
-    padding: 2rem 0;
-    text-align: center;
   }
   .degraded {
     background: color-mix(in srgb, var(--status-warn) 16%, transparent);
