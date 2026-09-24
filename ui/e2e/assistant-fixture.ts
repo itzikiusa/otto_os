@@ -28,9 +28,12 @@ export interface AssistantMock {
 }
 
 const DAY = new Date();
+// Fixture clock: "10:40 today" is 5 minutes ago, so everything the scenario
+// did already happened (the live-row guards drop rows older than what they
+// hold — a fixture in the future would make every server response "stale").
+const ANCHOR = Date.now() - 5 * 60_000;
 function at(h: number, m: number, dayOffset = 0): string {
-  const d = new Date(DAY.getFullYear(), DAY.getMonth(), DAY.getDate() + dayOffset, h, m, 0);
-  return d.toISOString();
+  return new Date(ANCHOR + ((h * 60 + m) - (10 * 60 + 40)) * 60_000 + dayOffset * 86_400_000).toISOString();
 }
 
 function thread(id: string, title: string, slot: 1 | 2 | 3 | 4 | null, provider: string, model: string | null, updated: string): AssistantThread {

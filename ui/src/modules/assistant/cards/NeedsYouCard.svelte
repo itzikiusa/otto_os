@@ -112,13 +112,13 @@
       <dd>{a.who_sees}</dd>
       <dt>Why</dt>
       <dd>{a.reason}</dd>
-    </dl>
-    {#if a.what}
-      {#if compact}
-        <p class="what-inline"><span class="dim">What</span> {a.what}</p>
-      {:else}
-        <div class="preview" aria-label="Exactly what is sent">{a.what}</div>
+      {#if a.what && compact}
+        <dt>What</dt>
+        <dd class="clip" title={a.what}>{a.what}</dd>
       {/if}
+    </dl>
+    {#if a.what && !compact}
+      <div class="preview" aria-label="Exactly what is sent">{a.what}</div>
     {/if}
   {:else if kind === 'limit'}
     <p class="q">{limitNotice(ny?.limit?.provider ?? 'claude', ny?.limit?.until ?? null, pending ? suggestion : null, clock)}</p>
@@ -227,8 +227,7 @@
   :global([dir='rtl']) .preview {
     border-radius: var(--radius-m) 0 0 var(--radius-m);
   }
-  .what-inline {
-    margin: 6px 0 0;
+  .kv dd.clip {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

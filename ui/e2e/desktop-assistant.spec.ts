@@ -17,11 +17,13 @@ import { assistantState, mockAssistant, type AssistantMock } from './assistant-f
 
 // The UI registers a fetch-proxying service worker that would bypass the mock.
 test.use({ serviceWorkers: 'block' });
+// The first navigation compiles the whole app in a cold Vite; give it room.
+test.describe.configure({ timeout: 120_000 });
 
 async function open(page: Page, route = 'assistant', s?: AssistantMock): Promise<AssistantMock> {
   const state = await mockAssistant(page, s ?? assistantState());
-  await page.goto(`/#/${route}`);
-  await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
+  await page.goto(`/#/${route}`, { timeout: 90_000 });
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 60_000 });
   return state;
 }
 
@@ -147,10 +149,13 @@ test('Tasks tab decides a limit: continue on Codex', async ({ page }) => {
   await expect(limit).toContainText('Claude limit reached until');
   await expect(limit).toContainText('continue on Codex?');
   await limit.getByRole('button', { name: /Continue on Codex/ }).click();
-  await expect(limit).toContainText('Answered');
+  // Decided: it leaves the queue and is listed under Done.
+  await expect(limit).toHaveCount(0);
   expect(lastCall(s, 'POST', '/assistant/tasks/task-limit/approve')?.body).toEqual({ provider: 'codex' });
+  await expect(tasks.getByRole('heading', { name: /Needs you/ })).toContainText('1');
   await expect(tasks.getByRole('heading', { name: /Running/ })).toBeVisible();
-  await expect(tasks.getByRole('heading', { name: /Done/ })).toBeVisible();
+  const done = tasks.locator('section', { has: page.getByRole('heading', { name: /Done/ }) });
+  await expect(done).toContainText('Claude limit reached');
 });
 
 test('Memory tab: profile save, forget with Undo, review queue, Hermes only queues', async ({ page }) => {

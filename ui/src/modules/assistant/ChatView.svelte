@@ -251,6 +251,10 @@
     padding: 0;
     border-radius: 0;
   }
+  .msg.agent :global(.turn.assistant .meta .ts),
+  .msg.agent :global(.turn.assistant .meta .model) {
+    display: none;
+  }
   .who {
     display: flex;
     flex-wrap: wrap;

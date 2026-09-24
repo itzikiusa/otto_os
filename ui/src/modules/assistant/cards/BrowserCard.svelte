@@ -100,7 +100,7 @@
         {#each progress.steps as s, i (i)}
           <li class={s.state}>
             <span class="mark" aria-hidden="true">
-              {#if s.state === 'done'}<Icon name="check" size={12} />{:else if s.state === 'current'}<span class="now"></span>{:else}<span class="todo"></span>{/if}
+              {#if s.state === 'done'}<Icon name="check" size={12} />{:else if s.state === 'current'}<span class="mark-now"></span>{:else}<span class="mark-todo"></span>{/if}
             </span>
             <span class="sr-only">{s.state === 'done' ? 'Done:' : s.state === 'current' ? 'Now:' : 'Next:'}</span>
             <span>{s.label}</span>
@@ -206,14 +206,14 @@
     justify-content: center;
     color: var(--success);
   }
-  .now {
+  .mark-now {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     background: var(--info);
     animation: step-pulse 1.4s ease-in-out infinite;
   }
-  .todo {
+  .mark-todo {
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -225,7 +225,7 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .now {
+    .mark-now {
       animation: none;
     }
   }

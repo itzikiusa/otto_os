@@ -10,6 +10,7 @@
   import { formatBytes } from '../../lib/metric-format';
   import { parseRouteHint, providerLabel, providerName } from './model';
   import PinModelSheet from './PinModelSheet.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { AssistantAttachment, AssistantThread } from '../../lib/api/types';
 
   interface Props {
@@ -130,7 +131,7 @@
       bind:value={text}
       rows="1"
       class="ta"
-      placeholder="Reply to Otto…  (@codex to route one turn)"
+      placeholder={viewport.isPhone ? 'Reply to Otto…' : 'Reply to Otto…  (@codex to route one turn)'}
       aria-label="Message Otto"
       onkeydown={onKey}
     ></textarea>
