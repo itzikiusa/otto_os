@@ -1843,6 +1843,7 @@
     opacity: 0.5;
   }
   .conn-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -1851,14 +1852,24 @@
     flex: 1;
     min-width: 0;
   }
+  /* Hover actions float over the row's end instead of reserving their width in
+     every row — that dead space squeezed the name + type/env badges until names
+     broke mid-word. */
   .conn-actions {
+    position: absolute;
+    inset-inline-end: 2px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     gap: 1px;
-    flex-shrink: 0;
+    padding: 1px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
     opacity: 0;
-    padding-inline-end: 2px;
   }
-  .conn-row:hover .conn-actions {
+  .conn-row:hover .conn-actions,
+  .conn-row:focus-within .conn-actions {
     opacity: 1;
   }
   .conn-glyph {
