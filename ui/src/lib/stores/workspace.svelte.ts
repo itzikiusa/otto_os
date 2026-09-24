@@ -480,6 +480,7 @@ class WorkspaceStore {
   private bindTabsKey(key: string): void {
     this.tabsKey = key;
     this.tabsHydrated = false;
+    this.layoutReady = false;
     this.pendingTabs = [];
     layout.bindKey(key);
   }
@@ -511,6 +512,7 @@ class WorkspaceStore {
     // {panes, axis} payload migrated through the old window fractions).
     const open = this.openTabs;
     layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
+    this.layoutReady = true;
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -613,6 +615,10 @@ class WorkspaceStore {
   /** Mirrors the layout store's own gate: false between {@link bindTabsKey} and
    *  the {@link restoreLayout} that reads the key. */
   private tabsHydrated = true;
+  /** True once the current workspace's tabs + split layout have been restored
+   *  (false from {@link bindTabsKey} until {@link restoreLayout}). Reactive, so
+   *  a page can tell "no panes yet" apart from "nothing open". */
+  layoutReady = $state(false);
   /** Tabs opened during that window, replayed by {@link restoreLayout}. */
   private pendingTabs: Id[] = [];
 
