@@ -96,3 +96,58 @@ test('MCP servers: a failed list load shows Couldn’t load + Retry, not "No ext
   await expect(page.getByText(/No external servers yet/)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('load-error')).toHaveCount(0);
 });
+
+test('workflows: a failed list load says so ONCE, and a workspace switch never keeps the old rows', async ({ page }) => {
+  // A second workspace WITH a workflow, so there are "previous rows" to leak.
+  const a = await apiCtx();
+  const otherWs = await seedWorkspace(a.ctx, a.base);
+  const r = await a.ctx.post(`${a.base}/api/v1/workspaces/${otherWs}/workflows`, {
+    data: { name: 'Other-workspace workflow', graph: { nodes: [], edges: [] } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const otherWfId = ((await r.json()) as { id: string }).id;
+  await a.ctx.dispose();
+
+  const failing = new RegExp(`/api/v1/workspaces/${wsId}/workflows(\\?|$)`);
+  const heal = await openWithFailingLoad(page, 'workflows', failing);
+  const err = page.getByTestId('load-error');
+  await expect(err).toBeVisible({ timeout: 30_000 });
+  // Said once — not in both the list rail and the main pane.
+  await expect(err).toHaveCount(1);
+  await expect(err).toContainText('Couldn\'t load workflows');
+  await expect(page.getByText('No workflows yet')).toHaveCount(0);
+
+  heal();
+  await err.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.getByTestId('load-error')).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByText('No workflows yet')).toBeVisible();
+
+  // Switch in-app to the other workspace: its row shows…
+  const select = (id: string) =>
+    page.evaluate(async (wid) => {
+      const path = '/src/lib/stores/workspace.svelte.ts';
+      const { ws } = await import(/* @vite-ignore */ path);
+      await ws.select(wid);
+    }, id);
+  await select(otherWs);
+  await expect(page.getByTestId(`wf-row-${otherWfId}`)).toBeVisible({ timeout: 15_000 });
+
+  // …then back to a workspace whose load fails: the old workspace's row (and
+  // its open editor) must not linger unflagged — gone, and the failure said once.
+  let broken = true;
+  await page.route(failing, (rt) =>
+    broken && rt.request().method() === 'GET'
+      ? rt.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ code: 'internal', message: 'forced failure (e2e)' }),
+        })
+      : rt.fallback(),
+  );
+  await select(wsId);
+  await expect(page.getByTestId('load-error')).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.getByTestId(`wf-row-${otherWfId}`)).toHaveCount(0);
+  await expect(page.getByText('Other-workspace workflow')).toHaveCount(0);
+  broken = false;
+});
