@@ -5,6 +5,8 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { sentenceCase, type Tone } from '../../lib/status';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import SessionView from '../agents/SessionView.svelte';
@@ -27,6 +29,8 @@
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
   let view = $state<View>('tree');
+  /** Swarm lifecycle → the shared badge tone (patterns.md §1). */
+  const SWARM_TONE: Record<string, Tone> = { active: 'success', paused: 'neutral', aborted: 'danger' };
 
   // --- Phone chrome (≤640px) ----------------------------------------------
   // On a phone the Swarms rail + the swarm header would eat most of the screen
@@ -396,7 +400,9 @@
   >
     {#snippet badge()}
       {#if detail}
-        <span class="status-pill {detail.status}">{detail.status}</span>
+        <span class="status-pill" data-status={detail.status}>
+          <StatusBadge tone={SWARM_TONE[detail.status] ?? 'neutral'} label={sentenceCase(detail.status)} />
+        </span>
         {#if detail.pause_reason}
           <span class="pause-reason" title={detail.pause_reason}>Paused: {detail.pause_reason}</span>
         {/if}
@@ -845,21 +851,8 @@
     background: var(--status-exited);
   }
   .status-pill {
-    font-size: var(--fs-xs);
-    padding: 1px 8px;
-    border-radius: 999px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .status-pill.active {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
-  }
-  .status-pill.aborted {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    display: inline-flex;
+    align-items: center;
   }
   .cap {
     display: flex;
