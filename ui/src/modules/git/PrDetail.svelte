@@ -2,6 +2,7 @@
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
@@ -67,8 +68,21 @@
   const inlineComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path !== null));
   const generalComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path === null));
 
+  // A different PR (back/forward, a notification deep link) reuses this
+  // component: drop the previous PR's data first, so a slow or failed load
+  // never shows PR A's title/diff (or offers its Approve…) under PR B's number.
   $effect(() => {
-    void load(repoId, number);
+    const rid = repoId;
+    const num = number;
+    untrack(() => {
+      pr = null;
+      diff = null;
+      commits = null;
+      prError = null;
+      diffError = null;
+      commitsError = null;
+    });
+    void load(rid, num);
   });
 
   // Load failures render INLINE with Retry (a toast is for failed actions).
@@ -96,10 +110,12 @@
   async function load(rid: string, num: number): Promise<void> {
     loading = true;
     try {
-      pr = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      if (rid !== repoId || num !== number) return; // switched PRs mid-flight
+      pr = next;
       prError = null;
     } catch (e) {
-      prError = loadErrorText(e);
+      if (rid === repoId && num === number) prError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -108,10 +124,12 @@
   async function loadDiff(rid: string, num: number): Promise<void> {
     diffLoading = true;
     try {
-      diff = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      const next = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      if (rid !== repoId || num !== number) return;
+      diff = next;
       diffError = null;
     } catch (e) {
-      diffError = loadErrorText(e);
+      if (rid === repoId && num === number) diffError = loadErrorText(e);
     } finally {
       diffLoading = false;
     }
@@ -120,10 +138,12 @@
   async function loadCommits(rid: string, num: number): Promise<void> {
     commitsLoading = true;
     try {
-      commits = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      const next = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      if (rid !== repoId || num !== number) return;
+      commits = next;
       commitsError = null;
     } catch (e) {
-      commitsError = loadErrorText(e);
+      if (rid === repoId && num === number) commitsError = loadErrorText(e);
     } finally {
       commitsLoading = false;
     }
