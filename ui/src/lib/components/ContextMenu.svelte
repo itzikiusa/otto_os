@@ -121,7 +121,7 @@
 
   <div
     bind:this={menuEl}
-    class="ctx-menu"
+    class="ctx-menu glass-raised"
     style="left:{cx}px;top:{cy}px"
     role="menu"
     aria-label="Context menu"
@@ -179,10 +179,8 @@
     z-index: 9999;
     min-width: 160px;
     max-width: 260px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    /* Raised glass (tokens.css .glass-raised): tint, blur, hairline, shadow. */
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
     padding: 4px;
     display: flex;
     flex-direction: column;
@@ -191,9 +189,6 @@
     max-height: calc(100vh - 16px);
     overflow-y: auto;
     overscroll-behavior: contain;
-    /* slightly translucent backdrop effect */
-    backdrop-filter: blur(12px) saturate(1.3);
-    -webkit-backdrop-filter: blur(12px) saturate(1.3);
   }
 
   .ctx-item {

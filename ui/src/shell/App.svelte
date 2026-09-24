@@ -957,7 +957,12 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    /* The ambient backdrop (tokens.css) lives on the window itself: the
+       sidebar's glass blurs it; content columns stay opaque (.center). */
+    background-color: var(--bg);
+    background-image: var(--ambient-image);
+    background-size: cover;
+    background-position: center;
   }
   .shell-main {
     flex: 1;
@@ -988,22 +993,25 @@
      so the window's NSVisualEffectView shows through chrome only; content
      columns keep an opaque background. The traffic-lights strip gets the same
      78% tint as `.sidebar-material` so the sidebar reads as one surface. */
+  /* The ambient image stays: a Subtle wash is translucent, so the native
+     material shows through it; a Wallpaper paints its own opaque base. */
   :global(html.otto-vibrant),
   :global(html.otto-vibrant body),
   .shell.vibrant {
-    background: transparent;
-  }
-  .shell.vibrant .center {
-    background: var(--bg);
+    background-color: transparent;
   }
   .shell.vibrant .titlebar-drag {
-    background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
+    background: var(--glass-tint-native);
   }
   @media (prefers-reduced-transparency: reduce) {
     :global(html.otto-vibrant body),
     .shell.vibrant {
-      background: var(--bg);
+      background-color: var(--bg);
     }
+  }
+  :global(html.otto-vibrant[data-transparency='reduced'] body),
+  :global(html[data-transparency='reduced']) .shell.vibrant {
+    background-color: var(--bg);
   }
   /* Pop-out window title strip (unified title bar: traffic lights at the
      start, centred title). */
@@ -1014,7 +1022,7 @@
     align-items: center;
     justify-content: center;
     padding-inline: 80px;
-    border-block-end: 1px solid var(--border);
+    border-block-end: 1px solid var(--separator);
     user-select: none;
   }
   .popout-title {
@@ -1031,6 +1039,9 @@
     display: flex;
     flex-direction: column;
     position: relative;
+    /* Content is opaque: the ambient backdrop only ever shows through chrome
+       (and on Home, which paints it on purpose — HomePage.svelte). */
+    background: var(--bg);
   }
 
   /* ---------- mobile shell (phone ≤640 / tablet 641–1024) ---------- */

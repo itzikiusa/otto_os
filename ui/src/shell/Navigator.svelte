@@ -1084,7 +1084,7 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--border);
+    border-inline-end: 1px solid var(--separator);
     position: relative;
   }
   .rail-resize {
