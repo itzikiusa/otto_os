@@ -122,6 +122,9 @@ test('search ranks title over shortcut over summary over body', () => {
   const commit = searchSections(list, 'commit').map((h) => h.section.id);
   assert.deepEqual(commit, ['agents', 'git']);
   assert.equal(searchSections(list, 'commit')[1].match?.kind, 'body');
+  // Snippets are plain text (no markdown leftovers even when cut mid-bold).
+  const bold = [guide('s', 'Settings', { body: '- **Open Settings** in `⌘K`. It opens on **Appearance**.' })];
+  assert.equal(searchSections(bold, 'appearance')[0].match?.text, 'Open Settings in ⌘K. It opens on Appearance.');
 
   // A plain letter never matches through shortcut columns.
   assert.ok(!searchSections(list, 't').some((h) => h.match?.kind === 'shortcut'));

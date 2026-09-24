@@ -200,7 +200,7 @@
       {/if}
     {/snippet}
     {#snippet actions()}
-      {#if FILM && !showFilm && showArticle}
+      {#if FILM && !showFilm && showArticle && !viewport.isPhone}
         <button class="btn ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
           <Icon name="play" size={12} /> Watch the tour
         </button>
@@ -248,7 +248,7 @@
               />
             </div>
 
-            {#if viewport.isPhone && FILM}
+            {#if viewport.isPhone && FILM && !searching}
               <div class="rail-film"><TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} /></div>
             {/if}
 
@@ -373,7 +373,9 @@
     font-size: var(--fs-m);
   }
   .rail-film {
-    padding: 4px 12px 12px;
+    padding: 4px 12px 16px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--separator);
   }
   .rail-list {
     flex: 1;

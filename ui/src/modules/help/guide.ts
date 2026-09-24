@@ -215,6 +215,7 @@ function plain(line: string): string {
     .replace(/`([^`]*)`/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\*+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

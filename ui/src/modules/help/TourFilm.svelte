@@ -294,6 +294,9 @@
     pointer-events: none;
   }
   .film-frame.fallback {
+    /* No 16:9 box for a film that isn't there: a compact inline notice. */
+    aspect-ratio: auto;
+    min-height: 168px;
     display: flex;
     flex-direction: column;
     align-items: center;

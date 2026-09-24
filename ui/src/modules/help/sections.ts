@@ -35,10 +35,10 @@ function load(): GuideSection[] {
     seen.add(s.id);
     out.push(s);
   }
-  return orderSections(
-    out,
-    SIDEBAR_MODULES.map((m) => m.id),
-  );
+  // Sidebar order; the Database Explorer and Message Brokers views (opened
+  // from Connections, no rows of their own) read right after Connections.
+  const order = SIDEBAR_MODULES.flatMap((m) => (m.id === 'connections' ? [m.id, 'database', 'brokers'] : [m.id]));
+  return orderSections(out, order);
 }
 
 /** Every guide, in rail order (group, then Basics reading order / sidebar order). */
