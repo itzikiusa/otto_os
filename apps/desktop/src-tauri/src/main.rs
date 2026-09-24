@@ -1,15 +1,21 @@
 // Otto desktop shell — thin Tauri 2 wrapper around the SPA + daemon supervisor.
-// No business logic lives here: menus, vibrancy, notifications, and ottod
-// lifecycle only.
+// No business logic lives here: menus, vibrancy, notifications, ottod
+// lifecycle, and the native companion layer (global shortcuts, the assistant
+// bar panel, the menu-bar item + popover, pop-out windows).
 
 #![cfg_attr(
     all(not(debug_assertions), target_os = "macos"),
     windows_subsystem = "windows"
 )]
 
+mod bar;
 mod browser;
+mod panel;
+mod popout;
+mod shortcuts;
 mod snip;
 mod supervisor;
+mod tray;
 mod windows;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -36,11 +42,21 @@ fn main() {
                     windows::snapshot_all(app);
                     app.exit(0);
                 }
+                // Menu-bar item's right-click menu (tray.rs).
+                tray::MENU_OPEN => {
+                    let _ = popout::open_in_otto(app.clone(), None);
+                }
+                tray::MENU_ASK => tray::ask(app),
+                tray::MENU_SETTINGS => {
+                    let _ = popout::open_in_otto(app.clone(), Some("settings/appearance".into()));
+                }
                 _ => {
+                    // The bar / tray panels never take menu events (their
+                    // pages have no menu bridge) — only app windows do.
                     let focused = app
                         .webview_windows()
                         .into_iter()
-                        .find(|(_, w)| w.is_focused().unwrap_or(false))
+                        .find(|(l, w)| windows::is_app_window(l) && w.is_focused().unwrap_or(false))
                         .map(|(l, _)| l);
                     match focused {
                         // menu.ts listens per-webview-window, so a targeted
@@ -76,10 +92,25 @@ fn main() {
             snip::snip_get_shortcut,
             snip::snip_set_shortcut,
             snip::open_snip_window,
+            shortcuts::shortcuts_list,
+            shortcuts::shortcuts_set,
+            shortcuts::shortcuts_reset,
+            bar::bar_show,
+            bar::bar_hide,
+            bar::bar_toggle,
+            bar::bar_resize,
+            tray::tray_set_status,
+            tray::tray_popover_hide,
+            tray::tray_info,
+            popout::open_popout,
+            popout::open_in_otto,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
 
+            // Sidebar vibrancy behind the whole window; the SPA keeps content
+            // opaque and lets it show through the sidebar/titlebar chrome only
+            // (shell/App.svelte `otto-vibrant`).
             #[cfg(target_os = "macos")]
             {
                 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
@@ -93,9 +124,15 @@ fn main() {
             // per-window (`__OTTO_WIN__`-keyed) localStorage.
             windows::restore(app.handle());
 
-            // System-wide snip shortcut (persisted chord or the ⌘⌃⇧2 default);
-            // failure is non-fatal — in-app triggers still work.
-            snip::init(app.handle());
+            // Hidden, always-alive chrome: the assistant bar panel and the
+            // menu-bar item + popover. Each is non-fatal on failure.
+            bar::init(app.handle());
+            tray::init(app.handle());
+
+            // Every system-wide chord (snip ⌘⌃⇧2, assistant ⌥Space, voice)
+            // from the shortcuts registry; a chord another app holds only
+            // disables that one global trigger.
+            shortcuts::init(app.handle());
 
             // Ensure the daemon is up in the background; the SPA polls /health
             // and surfaces state, so failures here are non-fatal.
@@ -119,10 +156,22 @@ fn main() {
             }
             tauri::RunEvent::WindowEvent { label, event, .. } => match event {
                 tauri::WindowEvent::CloseRequested { .. } => {
+                    if windows::is_popout(&label) {
+                        popout::on_close_requested(app, &label);
+                    }
                     windows::on_close_requested(app, &label);
                 }
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    windows::schedule_snapshot(app);
+                    // Pop-outs remember frames per route; the bar/tray panels
+                    // are placed by code and never persisted.
+                    if windows::is_popout(&label) {
+                        popout::schedule_save(app, &label);
+                    } else if windows::is_app_window(&label) {
+                        windows::schedule_snapshot(app);
+                    }
+                }
+                tauri::WindowEvent::Focused(false) if label == tray::POPOVER_LABEL => {
+                    tray::on_blur(app);
                 }
                 _ => {}
             },
