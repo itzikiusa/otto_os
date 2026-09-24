@@ -14,7 +14,6 @@
   import { k8sApi } from '../../lib/api/k8s';
   import { toasts } from '../../lib/toast.svelte';
   import type { Environment, K8sCluster, K8sDiscoveredContext } from '../../lib/api/types';
-  import { envBadge } from './k8s-util';
 
   interface Props {
     existing?: K8sCluster | null;
@@ -279,7 +278,7 @@
             >{e}</button>
           {/each}
         </div>
-        {#if env === 'prod'}<span class="hint danger">Production clusters get the {envBadge('prod')} treatment everywhere: red pill, and every destructive action asks you to type the resource name.</span>{/if}
+        {#if env === 'prod'}<span class="hint danger">Production clusters get the prod treatment everywhere: red pill, and every destructive action asks you to type the resource name.</span>{/if}
       </div>
     {/if}
 

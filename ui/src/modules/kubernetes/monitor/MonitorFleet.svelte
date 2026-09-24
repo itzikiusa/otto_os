@@ -29,7 +29,8 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import MetricChart from '../../../lib/components/MetricChart.svelte';
-  import { envBadge, formatBytes } from '../k8s-util';
+  import { formatBytes } from '../k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, classColor, classLabel, fmtMs, fmtPct, fmtRate, isWindow } from './monitor-util';
 
   interface Props {
@@ -466,7 +467,7 @@
         >
           <span class="dot" style="background: {c.color ?? 'var(--accent)'}"></span>
           {c.name}
-          <span class="env-badge" class:prod={c.environment === 'prod'}>{envBadge(c.environment)}</span>
+          <EnvBadge env={c.environment} />
         </button>
       {/each}
     </div>
@@ -573,7 +574,7 @@
           <tbody>
             {#each visibleRows as r (`${r.cluster_id}/${r.namespace}/${r.workload}/${r.pod}`)}
               <tr class="wl-row" onclick={() => drillRow(r)} title={group === 'workload' ? "Show this workload's pods" : "Show this pod's events"} data-testid="k8s-fleet-row">
-                <td><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <span class="env-badge" class:prod={r.cluster.environment === 'prod'}>{envBadge(r.cluster.environment)}</span></td>
+                <td><span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span> {r.cluster.name} <EnvBadge env={r.cluster.environment} /></td>
                 <td class="dim">{r.namespace}</td>
                 <td><b>{r.workload}</b></td>
                 {#if group === 'pod'}<td class="mono small">{r.pod}</td>{:else}<td class="num mono">{r.pods}</td>{/if}
@@ -778,19 +779,6 @@
     height: 8px;
     border-radius: 50%;
     vertical-align: middle;
-  }
-  .env-badge {
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .selects {
     display: flex;

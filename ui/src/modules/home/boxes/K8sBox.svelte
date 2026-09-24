@@ -12,7 +12,8 @@
   import { k8sApi } from '../../../lib/api/k8s';
   import { router } from '../../../lib/router.svelte';
   import type { K8sMonitorOverviewRow } from '../../../lib/api/types';
-  import { envBadge, formatBytes } from '../../kubernetes/k8s-util';
+  import { formatBytes } from '../../kubernetes/k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, fmtPct, fmtRate, healthLabel, isWindow } from '../../kubernetes/monitor/monitor-util';
   import { home, type HomeBox } from '../home.svelte';
   import { poll, type Poller } from './poll';
@@ -109,7 +110,7 @@
           <button class="row" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}`)} title="Open {c.name}">
             <span class="cdot" style:background={c.color ?? 'var(--text-dim)'}></span>
             <span class="name ellipsis">{c.name}</span>
-            <span class="env">{envBadge(c.environment)}</span>
+            <EnvBadge env={c.environment} />
             <span class="health {h.cls}">{h.label}</span>
             {#if r && r.enabled && r.status}
               <span class="m" title="Pods running / total">
@@ -220,15 +221,6 @@
     font-weight: 600;
     min-width: 0;
     max-width: 40%;
-  }
-  .env {
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 0 5px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text-dim);
   }
   .health {
     font-size: var(--fs-xs);
