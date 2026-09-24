@@ -2078,10 +2078,10 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
         if *t != tool {
             continue;
         }
-        let Some(k) = crate::agent_refs::kind_of(*kind) else {
+        let Some(k) = crate::agent_refs::kind_of(kind) else {
             continue;
         };
-        match s(*arg) {
+        match s(arg) {
             None => {
                 if k.sole_default {
                     return true;
@@ -2105,7 +2105,7 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
         && s("workspace_id").is_none()
         && PIN_PROBES
             .iter()
-            .any(|(t, arg, _, _)| *t == tool && s(*arg).is_some())
+            .any(|(t, arg, _, _)| *t == tool && s(arg).is_some())
 }
 
 /// Resolve every friendly reference in a governed call (see [`REF_ARGS`]), a
@@ -2197,10 +2197,10 @@ async fn fill_refs_with(
         if *t != tool {
             continue;
         }
-        let Some(kind) = kind_of(*kind_key) else {
+        let Some(kind) = kind_of(kind_key) else {
             continue;
         };
-        let value = text(&out, *arg);
+        let value = text(&out, arg);
         let needs = match &value {
             None => kind.sole_default,
             Some(v) => !looks_like_id(v) || (pinned && kind.scope == Scope::Workspace),
@@ -2216,7 +2216,7 @@ async fn fill_refs_with(
             caller,
             auth,
             kind,
-            *arg,
+            arg,
             value.as_deref(),
             ws_filter.as_deref(),
             prefer,
@@ -2260,9 +2260,9 @@ async fn fill_refs_with(
     // 4. Pinned token, id-only object: learn its real workspace.
     if pinned && text(&out, "workspace_id").is_none() {
         if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
-            if let Some(id) = text(&out, *arg) {
+            if let Some(id) = text(&out, arg) {
                 let v = caller.get(&format!("{prefix}{}", seg(&id))).await?;
-                if let Some(ws) = v.pointer(*ptr).and_then(Value::as_str) {
+                if let Some(ws) = v.pointer(ptr).and_then(Value::as_str) {
                     out.insert("workspace_id".into(), json!(ws));
                 }
             }

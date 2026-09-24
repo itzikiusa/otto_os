@@ -278,6 +278,9 @@ pub async fn can_see(ctx: &ServerCtx, user: &User, owner_id: &str, workspace_id:
             .is_ok()
 }
 
+// The Err side is an early-return axum `Response` (the handler returns it as
+// is); boxing it would only add an allocation on the error path.
+#[allow(clippy::result_large_err)]
 async fn load_tab(ctx: &ServerCtx, id: &Id) -> Result<BrowserTab, Response> {
     ctx.browser_tabs
         .get(id)
@@ -287,6 +290,9 @@ async fn load_tab(ctx: &ServerCtx, id: &Id) -> Result<BrowserTab, Response> {
 }
 
 /// The tab's session when it exists and `user` may see it.
+// The Err side is an early-return axum `Response` (the handler returns it as
+// is); boxing it would only add an allocation on the error path.
+#[allow(clippy::result_large_err)]
 async fn visible_session(
     ctx: &ServerCtx,
     user: &User,
@@ -564,6 +570,9 @@ struct NavReq {
     url: Option<String>,
 }
 
+// The Err side is an early-return axum `Response` (the handler returns it as
+// is); boxing it would only add an allocation on the error path.
+#[allow(clippy::result_large_err)]
 async fn editable_session(
     ctx: &ServerCtx,
     user: &User,

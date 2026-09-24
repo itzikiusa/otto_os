@@ -1772,7 +1772,7 @@ fn native_ref_plan(name: &str, args: &Value) -> Vec<(&'static str, &'static str,
         if *tool != name {
             continue;
         }
-        match text(*arg) {
+        match text(arg) {
             Some(v) if !otto_server::agent_refs::looks_like_id(&v) => {
                 plan.push((*arg, *kind, Some(v)))
             }
