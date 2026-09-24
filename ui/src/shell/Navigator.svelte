@@ -9,6 +9,7 @@
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
+  import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
@@ -646,6 +647,9 @@
     <span class="grow">{m.label}</span>
     {#if m.id === 'workflows' && ws.activeWorkflowRuns.length > 0}
       <span class="count-chip working" title="running workflows">{ws.activeWorkflowRuns.length}</span>
+    {/if}
+    {#if m.id === 'assistant' && assistant.needsYouCount > 0}
+      <span class="count-chip needs" title={`${assistant.needsYouCount} waiting on you`} data-testid="assistant-needs-badge">{assistant.needsYouCount}</span>
     {/if}
   </button>
 {/snippet}
@@ -1619,6 +1623,11 @@
   .count-chip.working {
     background: color-mix(in srgb, var(--status-working) 22%, transparent);
     color: var(--status-working);
+  }
+  /* Needs you (the Assistant's approvals/questions): the one attention tone. */
+  .count-chip.needs {
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .nav-foot {
     border-top: 1px solid var(--border);

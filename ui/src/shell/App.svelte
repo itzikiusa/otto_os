@@ -64,6 +64,7 @@
   import ProofPage from '../modules/proof/ProofPage.svelte';
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
+  import AssistantPage from '../modules/assistant/AssistantPage.svelte';
   import AwsPage from '../modules/aws/AwsPage.svelte';
   import KubernetesPage from '../modules/kubernetes/KubernetesPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
@@ -662,6 +663,10 @@
       <AgentsPage />
     {:else if moduleName === 'home'}
       <HomePage />
+    {:else if moduleName === 'assistant'}
+      <!-- Otto Assistant: threads (Spaces 01–04 + Recent) and a chat rendered
+           from the CLI transcript, with Tasks · Memory · Permissions tabs. -->
+      <AssistantPage />
     {:else if moduleName === 'history'}
       <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
            read-only conversation view. `#/history`, not `#/agents/…`, whose
