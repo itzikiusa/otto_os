@@ -17,7 +17,9 @@
   import PageBody from '../../../lib/components/PageBody.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
-  import { envBadge, formatAge, formatBytes } from '../k8s-util';
+  import { formatAge, formatBytes } from '../k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
+  import { envTone } from '../../../lib/status';
   import Sparkline from './Sparkline.svelte';
   import MonitorSettings from './MonitorSettings.svelte';
   import MonitorInsights from './MonitorInsights.svelte';
@@ -69,7 +71,7 @@
     ctxMenu.show(
       e,
       k8s.clusters.map((c) => ({
-        label: `${c.name} · ${envBadge(c.environment)}`,
+        label: `${c.name} · ${envTone(c.environment).label}`,
         icon: 'helm',
         disabled: c.id === cluster.id,
         action: () => router.go(`kubernetes/monitor/${encodeURIComponent(c.id)}/${activeTab}`),
@@ -234,7 +236,7 @@
     <button class="cluster-pick" onclick={clusterMenu} title="Switch cluster" data-testid="k8s-monitor-cluster-pick">
       <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
       {cluster.name}
-      <span class="env-badge" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
+      <EnvBadge env={cluster.environment} />
       <Icon name="chevronDown" size={11} />
     </button>
   {/snippet}
@@ -463,19 +465,6 @@
     width: 9px;
     height: 9px;
     border-radius: 50%;
-  }
-  .env-badge {
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .seg {
     display: inline-flex;

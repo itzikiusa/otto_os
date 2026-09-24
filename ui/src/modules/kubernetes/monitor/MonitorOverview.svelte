@@ -14,7 +14,8 @@
   import PageBody from '../../../lib/components/PageBody.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { envBadge, formatBytes } from '../k8s-util';
+  import { formatBytes } from '../k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, classColor, classLabel, collectorLine, fmtPct, fmtRate, healthLabel, isWindow, rbacMessage } from './monitor-util';
 
   let window = $state<(typeof WINDOWS)[number]>('24h');
@@ -115,7 +116,7 @@
           <div class="row1">
             <span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span>
             <span class="name">{r.cluster.name}</span>
-            <span class="env-badge" class:prod={r.cluster.environment === 'prod'}>{envBadge(r.cluster.environment)}</span>
+            <EnvBadge env={r.cluster.environment} />
             <span class="health {h.cls}" data-testid="k8s-monitor-health">{h.label}</span>
           </div>
 
@@ -267,20 +268,6 @@
     white-space: nowrap;
     flex: 1;
     min-width: 0;
-  }
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .health {
     flex-shrink: 0;

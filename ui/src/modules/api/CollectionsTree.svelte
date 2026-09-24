@@ -198,12 +198,12 @@
     {/if}
   </div>
 
-  {#if apiClient.loadError && isEmpty}
+  {#if apiClient.requestsLoadError && isEmpty}
     <div class="state err" role="alert">
       <Icon name="warning" size={14} />
       <div class="grow">
         <div>Couldn’t load saved requests.</div>
-        <div class="dim-line">{apiClient.loadError}</div>
+        <div class="dim-line">{apiClient.requestsLoadError}</div>
       </div>
       <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
     </div>

@@ -5,6 +5,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { envTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
@@ -814,13 +815,12 @@
   type EnvGuarded = Pick<Connection, 'environment' | 'read_only'>;
   const isProdConn = (c: EnvGuarded): boolean => c.environment === 'prod';
   const isGuardedConn = (c: EnvGuarded): boolean => c.environment === 'prod' || c.read_only;
-  // Short badge label, or '' when neither (dev, not read-only) — also the guard
-  // for rendering the shared <EnvBadge>, which draws prod/staging/RO itself.
-  function envBadge(c: EnvGuarded): string {
-    if (c.environment === 'prod') return 'PROD';
-    if (c.read_only) return 'RO';
-    if (c.environment === 'staging') return 'STG';
-    return '';
+  // Whether a row gets the shared <EnvBadge> — the same rule as Brokers /
+  // Kubernetes / AWS: prod and staging are badged, and so is read-only (RO);
+  // dev (the default) stays unbadged. Uses `envTone` so env aliases agree with
+  // the badge itself.
+  function envBadge(c: EnvGuarded): boolean {
+    return envTone(c.environment).key !== 'dev' || c.read_only;
   }
 </script>
 
@@ -1775,6 +1775,7 @@
   }
   /* --- Section hierarchy rows --- */
   .sec-head {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1823,20 +1824,33 @@
     width: 16px;
     flex-shrink: 0;
   }
+  /* The folder count sits in the same end column as the connection rows'
+     type/env badges: the section's hover actions float over the row end (like
+     .conn-actions) instead of reserving their width, and the count is sized
+     like a badge so the numbers line up with the pills below them. */
   .count {
-    font-size: 9.5px;
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    min-width: 14px;
-    text-align: center;
+    min-width: 16px;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
   .sec-actions {
+    position: absolute;
+    inset-inline-end: 2px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     gap: 0;
-    flex-shrink: 0;
+    padding: 1px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
     opacity: 0;
   }
-  .sec-head:hover .sec-actions {
+  .sec-head:hover .sec-actions,
+  .sec-head:focus-within .sec-actions {
     opacity: 1;
   }
   .conn-row.dragging {
