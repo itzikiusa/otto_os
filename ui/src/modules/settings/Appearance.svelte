@@ -11,6 +11,8 @@
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { barStore } from '../../lib/stores/bar.svelte';
+  import type { BarPref } from '../../lib/floatingBar';
   import { plugins } from '../../lib/stores/plugins.svelte';
   import {
     availableModules,
@@ -19,6 +21,14 @@
     resolveOrder,
     type SidebarPluginEntry,
   } from '../../lib/sidebar';
+
+  // The "Type or speak… ⌘K" bar over the content column (FloatingBar.svelte).
+  const barPrefs: { id: BarPref; label: string; hint: string }[] = [
+    { id: 'auto', label: 'Auto', hint: 'A short pill at rest, full on Home; it docks into the status bar while you scroll or type in a terminal or editor.' },
+    { id: 'pinned', label: 'Always full', hint: 'The whole pill (model, spaces) stays up; it only shrinks while a terminal or editor has the keyboard.' },
+    { id: 'docked', label: 'Docked', hint: 'A small chip in the status bar that never covers content; ⌘K opens the full bar.' },
+    { id: 'hidden', label: 'Hidden', hint: 'No bar; ⌘K opens the command palette sheet instead.' },
+  ];
 
   // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
   // the user may see + permitted plugins, in the saved order, including hidden
@@ -138,6 +148,22 @@
     engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
     monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
     tables or box art. Toggling reloads open terminals.
+  </p>
+
+  <div class="section-title">Floating bar</div>
+  <div class="segmented" role="radiogroup" aria-label="Floating bar">
+    {#each barPrefs as b (b.id)}
+      <button
+        role="radio"
+        aria-checked={barStore.pref === b.id}
+        class:active={barStore.pref === b.id}
+        onclick={() => barStore.setPref(b.id)}
+      >{b.label}</button>
+    {/each}
+  </div>
+  <p class="hint-line">
+    {barPrefs.find((b) => b.id === barStore.pref)?.hint} Desktop window only — phones and tablets
+    keep the ⌘K sheet. Saved per device.
   </p>
 
   <div class="section-title">Sessions on this device</div>

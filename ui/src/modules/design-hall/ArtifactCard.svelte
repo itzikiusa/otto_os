@@ -4,6 +4,9 @@
   // (the stories it implements, how often it is referenced). The whole card is
   // a link to the artifact view.
   import Icon from '../../lib/components/Icon.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { canPopout, popoutItems } from '../../lib/popoutMenu';
   import { rel } from '../../lib/stores/now.svelte';
   import type { DesignArtifact } from '../../lib/api/types';
   import ArtifactThumb from './ArtifactThumb.svelte';
@@ -22,7 +25,18 @@
   const by = $derived(artifact.created_by_kind === 'agent' ? ' · drafted by Otto' : '');
 </script>
 
-<a class="acard" href={`#/design/a/${encodeURIComponent(artifact.id)}`} data-testid="design-artifact-card">
+<a
+  class="acard"
+  href={`#/design/a/${encodeURIComponent(artifact.id)}`}
+  data-testid="design-artifact-card"
+  oncontextmenu={canPopout
+    ? (e) =>
+        ctxMenu.show(e, [
+          { label: 'Open', icon: 'chevronRight', action: () => router.go(`design/a/${encodeURIComponent(artifact.id)}`) },
+          ...popoutItems(`design/a/${encodeURIComponent(artifact.id)}`, artifact.title),
+        ])
+    : undefined}
+>
   <div class="pic"><ArtifactThumb {artifact} {live} /></div>
   <div class="body">
     <div class="line1">

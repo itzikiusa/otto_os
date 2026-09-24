@@ -198,7 +198,7 @@ test('boxes: add from the picker (max 8), resize in grid units, zoom, remove', a
   expect(await boxes.nth(0).evaluate((el) => (el as HTMLElement).style.gridColumn)).toBe('span 5');
 });
 
-test('Go to Home is in the palette and the page never overflows horizontally', async ({ page }) => {
+test('Go to Home is one ⌘K away and the page never overflows horizontally', async ({ page }) => {
   await boot(page, 'agents');
   await page.keyboard.press('Meta+k');
   await page.keyboard.type('go to home');

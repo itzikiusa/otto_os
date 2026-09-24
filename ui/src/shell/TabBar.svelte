@@ -8,6 +8,7 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { popoutItems } from '../lib/popoutMenu';
   import ShareModal from '../modules/agents/ShareModal.svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
@@ -220,6 +221,9 @@
           ...(id !== DB_PANE_ID
             ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) }]
             : []),
+          ...(id === DB_PANE_ID
+            ? popoutItems('database', 'Database')
+            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
           { separator: true },
           {
             label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',

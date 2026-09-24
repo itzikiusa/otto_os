@@ -273,9 +273,10 @@ test('keyboard: typing is forwarded, ⌘K stays with Otto, Esc releases, paste i
   const h = live.sent.find((m) => m.type === 'key' && m.key === 'H');
   expect(h).toMatchObject({ code: 'KeyH', key_code: 72, text: 'H' });
 
-  // ⌘K / Ctrl+K opens Otto's palette and is NOT sent to the page
+  // ⌘K / Ctrl+K focuses Otto's floating bar (the desktop command surface)
+  // and is NOT sent to the page
   await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.locator('.palette')).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Ask Otto or search commands' })).toBeFocused();
   expect(live.sent.some((m) => m.type === 'key' && m.key.toLowerCase() === 'k')).toBe(false);
   await page.keyboard.press('Escape');
 

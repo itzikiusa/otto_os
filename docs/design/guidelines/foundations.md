@@ -297,7 +297,7 @@ Elevation comes mostly from **surface steps and hairlines, not shadows**:
 
 - Cards sit on `--bg` as `--surface` with a 1 px `--border`. No shadow.
 - **Floating layers only** get `--shadow`: Modal, popovers, menus, toasts, and
-  the proposed floating bar. There is one shadow token, and it is tuned per
+  the floating bar. There is one shadow token, and it is tuned per
   theme.
 - A selected segment in `.segmented` has a 1 px micro-shadow. That is the only
   in-flow shadow.
@@ -317,6 +317,7 @@ the existing layers. Don't invent a number.
 |---|---|---|
 | In-pane stacking | 1–10 | sticky headers, resize handles, the right-panel edge (5) |
 | Mobile chrome | 60 / 90–93 | `BottomNav` (60, sheet 92–93), `Drawer` (90–91) |
+| Floating bar | 40 | `FloatingBar` over the content column (below every sheet and menu) |
 | Command surfaces | 150 | `Palette`, `ShortcutsOverlay` |
 | Sheets | 200 | `Modal` (and so `ConfirmDialog`) |
 | Toasts | 300 | `Toasts` |
@@ -358,7 +359,7 @@ Today it is used by the Navigator and the Rail.
 | Sidebar / Rail | Tables, grids, result sets |
 | The window's toolbar strip, if it is made translucent | Editors, terminals, diffs, logs |
 | Popovers and menus (optional) | Forms and settings bodies |
-| The proposed floating command bar | Modal bodies and long-form text |
+| The floating command bar | Modal bodies and long-form text |
 | The ambient backdrop behind Home / studio canvases (Proposed) | Anything the user reads for more than a glance |
 
 Constraints for any translucent surface:
