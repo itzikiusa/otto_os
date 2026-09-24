@@ -419,6 +419,26 @@ test('handles multiple scenes — list + switch', async ({ page }) => {
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
 });
 
+test('deleting the OPEN scene opens another (no endless loading pane)', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { ctx, base } = await apiCtx();
+  const title = `Doomed ${Date.now()}`;
+  await seedScene(ctx, base, title, 'mermaid', MERMAID.flowchart);
+  await seedScene(ctx, base, `Survivor ${Date.now()}`, 'mermaid', MERMAID.flowchart);
+  await ctx.dispose();
+
+  await openScene(page, title);
+  const row = page.locator('.scene-list .row.active', { hasText: title });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.hover();
+  await row.locator('button.del').click();
+  await page.locator('button.btn.danger', { hasText: 'Delete' }).click();
+  await expect(page.locator('.scene-list .row', { hasText: title })).toHaveCount(0, { timeout: 10_000 });
+  // The auto-pick re-opens a remaining scene instead of a skeleton forever.
+  await expect(page.locator('.editor-split')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.scene-list .row.active')).toHaveCount(1);
+});
+
 // ---------------------------------------------------------------------------
 // Sections, rename, provider, Product link
 // ---------------------------------------------------------------------------
