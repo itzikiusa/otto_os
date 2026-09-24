@@ -182,7 +182,7 @@ impl Ctx {
         if !status.is_success() {
             return Err(daemon_error(status, &body));
         }
-        serde_json::from_slice(&body).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&body)
     }
 
     /// POST an `/api/v1` path with the bearer token. Used by the governed gateway
@@ -226,7 +226,7 @@ impl Ctx {
         if !status.is_success() {
             return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// PUT an `/api/v1` path with the bearer token. Used ONLY by
@@ -265,13 +265,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// PATCH an `/api/v1` path with the bearer token. Used by the swarm write
@@ -310,13 +306,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// DELETE an `/api/v1` path with the bearer token. Used ONLY by
@@ -344,11 +336,7 @@ impl Ctx {
             return Ok(());
         }
         let bytes = resp.bytes().await.unwrap_or_default();
-        let snippet = String::from_utf8_lossy(&bytes);
-        Err(format!(
-            "daemon returned {status}: {}",
-            snippet.chars().take(300).collect::<String>()
-        ))
+        Err(daemon_error(status, &bytes))
     }
 
     /// GET an `/api/v1` path that answers `text/plain` (today only the pod-logs
@@ -389,11 +377,10 @@ impl Ctx {
                 body.len()
             ));
         }
-        let text = String::from_utf8_lossy(&body);
         if !status.is_success() {
-            let snippet = text.chars().take(300).collect::<String>();
-            return Err(format!("daemon returned {status}: {snippet}"));
+            return Err(daemon_error(status, &body));
         }
+        let text = String::from_utf8_lossy(&body);
         Ok(tail_text(&text, MAX_TEXT_CHARS))
     }
 
@@ -495,14 +482,19 @@ impl Ctx {
 const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
 
 /// The agent-facing text for a non-2xx daemon reply. A JSON `Problem`
-/// (`{code, message}`) surfaces its `message` (capped at
+/// (`{code, message}`, or a module's `{error}`) surfaces that message (capped at
 /// [`MAX_ERROR_MESSAGE_CHARS`]); anything else is a raw 300-char snippet so a
 /// huge body never reaches the transcript. The status stays in front — it is
 /// the actionable part when the message is terse.
 fn daemon_error(status: reqwest::StatusCode, body: &[u8]) -> String {
     let message = serde_json::from_slice::<Value>(body)
         .ok()
-        .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_string));
+        .and_then(|v| {
+            v.get("message")
+                .or_else(|| v.get("error"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     match message {
         Some(m) => format!(
             "daemon returned {status}: {}",
@@ -513,6 +505,16 @@ fn daemon_error(status: reqwest::StatusCode, body: &[u8]) -> String {
             String::from_utf8_lossy(body).chars().take(300).collect::<String>()
         ),
     }
+}
+
+/// Parse a 2xx daemon body. An EMPTY body (`204 No Content` — e.g. a Jira
+/// transition, a delete) is a success, not a "parse json: EOF" error the agent
+/// would read as a failure and retry: it becomes `{"ok": true}`.
+fn parse_ok_body(body: &[u8]) -> Result<Value, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({ "ok": true }));
+    }
+    serde_json::from_slice(body).map_err(|e| format!("parse json: {e}"))
 }
 
 /// Recursively cap the number of elements in every JSON array to [`MAX_ROWS`],
@@ -4012,6 +4014,17 @@ mod tests {
         // A non-Problem body stays a short raw snippet.
         let raw = daemon_error(status, "y".repeat(5000).as_bytes());
         assert!(raw.len() < 400, "{}", raw.len());
+        // A module's `{error}` body is surfaced too.
+        let e = daemon_error(status, br#"{"error":"no such thing"}"#);
+        assert!(e.ends_with("no such thing"), "{e}");
+    }
+
+    #[test]
+    fn an_empty_success_body_is_ok_not_a_parse_error() {
+        assert_eq!(parse_ok_body(b"").unwrap(), json!({"ok": true}));
+        assert_eq!(parse_ok_body(b" \n").unwrap(), json!({"ok": true}));
+        assert_eq!(parse_ok_body(br#"{"a":1}"#).unwrap(), json!({"a": 1}));
+        assert!(parse_ok_body(b"<html>").is_err());
     }
 
     #[tokio::test]

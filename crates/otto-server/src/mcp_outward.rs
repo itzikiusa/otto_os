@@ -3151,10 +3151,45 @@ async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let snippet: String = text.chars().take(400).collect();
-        return Err(Error::Upstream(format!("{status}: {snippet}")));
+        return Err(Error::Upstream(self_call_error(status, &text)));
     }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    Ok(parse_self_ok(&text))
+}
+
+/// Cap on a self-call error MESSAGE handed back to the agent. The message is
+/// often the actionable part (a reference that did not resolve lists the
+/// candidates, a validation error names the bad field), so it is kept whole up
+/// to this bound — the old 400-char raw snippet cut candidate lists mid-row.
+const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+
+/// The agent-facing text of a non-2xx self-call: `"<status>: <message>"`, the
+/// `message` (or a module's `error`) of a JSON problem body when there is one
+/// (≤ [`MAX_ERROR_MESSAGE_CHARS`]), else a short raw snippet so an HTML/huge
+/// body never floods the transcript. Pure, so it is unit-tested.
+fn self_call_error(status: reqwest::StatusCode, body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        v.get("message")
+            .or_else(|| v.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    match message {
+        Some(m) => format!(
+            "{status}: {}",
+            m.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>()
+        ),
+        None => format!("{status}: {}", body.chars().take(400).collect::<String>()),
+    }
+}
+
+/// A 2xx self-call body as JSON. An empty body (`204 No Content` — a Jira
+/// transition, a delete) is `{"ok": true}`, not `null`, so the agent reads a
+/// success as one.
+fn parse_self_ok(body: &str) -> Value {
+    if body.trim().is_empty() {
+        return json!({ "ok": true });
+    }
+    serde_json::from_str(body).unwrap_or(Value::Null)
 }
 /// GET a `text/plain` route (pod logs) and wrap it as `{text, truncated}`,
 /// keeping the newest [`MAX_TEXT_CHARS`] — `parse_self` would turn a non-JSON
@@ -3170,8 +3205,7 @@ async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Resu
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let snippet: String = text.chars().take(400).collect();
-        return Err(Error::Upstream(format!("{status}: {snippet}")));
+        return Err(Error::Upstream(self_call_error(status, &text)));
     }
     let n = text.chars().count();
     let (text, truncated) = if n > MAX_TEXT_CHARS {
@@ -3660,6 +3694,23 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str().map(String::from))
             .collect()
+    }
+
+    #[test]
+    fn self_call_errors_keep_the_whole_actionable_message() {
+        let status = reqwest::StatusCode::NOT_FOUND;
+        // A candidate listing (the resolver's 404) survives past 400 chars.
+        let long = format!("not found: {}", "- r1  repo  (workspace: w)\n".repeat(40));
+        let body = json!({"code":"not_found","message": long}).to_string();
+        let msg = self_call_error(status, &body);
+        assert!(msg.starts_with("404 Not Found: not found: - r1"), "{msg}");
+        assert!(msg.len() > 1000, "{}", msg.len());
+        // `{error}` bodies too; a raw non-JSON body stays a short snippet.
+        assert!(self_call_error(status, r#"{"error":"nope"}"#).ends_with("nope"));
+        assert!(self_call_error(status, &"y".repeat(5000)).len() < 450);
+        // 204 No Content is a success the agent can read, not `null`.
+        assert_eq!(parse_self_ok(""), json!({"ok": true}));
+        assert_eq!(parse_self_ok("[1]"), json!([1]));
     }
 
     #[test]
