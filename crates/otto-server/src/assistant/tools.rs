@@ -19,9 +19,9 @@ use otto_state::AssistantThread;
 use serde_json::{json, Value};
 
 use super::memory::{self, to_wire};
+use super::repo;
 use super::tasks;
 use super::types::CreateTaskReq;
-use super::repo;
 use crate::state::ServerCtx;
 
 /// Every `{tool}` segment, and the MCP tool it backs.
@@ -123,7 +123,11 @@ pub async fn run(ctx: &ServerCtx, auth: &AuthContext, tool: &str, body: Value) -
             }))
         }
         "recall" => {
-            let k = body.get("k").and_then(Value::as_i64).unwrap_or(10).clamp(1, 20);
+            let k = body
+                .get("k")
+                .and_then(Value::as_i64)
+                .unwrap_or(10)
+                .clamp(1, 20);
             let (accepted, _) = memory::list(ctx, owner, arg(&body, "query"), k).await?;
             let profile = memory::read_profile(ctx, owner)
                 .await
@@ -224,9 +228,18 @@ mod tests {
     #[test]
     fn the_token_binding_overrides_the_body_session() {
         let body = json!({"session_id": "other-session"});
-        assert_eq!(calling_session(&auth(Some("mine")), &body).as_deref(), Some("mine"));
-        assert_eq!(calling_session(&auth(None), &body).as_deref(), Some("other-session"));
-        assert_eq!(calling_session(&auth(None), &json!({"session_id": " "})), None);
+        assert_eq!(
+            calling_session(&auth(Some("mine")), &body).as_deref(),
+            Some("mine")
+        );
+        assert_eq!(
+            calling_session(&auth(None), &body).as_deref(),
+            Some("other-session")
+        );
+        assert_eq!(
+            calling_session(&auth(None), &json!({"session_id": " "})),
+            None
+        );
         assert_eq!(calling_session(&auth(None), &json!({})), None);
     }
 

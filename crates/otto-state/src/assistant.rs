@@ -4,8 +4,8 @@
 //! answer `NotFound` for another user's row, so a route can never leak one
 //! user's thread/task to another (IDOR guard at the storage edge). Pure
 //! storage — routing, session driving, memory and cadence math live in
-//! `otto_server::assistant`. Ids are ULIDs, so `id` order is creation order
-//! (the turn index pages on it).
+//! `otto_server::assistant`. Lists order and page on `rowid` (insert order):
+//! ULIDs are random within one millisecond, so `id` order is not.
 
 use chrono::Utc;
 use otto_core::{new_id, Error, Result};
@@ -155,7 +155,14 @@ pub struct NewTask {
 pub const TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 
 /// Every valid task state.
-pub const TASK_STATES: [&str; 6] = ["queued", "running", "needs_you", "done", "failed", "cancelled"];
+pub const TASK_STATES: [&str; 6] = [
+    "queued",
+    "running",
+    "needs_you",
+    "done",
+    "failed",
+    "cancelled",
+];
 
 // --- Row mapping ---------------------------------------------------------------
 
@@ -238,9 +245,9 @@ fn row_to_attachment(r: &sqlx::sqlite::SqliteRow) -> AssistantAttachment {
 
 fn check_slot(slot: Option<i64>) -> Result<()> {
     match slot {
-        Some(s) if !(1..=4).contains(&s) => Err(Error::Invalid(
-            "space_slot must be 1..4 (or null)".into(),
-        )),
+        Some(s) if !(1..=4).contains(&s) => {
+            Err(Error::Invalid("space_slot must be 1..4 (or null)".into()))
+        }
         _ => Ok(()),
     }
 }
@@ -429,13 +436,15 @@ impl AssistantRepo {
         if !matches!(choice, "ask" | "switch" | "stay") {
             return Err(Error::Invalid(format!("failover_choice '{choice}'")));
         }
-        sqlx::query("UPDATE assistant_threads SET failover_choice = ?, updated_at = ? WHERE id = ?")
-            .bind(choice)
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set assistant failover choice"))?;
+        sqlx::query(
+            "UPDATE assistant_threads SET failover_choice = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(choice)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set assistant failover choice"))?;
         Ok(())
     }
 
@@ -487,7 +496,11 @@ impl AssistantRepo {
         .bind(&id)
         .bind(&t.thread_id)
         .bind(&t.role)
-        .bind(if t.kind.is_empty() { "message" } else { t.kind.as_str() })
+        .bind(if t.kind.is_empty() {
+            "message"
+        } else {
+            t.kind.as_str()
+        })
         .bind(&t.text)
         .bind(&t.provider)
         .bind(&t.model)
@@ -542,13 +555,15 @@ impl AssistantRepo {
                 if text == t.text {
                     return Ok(None);
                 }
-                sqlx::query("UPDATE assistant_turns SET text = ?, model = COALESCE(?, model) WHERE id = ?")
-                    .bind(&t.text)
-                    .bind(&t.model)
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(dberr("update indexed assistant turn"))?;
+                sqlx::query(
+                    "UPDATE assistant_turns SET text = ?, model = COALESCE(?, model) WHERE id = ?",
+                )
+                .bind(&t.text)
+                .bind(&t.model)
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update indexed assistant turn"))?;
                 self.get_turn(&id).await.map(Some)
             }
         }
@@ -564,8 +579,9 @@ impl AssistantRepo {
     ) -> Result<Vec<AssistantTurn>> {
         let limit = limit.clamp(1, 500);
         let rows = sqlx::query(
-            "SELECT * FROM assistant_turns WHERE thread_id = ? AND (? IS NULL OR id < ?) \
-             ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM assistant_turns WHERE thread_id = ? \
+             AND (? IS NULL OR rowid < (SELECT rowid FROM assistant_turns WHERE id = ?)) \
+             ORDER BY rowid DESC LIMIT ?",
         )
         .bind(thread_id)
         .bind(before)
@@ -695,7 +711,7 @@ impl AssistantRepo {
         let rows = sqlx::query(
             "SELECT * FROM assistant_tasks WHERE owner_user_id = ? \
              AND (? IS NULL OR state = ?) AND (? IS NULL OR thread_id = ?) \
-             ORDER BY id DESC LIMIT ?",
+             ORDER BY rowid DESC LIMIT ?",
         )
         .bind(owner)
         .bind(state)
@@ -712,7 +728,7 @@ impl AssistantRepo {
     /// The needs-you queue, oldest first.
     pub async fn needs_you(&self, owner: &str) -> Result<Vec<AssistantTask>> {
         let rows = sqlx::query(
-            "SELECT * FROM assistant_tasks WHERE owner_user_id = ? AND state = 'needs_you' ORDER BY id",
+            "SELECT * FROM assistant_tasks WHERE owner_user_id = ? AND state = 'needs_you' ORDER BY rowid",
         )
         .bind(owner)
         .fetch_all(&self.pool)
@@ -1025,10 +1041,16 @@ mod tests {
         assert_eq!(r.get_thread("u1", &b.id).await.unwrap().space_slot, Some(1));
         // Out-of-range slots are refused; unslotting works.
         assert!(r.create_thread(thread("u1", Some(5))).await.is_err());
-        let b2 = r.update_thread("u1", &b.id, None, Some(None)).await.unwrap();
+        let b2 = r
+            .update_thread("u1", &b.id, None, Some(None))
+            .await
+            .unwrap();
         assert_eq!(b2.space_slot, None);
         // Slotted threads list first.
-        let _ = r.update_thread("u1", &a.id, None, Some(Some(2))).await.unwrap();
+        let _ = r
+            .update_thread("u1", &a.id, None, Some(Some(2)))
+            .await
+            .unwrap();
         let list = r.list_threads("u1").await.unwrap();
         assert_eq!(list[0].id, a.id);
     }
@@ -1058,7 +1080,11 @@ mod tests {
         // Same text again: no change, nothing to emit.
         assert!(r.upsert_indexed_turn(reply("Hel")).await.unwrap().is_none());
         // The turn grew: updated in place (same row).
-        let grown = r.upsert_indexed_turn(reply("Hello!")).await.unwrap().unwrap();
+        let grown = r
+            .upsert_indexed_turn(reply("Hello!"))
+            .await
+            .unwrap()
+            .unwrap();
         let turns = r.list_turns(&t.id, None, 100).await.unwrap();
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].id, user.id);
@@ -1068,7 +1094,12 @@ mod tests {
         let page = r.list_turns(&t.id, Some(&grown.id), 100).await.unwrap();
         assert_eq!(page.len(), 1);
         // The thread's last_turn_at moved.
-        assert!(r.get_thread("u1", &t.id).await.unwrap().last_turn_at.is_some());
+        assert!(r
+            .get_thread("u1", &t.id)
+            .await
+            .unwrap()
+            .last_turn_at
+            .is_some());
     }
 
     #[tokio::test]
@@ -1089,7 +1120,12 @@ mod tests {
         assert_eq!(r.count_needs_you("u2").await.unwrap(), 0);
         assert_eq!(r.needs_you("u1").await.unwrap()[0].id, t.id);
         let done = r
-            .set_task_state(&t.id, "done", Some(Value::Null), Some(json!({"decision":"approved"})))
+            .set_task_state(
+                &t.id,
+                "done",
+                Some(Value::Null),
+                Some(json!({"decision":"approved"})),
+            )
             .await
             .unwrap();
         assert!(done.needs_you.is_none());
@@ -1114,19 +1150,37 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(r.due_reminders("2026-09-24T14:59:00+00:00").await.unwrap().is_empty());
-        assert_eq!(r.due_reminders("2026-09-24T15:00:00+00:00").await.unwrap().len(), 1);
+        assert!(r
+            .due_reminders("2026-09-24T14:59:00+00:00")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            r.due_reminders("2026-09-24T15:00:00+00:00")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(r.claim_task(&t.id, "queued", "running").await.unwrap());
         assert!(!r.claim_task(&t.id, "queued", "running").await.unwrap());
-        assert!(r.due_reminders("2026-09-25T00:00:00+00:00").await.unwrap().is_empty());
+        assert!(r
+            .due_reminders("2026-09-25T00:00:00+00:00")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
     async fn routing_upserts_and_grants_are_per_principal() {
         let r = repo().await;
         assert!(r.routing("u1").await.unwrap().is_none());
-        r.set_limits("u1", &json!([{"provider":"claude"}])).await.unwrap();
-        r.put_routing("u1", &json!({"targets":{}}), true, false).await.unwrap();
+        r.set_limits("u1", &json!([{"provider":"claude"}]))
+            .await
+            .unwrap();
+        r.put_routing("u1", &json!({"targets":{}}), true, false)
+            .await
+            .unwrap();
         let row = r.routing("u1").await.unwrap().unwrap();
         assert!(row.auto_failover);
         assert_eq!(row.limits[0]["provider"], "claude");
@@ -1134,11 +1188,20 @@ mod tests {
         assert_eq!(p1, r.assistant_principal("u1").await.unwrap());
         let p2 = r.assistant_principal("u2").await.unwrap();
         assert_ne!(p1, p2);
-        r.set_grant(&p1, "tool_destination", "telegram|me", "allow").await.unwrap();
+        r.set_grant(&p1, "tool_destination", "telegram|me", "allow")
+            .await
+            .unwrap();
         assert_eq!(
-            r.grant_mode(&p1, "tool_destination", "telegram|me").await.unwrap().as_deref(),
+            r.grant_mode(&p1, "tool_destination", "telegram|me")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("allow")
         );
-        assert!(r.grant_mode(&p2, "tool_destination", "telegram|me").await.unwrap().is_none());
+        assert!(r
+            .grant_mode(&p2, "tool_destination", "telegram|me")
+            .await
+            .unwrap()
+            .is_none());
     }
 }

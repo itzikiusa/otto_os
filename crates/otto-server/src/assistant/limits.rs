@@ -158,7 +158,8 @@ mod tests {
         let claude = "⏺ Working on it\n\n  ⎿  5-hour limit reached ∙ resets 2pm\n     /upgrade to increase your usage limit.";
         let hit = detect_limit(claude).unwrap();
         assert!(hit.message.contains("5-hour limit reached"));
-        let codex = "■ You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.";
+        let codex =
+            "■ You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.";
         assert!(detect_limit(codex).is_some());
         let transcript = "Claude AI usage limit reached|1790265600";
         let hit = detect_limit(transcript).unwrap();
@@ -176,7 +177,10 @@ mod tests {
         }
         assert!(detect_limit(&text).is_none());
         // A bogus epoch is not a reset time.
-        assert!(detect_limit("usage limit reached|12").unwrap().until.is_none());
+        assert!(detect_limit("usage limit reached|12")
+            .unwrap()
+            .until
+            .is_none());
     }
 
     #[test]

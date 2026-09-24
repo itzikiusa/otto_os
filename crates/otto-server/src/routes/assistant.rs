@@ -14,12 +14,16 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use otto_core::{new_id, Error};
-use otto_state::{AssistantAttachment, AssistantTask, AssistantThread, AssistantTurn, NewAssistantThread};
+use otto_state::{
+    AssistantAttachment, AssistantTask, AssistantThread, AssistantTurn, NewAssistantThread,
+};
 
 use crate::assistant::limits::LimitState;
 use crate::assistant::router::{self as arouter, RouteDecision, RoutingSettings};
 use crate::assistant::types::*;
-use crate::assistant::{self, hermes, memory, owned_thread, repo, system_turn, tasks, threads, tools};
+use crate::assistant::{
+    self, hermes, memory, owned_thread, repo, system_turn, tasks, threads, tools,
+};
 use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
@@ -34,7 +38,10 @@ pub fn routes() -> Router<ServerCtx> {
             "/assistant/threads/{id}",
             get(get_thread).patch(update_thread).delete(delete_thread),
         )
-        .route("/assistant/threads/{id}/turns", get(list_turns).post(send_turn))
+        .route(
+            "/assistant/threads/{id}/turns",
+            get(list_turns).post(send_turn),
+        )
         .route(
             "/assistant/threads/{id}/attachments",
             post(add_attachment).layer(DefaultBodyLimit::max(30 * 1024 * 1024)),
@@ -81,7 +88,10 @@ async fn create_thread(
     CurrentUser(user): CurrentUser,
     Json(req): Json<CreateThreadReq>,
 ) -> ApiResult<Json<AssistantThread>> {
-    let pinned = req.provider.as_deref().is_some_and(|p| !p.trim().is_empty());
+    let pinned = req
+        .provider
+        .as_deref()
+        .is_some_and(|p| !p.trim().is_empty());
     let (settings, _) = threads::load_settings(&ctx, &user.id).await;
     let target = if pinned {
         let p = req.provider.clone().unwrap_or_default();
@@ -189,13 +199,17 @@ async fn add_attachment(
 ) -> ApiResult<Json<AssistantAttachment>> {
     repo(&ctx).get_thread(&user.id, &id).await?;
     if req.content_base64.len() > (MAX_ATTACHMENT_BYTES / 3 + 1) * 4 + 16 {
-        return Err(ApiError(Error::PayloadTooLarge("attachment exceeds 20 MiB".into())));
+        return Err(ApiError(Error::PayloadTooLarge(
+            "attachment exceeds 20 MiB".into(),
+        )));
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(req.content_base64.trim())
         .map_err(|_| ApiError(Error::Invalid("content_base64 is not valid base64".into())))?;
     if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(ApiError(Error::PayloadTooLarge("attachment exceeds 20 MiB".into())));
+        return Err(ApiError(Error::PayloadTooLarge(
+            "attachment exceeds 20 MiB".into(),
+        )));
     }
     let name = safe_name(&req.name)
         .ok_or_else(|| ApiError(Error::Invalid("name must be a plain file name".into())))?;
@@ -250,7 +264,12 @@ async fn set_route(
     Json(req): Json<RouteReq>,
 ) -> ApiResult<Json<AssistantThread>> {
     let before = repo(&ctx).get_thread(&user.id, &id).await?;
-    match req.provider.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    match req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         Some(p) => {
             if !arouter::valid_provider(p) {
                 return Err(ApiError(Error::Invalid(format!("provider '{p}'"))));
@@ -265,10 +284,20 @@ async fn set_route(
                 threads::display_provider(p),
                 model.map(|m| format!(" · {m}")).unwrap_or_default()
             );
-            system_turn(&ctx, &user.id, &id, "route", &text, Some(json!({"pinned": true, "provider": p, "model": model}))).await;
+            system_turn(
+                &ctx,
+                &user.id,
+                &id,
+                "route",
+                &text,
+                Some(json!({"pinned": true, "provider": p, "model": model})),
+            )
+            .await;
         }
         None => {
-            repo(&ctx).set_thread_pin(&id, false, None, None, None).await?;
+            repo(&ctx)
+                .set_thread_pin(&id, false, None, None, None)
+                .await?;
             if before.route_pinned {
                 system_turn(
                     &ctx,
@@ -292,7 +321,14 @@ async fn delegate(
     Json(req): Json<DelegateReq>,
 ) -> ApiResult<Json<AssistantTask>> {
     Ok(Json(
-        tasks::delegate(&ctx, &user, Some(id.as_str()), &req.agent_id, &req.directive).await?,
+        tasks::delegate(
+            &ctx,
+            &user,
+            Some(id.as_str()),
+            &req.agent_id,
+            &req.directive,
+        )
+        .await?,
     ))
 }
 
@@ -303,7 +339,14 @@ async fn preview(
 ) -> ApiResult<Json<RouteDecision>> {
     assistant::check_text("text", &req.text, threads::MAX_TURN_BYTES)?;
     Ok(Json(
-        threads::preview(&ctx, &user.id, &req.text, req.thread_id.as_deref(), req.voice).await?,
+        threads::preview(
+            &ctx,
+            &user.id,
+            &req.text,
+            req.thread_id.as_deref(),
+            req.voice,
+        )
+        .await?,
     ))
 }
 
@@ -429,7 +472,9 @@ async fn accept_memory(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<AssistantMemory>> {
-    Ok(Json(memory::to_wire(&memory::accept(&ctx, &user.id, &id).await?)))
+    Ok(Json(memory::to_wire(
+        &memory::accept(&ctx, &user.id, &id).await?,
+    )))
 }
 
 async fn undo_memory(
@@ -566,8 +611,8 @@ async fn put_routing(
     Json(patch): Json<Value>,
 ) -> ApiResult<Json<RoutingSettings>> {
     let (current, _) = threads::load_settings(&ctx, &user.id).await;
-    let merged = arouter::merge_settings(&current, &patch)
-        .map_err(|e| ApiError(Error::Invalid(e)))?;
+    let merged =
+        arouter::merge_settings(&current, &patch).map_err(|e| ApiError(Error::Invalid(e)))?;
     threads::save_settings(&ctx, &user.id, &merged).await?;
     Ok(Json(threads::load_settings(&ctx, &user.id).await.0))
 }
@@ -597,8 +642,14 @@ mod tests {
     #[test]
     fn attachment_names_are_one_plain_segment() {
         assert_eq!(safe_name("report.pdf").as_deref(), Some("report.pdf"));
-        assert_eq!(safe_name("/tmp/x/../report.pdf").as_deref(), Some("report.pdf"));
-        assert_eq!(safe_name("C:\\Users\\me\\scan.png").as_deref(), Some("scan.png"));
+        assert_eq!(
+            safe_name("/tmp/x/../report.pdf").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            safe_name("C:\\Users\\me\\scan.png").as_deref(),
+            Some("scan.png")
+        );
         assert!(safe_name("..").is_none());
         assert!(safe_name(".env").is_none());
         assert!(safe_name("").is_none());

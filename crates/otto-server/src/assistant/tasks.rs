@@ -140,8 +140,7 @@ pub async fn create(
                 .as_deref()
                 .ok_or_else(|| Error::Invalid("a reminder needs run_at".into()))?;
             let tz = check_tz(req.timezone.as_deref().unwrap_or(""))?;
-            let (schedule, at) =
-                resolve_run_at(raw, &tz, Utc::now()).map_err(Error::Invalid)?;
+            let (schedule, at) = resolve_run_at(raw, &tz, Utc::now()).map_err(Error::Invalid)?;
             let t = repo(ctx)
                 .create_task(NewAssistantTask {
                     owner_user_id: owner.to_string(),
@@ -188,7 +187,11 @@ pub async fn create(
             ctx,
             owner,
             tid,
-            if task.kind == "reminder" { "reminder" } else { "task" },
+            if task.kind == "reminder" {
+                "reminder"
+            } else {
+                "task"
+            },
             &turn_text,
             Some(json!({"task_id": task.id})),
         )
@@ -241,7 +244,15 @@ pub async fn agent_update(
             "done" => format!("Done: {}", updated.title),
             _ => format!("Failed: {}", updated.title),
         };
-        system_turn(ctx, owner, tid, "task", &text, Some(json!({"task_id": updated.id}))).await;
+        system_turn(
+            ctx,
+            owner,
+            tid,
+            "task",
+            &text,
+            Some(json!({"task_id": updated.id})),
+        )
+        .await;
     }
     Ok(updated)
 }
@@ -505,9 +516,12 @@ pub async fn act(
     let owner = user.id.as_str();
     let task = repo(ctx).get_task(owner, task_id).await?;
     let needs = needs_kind(&task);
-    let to = next_state(&task.kind, &task.state, needs.as_deref(), action)
-        .map_err(Error::Conflict)?;
-    let reason = req.reason.clone().map(|r| r.chars().take(2000).collect::<String>());
+    let to =
+        next_state(&task.kind, &task.state, needs.as_deref(), action).map_err(Error::Conflict)?;
+    let reason = req
+        .reason
+        .clone()
+        .map(|r| r.chars().take(2000).collect::<String>());
     let decision = match action {
         "approve" => "approved",
         "deny" => "denied",
@@ -574,7 +588,9 @@ pub async fn act(
                 .and_then(|n| n.get("prompt"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            followup = Some(format!("Answer to your question \u{201c}{prompt}\u{201d}: {answer}"));
+            followup = Some(format!(
+                "Answer to your question \u{201c}{prompt}\u{201d}: {answer}"
+            ));
         }
         ("approve", Some("memory")) | ("deny", Some("memory")) => {
             if let Some(mid) = task
@@ -583,8 +599,13 @@ pub async fn act(
                 .and_then(|n| n.get("memory_id"))
                 .and_then(Value::as_str)
             {
+                // Only the memory changes here; the review item is settled
+                // below (once), never through `memory::settle_review`.
                 if action == "approve" {
-                    let _ = super::memory::accept(ctx, owner, mid).await;
+                    let _ = ctx
+                        .memory
+                        .set_state(otto_core::domain::SCRATCH_WORKSPACE_ID, mid, "accepted")
+                        .await;
                 } else {
                     let _ = super::memory::forget_one(ctx, owner, mid).await;
                 }
@@ -629,7 +650,10 @@ pub async fn act(
             followup = Some(if note.is_empty() {
                 format!("I've handed control back — please continue: {}", task.title)
             } else {
-                format!("I've handed control back ({note}) — please continue: {}", task.title)
+                format!(
+                    "I've handed control back ({note}) — please continue: {}",
+                    task.title
+                )
             });
         }
         _ => {}
@@ -689,7 +713,7 @@ async fn resend_last_on(ctx: &ServerCtx, owner: &str, thread_id: &str, provider:
     .find(|t| t.provider == provider)
     .cloned()
     .unwrap_or_else(|| RouteTarget::new(provider, None));
-    let _ = threads::send_boxed(
+    if let Err(e) = threads::send_boxed(
         ctx.clone(),
         owner.to_string(),
         thread_id.to_string(),
@@ -700,7 +724,22 @@ async fn resend_last_on(ctx: &ServerCtx, owner: &str, thread_id: &str, provider:
         },
         Some(target),
     )
-    .await;
+    .await
+    {
+        warn!(thread = %thread_id, "assistant: re-send on {provider} failed: {e}");
+        system_turn(
+            ctx,
+            owner,
+            thread_id,
+            "limit",
+            &format!(
+                "Couldn't continue on {}: {e}. Send the message again.",
+                display_provider(provider)
+            ),
+            None,
+        )
+        .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -719,11 +758,20 @@ pub async fn on_limit(
     source: &str,
 ) {
     let now = Utc::now();
-    let state = limits::state_for(&route.provider, route.account_id.as_deref(), hit, source, now);
+    let state = limits::state_for(
+        &route.provider,
+        route.account_id.as_deref(),
+        hit,
+        source,
+        now,
+    );
     let (settings, snapshot) = load_settings(ctx, owner).await;
     let snapshot = limits::upsert_snapshot(snapshot, state.clone(), now);
     let _ = repo(ctx)
-        .set_limits(owner, &serde_json::to_value(&snapshot).unwrap_or(Value::Null))
+        .set_limits(
+            owner,
+            &serde_json::to_value(snapshot).unwrap_or(Value::Null),
+        )
         .await;
     let Ok(thread) = repo(ctx).get_thread(owner, thread_id).await else {
         return;
@@ -744,7 +792,15 @@ pub async fn on_limit(
 
     let mut task_id = None;
     if auto || thread.failover_choice == "stay" || suggestion.is_none() {
-        system_turn(ctx, owner, thread_id, "limit", &label, Some(json!({"limit": state}))).await;
+        system_turn(
+            ctx,
+            owner,
+            thread_id,
+            "limit",
+            &label,
+            Some(json!({"limit": state})),
+        )
+        .await;
         if let (true, Some(alt)) = (auto, suggestion.as_ref()) {
             // The turn that hit the limit is still being driven (its claim is
             // held): re-send it on the alternative once the driver lets go.
@@ -755,7 +811,8 @@ pub async fn on_limit(
                 alt.provider.clone(),
             );
             tokio::spawn(async move {
-                for _ in 0..40 {
+                // The driver only has its final indexing left; wait up to 2 min.
+                for _ in 0..240 {
                     if !threads::is_in_flight(&tid) {
                         break;
                     }
@@ -765,7 +822,9 @@ pub async fn on_limit(
             });
         }
     } else {
-        let alt = suggestion.clone().unwrap_or_else(|| RouteTarget::new("codex", None));
+        let alt = suggestion
+            .clone()
+            .unwrap_or_else(|| RouteTarget::new("codex", None));
         let already_open = repo(ctx)
             .needs_you(owner)
             .await
@@ -810,7 +869,9 @@ pub async fn on_limit(
         user_id: owner.to_string(),
         thread_id: Some(thread_id.to_string()),
         limit: serde_json::to_value(&state).unwrap_or(Value::Null),
-        suggestion: suggestion.as_ref().and_then(|s| serde_json::to_value(s).ok()),
+        suggestion: suggestion
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok()),
         task_id,
         auto_switched: auto,
     });
@@ -868,7 +929,11 @@ async fn fire_due_reminders(ctx: &ServerCtx) {
         if !cadence::is_due(&spec, None, now, tz) && t.schedule.is_some() {
             continue;
         }
-        if !repo(ctx).claim_task(&t.id, "queued", "running").await.unwrap_or(false) {
+        if !repo(ctx)
+            .claim_task(&t.id, "queued", "running")
+            .await
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Some(tid) = t.thread_id.as_deref() {
@@ -896,7 +961,12 @@ async fn fire_due_reminders(ctx: &ServerCtx) {
             })
             .await;
         if let Ok(done) = repo(ctx)
-            .set_task_state(&t.id, "done", None, Some(json!({"delivered_at": now.to_rfc3339(), "origin": t.origin})))
+            .set_task_state(
+                &t.id,
+                "done",
+                None,
+                Some(json!({"delivered_at": now.to_rfc3339(), "origin": t.origin})),
+            )
             .await
         {
             emit_task(ctx, &done);
@@ -917,7 +987,12 @@ async fn settle_delegations(ctx: &ServerCtx) {
             Ok(r) => r,
             Err(Error::NotFound(_)) => {
                 if let Ok(done) = repo(ctx)
-                    .set_task_state(&t.id, "failed", None, Some(json!({"error": "run was pruned"})))
+                    .set_task_state(
+                        &t.id,
+                        "failed",
+                        None,
+                        Some(json!({"error": "run was pruned"})),
+                    )
                     .await
                 {
                     emit_task(ctx, &done);
@@ -1028,24 +1103,45 @@ mod tests {
 
     #[test]
     fn approvals_settle_either_way() {
-        assert_eq!(next_state("approval", "needs_you", Some("approval"), "approve"), Ok("done"));
-        assert_eq!(next_state("approval", "needs_you", Some("approval"), "deny"), Ok("done"));
+        assert_eq!(
+            next_state("approval", "needs_you", Some("approval"), "approve"),
+            Ok("done")
+        );
+        assert_eq!(
+            next_state("approval", "needs_you", Some("approval"), "deny"),
+            Ok("done")
+        );
         // Not open: nothing to approve.
         assert!(next_state("approval", "done", Some("approval"), "approve").is_err());
     }
 
     #[test]
     fn a_blocked_task_resumes_on_an_answer_and_is_cancelled_on_no() {
-        assert_eq!(next_state("task", "needs_you", Some("question"), "approve"), Ok("running"));
-        assert_eq!(next_state("task", "needs_you", Some("question"), "deny"), Ok("cancelled"));
+        assert_eq!(
+            next_state("task", "needs_you", Some("question"), "approve"),
+            Ok("running")
+        );
+        assert_eq!(
+            next_state("task", "needs_you", Some("question"), "deny"),
+            Ok("cancelled")
+        );
         // A standalone question item is simply settled.
-        assert_eq!(next_state("question", "needs_you", Some("question"), "approve"), Ok("done"));
+        assert_eq!(
+            next_state("question", "needs_you", Some("question"), "approve"),
+            Ok("done")
+        );
     }
 
     #[test]
     fn takeover_pauses_and_handback_resumes() {
-        assert_eq!(next_state("task", "running", None, "takeover"), Ok("needs_you"));
-        assert_eq!(next_state("task", "needs_you", Some("takeover"), "handback"), Ok("running"));
+        assert_eq!(
+            next_state("task", "running", None, "takeover"),
+            Ok("needs_you")
+        );
+        assert_eq!(
+            next_state("task", "needs_you", Some("takeover"), "handback"),
+            Ok("running")
+        );
         // A takeover is not approved/denied — it is handed back.
         assert!(next_state("task", "needs_you", Some("takeover"), "approve").is_err());
         // Nothing to hand back when nobody took over.
@@ -1056,7 +1152,11 @@ mod tests {
     #[test]
     fn cancel_ends_live_or_open_tasks_only() {
         for s in ["queued", "running", "needs_you"] {
-            assert_eq!(next_state("task", s, None, "cancel"), Ok("cancelled"), "{s}");
+            assert_eq!(
+                next_state("task", s, None, "cancel"),
+                Ok("cancelled"),
+                "{s}"
+            );
         }
         for s in ["done", "failed", "cancelled"] {
             assert!(next_state("task", s, None, "cancel").is_err(), "{s}");
@@ -1072,7 +1172,12 @@ mod tests {
         let future = (now + chrono::Duration::hours(2)).to_rfc3339();
         let (spec, at) = resolve_run_at(&future, "UTC", now).unwrap();
         assert_eq!(spec["cadence"], "once");
-        assert!((at - (now + chrono::Duration::hours(2))).num_seconds().abs() <= 1);
+        assert!(
+            (at - (now + chrono::Duration::hours(2)))
+                .num_seconds()
+                .abs()
+                <= 1
+        );
         // Local wall-clock in a named zone.
         let (_, at) = resolve_run_at("2099-01-01T09:00", "Asia/Jerusalem", now).unwrap();
         assert_eq!(at.to_rfc3339(), "2099-01-01T07:00:00+00:00");

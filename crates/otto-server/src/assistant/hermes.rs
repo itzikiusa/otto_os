@@ -177,11 +177,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.md"), "s").unwrap();
-        std::os::unix::fs::symlink(
-            outside.path().join("secret.md"),
-            dir.path().join("LINK.md"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), dir.path().join("LINK.md"))
+            .unwrap();
         assert!(scan_dir(dir.path()).is_empty());
     }
 

@@ -289,7 +289,9 @@ pub fn approval_card(args: &Value) -> Result<ApprovalCard, String> {
             .filter(|v| !v.is_empty())
             .map(|v| v.chars().take(400).collect())
     };
-    let category = opt("category").unwrap_or_else(|| "other".into()).to_lowercase();
+    let category = opt("category")
+        .unwrap_or_else(|| "other".into())
+        .to_lowercase();
     if !APPROVAL_CATEGORIES.contains(&category.as_str()) {
         return Err(format!(
             "`category` must be one of {}",
@@ -330,11 +332,22 @@ mod tests {
         }))
         .unwrap();
         let v = serde_json::to_value(&c).unwrap();
-        for k in ["where", "what", "who_sees", "reason", "tool", "destination", "category"] {
+        for k in [
+            "where",
+            "what",
+            "who_sees",
+            "reason",
+            "tool",
+            "destination",
+            "category",
+        ] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["always_allow_allowed"], true);
-        assert_eq!(always_allow_resource(&c).as_deref(), Some("telegram_send|me"));
+        assert_eq!(
+            always_allow_resource(&c).as_deref(),
+            Some("telegram_send|me")
+        );
     }
 
     #[test]
@@ -355,7 +368,8 @@ mod tests {
             "where":"x","what":"y","who_sees":"z","reason":"r","category":"bribe"
         }))
         .is_err());
-        let c = approval_card(&json!({"where":"x","what":"y","who_sees":"z","reason":"r"})).unwrap();
+        let c =
+            approval_card(&json!({"where":"x","what":"y","who_sees":"z","reason":"r"})).unwrap();
         assert_eq!(c.category, "other");
         assert!(always_allow_resource(&c).is_none());
     }

@@ -301,7 +301,12 @@ pub async fn settle_review(ctx: &ServerCtx, user_id: &str, memory_id: &str, outc
                 == Some(memory_id)
     }) {
         if let Ok(done) = repo(ctx)
-            .set_task_state(&t.id, "done", Some(Value::Null), Some(json!({"decision": outcome})))
+            .set_task_state(
+                &t.id,
+                "done",
+                Some(Value::Null),
+                Some(json!({"decision": outcome})),
+            )
             .await
         {
             emit_task(ctx, &done);
@@ -552,10 +557,22 @@ mod tests {
 
     #[test]
     fn ownership_needs_collection_creator_and_partition() {
-        assert!(owned_by(&mem("u1", Some("user:u1"), COLLECTION, "accepted"), "u1"));
-        assert!(!owned_by(&mem("u1", Some("user:u1"), COLLECTION, "accepted"), "u2"));
-        assert!(!owned_by(&mem("u1", Some("user:u2"), COLLECTION, "accepted"), "u1"));
-        assert!(!owned_by(&mem("u1", Some("user:u1"), "product", "accepted"), "u1"));
+        assert!(owned_by(
+            &mem("u1", Some("user:u1"), COLLECTION, "accepted"),
+            "u1"
+        ));
+        assert!(!owned_by(
+            &mem("u1", Some("user:u1"), COLLECTION, "accepted"),
+            "u2"
+        ));
+        assert!(!owned_by(
+            &mem("u1", Some("user:u2"), COLLECTION, "accepted"),
+            "u1"
+        ));
+        assert!(!owned_by(
+            &mem("u1", Some("user:u1"), "product", "accepted"),
+            "u1"
+        ));
         assert!(!owned_by(&mem("u1", None, COLLECTION, "accepted"), "u1"));
     }
 
@@ -574,7 +591,16 @@ mod tests {
         assert_eq!(w.state, "accepted");
         assert_eq!(w.source.thread_id.as_deref(), Some("thread-1"));
         let v = serde_json::to_value(&w).unwrap();
-        for k in ["id", "text", "kind", "tags", "state", "source", "created_at", "updated_at"] {
+        for k in [
+            "id",
+            "text",
+            "kind",
+            "tags",
+            "state",
+            "source",
+            "created_at",
+            "updated_at",
+        ] {
             assert!(v.get(k).is_some(), "{k}");
         }
     }
@@ -591,7 +617,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = read_profile_sync(dir.path()).unwrap();
         assert!(!first.exists);
-        assert!(!dir.path().join("profile.md").exists(), "reads never provision");
+        assert!(
+            !dir.path().join("profile.md").exists(),
+            "reads never provision"
+        );
         let saved = save_profile_sync(dir.path(), &first.version, "Name: Itzik\n").unwrap();
         assert!(saved.exists);
         assert_eq!(saved.content, "Name: Itzik\n");
@@ -600,7 +629,10 @@ mod tests {
             save_profile_sync(dir.path(), &first.version, "stale"),
             Err(Error::Conflict(_))
         ));
-        assert_eq!(read_profile_sync(dir.path()).unwrap().content, "Name: Itzik\n");
+        assert_eq!(
+            read_profile_sync(dir.path()).unwrap().content,
+            "Name: Itzik\n"
+        );
     }
 
     #[test]
@@ -610,6 +642,9 @@ mod tests {
         std::fs::write(outside.path().join("x.md"), "secret").unwrap();
         std::os::unix::fs::symlink(outside.path().join("x.md"), dir.path().join("profile.md"))
             .unwrap();
-        assert!(matches!(read_profile_sync(dir.path()), Err(Error::Forbidden(_))));
+        assert!(matches!(
+            read_profile_sync(dir.path()),
+            Err(Error::Forbidden(_))
+        ));
     }
 }

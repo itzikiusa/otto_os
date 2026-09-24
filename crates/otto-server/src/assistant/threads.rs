@@ -213,7 +213,10 @@ pub async fn send(
     check_text("text", &req.text, MAX_TURN_BYTES)?;
     let origin = req.origin.clone().unwrap_or_else(|| "app".into());
     if !ORIGINS.contains(&origin.as_str()) {
-        return Err(Error::Invalid(format!("origin must be one of {}", ORIGINS.join("|"))));
+        return Err(Error::Invalid(format!(
+            "origin must be one of {}",
+            ORIGINS.join("|")
+        )));
     }
     let repo = repo(ctx);
     let thread = repo.get_thread(owner, thread_id).await?;
@@ -222,9 +225,8 @@ pub async fn send(
             "the assistant is still answering the previous message in this thread".into(),
         ));
     }
-    let claim = TurnClaim::claim(&thread.id).ok_or_else(|| {
-        Error::Conflict("the assistant is still answering in this thread".into())
-    })?;
+    let claim = TurnClaim::claim(&thread.id)
+        .ok_or_else(|| Error::Conflict("the assistant is still answering in this thread".into()))?;
 
     let (settings, limits_now) = load_settings(ctx, owner).await;
     let limited = limits::limited_providers(&limits_now, chrono::Utc::now());
@@ -323,24 +325,22 @@ async fn drive_turn(
         .await;
     }
 
-    let (session, fresh_session) = match session_for_turn(ctx, owner, &thread, &target, switching).await {
-        Ok(s) => s,
-        Err(e) => {
-            system_turn(
-                ctx,
-                owner,
-                &thread.id,
-                "message",
-                &format!(
-                    "Couldn't start {}: {e}",
-                    display_provider(&target.provider)
-                ),
-                None,
-            )
-            .await;
-            return Err(e);
-        }
-    };
+    let (session, fresh_session) =
+        match session_for_turn(ctx, owner, &thread, &target, switching).await {
+            Ok(s) => s,
+            Err(e) => {
+                system_turn(
+                    ctx,
+                    owner,
+                    &thread.id,
+                    "message",
+                    &format!("Couldn't start {}: {e}", display_provider(&target.provider)),
+                    None,
+                )
+                .await;
+                return Err(e);
+            }
+        };
     let handoff = if fresh_session {
         handoff_for(ctx, owner, &thread).await
     } else {
@@ -397,7 +397,14 @@ async fn drive_turn(
         .map(|h| h.screen_rows().join("\n"))
         .unwrap_or_default();
     if let Some(hit) = limits::detect_limit(&screen) {
-        super::tasks::on_limit(ctx, owner, &thread.id, &target, &hit, "pty").await;
+        // A banner still on screen from an EARLIER turn is not a new hit.
+        let (_, snapshot) = load_settings(ctx, owner).await;
+        let seen = snapshot
+            .iter()
+            .any(|s| s.limited && s.provider == target.provider && s.message == hit.message);
+        if !seen {
+            super::tasks::on_limit(ctx, owner, &thread.id, &target, &hit, "pty").await;
+        }
     }
     // Push the settled thread (status back to idle) to the clients.
     if let Ok(t) = repo(ctx).get_thread(owner, &thread.id).await {
@@ -440,7 +447,9 @@ async fn session_for_turn(
         if let Some(sid) = thread.session_id.as_ref() {
             match resume(ctx, sid).await {
                 Ok(s) => return Ok((s, false)),
-                Err(e) => warn!(thread = %thread.id, "assistant: resume failed, starting fresh: {e}"),
+                Err(e) => {
+                    warn!(thread = %thread.id, "assistant: resume failed, starting fresh: {e}")
+                }
             }
         }
     }
@@ -503,7 +512,10 @@ pub async fn open_session(
         model: target.model.clone(),
         meta: Some(meta),
     };
-    let session = ctx.manager.create(&ws, &owner.to_string(), req, None).await?;
+    let session = ctx
+        .manager
+        .create(&ws, &owner.to_string(), req, None)
+        .await?;
     repo(ctx)
         .set_thread_session(
             &thread.id,
@@ -530,7 +542,8 @@ pub async fn ensure_workspace(ctx: &ServerCtx, owner: &str, provider: &str) -> R
         ..Default::default()
     };
     let ctx_root = otto_context::materialize::default_context_root();
-    let _ = otto_context::materialize::provision(&ctx.context_library, &cfg, &cwd, provider, &ctx_root);
+    let _ =
+        otto_context::materialize::provision(&ctx.context_library, &cfg, &cwd, provider, &ctx_root);
     Ok(cwd)
 }
 
@@ -604,7 +617,11 @@ recent history is below (oldest first) — continue naturally; do not re-introdu
             _ => "Note".to_string(),
         };
         let text: String = t.text.chars().take(HANDOFF_TURN_CHARS).collect();
-        let more = if t.text.chars().count() > HANDOFF_TURN_CHARS { " …" } else { "" };
+        let more = if t.text.chars().count() > HANDOFF_TURN_CHARS {
+            " …"
+        } else {
+            ""
+        };
         out.push_str(&format!("{who}: {}{more}\n", text.trim()));
     }
     let profile = profile.trim();
@@ -707,7 +724,11 @@ pub fn reply_texts(turns: &[otto_transcript::FoldedTurn]) -> Vec<(String, Option
             if text.is_empty() {
                 return None;
             }
-            Some((ft.turn.id.clone(), ft.turn.model.clone(), cap_bytes(&text, MAX_INDEXED_BYTES)))
+            Some((
+                ft.turn.id.clone(),
+                ft.turn.model.clone(),
+                cap_bytes(&text, MAX_INDEXED_BYTES),
+            ))
         })
         .collect()
 }
@@ -780,14 +801,23 @@ mod tests {
     fn a_session_is_reused_unless_the_route_really_changes() {
         let t = thread();
         // Same provider, rule-picked model change: keep the session.
-        assert!(!needs_new_session(&t, &decision("claude", Some("opus"), "rule")));
+        assert!(!needs_new_session(
+            &t,
+            &decision("claude", Some("opus"), "rule")
+        ));
         // Provider switch, or a pinned model change: new session.
         assert!(needs_new_session(&t, &decision("codex", None, "rule")));
-        assert!(needs_new_session(&t, &decision("claude", Some("opus"), "pin")));
+        assert!(needs_new_session(
+            &t,
+            &decision("claude", Some("opus"), "pin")
+        ));
         // No session yet: always new.
         let mut fresh = thread();
         fresh.session_id = None;
-        assert!(needs_new_session(&fresh, &decision("claude", Some("sonnet"), "default")));
+        assert!(needs_new_session(
+            &fresh,
+            &decision("claude", Some("sonnet"), "default")
+        ));
         // Another account on the same provider: new session.
         let mut d = decision("claude", Some("sonnet"), "default");
         d.account_id = Some("work".into());
@@ -862,9 +892,13 @@ mod tests {
                 "a2",
                 Role::Assistant,
                 vec![
-                    Block::Text { md: "First.".into() },
+                    Block::Text {
+                        md: "First.".into(),
+                    },
                     Block::Text { md: "  ".into() },
-                    Block::Text { md: "Second.".into() },
+                    Block::Text {
+                        md: "Second.".into(),
+                    },
                 ],
             ),
         ];

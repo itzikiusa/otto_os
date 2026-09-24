@@ -179,7 +179,10 @@ mod tests {
     #[test]
     fn check_text_rejects_blank_and_oversized() {
         assert!(check_text("text", "hi", 10).is_ok());
-        assert!(matches!(check_text("text", "   ", 10), Err(Error::Invalid(_))));
+        assert!(matches!(
+            check_text("text", "   ", 10),
+            Err(Error::Invalid(_))
+        ));
         assert!(matches!(
             check_text("text", &"x".repeat(11), 10),
             Err(Error::PayloadTooLarge(_))

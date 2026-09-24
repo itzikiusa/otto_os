@@ -81,8 +81,9 @@ pub struct ExtraKeywords {
     pub hard: Vec<String>,
 }
 
-/// `AssistantRoutingSettings` on the wire.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `AssistantRoutingSettings` on the wire. Default: the Decision-2 targets,
+/// auto-failover and memory approval both OFF.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoutingSettings {
     #[serde(default)]
     pub targets: Targets,
@@ -94,18 +95,6 @@ pub struct RoutingSettings {
     pub memory_approval: bool,
     #[serde(default)]
     pub updated_at: Option<String>,
-}
-
-impl Default for RoutingSettings {
-    fn default() -> Self {
-        Self {
-            targets: Targets::default(),
-            extra_keywords: ExtraKeywords::default(),
-            auto_failover: false,
-            memory_approval: false,
-            updated_at: None,
-        }
-    }
 }
 
 /// `AssistantRouteDecision` on the wire.
@@ -199,8 +188,8 @@ const CODE_WORDS: &[&str] = &[
 
 /// File extensions that mark a code / data request ("fix run.sh").
 const CODE_EXTS: &[&str] = &[
-    ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".sh", ".sql", ".csv",
-    ".xlsx", ".json", ".yaml", ".yml", ".toml", ".rb", ".swift", ".kt", ".c", ".cpp", ".h",
+    ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".sh", ".sql", ".csv", ".xlsx",
+    ".json", ".yaml", ".yml", ".toml", ".rb", ".swift", ".kt", ".c", ".cpp", ".h",
 ];
 
 /// A request longer than this is "hard" (long, multi-part work).
@@ -248,7 +237,10 @@ pub fn parse_mention(text: &str) -> (Option<&'static str>, String) {
         return (None, text.trim().to_string());
     };
     for p in MENTIONS {
-        if rest.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)) {
+        if rest
+            .get(..p.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(p))
+        {
             let after = &rest[p.len()..];
             let boundary = after
                 .chars()
@@ -373,12 +365,12 @@ pub fn decide(input: RouteInput<'_>) -> RouteDecision {
 
     // 4. Limit-aware failover — only when allowed; never silent (the caller
     // posts a `route` turn for the switch).
-    if input.failover && input.limited.iter().any(|p| *p == target.provider) {
+    if input.failover && input.limited.contains(&target.provider) {
         if let Some(alt) = settings
             .targets
             .all()
             .into_iter()
-            .find(|t| !input.limited.iter().any(|p| *p == t.provider))
+            .find(|t| !input.limited.contains(&t.provider))
         {
             target = alt.clone();
             reason = "failover";
@@ -387,7 +379,13 @@ pub fn decide(input: RouteInput<'_>) -> RouteDecision {
     build(target, kind, reason, matched, body)
 }
 
-fn build(t: RouteTarget, kind: &str, reason: &str, matched: Vec<String>, text: String) -> RouteDecision {
+fn build(
+    t: RouteTarget,
+    kind: &str,
+    reason: &str,
+    matched: Vec<String>,
+    text: String,
+) -> RouteDecision {
     RouteDecision {
         provider: t.provider,
         model: t.model,
@@ -430,7 +428,10 @@ pub fn merge_settings(
         out.targets = serde_json::from_value(targets).map_err(|e| format!("targets: {e}"))?;
         for t in out.targets.all() {
             if !valid_provider(&t.provider) {
-                return Err(format!("provider '{}' is not a valid provider name", t.provider));
+                return Err(format!(
+                    "provider '{}' is not a valid provider name",
+                    t.provider
+                ));
             }
         }
     }
@@ -443,10 +444,16 @@ pub fn merge_settings(
         }
         out.extra_keywords = kw;
     }
-    if let Some(b) = patch.get("auto_failover").and_then(serde_json::Value::as_bool) {
+    if let Some(b) = patch
+        .get("auto_failover")
+        .and_then(serde_json::Value::as_bool)
+    {
         out.auto_failover = b;
     }
-    if let Some(b) = patch.get("memory_approval").and_then(serde_json::Value::as_bool) {
+    if let Some(b) = patch
+        .get("memory_approval")
+        .and_then(serde_json::Value::as_bool)
+    {
         out.memory_approval = b;
     }
     Ok(out)
@@ -456,7 +463,8 @@ pub fn merge_settings(
 pub fn valid_provider(p: &str) -> bool {
     !p.is_empty()
         && p.len() <= 40
-        && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -516,7 +524,10 @@ mod tests {
     fn keywords_match_whole_words_only() {
         let e = ExtraKeywords::default();
         // "codename" / "digit" must not trip "code" / "git".
-        assert_eq!(classify("what's the codename of the digital launch?", &e, false).0, "chat");
+        assert_eq!(
+            classify("what's the codename of the digital launch?", &e, false).0,
+            "chat"
+        );
         assert_eq!(classify("git status please", &e, false).0, "code");
         // Extra user keywords extend the rules.
         let extra = ExtraKeywords {
@@ -626,8 +637,16 @@ mod tests {
         assert_eq!(out.targets.code.provider, "claude");
         assert_eq!(out.targets.chat, cur.targets.chat);
         assert!(merge_settings(&cur, &json!({"targets": {"bogus": {"provider":"x"}}})).is_err());
-        assert!(merge_settings(&cur, &json!({"targets": {"chat": {"provider":"bad name!"}}})).is_err());
-        let kw = merge_settings(&cur, &json!({"extra_keywords": {"code": ["", "terraform"]}})).unwrap();
+        assert!(merge_settings(
+            &cur,
+            &json!({"targets": {"chat": {"provider":"bad name!"}}})
+        )
+        .is_err());
+        let kw = merge_settings(
+            &cur,
+            &json!({"extra_keywords": {"code": ["", "terraform"]}}),
+        )
+        .unwrap();
         assert_eq!(kw.extra_keywords.code, vec!["terraform".to_string()]);
     }
 
