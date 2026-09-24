@@ -447,9 +447,7 @@
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
     <span class="nav-title">Otto</span>
-    <!-- The one notification bell on desktop/tablet: same spot on every page,
-         so no module has to reserve room for a floating one. -->
-    <NotificationBell />
+    <span class="grow"></span>
     <button
       class="icon-btn nav-back"
       onclick={() => router.back()}
@@ -468,6 +466,11 @@
     >
       <Icon name="chevronRight" size={14} />
     </button>
+    <!-- The one notification bell on desktop/tablet: same spot on every page,
+         so no module has to reserve room for a floating one. It sits at the
+         header's inline-end, next to the sidebar edge its panel opens beside,
+         so the panel's caret points straight back at it. -->
+    <NotificationBell />
     <!-- On phone the Navigator is the off-canvas drawer: this closes it (the
          desktop collapse-to-Rail preference means nothing there). -->
     <button
@@ -1122,8 +1125,12 @@
   .nav-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 10px 10px 6px 14px;
+    gap: 2px;
+    padding-block: 10px 6px;
+    padding-inline: 14px 10px;
+  }
+  .nav-head .nav-title {
+    margin-inline-start: 6px;
   }
   .nav-logo {
     border-radius: 5px;
