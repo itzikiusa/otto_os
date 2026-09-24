@@ -33,7 +33,7 @@ use crate::state::ServerCtx;
 
 /// Fixed first subprotocol the browser offers alongside the token; echoed back
 /// on a successful upgrade so the handshake completes.
-const BEARER_SUBPROTOCOL: &str = "otto-bearer";
+pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
@@ -81,7 +81,7 @@ pub async fn events_ws(
 
 /// Extract the bearer token from a `Sec-WebSocket-Protocol: otto-bearer, <token>`
 /// request header. Returns `None` when the header is absent or not in that form.
-fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?
         .to_str()

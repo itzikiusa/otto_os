@@ -223,7 +223,8 @@ a client that never acks gets one frame and then nothing.
   keydown, `rawKeyDown` otherwise; `windowsVirtualKeyCode` derived from `code`
   when `key_code` is absent). macOS editing shortcuts (⌘A/⌘C/⌘V/⌘X/⌘Z) are sent
   as the matching editing `commands`.
-- Mouse moves are coalesced server-side (latest wins, ≥ 8 ms apart).
+- Mouse moves closer than 8 ms to the previous dispatched move are dropped
+  server-side (clicks, wheels and keys never are).
 - Input from a viewer while `controller == "agent"` → `not_driver` (send
   `take_over` first). The first input while `controller == "none"` makes this
   viewer's user the driver.

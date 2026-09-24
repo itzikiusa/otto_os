@@ -4118,10 +4118,18 @@ device_scale_factor}, controller:"none"|"human"|"agent", controller_user_id,
 viewers, created_at, last_activity_at}`.
 
 The screenshot + navigation surface is also exposed in-process
-(`otto_browser::live::LiveRuntime` — `screenshot`, `navigate`, `agent_acquire`,
-`agent_release`, plus the `ApprovalGate` / `LiveAudit` hooks) for Design Hall
-renders and the browser MCP tools, which reuse the same session, guard, lock
-and approval gate.
+(`otto_browser::live::LiveRuntime::session(tab)` → `LiveSession::{screenshot,
+navigate, agent_acquire, agent_input, agent_release}`, with the host's
+`LiveHooks` — audit, events, MCP approvals) for Design Hall renders and the
+browser MCP tools, which reuse the same session, guard, lock and approval gate.
+
+**Residuals (as built).** Chromium's own sandbox is kept and the process is
+not additionally wrapped in `otto-sandbox`'s Seatbelt profile (nesting breaks
+Chrome's renderer sandbox). File uploads are not supported yet (the file
+chooser is intercepted and refused). Page-initiated popups are closed and
+reported as a `popup` frame instead of opening. Only main-frame *document*
+POST/PUT/PATCH/DELETE requests are held for approval while an agent drives —
+XHR/fetch posts are not.
 
 ## AWS console (`/aws/*`)
 

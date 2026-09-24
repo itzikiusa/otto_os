@@ -497,7 +497,9 @@ impl LiveSession {
 
     pub fn broadcast_state(&self) {
         let info = self.info();
-        self.broadcast_msg(ServerMsg::State { session: info });
+        self.broadcast_msg(ServerMsg::State {
+            session: Box::new(info),
+        });
     }
 
     pub fn notify_blocked(&self, host: &str) {

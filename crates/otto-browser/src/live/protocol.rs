@@ -167,7 +167,7 @@ impl ClientMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
     State {
-        session: LiveSessionInfo,
+        session: Box<LiveSessionInfo>,
     },
     Cursor {
         cursor: String,
