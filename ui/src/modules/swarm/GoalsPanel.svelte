@@ -267,8 +267,8 @@
     color: var(--accent-text);
   }
   .status.passed {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
   }
   .status.warned {
     background: color-mix(in srgb, var(--warning) 26%, transparent);

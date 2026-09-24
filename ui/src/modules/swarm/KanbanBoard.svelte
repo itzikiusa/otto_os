@@ -693,8 +693,8 @@
     color: var(--text);
   }
   .gchip.all-passed {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
     border-color: var(--success);
     font-weight: 600;
   }

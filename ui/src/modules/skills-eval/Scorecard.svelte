@@ -29,21 +29,21 @@
   let loaded = $state(false);
   let artifacts = $state<Artifact[]>([]);
 
-  // Proof-status pill palette: passed=light-green, failed=red, partial=amber,
-  // waived=accent-blue, anything else (missing/empty)=dim grey.
-  const grey = { bg: 'var(--text-dim)', fg: '#000' };
+  // Proof-status pill palette: soft tone tint + text-safe tone, per the
+  // design tokens (passed/failed/partial/waived; anything else = neutral).
+  const grey = { bg: 'var(--surface-2)', fg: 'var(--text-dim)' };
   const PROOF: Record<string, { bg: string; fg: string }> = {
-    passed: { bg: '#7ee787', fg: '#000' },
-    failed: { bg: '#d66', fg: '#fff' },
-    partial: { bg: '#d8a657', fg: '#000' },
-    waived: { bg: 'var(--accent)', fg: '#fff' },
+    passed: { bg: 'var(--success-soft)', fg: 'var(--success)' },
+    failed: { bg: 'var(--danger-soft)', fg: 'var(--danger)' },
+    partial: { bg: 'var(--warning-soft)', fg: 'var(--warning)' },
+    waived: { bg: 'var(--accent-soft)', fg: 'var(--accent-text)' },
   };
   const proofTone = $derived(score ? (PROOF[score.proof_status] ?? grey) : grey);
 
   function barColor(s: number): string {
-    if (s >= 80) return '#7ee787';
-    if (s >= 50) return '#d8a657';
-    return '#d66';
+    if (s >= 80) return 'var(--status-working)';
+    if (s >= 50) return 'var(--status-warn)';
+    return 'var(--status-exited)';
   }
 
   type Row = { label: string; score: number; detail: string; ran: boolean };
@@ -60,8 +60,8 @@
   );
 
   function dotTone(status: string): string {
-    if (status === 'passed') return '#7ee787';
-    if (status === 'failed') return '#d66';
+    if (status === 'passed') return 'var(--status-working)';
+    if (status === 'failed') return 'var(--status-exited)';
     return 'var(--text-dim)';
   }
 

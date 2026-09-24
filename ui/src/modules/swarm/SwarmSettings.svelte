@@ -372,9 +372,9 @@
     cursor: pointer;
   }
   .toggle.on {
-    background: #7ee787;
-    color: #0a0a0a;
-    border-color: var(--success);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     font-weight: 600;
   }
   .form {

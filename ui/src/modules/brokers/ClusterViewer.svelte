@@ -188,7 +188,7 @@
   }
   .tunnel-pill.ready {
     color: var(--success);
-    border-color: #7ee78755;
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .boot {
     font-size: 11px;

@@ -3918,10 +3918,10 @@
     user-select: none;
   }
   .ref-expander:hover {
-    /* High-contrast active highlight (light-green + black), readable on dark. */
-    background: #7ee787;
-    color: #000;
-    border-color: var(--success);
+    /* Active highlight: the accent tint every selection uses. */
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   /* Full-screen click-catcher: any outside click closes the popover. */
   .ref-pop-backdrop {
@@ -3970,8 +3970,8 @@
   }
   .ref-pop-row:hover,
   .ref-pop-row:focus-visible {
-    background: #7ee787;
-    color: #000;
+    background: var(--accent-soft);
+    color: var(--accent-text);
     outline: none;
   }
   .ref-pop-label {

@@ -249,7 +249,7 @@
   .status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .status-verified { background: #7ee787; color: #000; }
+  .status-verified { background: var(--success-soft); color: var(--success); }
   .status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 

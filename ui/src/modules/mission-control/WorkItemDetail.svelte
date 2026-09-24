@@ -454,7 +454,7 @@
     white-space: nowrap;
   }
   .chip-status.sm {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
   }
   .badge-approve {
@@ -462,8 +462,9 @@
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 999px;
-    background: #ffd33d;
-    color: #3a2c00;
+    background: var(--warning-soft);
+    color: var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
   }
   .approvals,
   .edges,
@@ -486,7 +487,7 @@
     padding: 6px 9px;
   }
   .ap.pending {
-    border: 1px solid #ffd33d66;
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
   }
   .ap-main {
     display: flex;
@@ -500,7 +501,7 @@
     text-transform: uppercase;
   }
   .ap-pending {
-    color: #d6a800;
+    color: var(--warning);
   }
   .ap-approved {
     color: var(--success);
@@ -592,13 +593,13 @@
     background: var(--text-dim);
   }
   .tl-dot.actor-user {
-    background: #7ee787;
+    background: var(--status-working);
   }
   .tl-dot.actor-agent {
     background: var(--accent);
   }
   .tl-dot.actor-integration {
-    background: #ffd33d;
+    background: var(--status-warn);
   }
   .tl-type {
     font-weight: 600;

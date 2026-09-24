@@ -341,11 +341,11 @@
     line-height: 1.6;
   }
   .fb-pill:hover { color: var(--text); }
-  /* Active filter pill: high-contrast light-green + black (selection-contrast rule). */
+  /* Active filter pill: the accent tint every selection uses. */
   .fb-pill.active {
-    background: #7ee787;
-    color: #000;
-    border-color: var(--success);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     font-weight: 600;
   }
 
@@ -451,7 +451,7 @@
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .chip.status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .chip.status-verified { background: #7ee787; color: #000; font-weight: 700; }
+  .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 700; }
   .chip.status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .chip.status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
