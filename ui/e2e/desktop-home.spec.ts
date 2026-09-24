@@ -2,9 +2,10 @@ import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport } from './helpers';
 
-// Home: the personal dashboard — up to 4 views of up to 8 live boxes on a
-// 12-column grid, sliding between views (arrows / dots / ←→) with a 30 s
-// auto-rotation, per-box resize (grid units) and zoom-to-fill.
+// Home: the desktop — a greeting + today's glance cards over the ambient
+// backdrop, and spaces 01–04 (Home's views) of up to 8 live widgets on a
+// 12-column grid, switched by tabs / ←→ / ⌘K with a 30 s cycle, per-widget
+// resize (grid units) and zoom-to-fill.
 //
 // Layout is per device (localStorage), so every test starts from a clean
 // storage; the boxes themselves talk to the isolated daemon (empty workspace →
@@ -23,14 +24,18 @@ async function boot(page: Page, route = 'home'): Promise<void> {
     sessionStorage.setItem('otto_e2e_home_reset', '1');
     localStorage.removeItem('otto_home_views');
     localStorage.removeItem('otto_home_active');
+    localStorage.removeItem('otto_bar_spaces');
     localStorage.removeItem('otto_home_rotate');
   }, wsId);
   await page.goto(`/#/${route}`);
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
 }
 
+/** The active space's tab (its accessible name is the space name). */
+const current = (page: Page) => page.getByRole('tab', { selected: true });
+
 async function addView(page: Page, name: string): Promise<void> {
-  await page.getByRole('button', { name: 'Add view' }).click();
+  await page.getByRole('button', { name: 'Add space' }).click();
   const input = page.locator('.cf-input');
   await input.fill(name);
   await page.getByRole('button', { name: 'Create' }).click();
@@ -65,41 +70,66 @@ test('Home is the first sidebar entry and seeds a default view of live boxes', a
   await expect(boxes.nth(1)).toContainText(/Nothing in flight|active/);
   await expect(boxes.nth(2)).toContainText(/No clusters yet|cluster/);
   await expect(boxes.nth(3)).toContainText(/No DB dashboards yet|Pick a dashboard/);
-  // A single view: no rotation control, no arrows, one dot.
+  // A single space: no cycling control; one numbered tab.
   await expect(page.getByRole('tab')).toHaveCount(1);
-  await expect(page.getByRole('button', { name: 'Next view' })).toHaveCount(0);
+  await expect(current(page)).toHaveAccessibleName('Overview');
+  await expect(current(page)).toContainText('01');
+  await expect(page.getByRole('button', { name: /Auto-rotate/ })).toHaveCount(0);
+  // Today: the greeting and the four glance cards sit above the widgets.
+  const today = home.getByRole('region', { name: 'Today' });
+  await expect(today.locator('.hello')).toContainText(/Good (morning|afternoon|evening)/);
+  await expect(today.locator('.gcard')).toHaveCount(4);
+  await expect(today.locator('.gcard[data-card="needs"]')).toContainText('Needs you');
+  // Home's spaces are the floating bar's: space 01 takes the view's name.
+  const barSpaces = () => page.evaluate(() => JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}'));
+  await expect.poll(async () => (await barSpaces()).spaces?.[0]?.name).toBe('Overview');
 });
 
-test('views: add (max 4), slide with arrows / dots / keys, rename, delete, persist', async ({ page }) => {
+test('spaces: add (max 4), switch with tabs / keys, rename, delete, persist', async ({ page }) => {
   await boot(page);
   await addView(page, 'Second');
   await expect(page.getByRole('tab')).toHaveCount(2);
-  await expect(page.locator('.vname')).toContainText('Second');
-  // New view starts empty with the add-box empty state.
-  await expect(page.locator('.stage')).toContainText('This view is empty');
-  // Arrows wrap around.
-  await page.getByRole('button', { name: 'Previous view' }).click();
-  await expect(page.locator('.vname')).toContainText('Overview');
-  await page.getByRole('button', { name: 'Next view' }).click();
-  await expect(page.locator('.vname')).toContainText('Second');
-  // Keyboard.
+  await expect(current(page)).toHaveAccessibleName('Second');
+  await expect(current(page)).toContainText('02');
+  // A new space starts empty with the add-widget empty state (+ quick adds).
+  await expect(page.locator('.stage')).toContainText('This space is empty');
+  await expect(page.locator('.stage .quick-chip').first()).toBeVisible();
+  // Keyboard wraps around.
   await page.locator('.stage').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press('ArrowRight');
-  await expect(page.locator('.vname')).toContainText('Overview');
-  // Dots.
+  await expect(current(page)).toHaveAccessibleName('Overview');
+  await page.keyboard.press('ArrowLeft');
+  await expect(current(page)).toHaveAccessibleName('Second');
+  // Tabs.
+  await page.getByRole('tab', { name: 'Overview' }).click();
+  await expect(current(page)).toHaveAccessibleName('Overview');
   await page.getByRole('tab', { name: 'Second' }).click();
-  await expect(page.locator('.vname')).toContainText('Second');
-  // Rename via the view menu.
-  await page.locator('.vname').click();
-  await page.getByRole('menuitem', { name: /Rename view/ }).click();
+  await expect(current(page)).toHaveAccessibleName('Second');
+  // The floating bar follows: its active space is Home's.
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}').active)).toBe(1);
+  // …and the other way round: the bar's 01 brings Home back to space 01.
+  await page.evaluate(() => {
+    const raw = JSON.parse(localStorage.getItem('otto_bar_spaces') ?? '{}');
+    raw.active = 0;
+    const v = JSON.stringify(raw);
+    localStorage.setItem('otto_bar_spaces', v);
+    // What another window's write looks like here (the ⌥Space panel).
+    window.dispatchEvent(new StorageEvent('storage', { key: 'otto_bar_spaces', newValue: v }));
+  });
+  await expect(current(page)).toHaveAccessibleName('Overview');
+  await page.getByRole('tab', { name: 'Second' }).click();
+  await expect(current(page)).toHaveAccessibleName('Second');
+  // Rename via the space menu.
+  await page.getByRole('button', { name: 'Space options' }).click();
+  await page.getByRole('menuitem', { name: /Rename space/ }).click();
   await page.locator('.cf-input').fill('Ops');
   await page.getByRole('button', { name: 'Rename' }).click();
-  await expect(page.locator('.vname')).toContainText('Ops');
+  await expect(current(page)).toHaveAccessibleName('Ops');
   // Cap at 4.
   await addView(page, 'Three');
   await addView(page, 'Four');
   await expect(page.getByRole('tab')).toHaveCount(4);
-  await expect(page.getByRole('button', { name: 'Add view' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Add space' })).toHaveCount(0);
   // Auto-rotate control appears with >1 views, defaults ON, toggles and persists.
   const rot = page.getByRole('button', { name: /Auto-rotate/ });
   await expect(rot).toHaveAttribute('aria-pressed', 'true');
@@ -111,25 +141,25 @@ test('views: add (max 4), slide with arrows / dots / keys, rename, delete, persi
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible();
   await expect(page.getByRole('tab')).toHaveCount(4);
-  await expect(page.locator('.vname')).toContainText('Four');
+  await expect(current(page)).toHaveAccessibleName('Four');
   await expect(page.getByRole('button', { name: /Auto-rotate/ })).toHaveAttribute('aria-pressed', 'false');
-  // Delete the current view.
-  await page.locator('.vname').click();
-  await page.getByRole('menuitem', { name: /Delete view/ }).click();
+  // Delete the current space.
+  await page.getByRole('button', { name: 'Space options' }).click();
+  await page.getByRole('menuitem', { name: /Delete space/ }).click();
   await page.getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByRole('tab')).toHaveCount(3);
 });
 
-test('boxes: add from the picker (max 8), resize in grid units, zoom, remove', async ({ page }) => {
+test('widgets: add from the picker (max 8), resize in grid units, zoom, remove', async ({ page }) => {
   await boot(page);
   const home = page.getByRole('region', { name: 'Home dashboard' });
   const boxes = home.locator('section.hbox');
   await expect(boxes).toHaveCount(4);
 
   // Add box picker lists every kind for root and adds one.
-  await page.getByRole('button', { name: 'Add box' }).click();
+  await page.getByRole('button', { name: 'Add widget' }).click();
   const sheet = page.getByRole('dialog');
-  await expectFullyInViewport(page, sheet, 'add-box sheet');
+  await expectFullyInViewport(page, sheet, 'add-widget sheet');
   await expect(sheet.locator('.kind')).toHaveCount(6);
   await sheet.locator('.kind', { hasText: 'Usage' }).click();
   await expect(boxes).toHaveCount(5);
@@ -138,11 +168,11 @@ test('boxes: add from the picker (max 8), resize in grid units, zoom, remove', a
 
   // Cap: fill to 8 then the button disables.
   for (const k of ['Insights', 'Agents', 'Kubernetes']) {
-    await page.getByRole('button', { name: 'Add box' }).click();
+    await page.getByRole('button', { name: 'Add widget' }).click();
     await page.getByRole('dialog').locator('.kind', { hasText: k }).click();
   }
   await expect(boxes).toHaveCount(8);
-  await expect(page.getByRole('button', { name: 'Add box' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Add widget' })).toBeDisabled();
 
   // Resize with the keyboard on the corner handle: one grid unit per arrow.
   const first = boxes.nth(0);

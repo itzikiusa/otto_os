@@ -126,22 +126,28 @@
     height: 100%;
     min-height: 0;
   }
+  /* Widget figures: number over label, split by hairlines — no tile fills
+     (the calm desktop-widget look shared by every Home box). */
   .stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
+    gap: 0;
   }
   .stat {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 6px 4px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
+    align-items: flex-start;
+    min-width: 0;
+    padding: 2px 12px;
+    border-inline-start: 1px solid var(--separator);
+  }
+  .stat:first-child {
+    padding-inline-start: 2px;
+    border-inline-start: none;
   }
   .n {
     font-size: var(--fs-xl);
-    font-weight: 700;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }

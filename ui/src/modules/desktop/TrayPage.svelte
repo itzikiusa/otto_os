@@ -282,22 +282,18 @@
 </div>
 
 <style>
-  /* Chrome over native vibrancy: the 78% tint rule (foundations §7), opaque
-     when the user asks for reduced transparency. */
+  /* Chrome over the native popover vibrancy: the sidebar glass tint
+     (foundations §7), which turns opaque under reduced transparency (the
+     system setting or Settings → Appearance) — tokens.css. */
   .tray {
     height: 100vh;
     display: flex;
     flex-direction: column;
-    background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
+    background: var(--glass-tint-native);
     color: var(--text);
     font-size: var(--fs-m);
     border-radius: var(--radius-l);
     overflow: hidden;
-  }
-  @media (prefers-reduced-transparency: reduce) {
-    .tray {
-      background: var(--bg-sidebar);
-    }
   }
   .head {
     display: flex;
@@ -442,6 +438,6 @@
     gap: 8px;
     padding-block: 10px;
     padding-inline: 12px;
-    border-block-start: 1px solid var(--border);
+    border-block-start: 1px solid var(--separator);
   }
 </style>

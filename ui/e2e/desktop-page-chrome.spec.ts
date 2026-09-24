@@ -182,3 +182,65 @@ test('a list/detail page opens on its first item and restores the last one', asy
   await expect(title).toHaveText(other, { timeout: 20_000 });
   expect([packA, packB]).toContain(await page.evaluate(() => localStorage.getItem('otto.lastSelection.proof')));
 });
+
+// Ambient backdrop + glass (foundations.md §7): the backdrop shows through the
+// chrome only — the content column stays opaque — Settings → Appearance
+// switches it, and reduced transparency makes every glass surface opaque.
+test('ambient backdrop shows through chrome only; reduce transparency goes opaque', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('ambient-reset')) return;
+    sessionStorage.setItem('ambient-reset', '1');
+    for (const k of ['otto_ambient', 'otto_ambient_photo', 'otto_reduce_transparency']) localStorage.removeItem(k);
+  });
+  await gotoRoute(page, 'settings/appearance');
+  const html = page.locator('html');
+  // Default: the subtle wash, generated (no network image).
+  await expect(html).toHaveAttribute('data-ambient', 'subtle');
+  const art = () =>
+    page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--ambient-image').trim());
+  expect(await art()).toMatch(/^radial-gradient/);
+
+  const paint = (sel: string) =>
+    page
+      .locator(sel)
+      .first()
+      .evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { color: cs.backgroundColor, image: cs.backgroundImage, filter: cs.backdropFilter };
+      });
+  const translucent = /,\s*0?\.\d+\)$|\/\s*0?\.\d+\)$/;
+  // Chrome: the sidebar is translucent glass with a blur; the toolbar strip
+  // paints the ambient under its tint.
+  const side = await paint('.sidebar-material');
+  expect(side.color).toMatch(translucent);
+  expect(side.filter).toContain('blur');
+  expect((await paint('[data-testid="page-header"]')).image).toContain('radial-gradient');
+  // Content: the centre column is opaque and carries no backdrop.
+  const center = await paint('.shell .center');
+  expect(center.image).toBe('none');
+  expect(center.color).not.toMatch(translucent);
+  expect(center.color).not.toBe('rgba(0, 0, 0, 0)');
+
+  // Switch to Wallpaper from the Backdrop picker.
+  await page.locator('[data-ambient-option="wallpaper"]').click();
+  await expect(html).toHaveAttribute('data-ambient', 'wallpaper');
+  expect(await art()).toMatch(/linear-gradient\(#[0-9a-f]{6}, #[0-9a-f]{6}\)$/);
+  expect(await page.evaluate(() => localStorage.getItem('otto_ambient'))).toBe('wallpaper');
+
+  // Reduce transparency: opaque sidebar, no blur, no backdrop anywhere.
+  const reduce = page.getByRole('checkbox', { name: 'Reduce transparency' });
+  await reduce.check();
+  await expect(html).toHaveAttribute('data-transparency', 'reduced');
+  expect(await art()).toBe('none');
+  const opaque = await paint('.sidebar-material');
+  expect(['none', '']).toContain(opaque.filter);
+  expect(opaque.color).not.toMatch(translucent);
+
+  // None: plain window colours, persisted across a reload.
+  await reduce.uncheck();
+  await page.locator('[data-ambient-option="none"]').click();
+  await page.reload();
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
+  await expect(html).toHaveAttribute('data-ambient', 'none');
+  expect(await art()).toBe('none');
+});

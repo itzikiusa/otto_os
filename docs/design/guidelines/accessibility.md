@@ -109,7 +109,7 @@ in audits.
   ([foundations.md §8](./foundations.md#8-motion)).
 - Respect `prefers-reduced-transparency` on translucent chrome where the engine
   supports it. The opaque fallback must look right on its own
-  ([foundations.md §7](./foundations.md#7-translucency-and-vibrancy)).
+  ([foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)).
 - Nothing flashes more than 3 times a second.
 
 ## 6. Right-to-left

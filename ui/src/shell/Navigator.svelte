@@ -1097,7 +1097,7 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--border);
+    border-inline-end: 1px solid var(--separator);
     position: relative;
   }
   .rail-resize {
@@ -1138,8 +1138,8 @@
     cursor: default;
   }
   .nav-title {
-    font-size: 13px;
-    font-weight: 700;
+    font-size: var(--fs-m);
+    font-weight: 600;
     letter-spacing: -0.01em;
   }
   .nav-scroll {

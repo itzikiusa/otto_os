@@ -363,7 +363,7 @@
       if (e.target === e.currentTarget) close();
     }}
   >
-    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="palette glass-raised" role="dialog" aria-modal="true" aria-label="Command palette">
       <div class="pal-mode-row">
         <div class="segmented">
           <button class:active={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
@@ -522,10 +522,8 @@
     max-height: 60vh;
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    /* Raised glass (tokens.css .glass-raised), like Spotlight. */
     border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
     overflow: hidden;
     align-self: flex-start;
     animation: pal-in 150ms ease-out;

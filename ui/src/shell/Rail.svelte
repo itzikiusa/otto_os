@@ -119,7 +119,7 @@
     align-items: center;
     padding: 10px 0;
     gap: 4px;
-    border-inline-end: 1px solid var(--border);
+    border-inline-end: 1px solid var(--separator);
   }
   /* Scrolls (scrollbar hidden) when the window is shorter than the icon
      column, so the bottom Settings/account buttons are never pushed under the

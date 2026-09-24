@@ -5,7 +5,7 @@ This doc covers:
 - the shell anatomy
 - the sidebar
 - the page chrome (`PageHeader` and `PageBody`)
-- the five page archetypes
+- the five page archetypes, and Home as the desktop
 - responsive rules
 - windows
 - the floating command bar
@@ -38,6 +38,10 @@ The parts of the shell:
 
 - **Sidebar.** `shell/Navigator.svelte` when expanded, `shell/Rail.svelte` when
   collapsed (icons only; ⌘1 toggles between them). Both use `.sidebar-material`.
+- **Backdrop and glass.** The window paints the ambient backdrop; the sidebar,
+  the `PageHeader` row and the status bar are glass over it; the content column
+  is opaque `--bg`. See
+  [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
   exception is **Agents**, whose session `TabBar` is its top row; it has a
   right panel (⌘J) for Browser, Outputs and similar.
@@ -310,21 +314,68 @@ PageHeader: title = selected item (or module), item actions, primary
 
 ### 4.3 Dashboard
 
-- A grid of cards (`.card`, `--surface`, `--border`, no shadow). Home uses a
-  12-column grid (`COLS = 12`, row 72 px, gap 12 px) of live boxes from
-  `modules/home/kinds.ts`.
+- A grid of cards (`.card`: `--surface`, `--border`, `--shadow-card`).
 - Every card has:
   - a title row (label, plus an optional "open" affordance to its module)
   - one primary figure or list
   - its **own** loading, empty and error states, so one failing box never
     blanks the page
 - KPI figures: `--fs-xl`/`--fs-2xl`, `tabular-nums`, **one** font family per
-  row (don't mix mono `$0.00` with sans counts).
+  row (don't mix mono `$0.00` with sans counts). In widgets, figures sit number
+  over label, split by `--separator` hairlines, not in filled tiles.
 - **Don't seed empty cards.** A default layout contains only kinds that have
-  data. Offer "Add box" for the rest.
-- Home is the one "desktop" in Otto: widgets, up to four views, and rotation.
-  Other modules don't grow widget systems of their own. Contribute a Home box
-  kind instead.
+  data. Offer "Add widget" for the rest.
+
+#### Home: the desktop
+
+Home is the one "desktop" in Otto (`modules/home/`). Other modules don't grow
+widget systems of their own; contribute a Home widget kind (`kinds.ts`)
+instead.
+
+```
+PageHeader: Home  [01 Overview][02][03] + ⋯           [30s]  [+ Add widget]
+┌ ambient backdrop, full-bleed ─────────────────────────────────────────────┐
+│ Good afternoon, Dana                                                      │
+│ Thursday 24 September · 1 needs you · 2 running                           │
+│ ┌ Needs you ─┐ ┌ Running ───┐ ┌ Up next ───┐ ┌ Recent ────┐               │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘               │
+│ ┌ widget ──────────────┐ ┌ widget ───────────────────────────┐            │
+│ └──────────────────────┘ └───────────────────────────────────┘            │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+- **The backdrop** is the ambient image, painted full-bleed and fixed to the
+  viewport, so it runs on into the toolbar and sidebar glass. Everything on it
+  is an opaque card at elevation 1. Text straight on the backdrop is `--text`
+  only (the greeting and today's line).
+- **Today** (`HomeToday.svelte`, data in `today.svelte.ts`): four glance cards,
+  built from data Otto already has.
+  - *Needs you*: assistant tasks waiting on you, pending MCP approvals,
+    sessions waiting on input, work items awaiting approval, unread warnings.
+  - *Running*: running assistant tasks, working sessions and in-flight
+    workflow runs.
+  - *Up next*: the assistant's reminders due in the next 24 hours (the typed
+    `Reminder` slot), then today's notices.
+  - *Recent*: Design Hall artifacts and pull requests from the work graph.
+
+  Each card shows at most three rows plus "N more", and has its own loading and
+  empty state. An empty card is a centred, one-line "nothing here" with a quiet
+  mark, never a blank box. On a phone an empty card collapses to one line.
+- **Widgets** are the existing live boxes on a 12-column grid (`COLS = 12`, row
+  72 px, gap 12 px), up to 8 per space. They keep drag-to-reorder (the grip),
+  resize in grid units (the corner, or arrow keys on it) and zoom to fill. Their
+  header is quiet: icon tile and title; refresh, zoom and the menu surface on
+  hover or focus (always visible without hover).
+- **Spaces 01–04** are Home's views (`MAX_VIEWS = 4`). The toolbar shows them as
+  numbered segmented tabs (the active one also shows its name), then `+` (add)
+  and `⋯` (rename, add, delete). ←/→, swipe and ⌘K "Home: space 01 · …" switch
+  them; they can cycle every 30 s. The active space and the names live in
+  `lib/stores/spaces.svelte.ts`, shared with the floating bar's 01–04 and synced
+  across windows; Home owns what a space contains.
+- **An empty space** invites setup without clutter: one page `EmptyState` with
+  the single "Add widget" action and a row of quick-add chips for the first few
+  widget kinds. Examples are generic (agents, usage, clusters), never tied to a
+  particular product or customer.
 
 ### 4.4 Settings form
 
@@ -369,8 +420,9 @@ PageHeader: crumbs / title · status pill · version   [device ▢▢▢] [Fit] 
 - **Versions are the undo model.** Every applied change (the user's or an
   agent's) creates a version chip, and restoring creates a *new* version.
   Nothing is lost silently.
-- This is the archetype where the ambient backdrop and the floating command
-  bar (below) may appear.
+- This is the other archetype where the ambient backdrop may show (around the
+  pasteboard, never under the artboard) and where the floating command bar
+  (below) may appear.
 
 ## 5. Responsive rules
 
@@ -450,7 +502,10 @@ the pill is drawn in the SAME surface — never a second glass layer.
    (name, workspace, agent, `ModelPicker`) in the panel, not a popover.
 4. **Spaces 01–04** — four pinned contexts (default Personal · Work ·
    Research · Home), each remembering a name, a workspace (or "follow Otto"),
-   agent + model and its last 20 turns. `⌃1–⌃4` inside the bar only
+   agent + model and its last 20 turns. **Home's spaces are the same
+   four:** `lib/stores/spaces.svelte.ts` reads and switches the bar's active
+   space, and Home's view names are the space names (renaming either renames
+   both). `⌃1–⌃4` inside the bar only
    (`keyContext.barFocused` stops the global "jump to session N"); clicking
    the active number opens its settings. Stored per device
    (`otto_bar_spaces`), shared by both hosts. In the main window, switching to
@@ -491,15 +546,17 @@ scrolls; e2e asserts it with `expectFullyInViewport`
 - One bar per window. Don't build a second command system or a page-level
   floating bar; register ⌘K commands and they appear in it.
 - At most 720 px wide, centred, 16 px above the status bar. Never on phone.
-- Glass rules from [foundations.md §7](./foundations.md#7-translucency-and-vibrancy):
-  78% tint, opaque `--surface` fallback without `backdrop-filter`, opaque
-  under `prefers-reduced-transparency`. Motion off under reduced motion.
+- Glass rules from [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop):
+  78% tint (it floats over content, not the banded backdrop), opaque
+  `--surface` fallback without `backdrop-filter`, opaque under reduced
+  transparency. Motion off under reduced motion.
 - Keyboard: `Esc` clears the query, then closes (the panel hides the window);
   `Enter` runs the selection; `↑↓` wrap. The pill is never the only way to
   reach an action.
 
-**Ambient backdrop (Proposed).** A full-bleed, heavily blurred backdrop (a
-wallpaper or a render of the user's own work) is allowed only behind
-**Home and canvas/studio** surfaces, and only seen through chrome. Content
-cards on top of it stay opaque `--surface`. It is off under reduced
-transparency and in e2e/screenshot runs, and the user can turn it off.
+**Ambient backdrop.** Shipped: see
+[foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
+It shows through chrome on every page and fills only Home's desktop (and, when
+a studio adopts it, the pasteboard). Content cards on top of it stay opaque
+`--surface`. It is off under reduced transparency and when the user picks
+**None**.
