@@ -26,6 +26,8 @@
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
@@ -205,6 +207,10 @@
   // ── Commits / graph ───────────────────────────────────────────────────────
   let commits: CommitInfo[] = $state([]);
   let commitsLoading = $state(true);
+  /** The history load failed with nothing on screen — rendered inline with
+   *  Retry, never as "No commits found." (a later-page failure keeps the rows
+   *  and just retries on the next scroll). */
+  let commitsError = $state<string | null>(null);
 
   // ── History paging ────────────────────────────────────────────────────────
   // There is no ceiling on how far back the graph can reach. The page is big
@@ -252,6 +258,13 @@
     return p;
   }
 
+  /** Retry a failed first page (the inline error's Retry). */
+  function retryCommits(): void {
+    commitsLoading = true;
+    hasMore = true;
+    void loadMore().finally(() => (commitsLoading = false));
+  }
+
   async function loadPage(): Promise<boolean> {
     const gen = loadGen;
     try {
@@ -259,6 +272,7 @@
         `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}`,
       );
       if (gen !== loadGen) return false; // repo changed under us — drop it
+      commitsError = null;
       skipCursor += page.length;
       if (page.length < PAGE) hasMore = false;
       if (page.length > 0) {
@@ -269,9 +283,10 @@
         if (fresh.length > 0) commits = [...commits, ...fresh];
       }
       return page.length > 0;
-    } catch {
+    } catch (e) {
       // Leave `hasMore` alone: a transient failure shouldn't permanently declare
       // the end of history — the next scroll retries.
+      if (gen === loadGen && commits.length === 0) commitsError = loadErrorText(e);
       return false;
     }
   }
@@ -389,6 +404,7 @@
     const id = repoId;
     refsLoading = true;
     commitsLoading = true;
+    commitsError = null;
     refs = null;
     commits = [];
     stashes = [];
@@ -527,10 +543,13 @@
         .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${want}`)
         .then((c) => {
           commits = c;
+          commitsError = null;
           skipCursor = c.length;
           hasMore = c.length >= want;
         })
-        .catch(() => {}),
+        .catch((e) => {
+          if (commits.length === 0) commitsError = loadErrorText(e);
+        }),
       api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
       api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
     ]);
@@ -2737,7 +2756,9 @@
     bind:this={graphPanelEl}
     onscroll={onGraphScroll}
   >
-    {#if commitsLoading}
+    {#if commitsError && commits.length === 0}
+      <LoadState what="commits" error={commitsError} empty loading={commitsLoading} onretry={retryCommits} />
+    {:else if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
     {:else if commits.length === 0}
       <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>

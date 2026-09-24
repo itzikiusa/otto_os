@@ -13,7 +13,8 @@
   import CommentThread from './CommentThread.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
   import PrMergeModal from './PrMergeModal.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -67,20 +68,24 @@
     void load(repoId, number);
   });
 
-  // Lazy-load diff when switching to Files tab. `diffFailed` stops the effect
+  // Load failures render INLINE with Retry (a toast is for failed actions).
+  let prError = $state<string | null>(null);
+
+  // Lazy-load diff when switching to Files tab. `diffError` stops the effect
   // from re-firing after an error — diff stays null on failure, so without the
-  // latch this loop hammered the daemon with retries (and toast spam) forever.
-  let diffFailed = $state(false);
+  // latch this loop hammered the daemon with retries forever.
+  let diffError = $state<string | null>(null);
   $effect(() => {
-    if (activeTab === 'files' && diff === null && !diffLoading && !diffFailed) {
+    if (activeTab === 'files' && diff === null && !diffLoading && !diffError) {
       void loadDiff(repoId, number);
     }
   });
 
-  // Lazy-load commits when switching to Commits tab (same failure latch).
-  let commitsFailed = $state(false);
+  // Lazy-load commits when switching to Commits tab (same failure latch; the
+  // latch used to leave the tab on "Loading commits…" forever).
+  let commitsError = $state<string | null>(null);
   $effect(() => {
-    if (activeTab === 'commits' && commits === null && !commitsLoading && !commitsFailed) {
+    if (activeTab === 'commits' && commits === null && !commitsLoading && !commitsError) {
       void loadCommits(repoId, number);
     }
   });
@@ -89,8 +94,9 @@
     loading = true;
     try {
       pr = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      prError = null;
     } catch (e) {
-      toasts.error('Could not load PR', e instanceof Error ? e.message : String(e));
+      prError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -98,12 +104,11 @@
 
   async function loadDiff(rid: string, num: number): Promise<void> {
     diffLoading = true;
-    diffFailed = false;
     try {
       diff = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      diffError = null;
     } catch (e) {
-      diffFailed = true;
-      toasts.error('Could not load diff', e instanceof Error ? e.message : String(e));
+      diffError = loadErrorText(e);
     } finally {
       diffLoading = false;
     }
@@ -111,12 +116,11 @@
 
   async function loadCommits(rid: string, num: number): Promise<void> {
     commitsLoading = true;
-    commitsFailed = false;
     try {
       commits = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      commitsError = null;
     } catch (e) {
-      commitsFailed = true;
-      toasts.error('Could not load commits', e instanceof Error ? e.message : String(e));
+      commitsError = loadErrorText(e);
     } finally {
       commitsLoading = false;
     }
@@ -274,8 +278,16 @@
   {/snippet}
 </PageHeader>
 <div class="prd">
-  {#if loading && !pr}
-    <div style="padding: 16px"><Skeleton rows={5} height={40} /></div>
+  {#if !pr && (loading || prError)}
+    <LoadState
+      what="this pull request"
+      variant="page"
+      rows={5}
+      {loading}
+      error={prError}
+      empty
+      onretry={() => void load(repoId, number)}
+    />
   {:else if pr}
 
     <div class="prd-title-block">
@@ -467,18 +479,15 @@
     <!-- Files tab -->
     {#if activeTab === 'files'}
       <section class="prd-diff">
-        {#if diffFailed}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">
-            Could not load the diff.
-            <button class="btn small ghost" onclick={() => void loadDiff(repoId, number)}>Retry</button>
-          </p>
-        {:else if diffLoading || (!diff && !diffLoading)}
-          {#if diffLoading}
-            <Skeleton rows={4} height={30} />
-          {:else}
-            <p class="dim" style="font-size: 12px; padding: 12px 0">Loading diff…</p>
-          {/if}
-        {:else if diff}
+        {#if diffError || !diff}
+          <LoadState
+            what="the diff"
+            loading={diffLoading || !diffError}
+            error={diffError}
+            empty
+            onretry={() => void loadDiff(repoId, number)}
+          />
+        {:else}
           <DiffViewer
             {diff}
             prMode={true}
@@ -495,14 +504,15 @@
     <!-- Commits tab -->
     {#if activeTab === 'commits'}
       <section class="prd-commits">
-        {#if commitsLoading}
-          <Skeleton rows={4} height={28} />
-        {:else if commits === null}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">Loading commits…</p>
-        {:else if commits.length === 0}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">No commits found.</p>
-        {:else}
-          {#each commits as c (c.sha)}
+        <LoadState
+          what="commits"
+          loading={commitsLoading || (commits === null && !commitsError)}
+          error={commitsError}
+          empty={!commits || commits.length === 0}
+          onretry={() => void loadCommits(repoId, number)}
+        >
+          {#snippet emptyView()}<p class="dim" style="font-size: 12px; padding: 12px 0">No commits found.</p>{/snippet}
+          {#each commits ?? [] as c (c.sha)}
             <div class="commit-row">
               <span class="commit-sha mono">{c.short_sha}</span>
               <span class="commit-subject">{c.subject}</span>
@@ -510,7 +520,7 @@
               <span class="commit-date dim">{formatRelativeDate(c.date)}</span>
             </div>
           {/each}
-        {/if}
+        </LoadState>
       </section>
     {/if}
 

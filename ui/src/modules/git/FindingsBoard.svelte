@@ -14,8 +14,9 @@
     FindingStatus,
     FindingSeverity,
   } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { findingBus } from '../../lib/events.svelte';
   import FindingActions from './FindingActions.svelte';
   import ProofPackView from './ProofPackView.svelte';
@@ -28,6 +29,8 @@
 
   let findings: Finding[] = $state([]);
   let loading = $state(true);
+  /** Failed list load — inline with Retry, never "No tracked findings". */
+  let loadError = $state<string | null>(null);
   let expanded: Record<string, boolean> = $state({});
   let details: Record<string, FindingDetail> = $state({});
   let detailLoading: Record<string, boolean> = $state({});
@@ -60,8 +63,9 @@
     loading = true;
     try {
       findings = await listFindings(rid);
+      loadError = null;
     } catch (e) {
-      toasts.error('Could not load findings', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -72,6 +76,7 @@
     try {
       const next = await listFindings(reviewId);
       findings = next;
+      loadError = null;
       // Refresh any open detail so its timeline reflects the new events.
       for (const id of Object.keys(expanded)) {
         if (expanded[id] && details[id]) void loadDetail(id, true);
@@ -155,7 +160,9 @@
     </button>
   </div>
 
-  {#if loading}
+  {#if loadError && findings.length === 0}
+    <LoadState what="findings" {loading} error={loadError} empty onretry={() => void load(reviewId)} />
+  {:else if loading}
     <Skeleton rows={3} height={48} />
   {:else if findings.length === 0}
     <p class="dim fb-empty">No tracked findings for this review yet.</p>
