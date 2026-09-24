@@ -1,7 +1,18 @@
 // Shared status vocabulary (lib/status.ts): sessions, runs, environments.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { envTone, isResumable, runStatus, sentenceCase, sessionState } from '../src/lib/status.ts';
+import { envTone, isResumable, runStatus, sentenceCase, sessionState, storyStage } from '../src/lib/status.ts';
+
+test('storyStage: product stages map to one label/tone; done is success, not accent', () => {
+  assert.deepEqual([storyStage('draft').label, storyStage('draft').tone], ['Draft', 'neutral']);
+  assert.equal(storyStage('review').tone, 'warning');
+  assert.equal(storyStage('approved').tone, 'success');
+  assert.deepEqual([storyStage('done').label, storyStage('done').tone], ['Done', 'success']);
+  assert.deepEqual([storyStage('tests_drafted').label, storyStage('planned').tone], ['Tests drafted', 'info']);
+  const odd = storyStage('in-flight');
+  assert.deepEqual([odd.key, odd.label, odd.tone], ['in_flight', 'In flight', 'neutral']);
+  assert.equal(storyStage(null).key, 'unknown');
+});
 
 const agent = { kind: 'agent', provider_session_id: 'psid' };
 const shell = { kind: 'shell', provider_session_id: null };

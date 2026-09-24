@@ -244,3 +244,35 @@ export function envTone(env: string | null | undefined): StatusInfo & { key: Env
   }
   return { key: e, label: e, tone: 'neutral' };
 }
+
+// ---------------------------------------------------------------------------
+// Product story stages
+// ---------------------------------------------------------------------------
+
+/** The lifecycle stages an operator sets by hand (the Overview stage picker).
+ *  The daemon also writes intermediate stages as agents work (`imported`,
+ *  `analyzed`, `refined`, `tests_drafted`, `planned`). */
+export const STORY_STAGES = ['draft', 'review', 'approved', 'done'] as const;
+
+const STAGE_INFO: Record<string, Omit<StatusInfo, 'key'>> = {
+  draft: { label: 'Draft', tone: 'neutral', hint: 'Draft — not reviewed yet' },
+  imported: { label: 'Imported', tone: 'neutral', hint: 'Imported from the source, not analysed yet' },
+  analyzed: { label: 'Analyzed', tone: 'info', hint: 'Agents analysed the story' },
+  refined: { label: 'Refined', tone: 'info', hint: 'An agent suggested a rewrite' },
+  tests_drafted: { label: 'Tests drafted', tone: 'info', hint: 'Test cases were generated' },
+  planned: { label: 'Planned', tone: 'info', hint: 'An implementation plan exists' },
+  review: { label: 'Review', tone: 'warning', hint: 'Waiting on a review' },
+  approved: { label: 'Approved', tone: 'success', hint: 'Approved — ready to send to a swarm' },
+  done: { label: 'Done', tone: 'success', hint: 'Delivered' },
+};
+
+/** One mapping for a Product story's `stage` — the story list rows, the
+ *  Overview stage picker and the epic Children board all read it. Unknown
+ *  stages keep their own sentence-cased label with a neutral tone. Done is
+ *  success, never the accent (accent means selected). */
+export function storyStage(raw: string | null | undefined): StatusInfo {
+  const k = (raw ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const info = STAGE_INFO[k];
+  if (info) return { key: k, ...info };
+  return { key: k || 'unknown', label: k ? sentenceCase(k) : 'Unknown', tone: 'neutral' };
+}
