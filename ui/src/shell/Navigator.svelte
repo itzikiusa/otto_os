@@ -57,6 +57,13 @@
     return status === 'exited' && s.kind === 'agent' && s.provider_session_id != null;
   }
   const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
+  /** Session-row tooltip: a long title made one very wide native tooltip that
+   *  WKWebView pinned against the window edge and clipped over the page. Keep
+   *  it short and put the hint on its own line. */
+  function rowTip(title: string, resumable: boolean): string {
+    const t = title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
+    return `${t}\n${resumable ? SUSPENDED_TIP : 'Double-click to rename'}`;
+  }
 
   let agentsOpen = $state(true);
   // Channel groups (ticket/chat sessions) start collapsed — at ticketing volume
@@ -1023,7 +1030,7 @@
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
-        title={resumable ? `${s.title} — ${SUSPENDED_TIP}` : `${s.title} — double-click to rename`}
+        title={rowTip(s.title, resumable)}
       >
         {#if resumable}
           <span class="susp-dot" aria-hidden="true">
