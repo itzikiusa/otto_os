@@ -6,6 +6,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import type { ProductStoryVersion } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
@@ -18,7 +19,6 @@
   let provider = $state<string>(defaultAgentProvider());
   let generating = $state(false);
   let publishing = $state(false);
-  let confirmPublish = $state(false);
 
   // Loaded version bodies
   let sourceVersion = $state<ProductStoryVersion | null>(null);
@@ -77,7 +77,6 @@
     // Reset local state when story changes.
     sourceVersion = null;
     suggestedVersion = null;
-    confirmPublish = false;
     clearPoll();
     // Kick off initial load if we have a story.
     if (product.selectedId) {
@@ -157,10 +156,27 @@
     }
   }
 
+  // The live target of a publish, named everywhere it's offered or confirmed.
+  const isJira = $derived(story?.source_kind === 'jira');
+  const targetShort = $derived(isJira ? (story?.source_key ?? 'the issue') : 'the Confluence page');
+  const targetLabel = $derived(
+    isJira ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}”` : `Confluence page “${story?.title ?? ''}”`,
+  );
+  const targetNoun = $derived(isJira ? 'description' : 'page body');
+
   async function publish(): Promise<void> {
     if (!suggestedVersion || publishing) return;
+    const first = (suggestedVersion.body_md ?? '').split('\n').filter((l) => l.trim() !== '').slice(0, 4).join('\n');
+    const ok = await confirmOutward({
+      verb: `Overwrite ${targetShort}`,
+      title: `Overwrite ${targetShort}?`,
+      where: targetLabel,
+      what: `Suggested v${suggestedVersion.version_no} replaces the live ${targetNoun}:\n${first}`,
+      who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
+      danger: true,
+    });
+    if (!ok) return;
     publishing = true;
-    confirmPublish = false;
     try {
       await product.publishVersion(suggestedVersion.id);
       toasts.success('Published', 'Suggested version published back to source.');
@@ -239,27 +255,6 @@
               <span class="cn-body">{suggestedVersion.change_notes}</span>
             </div>
           {/if}
-
-          <!-- Publish button -->
-          <div class="publish-wrap">
-            {#if confirmPublish}
-              <span class="confirm-text">This will overwrite the live ticket/page. Are you sure?</span>
-              <button class="action-btn danger" onclick={publish} disabled={publishing}>
-                {publishing ? 'Publishing…' : 'Yes, publish'}
-              </button>
-              <button class="action-btn" onclick={() => (confirmPublish = false)} disabled={publishing}>
-                Cancel
-              </button>
-            {:else}
-              <button
-                class="action-btn primary"
-                onclick={() => (confirmPublish = true)}
-                disabled={publishing}
-              >
-                Publish to Jira/Confluence
-              </button>
-            {/if}
-          </div>
         </div>
       </section>
 
@@ -317,6 +312,21 @@
             {/if}
           </div>
         </div>
+      {/if}
+
+      <!-- Publish sits AFTER the diff: review what changes first, then
+           overwrite. The button names the live target; publish() confirms. -->
+      {#if story && story.source_kind !== 'draft'}
+        <section class="card rw-publish" data-testid="rw-publish">
+          <p class="rw-publish-text">
+            Publishing replaces the live {targetNoun} of <strong>{targetLabel}</strong> with suggested
+            v{suggestedVersion.version_no}, for everyone who can see it.
+            {#if sourceVersion}Otto keeps the current text as source v{sourceVersion.version_no}.{/if}
+          </p>
+          <button class="action-btn danger" onclick={publish} disabled={publishing} data-testid="rw-publish-btn">
+            {publishing ? 'Publishing…' : `Overwrite ${targetShort}…`}
+          </button>
+        </section>
       {/if}
 
     {:else}
@@ -465,16 +475,22 @@
     line-height: 1.5;
     font-style: italic;
   }
-  .publish-wrap {
+
+  /* ── Publish (below the diff) ────────────────────────────────── */
+  .rw-publish {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
     flex-wrap: wrap;
-    margin-inline-start: auto;
+    padding: 12px 14px;
   }
-  .confirm-text {
-    font-size: 12px;
-    color: var(--warning);
+  .rw-publish-text {
+    flex: 1;
+    min-width: 220px;
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
 
   /* ── View toggle row ─────────────────────────────────────────── */
