@@ -274,6 +274,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // the other canvas-family live-edit events.
         | Event::BrowserTabUpdated { workspace_id, .. }
         | Event::BrowserAnnotationAdded { workspace_id, .. }
+        // A remote live session's lifecycle tick (no URL/title — owner-private
+        // details stay on the per-tab REST/WS surface).
+        | Event::BrowserLiveSessionUpdated { workspace_id, .. }
         // Live mockup-source edits + the mockup-agent-started signal go to the
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
@@ -326,6 +329,8 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::AwsInstallUpdated { .. }
         | Event::K8sClusterUpdated { .. }
         | Event::K8sInstallUpdated { .. }
+        // The Chromium download job is machine-wide, like the k8s installer.
+        | Event::BrowserEngineInstallUpdated { .. }
         | Event::K8sMonitorCycle { .. } => Scope::Everyone,
     }
 }
