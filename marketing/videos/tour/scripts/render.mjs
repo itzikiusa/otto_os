@@ -22,7 +22,7 @@ const opt = (f) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const CONCURRENCY = Math.min(4, Number(opt('concurrency') ?? 4));
-const CRF = Number(opt('crf') ?? 23);
+const CRF = Number(opt('crf') ?? 30); // ≤ 30 MB for ~3 min of mostly-static UI
 const out = join(tour, 'out');
 mkdirSync(out, { recursive: true });
 

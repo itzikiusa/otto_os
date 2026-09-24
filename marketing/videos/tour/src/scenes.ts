@@ -418,13 +418,14 @@ export const SCENES: Record<string, ChapterSpec> = {
       },
       {
         kind: 'screen',
-        src: cap('db-mongo.jpg'),
+        src: cap('db-results.jpg'),
         weight: 0.9,
         cam: [
-          { t: 0, x: 0.55, y: 0.5, z: 1.15 },
-          { t: 1, x: 0.6, y: 0.5, z: 1.3 },
+          { t: 0, x: 0.6, y: 0.6, z: 1.3 },
+          { t: 1, x: 0.55, y: 0.6, z: 1.45 },
         ],
-        chip: 'MongoDB in the vertical view',
+        callouts: [{ t0: 0.2, x: 0.55, y: 0.5, label: 'Grid · Vertical · JSON', side: 'top' }],
+        chip: 'Results in a grid or one record at a time',
       },
     ],
   },

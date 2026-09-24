@@ -30,7 +30,7 @@ export const Intro: React.FC<{ frames: number }> = ({ frames }) => {
   const tagK = interpolate(f, [80, 100], [0, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
   const outK = interpolate(f, [frames - 26, frames], [0, 1], { ...clamp, easing: Easing.in(Easing.cubic) });
   const wallZ = interpolate(f, [0, frames], [-900, -520]) + outK * 900;
-  const wallO = interpolate(f, [0, 24], [0, 0.55], clamp) * (1 - outK * 0.6);
+  const wallO = interpolate(f, [0, 24], [0, 0.75], clamp) * (1 - outK * 0.6);
   return (
     <AbsoluteFill>
       <Sequence from={10} durationInFrames={70}>
@@ -60,7 +60,7 @@ export const Intro: React.FC<{ frames: number }> = ({ frames }) => {
             </div>
           ))}
         </div>
-        <AbsoluteFill style={{ background: 'radial-gradient(60% 60% at 50% 50%, rgba(11,11,14,0.2), rgba(11,11,14,0.92))' }} />
+        <AbsoluteFill style={{ background: 'radial-gradient(60% 60% at 50% 50%, rgba(11,11,14,0.35), rgba(11,11,14,0.9))' }} />
       </AbsoluteFill>
       {/* the lockup */}
       <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', opacity: 1 - outK }}>
