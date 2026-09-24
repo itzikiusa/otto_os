@@ -165,7 +165,11 @@
     {:else}
       <header class="detail-head">
         <strong>{selected.room.name}</strong>
-        <button class="btn small" onclick={(e) => roomMenu(e, selected)}>⋯</button>
+        <button
+          class="btn small"
+          aria-label="Room actions for {selected.room.name}"
+          title="Room actions"
+          onclick={(e) => roomMenu(e, selected)}>⋯</button>
       </header>
 
       <div class="members">

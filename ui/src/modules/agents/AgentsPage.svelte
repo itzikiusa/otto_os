@@ -25,6 +25,23 @@
     })(),
   );
   const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
+
+  // Never open onto a "pick one" void when there are sessions: once per
+  // workspace, if its restored layout has no panes, open the most recently
+  // active session. Only on ARRIVAL — closing the last tab later leaves the
+  // empty state alone (the user just chose that).
+  let autoOpenedFor: string | null | undefined = undefined;
+  $effect(() => {
+    if (!ws.layoutReady || ws.sessionsLoading) return;
+    const key = ws.currentId;
+    if (autoOpenedFor === key) return;
+    autoOpenedFor = key;
+    if (ws.panes.length > 0 || tiled || mission) return;
+    const latest = [...ws.mainSessions].sort(
+      (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),
+    )[0];
+    if (latest) ws.navigateToSession(latest.id);
+  });
 </script>
 
 <div class="agents">

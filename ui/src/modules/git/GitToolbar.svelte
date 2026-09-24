@@ -225,7 +225,13 @@
         <button class="btn small primary" type="submit" disabled={busy === 'branch' || branchName.trim() === ''}>
           {busy === 'branch' ? '…' : 'Create'}
         </button>
-        <button class="btn small ghost" type="button" onclick={() => { branchOpen = false; branchName = ''; }}>
+        <button
+          class="btn small ghost"
+          type="button"
+          aria-label="Cancel new branch"
+          title="Cancel"
+          onclick={() => { branchOpen = false; branchName = ''; }}
+        >
           <Icon name="x" size={11} />
         </button>
       </form>

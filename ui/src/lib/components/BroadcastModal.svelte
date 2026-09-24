@@ -9,6 +9,8 @@
   import { toasts } from '../toast.svelte';
   import Modal from './Modal.svelte';
   import StatusDot from './StatusDot.svelte';
+  import { events } from '../events.svelte';
+  import { sessionState } from '../status';
 
   let text = $state('');
   let busy = $state(false);
@@ -122,7 +124,10 @@
             checked={!deselected.has(s.id)}
             onchange={() => toggle(s.id)}
           />
-          <StatusDot status={ws.statusMap[s.id] ?? s.status} size={7} />
+          <StatusDot
+            state={sessionState(s, ws.statusMap[s.id], ws.needsYou[s.id] === true, { stale: events.state !== 'connected' })}
+            size={7}
+          />
           <span class="bc-title">{s.title}</span>
           <span class="bc-provider">{s.provider}</span>
         </label>
