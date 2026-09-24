@@ -429,7 +429,7 @@
     <div class="section">
       <div class="label">PR &amp; commit draft model</div>
       <div class="row">
-        <select bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
+        <select class="select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
           <option value="">Fastest (haiku)</option>
           {#each DRAFT_MODELS as m (m)}
             <option value={m}>{m}</option>
