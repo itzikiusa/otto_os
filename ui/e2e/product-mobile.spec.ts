@@ -40,7 +40,7 @@ async function openProduct(page: Page): Promise<void> {
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   // A Stories|Learnings toggle is always present in some copy.
   await expect(
-    page.locator('.product-header-row1 .vt:visible, .m-view-toggle .vt:visible').first(),
+    page.locator('.m-view-toggle > button:visible').first(),
   ).toBeVisible({ timeout: 20_000 });
 }
 

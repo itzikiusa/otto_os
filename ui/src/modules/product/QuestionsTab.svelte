@@ -284,7 +284,7 @@
       <!-- Post selected -->
       {#if selectedIds.size > 0}
         <button
-          class="action-btn accent-btn"
+          class="btn small primary"
           onclick={postSelected}
           disabled={postingIds}
         >
@@ -293,7 +293,7 @@
       {/if}
 
       <!-- Add question -->
-      <button class="action-btn" onclick={openAdd}>+ Add question</button>
+      <button class="btn small" onclick={openAdd}>+ Add question</button>
     </div>
 
     <!-- ── Loading state ────────────────────────────────────────────────────── -->
@@ -360,13 +360,13 @@
                   </select>
                   <div class="edit-actions">
                     <button
-                      class="action-btn accent-btn"
+                      class="btn small primary"
                       onclick={saveEdit}
                       disabled={savingId === q.id}
                     >
                       {savingId === q.id ? 'Saving…' : 'Save'}
                     </button>
-                    <button class="action-btn" onclick={cancelEdit} disabled={savingId === q.id}>
+                    <button class="btn small ghost" onclick={cancelEdit} disabled={savingId === q.id}>
                       Cancel
                     </button>
                   </div>
@@ -443,13 +443,13 @@
                 ></textarea>
                 <div class="edit-actions">
                   <button
-                    class="action-btn accent-btn"
+                    class="btn small primary"
                     onclick={saveAnswer}
                     disabled={savingId === q.id}
                   >
                     {savingId === q.id ? 'Saving…' : 'Save answer'}
                   </button>
-                  <button class="action-btn" onclick={cancelAnswer} disabled={savingId === q.id}>
+                  <button class="btn small ghost" onclick={cancelAnswer} disabled={savingId === q.id}>
                     Cancel
                   </button>
                 </div>
@@ -493,9 +493,9 @@
           </label>
         </div>
         {#snippet footer()}
-          <button class="action-btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
+          <button class="btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
           <button
-            class="action-btn accent-btn"
+            class="btn primary"
             onclick={addQuestion}
             disabled={addWorking || !newText.trim()}
           >
@@ -544,41 +544,6 @@
     color: var(--text);
     font-size: 12px;
     padding: 4px 8px;
-  }
-
-  /* ── Action buttons ──────────────────────────────────────────────── */
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 100ms, border-color 100ms, color 100ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .accent-btn {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-weight: 600;
-  }
-  .accent-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent-text);
   }
 
   /* ── Select-all row ──────────────────────────────────────────────── */

@@ -5,6 +5,8 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import type { RefinementMessage } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
@@ -99,22 +101,6 @@
     }
   }
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <div class="refine-chat">
@@ -137,8 +123,13 @@
         <div class="bubble-row" class:row-user={m.role === 'user'} class:row-agent={m.role === 'agent'}>
           <div class="bubble" class:bubble-user={m.role === 'user'} class:bubble-agent={m.role === 'agent'}>
             <div class="bubble-header">
-              <span class="bubble-role">{m.role === 'user' ? 'PO' : 'Agent'}</span>
-              <span class="bubble-time">{relDate(m.created_at)}</span>
+              {#if m.role === 'agent'}
+                <!-- Agent turn: attributed (patterns.md §2). -->
+                <AgentByline at={m.created_at} />
+              {:else}
+                <span class="bubble-role">PO</span>
+                <RelTime iso={m.created_at} class="bubble-time" />
+              {/if}
             </div>
             <div class="bubble-body md-body">{@html renderMarkdown(m.body)}</div>
             {#if storyUpdated && versionNo !== null}
@@ -279,7 +270,7 @@
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
-  .bubble-time {
+  .bubble-header :global(.bubble-time) {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

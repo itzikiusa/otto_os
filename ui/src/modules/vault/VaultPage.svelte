@@ -7,7 +7,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { lsGet, lsSet } from '../../lib/storage';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
@@ -28,10 +29,21 @@
   // -- pane widths (drag-resizable, persisted) ---------------------------------
   const LEFT_W_KEY = 'otto_vault_left_w';
   const RIGHT_W_KEY = 'otto_vault_right_w';
-  let leftW = $state(Number(localStorage.getItem(LEFT_W_KEY)) || 250);
-  let rightW = $state(Number(localStorage.getItem(RIGHT_W_KEY)) || 280);
-  let rightOpen = $state(localStorage.getItem('otto_vault_right_open') !== '0');
-  let leftOpen = $state(localStorage.getItem('otto_vault_left_open') !== '0');
+  // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
+  // a full quota, so a private window never blanks the page.
+  let leftW = $state(Number(lsGet(LEFT_W_KEY)) || 250);
+  let rightW = $state(Number(lsGet(RIGHT_W_KEY)) || 280);
+  let rightOpen = $state(lsGet('otto_vault_right_open') !== '0');
+  let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
+
+  function toggleLeft(): void {
+    leftOpen = !leftOpen;
+    lsSet('otto_vault_left_open', leftOpen ? '1' : '0');
+  }
+  function toggleRight(): void {
+    rightOpen = !rightOpen;
+    lsSet('otto_vault_right_open', rightOpen ? '1' : '0');
+  }
   let resizing = $state(false);
 
   function startResize(e: MouseEvent, side: 'left' | 'right'): void {
@@ -44,10 +56,10 @@
       const w = Math.max(180, Math.min(520, Math.round(side === 'left' ? startW + d : startW - d)));
       if (side === 'left') {
         leftW = w;
-        localStorage.setItem(LEFT_W_KEY, String(w));
+        lsSet(LEFT_W_KEY, String(w));
       } else {
         rightW = w;
-        localStorage.setItem(RIGHT_W_KEY, String(w));
+        lsSet(RIGHT_W_KEY, String(w));
       }
     };
     const onUp = () => {
@@ -143,6 +155,65 @@
     }
   }
 
+  /** Header ⋯: the less-used views (history, trash) and the pane toggles —
+   *  the toolbar keeps ≤5 controls (graph, docs agent, switcher, new note, ⋯). */
+  function moreMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'Edit history', icon: 'clock', action: () => void vault.openHistory() },
+      { label: 'Trash and restore', icon: 'trash', action: () => void vault.openTrash() },
+      { separator: true },
+      { label: 'File tree', checked: leftOpen, action: toggleLeft },
+      { label: 'Right panel', checked: rightOpen, action: toggleRight },
+    ];
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
+  }
+
+  function toggleGraph(): void {
+    vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
+    vault.persistView();
+  }
+  function toggleDocsAgents(): void {
+    if (vault.centerMode === 'docs-agents') {
+      vault.centerMode = vault.note ? 'note' : 'empty';
+      vault.persistView();
+    } else {
+      vault.openDocsAgents('');
+    }
+  }
+
+  // -- landing note ----------------------------------------------------------------
+  // A vault never opens onto a bare "open a note" pane: on a first visit (no
+  // saved tabs/view for this vault) its root index/README note opens by itself.
+  // Once per vault per mount, so closing it lands on the empty state instead.
+  const INDEX_NAMES = ['index.md', 'readme.md', '_index.md'];
+  const indexNote = $derived.by(() => {
+    for (const name of INDEX_NAMES) {
+      const hit = vault.roots.find((r) => r.entry.kind === 'note' && r.entry.name.toLowerCase() === name);
+      if (hit) return hit.entry.path;
+    }
+    return null;
+  });
+  let autoIndexFor: number | null = null;
+  $effect(() => {
+    const id = vault.current?.id;
+    const path = indexNote;
+    if (id == null || !path || autoIndexFor === id) return;
+    if (vault.centerMode !== 'empty' || vault.tabs.length > 0) return;
+    // A saved view (tabs, or graph/docs-agents/trash) is restored by the
+    // store — don't race it.
+    let saved: { tabs?: unknown; mode?: unknown } = {};
+    try {
+      saved = JSON.parse(lsGet(`otto_vault_tabs:${id}`) ?? '{}') ?? {};
+    } catch {
+      /* corrupt blob — treat as a first visit */
+    }
+    const hasTabs = Array.isArray(saved.tabs) && saved.tabs.length > 0;
+    const mode = typeof saved.mode === 'string' ? saved.mode : 'empty';
+    if (hasTabs || (mode !== 'empty' && mode !== 'note')) return;
+    autoIndexFor = id;
+    void vault.open(path);
+  });
+
   const scanning = $derived(vault.status?.scan_state === 'scanning');
   const scanError = $derived(vault.status?.scan_state.startsWith('error') ?? false);
 
@@ -170,19 +241,6 @@
   <!-- Unified header: vault switcher as the title, status chips as badges,
        tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
   <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
-    {#snippet leading()}
-      <button
-        class="tool"
-        title={leftOpen ? 'Hide file tree' : 'Show file tree'}
-        aria-label={leftOpen ? 'Hide file tree' : 'Show file tree'}
-        onclick={() => {
-          leftOpen = !leftOpen;
-          localStorage.setItem('otto_vault_left_open', leftOpen ? '1' : '0');
-        }}
-      >
-        <Icon name="panel" size={14} />
-      </button>
-    {/snippet}
     {#snippet titleContent()}
       <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
         <Icon name="globe" size={14} />
@@ -219,64 +277,44 @@
     {/snippet}
     {#snippet actions()}
       {#if vault.current}
-        <div class="counts">
-          {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ??
-            vault.current.links} links
-          {#if (vault.status?.unresolved ?? 0) > 0}
-            · {vault.status?.unresolved} unresolved
-          {/if}
-        </div>
-        <button class="tool" title="Trash and restore" aria-label="Trash and restore" data-icon="trash" data-overflow="-1" onclick={() => void vault.openTrash()}><Icon name="trash" size={14} /></button>
-        <button class="tool" title="Edit history" aria-label="Edit history" data-icon="clock" data-overflow="-1" onclick={() => void vault.openHistory()}><Icon name="clock" size={14} /></button>
         <button
-          class="tool"
+          class="icon-btn vh-tool"
           class:active={vault.centerMode === 'graph'}
+          aria-pressed={vault.centerMode === 'graph'}
           title="Graph view"
           aria-label="Graph view"
           data-icon="share"
-          onclick={() => {
-            vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
-            vault.persistView();
-          }}
+          onclick={toggleGraph}
         >
           <Icon name="share" size={14} />
         </button>
         <button
-          class="tool"
+          class="icon-btn vh-tool"
           class:active={vault.centerMode === 'docs-agents'}
+          aria-pressed={vault.centerMode === 'docs-agents'}
           title="Docs agent — have agents write documentation into this vault"
           aria-label="Docs agent"
           data-label="Docs agent"
           data-icon="zap"
-          onclick={() => {
-            if (vault.centerMode === 'docs-agents') {
-              vault.centerMode = vault.note ? 'note' : 'empty';
-              vault.persistView();
-            } else {
-              vault.openDocsAgents('');
-            }
-          }}
+          onclick={toggleDocsAgents}
         >
           <Icon name="zap" size={14} />
         </button>
-        <button class="tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
+        <button class="icon-btn vh-tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
           <Icon name="search" size={14} />
         </button>
-        <button class="tool" title="New note (⌘N)" aria-label="New note" data-icon="plus" data-overflow="1" onclick={() => openNewNote('')}>
+        <button class="icon-btn vh-tool" title="New note (⌘N)" aria-label="New note" data-icon="plus" data-overflow="1" onclick={() => openNewNote('')}>
           <Icon name="plus" size={14} />
         </button>
         <button
-          class="tool"
-          title="Toggle right panel"
-          aria-label="Toggle right panel"
-          data-icon="sidebar"
-          data-overflow="1"
-          onclick={() => {
-            rightOpen = !rightOpen;
-            localStorage.setItem('otto_vault_right_open', rightOpen ? '1' : '0');
-          }}
+          class="icon-btn vh-tool"
+          title="More vault actions"
+          aria-label="More vault actions"
+          aria-haspopup="menu"
+          data-keep
+          onclick={moreMenu}
         >
-          <Icon name="sidebar" size={14} />
+          <Icon name="more" size={14} />
         </button>
       {/if}
     {/snippet}
@@ -296,20 +334,29 @@
     <div class="panes">
       {#if leftOpen}
       <aside class="left" style="width:{leftW}px">
-        <div class="left-modes">
+        <div class="left-modes" role="group" aria-label="Sidebar view">
           <button
+            class="icon-btn vh-tool"
             class:active={vault.leftMode === 'files'}
+            aria-pressed={vault.leftMode === 'files'}
             title="Files"
+            aria-label="Files"
             onclick={() => (vault.leftMode = 'files')}><Icon name="folder" size={14} /></button
           >
           <button
+            class="icon-btn vh-tool"
             class:active={vault.leftMode === 'search'}
+            aria-pressed={vault.leftMode === 'search'}
             title="Search"
+            aria-label="Search"
             onclick={() => (vault.leftMode = 'search')}><Icon name="search" size={14} /></button
           >
           <button
+            class="icon-btn vh-tool"
             class:active={vault.leftMode === 'tags'}
+            aria-pressed={vault.leftMode === 'tags'}
             title="Tags"
+            aria-label="Tags"
             onclick={() => {
               vault.leftMode = 'tags';
               void vault.loadTags();
@@ -317,10 +364,10 @@
           >
           <div class="spacer"></div>
           {#if vault.leftMode === 'files'}
-            <button title="Collapse all" onclick={() => vault.collapseAll()}>
+            <button class="icon-btn" title="Collapse all" aria-label="Collapse all" onclick={() => vault.collapseAll()}>
               <Icon name="minimize" size={13} />
             </button>
-            <button title="Rescan vault" onclick={() => void vault.rescan()}>
+            <button class="icon-btn" title="Rescan vault" aria-label="Rescan vault" onclick={() => void vault.rescan()}>
               <Icon name="refresh" size={13} />
             </button>
           {/if}
@@ -392,7 +439,20 @@
           <NoteView />
         {:else}
           <div class="center-empty">
-            <p>Open a note from the tree, search, or press ⌘O.</p>
+            <EmptyState
+              icon="note"
+              title="No note open"
+              body="Open a note from the file tree or search, press ⌘O to jump to one, or start a new note."
+              actionLabel="New note"
+              actionIcon="plus"
+              onaction={() => openNewNote('')}
+            >
+              {#if indexNote}
+                <button class="btn ghost" onclick={() => void vault.open(indexNote!)}>Open {indexNote}</button>
+              {:else}
+                <button class="btn ghost" onclick={() => (vault.switcherOpen = true)}>Quick switcher (⌘O)</button>
+              {/if}
+            </EmptyState>
           </div>
         {/if}
       </main>
@@ -407,6 +467,10 @@
     </div>
 
     <footer class="vault-statusbar">
+      <span class="vs-counts">
+        {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ?? vault.current.links} links{#if (vault.status?.unresolved ?? 0) > 0}
+          · {vault.status?.unresolved} unresolved{/if}
+      </span>
       {#if vault.note}
         <span>{vault.backlinks.length} backlinks</span>
         <span>{vault.note.meta.word_count} words</span>
@@ -490,7 +554,7 @@
     color: var(--text);
     border-radius: 8px;
     padding: 5px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
     max-width: 260px;
   }
@@ -507,28 +571,28 @@
     font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.4px;
-    color: var(--accent, #9ab4ff);
-    border: 1px solid var(--accent, #9ab4ff);
+    color: var(--accent-text);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
     border-radius: 5px;
     padding: 1px 6px;
   }
   .scan-chip {
-    font-size: 11px;
-    color: var(--accent, #9ab4ff);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .scan-chip.err {
-    color: var(--status-exited);
+    color: var(--danger);
     animation: none;
   }
   .run-chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 11px;
-    color: var(--accent, #9ab4ff);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    border: 1px solid var(--accent, #7a9cff);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
     border-radius: 999px;
     padding: 2px 9px;
     cursor: pointer;
@@ -543,37 +607,21 @@
       opacity: 0.45;
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .scan-chip,
+    .run-chip {
+      animation: none;
+    }
+  }
   .spacer,
   .grow {
     flex: 1;
   }
-  .counts {
-    font-size: 11.5px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    margin-inline-end: 4px;
-  }
-  /* Narrow panes: the tools matter more than the tally. */
-  @media (max-width: 1100px) {
-    .counts {
-      display: none;
-    }
-  }
-  .tool {
-    display: inline-flex;
-    background: none;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    color: var(--text);
-    padding: 5px 7px;
-    cursor: pointer;
-  }
-  .tool:hover {
-    background: var(--hover);
-  }
-  .tool.active {
-    border-color: var(--accent, #7a9cff);
-    color: var(--accent, #9ab4ff);
+  /* Header + sidebar-mode toggles are global .icon-btn; "on" is the quiet
+     selection tint, never the accent as text colour. */
+  .vh-tool.active {
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .panes {
     display: flex;
@@ -592,22 +640,6 @@
     gap: 2px;
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);
-  }
-  .left-modes button {
-    display: inline-flex;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-dim);
-    padding: 5px 7px;
-    cursor: pointer;
-  }
-  .left-modes button:hover {
-    background: var(--hover);
-  }
-  .left-modes button.active {
-    color: var(--accent, #9ab4ff);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .resizer {
     width: 4px;
@@ -694,11 +726,7 @@
     color: var(--text);
   }
   .center-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-size: 13px;
+    overflow-y: auto;
   }
   .right-pane {
     border-inline-start: 1px solid var(--border);
@@ -715,10 +743,13 @@
     color: var(--text-dim);
   }
   .vault-statusbar .ok {
-    color: var(--status-working);
+    color: var(--success);
   }
   .vault-statusbar .bad {
-    color: var(--status-exited);
+    color: var(--danger);
+  }
+  .vs-counts {
+    white-space: nowrap;
   }
   .vault-statusbar .dim {
     opacity: 0.7;

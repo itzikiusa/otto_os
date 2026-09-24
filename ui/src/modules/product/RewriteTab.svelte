@@ -6,6 +6,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import type { ProductStoryVersion } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -202,13 +203,13 @@
   <div class="rewrite-tab">
 
     <!-- ── Generate panel ───────────────────────────────────────────────────── -->
-    <section class="card gen-panel">
+    <section class="rw-card gen-panel">
       <div class="gen-row">
         <div class="provider-wrap">
           <label class="field-label" for="rw-provider-sel">Provider</label>
           <select
             id="rw-provider-sel"
-            class="sel"
+            class="input rw-sel"
             bind:value={provider}
             disabled={generating}
           >
@@ -219,7 +220,7 @@
         </div>
 
         <button
-          class="action-btn primary"
+          class="btn primary"
           onclick={generate}
           disabled={generating || pollTimer !== null}
         >
@@ -243,11 +244,13 @@
       <div class="muted">Loading version content…</div>
     {:else if suggestedVersion}
       <!-- Version metadata -->
-      <section class="card version-meta">
+      <section class="rw-card version-meta">
         <div class="vm-row">
           <div class="vm-info">
             <span class="vm-label">Suggested v{suggestedVersion.version_no}</span>
-            <span class="vm-date">{new Date(suggestedVersion.created_at).toLocaleString()}</span>
+            <!-- Agent-written draft: attributed, and only reaches the source
+                 when a person overwrites it below. -->
+            <AgentByline at={suggestedVersion.created_at} testid="rewrite-byline" />
           </div>
           {#if suggestedVersion.change_notes}
             <div class="change-notes">
@@ -261,16 +264,16 @@
       <!-- Diff view toggle -->
       <div class="view-toggle-row">
         <span class="field-label">View</span>
-        <div class="segmented">
-          <button class:active={diffView === 'split'} onclick={() => (diffView = 'split')}>Word diff</button>
-          <button class:active={diffView === 'source'} onclick={() => (diffView = 'source')}>Source only</button>
-          <button class:active={diffView === 'suggested'} onclick={() => (diffView = 'suggested')}>Suggested only</button>
+        <div class="segmented" role="group" aria-label="Diff view">
+          <button class:active={diffView === 'split'} aria-pressed={diffView === 'split'} onclick={() => (diffView = 'split')}>Word diff</button>
+          <button class:active={diffView === 'source'} aria-pressed={diffView === 'source'} onclick={() => (diffView = 'source')}>Source only</button>
+          <button class:active={diffView === 'suggested'} aria-pressed={diffView === 'suggested'} onclick={() => (diffView = 'suggested')}>Suggested only</button>
         </div>
       </div>
 
       <!-- Word-level diff using the shared DiffView component (T3) -->
       {#if diffView === 'split'}
-        <div class="diff-wrap card">
+        <div class="diff-wrap rw-card">
           <div class="pane-header diff-pane-header">
             <span class="pane-label source-label">Source{sourceVersion ? ` v${sourceVersion.version_no}` : ''}</span>
             <span class="pane-label suggested-label">Suggested v{suggestedVersion.version_no}</span>
@@ -283,7 +286,7 @@
           />
         </div>
       {:else if diffView === 'source'}
-        <div class="single-pane card">
+        <div class="single-pane rw-card">
           <div class="pane-header">
             <span class="pane-label source-label">Source</span>
             {#if sourceVersion}
@@ -299,7 +302,7 @@
           </div>
         </div>
       {:else}
-        <div class="single-pane card">
+        <div class="single-pane rw-card">
           <div class="pane-header">
             <span class="pane-label suggested-label">Suggested</span>
             <span class="pane-meta">v{suggestedVersion.version_no}</span>
@@ -317,13 +320,13 @@
       <!-- Publish sits AFTER the diff: review what changes first, then
            overwrite. The button names the live target; publish() confirms. -->
       {#if story && story.source_kind !== 'draft'}
-        <section class="card rw-publish" data-testid="rw-publish">
+        <section class="rw-card rw-publish" data-testid="rw-publish">
           <p class="rw-publish-text">
             Publishing replaces the live {targetNoun} of <strong>{targetLabel}</strong> with suggested
             v{suggestedVersion.version_no}, for everyone who can see it.
             {#if sourceVersion}Otto keeps the current text as source v{sourceVersion.version_no}.{/if}
           </p>
-          <button class="action-btn danger" onclick={publish} disabled={publishing} data-testid="rw-publish-btn">
+          <button class="btn danger" onclick={publish} disabled={publishing} data-testid="rw-publish-btn">
             {publishing ? 'Publishing…' : `Overwrite ${targetShort}…`}
           </button>
         </section>
@@ -351,9 +354,9 @@
   }
 
   /* ── Card ────────────────────────────────────────────────────── */
-  .card {
+  .rw-card {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    border-radius: var(--radius-m);
     padding: 12px 14px;
     background: var(--surface);
   }
@@ -371,66 +374,21 @@
     gap: 6px;
   }
   .field-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .sel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: 12px;
-    padding: 4px 8px;
+  .rw-sel {
+    width: auto;
+    font-size: var(--fs-s);
   }
   .polling-indicator {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
-  }
-
-  /* ── Buttons ─────────────────────────────────────────────────── */
-  .action-btn {
-    height: 30px;
-    padding: 0 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms, color 110ms, opacity 110ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .action-btn.primary {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-weight: 600;
-  }
-  .action-btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-  }
-  .action-btn.danger {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-    font-weight: 600;
-  }
-  .action-btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--danger) 20%, transparent);
   }
 
   /* ── Version metadata card ───────────────────────────────────── */
@@ -447,13 +405,9 @@
     min-width: 120px;
   }
   .vm-label {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
-  }
-  .vm-date {
-    font-size: 11px;
-    color: var(--text-dim);
   }
   .change-notes {
     flex: 1;
@@ -499,37 +453,6 @@
     align-items: center;
     gap: 10px;
   }
-  .segmented {
-    display: flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    overflow: hidden;
-  }
-  .segmented button {
-    height: 26px;
-    padding: 0 12px;
-    border: none;
-    border-inline-end: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 90ms, color 90ms;
-  }
-  .segmented button:last-child {
-    border-inline-end: none;
-  }
-  .segmented button:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    color: var(--text);
-  }
-  .segmented button.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
-    font-weight: 600;
-  }
-
   /* ── DiffView wrapper (split word-diff view, T3) ────────────── */
   .diff-wrap {
     padding: 0;
@@ -554,7 +477,7 @@
     flex-shrink: 0;
   }
   .pane-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -565,12 +488,14 @@
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);
     color: var(--text-dim);
   }
+  /* Suggested is agent-written, not "selected": neutral, marked by its label. */
   .suggested-label {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
   }
   .pane-meta {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 

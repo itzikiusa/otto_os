@@ -5,6 +5,7 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
   import { runStatus, type StatusInfo } from '../../lib/status';
   /** Shared run vocabulary (lib/status.ts); `partial` (some agents failed)
    *  is analysis-specific and reads as a warning. */
@@ -500,7 +501,7 @@
             <div class="rp-agent card">
               <div class="rp-agent-top">
                 <span class="rp-agent-name">{agent.name || agent.skill}</span>
-                <span class="rp-agent-chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
+                <AgentByline provider={agent.provider} model={agent.model} at={agent.finished_at ?? agent.started_at} />
                 <span class="grow"></span>
                 {#if agent.session_id}
                   <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id!)}>
@@ -557,7 +558,10 @@
           {#if findings}
             <section class="findings-card card">
               <div class="findings-header">
-                <span class="findings-agent-name">{agent.name || agent.skill}</span>
+                <span class="findings-who">
+                  <span class="findings-agent-name">{agent.name || agent.skill}</span>
+                  <AgentByline provider={agent.provider} model={agent.model} at={agent.finished_at} />
+                </span>
                 <div class="findings-right">
                   {#if agent.session_id}
                     <button
@@ -1054,24 +1058,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Agent-card provider chip. NOTE: deliberately NOT named `.chip` — that class
-   * is the provider-selection chip in the Configure panel, and a second `.chip`
-   * rule here would override its `.chip-on` selected state (equal specificity,
-   * later in source order). */
-  .rp-agent-chip {
-    flex-shrink: 0;
-    height: 22px;
-    display: inline-flex;
-    align-items: center;
-    padding: 0 9px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    white-space: nowrap;
-  }
   .grow {
     flex: 1;
   }
@@ -1161,8 +1147,15 @@
     align-items: center;
     gap: 8px;
   }
+  .findings-who {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    min-width: 0;
+  }
   .findings-agent-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }

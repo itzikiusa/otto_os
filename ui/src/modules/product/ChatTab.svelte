@@ -113,7 +113,7 @@
   <ListPane title="Chats" isEmpty={!loading && !loadError && chats.length === 0}>
     {#snippet actions()}
       <button
-        class="p-btn primary"
+        class="btn small primary"
         onclick={createChat}
         disabled={creating}
         title="Start a new discovery chat"

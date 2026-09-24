@@ -314,7 +314,7 @@ test('product mobile sweep', async ({ page }, info) => {
   await openTab(page, info, 'Inject');
   await expect(page.locator('.inject-tab')).toBeVisible({ timeout: 15_000 });
   try {
-    await page.locator('.action-btn.primary').first().click();
+    await page.locator('.inject-tab .btn.primary').first().click();
     // The button flips to "Rebuild" once the bundle is assembled.
     await page.getByRole('button', { name: 'Rebuild' }).first().waitFor({ timeout: 9_000 });
     await page.waitForTimeout(500);

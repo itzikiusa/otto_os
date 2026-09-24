@@ -4,10 +4,12 @@
   // 13 sub-views into 4 workflow GROUPS (Story · Discover · Deliver · Log) —
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
-  import './product.css';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { storyStage } from '../../lib/status';
   import { untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
@@ -353,16 +355,6 @@
     }
   }
 
-  function stageColor(stage: string): string {
-    switch (stage) {
-      case 'draft': return 'stage-draft';
-      case 'review': return 'stage-review';
-      case 'approved': return 'stage-approved';
-      case 'done': return 'stage-done';
-      default: return 'stage-other';
-    }
-  }
-
   function sourceIcon(kind: string): IconName {
     switch (kind) {
       case 'jira': return 'ticket';
@@ -380,14 +372,67 @@
     mobileSection = 'content';
   }
 
+  /** The list in the order the tree shows it (epics followed by their
+   *  children), so "the next story" after a delete is the row below it. */
+  function visibleOrder(): ProductStory[] {
+    const out: ProductStory[] = [];
+    for (const n of tree) {
+      out.push(n.story);
+      for (const f of n.folders) out.push(...f.children);
+    }
+    return out;
+  }
+
   async function deleteStory(s: ProductStory): Promise<void> {
     const ok = await confirmer.ask(
       `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).`,
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
-    void product.deleteStory(s.id);
+    // Deleting the open story lands on its neighbour (the row below, else the
+    // one above) — never on an empty "pick one" pane.
+    const wasOpen = product.selectedId === s.id;
+    const order = visibleOrder();
+    const i = order.findIndex((x) => x.id === s.id);
+    const gone = new Set([s.id, ...product.childrenOf(s.id).map((c) => c.id)]);
+    const next =
+      order.slice(i + 1).find((x) => !gone.has(x.id)) ??
+      order.slice(0, Math.max(i, 0)).reverse().find((x) => !gone.has(x.id)) ??
+      null;
+    try {
+      await product.deleteStory(s.id);
+    } catch (e) {
+      toasts.error(`Couldn't delete "${s.title}"`, product.errMsg(e));
+      return;
+    }
+    if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
+      product.tab = 'overview';
+      rememberSelection('product', next.id);
+      void product.select(next.id);
+    }
   }
+
+  /** Collection summary (shown only when no story is open): counts per stage
+   *  and the most recently touched stories, each one click away. */
+  const stageCounts = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const s of product.stories) if (s.tree_kind !== 'doc') m.set(s.stage, (m.get(s.stage) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  });
+  const recentStories = $derived(
+    [...product.stories].sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? '')).slice(0, 8),
+  );
+
+  /** Header title: the open story (Stories view), else the module. The parent
+   *  epic is the one crumb, so a child reads `Epic / Child`. */
+  const headerTitle = $derived(
+    product.view === 'stories' && selectedStory ? selectedStory.title : 'Product',
+  );
+  const headerCrumbs = $derived(
+    product.view === 'stories' && selectedParent
+      ? [{ label: selectedParent.title, onclick: () => void product.select(selectedParent.id) }]
+      : [],
+  );
 
   // ── Sidebar width (drag-resizable, persisted) ─────────────────────────────
   // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
@@ -458,7 +503,7 @@
           {#if node?.isEpic}
             <span class="epic-badge">epic · {node.childCount}</span>
           {:else}
-            <span class="stage-badge {stageColor(s.stage)}">{s.stage}</span>
+            <StatusBadge status={storyStage(s.stage)} variant="text" />
           {/if}
           {#if s.tree_kind === 'doc'}
             <span class="draft-badge doc">DOC</span>
@@ -498,19 +543,40 @@
 {/snippet}
 
 <div class="product-shell">
-<PageHeader title="Product" subtitle="Analyse Jira / Confluence stories — questions, plans and test cases, published back.">
+<PageHeader
+  title={headerTitle}
+  crumbs={headerCrumbs}
+  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Analyse Jira / Confluence stories — questions, plans and test cases, published back.'}
+>
+  {#snippet badge()}
+    {#if product.view === 'stories' && selectedStory}
+      <!-- Open story: its stage (or tree role), folder and source key sit beside
+           the title — the old breadcrumb row is folded into the header. -->
+      {#if selectedIsEpic}
+        <span class="chip pp-epic-chip"><Icon name="folder" size={10} /> Epic · {product.childrenOf(selectedStory.id).length} children</span>
+      {:else if selectedStory.tree_kind === 'doc'}
+        <span class="chip"><Icon name="note" size={10} /> Doc</span>
+      {:else}
+        <StatusBadge status={storyStage(selectedStory.stage)} />
+      {/if}
+      {#if selectedStory.folder}
+        <span class="chip pp-folder-chip" title="Folder inside the epic"><Icon name="folder" size={10} /> {selectedStory.folder}</span>
+      {/if}
+      {#if selectedStory.source_kind !== 'draft'}
+        <span class="pp-key mono">{selectedStory.source_key}</span>
+      {/if}
+    {/if}
+  {/snippet}
   {#snippet tabs()}
     <!-- The ONE Stories|Learnings toggle, at every breakpoint. -->
-    <div class="m-view-toggle" role="tablist" aria-label="View">
+    <div class="segmented m-view-toggle" role="tablist" aria-label="View">
       <button
-        class="vt"
         class:active={product.view === 'stories'}
         role="tab"
         aria-selected={product.view === 'stories'}
         onclick={() => (product.view = 'stories')}
       >Stories</button>
       <button
-        class="vt"
         class:active={product.view === 'learnings'}
         role="tab"
         aria-selected={product.view === 'learnings'}
@@ -520,6 +586,11 @@
   {/snippet}
   {#snippet actions()}
     {#if product.view === 'stories'}
+      {#if selectedStory && selectedIsEpic}
+        <button class="btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
+          <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
+        </button>
+      {/if}
       <button
         class="btn"
         onclick={newMenu}
@@ -555,11 +626,7 @@
   <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
   <aside class="product-side">
     {#if product.view === 'stories'}
-      <!-- Stories sidebar -->
-      <div class="side-head">
-        <span class="side-title">Stories</span>
-      </div>
-
+      <!-- Stories sidebar (the header's Stories|Learnings toggle names it). -->
       <!-- Tag filter row (only when tags exist) -->
       {#if allTags.length > 0}
         <div class="tag-filter-row">
@@ -615,10 +682,6 @@
 
     {:else}
       <!-- Learnings sidebar — filter nav -->
-      <div class="side-head">
-        <span class="side-title">Learnings</span>
-      </div>
-
       <div class="learn-nav">
         {#each ([
           { value: 'all', label: 'All' },
@@ -674,33 +737,6 @@
          inline-end (wrapping on a narrow window); a single-sub group (Log)
          shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
-      {#if selectedStory && (selectedParent || selectedIsEpic)}
-        <!-- Breadcrumb `Epic › Folder › Title` for a child; an epic shows its
-             child count + the Add child ▾ menu (design §3.2). -->
-        <div class="crumb-row">
-          <nav class="crumbs" aria-label="Epic breadcrumb">
-            {#if selectedParent}
-              <button class="crumb" onclick={() => void product.select(selectedParent.id)} title="Open the epic">
-                <Icon name="folder" size={11} /> {selectedParent.title}
-              </button>
-              <span class="crumb-sep">›</span>
-              {#if selectedStory.folder}
-                <span class="crumb dim">{selectedStory.folder}</span>
-                <span class="crumb-sep">›</span>
-              {/if}
-              <span class="crumb cur">{selectedStory.title}</span>
-            {:else}
-              <span class="crumb cur"><Icon name="folder" size={11} /> {selectedStory.title}</span>
-              <span class="crumb dim">epic · {product.childrenOf(selectedStory.id).length} children</span>
-            {/if}
-          </nav>
-          {#if selectedIsEpic}
-            <button class="p-btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic">
-              <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
-            </button>
-          {/if}
-        </div>
-      {/if}
       <div class="product-header-row2">
         <div class="tab-strip" role="tablist" aria-label="Story tabs">
           {#each visibleGroups as g (g.id)}
@@ -750,12 +786,33 @@
           onaction={() => (importOpen = true)}
         />
       {:else if !product.selectedId}
-        <EmptyState
-          variant="page"
-          icon="file"
-          title="Pick a story"
-          body="Select a story on the left to analyse it."
-        />
+        <!-- No story open (a phone, or the list is still loading): a summary
+             of the collection with every recent story one click away. -->
+        <section class="pp-summary" aria-label="Stories summary">
+          <h2 class="pp-summary-title">
+            {product.stories.length} {product.stories.length === 1 ? 'story' : 'stories'}
+          </h2>
+          {#if stageCounts.length}
+            <div class="pp-summary-stages">
+              {#each stageCounts as [st, n] (st)}
+                <StatusBadge status={storyStage(st)} label="{n} {storyStage(st).label.toLowerCase()}" />
+              {/each}
+            </div>
+          {/if}
+          <div class="section-title">Recently updated</div>
+          <ul class="pp-recent">
+            {#each recentStories as r (r.id)}
+              <li>
+                <button class="pp-recent-row" onclick={() => selectStory(r)}>
+                  <Icon name={r.tree_kind === 'doc' ? 'note' : r.tree_kind === 'epic' ? 'folder' : sourceIcon(r.source_kind)} size={13} />
+                  <span class="pp-recent-title">{r.title}</span>
+                  <StatusBadge status={storyStage(r.stage)} variant="text" />
+                  <RelTime iso={r.updated_at} class="pp-recent-time" />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </section>
       {:else if product.tab === 'overview'}
         <OverviewTab />
       {:else if product.tab === 'chat'}
@@ -840,26 +897,13 @@
   .side-resizer:hover {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
-  .side-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px 4px;
-    flex-shrink: 0;
-  }
+  /* Tree-role / draft markers are metadata, not selection: neutral. */
   .draft-badge {
     font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0 6px;
     border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .side-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    background: var(--surface-2);
     color: var(--text-dim);
   }
   .story-list {
@@ -1019,60 +1063,8 @@
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .draft-badge.doc {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--surface-2);
     color: var(--text-dim);
-  }
-  /* ── Breadcrumb row (child / epic header) ────────────────────── */
-  .crumb-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 14px 0;
-    flex-shrink: 0;
-  }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-width: 0;
-    font-size: 12px;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .crumb {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: none;
-    background: none;
-    color: var(--accent-text);
-    font-size: 12px;
-    padding: 0;
-    cursor: pointer;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 40%;
-  }
-  .crumb.dim {
-    color: var(--text-dim);
-    cursor: default;
-  }
-  .crumb.cur {
-    color: var(--text);
-    cursor: default;
-    font-weight: 600;
-  }
-  .crumb-sep {
-    color: var(--text-dim);
-  }
-  .add-child-btn {
-    flex-shrink: 0;
   }
   .story-icon {
     flex-shrink: 0;
@@ -1106,34 +1098,6 @@
   }
   .story-key {
     font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  /* Stage badges */
-  .stage-badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: capitalize;
-    padding: 1px 6px;
-    border-radius: 999px;
-  }
-  .stage-draft {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .stage-review {
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
-    color: var(--warning);
-  }
-  .stage-approved {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .stage-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
-  }
-  .stage-other {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
   }
   /* ── Tag filter row ─────────────────────────────────────────── */
@@ -1242,9 +1206,11 @@
   .st:hover {
     color: var(--text);
   }
+  /* Selection is the surface lift (components.md §3), not the accent. */
   .tab-strip .st.active {
     background: var(--surface);
-    color: var(--accent-text);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1266,8 +1232,8 @@
   .sub-tab-strip .st {
     height: 24px;
     padding: 0 9px;
-    font-size: 11px;
-    color: color-mix(in srgb, var(--text-dim) 85%, transparent);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     border: 1px solid transparent;
   }
   .sub-tab-strip .st:hover {
@@ -1275,9 +1241,10 @@
     border-color: var(--border);
   }
   .sub-tab-strip .st.active {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--border);
+    font-weight: 600;
   }
   .product-body {
     flex: 1;
@@ -1324,40 +1291,74 @@
     font-weight: 600;
   }
 
+  /* ── Collection summary (no story open) ──────────────────────────── */
+  .pp-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 720px;
+    width: 100%;
+  }
+  .pp-summary-title {
+    margin: 0;
+    font-size: var(--fs-l);
+    font-weight: 600;
+  }
+  .pp-summary-stages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .pp-recent {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
+  .pp-recent li + li {
+    border-top: 1px solid var(--border);
+  }
+  .pp-recent-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 32px;
+    padding: 4px 10px;
+    border: none;
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-m);
+    text-align: start;
+    cursor: pointer;
+  }
+  .pp-recent-row:hover {
+    background: var(--hover);
+  }
+  .pp-recent-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pp-recent-row :global(.pp-recent-time) {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .pp-key {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+
   /* ── Mobile accordion headers — hidden on desktop/tablet ──────────────── */
   .m-acc-head {
     display: none;
-  }
-
-  /* Stories|Learnings toggle — the ONE copy, a compact segmented control
-     living above the story list at every breakpoint. */
-  .m-view-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    padding: 2px;
-    border-radius: var(--radius-m, 8px);
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
-    flex-shrink: 0;
-  }
-  .m-view-toggle .vt {
-    height: 24px;
-    padding: 0 10px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .m-view-toggle .vt:hover {
-    color: var(--text);
-  }
-  .m-view-toggle .vt.active {
-    background: var(--surface);
-    color: var(--accent-text);
   }
 
   @media (max-width: 640px) {
@@ -1370,9 +1371,9 @@
     }
 
     /* Slightly bigger touch target for the segmented view toggle. */
-    .m-view-toggle .vt {
+    .m-view-toggle > button {
       height: 30px;
-      font-size: 13px;
+      font-size: var(--fs-m);
       padding: 0 12px;
     }
 
@@ -1452,13 +1453,6 @@
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
-    .side-title {
-      font-size: 12px;
-    }
-    .p-btn {
-      font-size: 13px;
-      padding: 6px 11px;
-    }
     .list-empty {
       font-size: 14px;
     }
@@ -1468,9 +1462,6 @@
     .story-key,
     .story-meta {
       font-size: 12.5px;
-    }
-    .stage-badge {
-      font-size: 11px;
     }
     .tag-filter-btn,
     .story-tag-chip {

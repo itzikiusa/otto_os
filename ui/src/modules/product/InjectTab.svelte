@@ -94,7 +94,7 @@
     <!-- ── Action bar ────────────────────────────────────────────────────── -->
     <div class="action-bar card">
       <button
-        class="action-btn primary"
+        class="btn primary"
         onclick={buildPreview}
         disabled={loading}
       >
@@ -104,7 +104,7 @@
 
       {#if bundle}
         <button
-          class="action-btn"
+          class="btn"
           onclick={copyMarkdown}
           disabled={copying}
           title="Copy inject bundle markdown to clipboard"
@@ -136,7 +136,7 @@
         /></PathField>
 
         <button
-          class="action-btn accent"
+          class="btn"
           onclick={openInAgent}
           disabled={launching}
           title="Create an agent session seeded with this inject bundle"
@@ -174,7 +174,7 @@
         <div class="preview-header">
           <span class="section-label">Full Markdown</span>
           <button
-            class="action-btn small"
+            class="btn small"
             onclick={copyMarkdown}
             disabled={copying}
             title="Copy to clipboard"
@@ -275,53 +275,6 @@
   .cwd-input:focus {
     outline: none;
     border-color: var(--accent);
-  }
-
-  /* Buttons */
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 11px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms, color 110ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .action-btn.primary {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-  }
-  .action-btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-  }
-  .action-btn.accent {
-    border-color: var(--status-working, #22c55e);
-    color: var(--status-working, #22c55e);
-    background: color-mix(in srgb, var(--status-working, #22c55e) 10%, transparent);
-  }
-  .action-btn.accent:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-working, #22c55e) 20%, transparent);
-  }
-  .action-btn.small {
-    height: 24px;
-    padding: 0 8px;
-    font-size: 11.5px;
   }
 
   /* Sections */

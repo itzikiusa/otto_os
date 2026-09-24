@@ -132,7 +132,7 @@
   <ListPane title="Threads">
     {#snippet actions()}
       <button
-        class="p-btn primary"
+        class="btn small primary"
         onclick={createThread}
         disabled={creating}
         title="Start a new refinement conversation"
@@ -158,7 +158,7 @@
             {/each}
           </select>
           <button
-            class="p-btn"
+            class="btn small"
             onclick={createFromRun}
             disabled={creating || !selectedRunId}
             title="Create a thread seeded from the selected discovery run"

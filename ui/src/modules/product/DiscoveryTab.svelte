@@ -150,7 +150,7 @@
     {/if}
 
     <button
-      class="toolbar-btn primary"
+      class="btn small primary"
       onclick={runDiscovery}
       disabled={running}
       title="Launch a new discovery swarm run for this story"
@@ -159,7 +159,7 @@
     </button>
 
     <button
-      class="toolbar-btn"
+      class="btn small"
       onclick={loadRuns}
       disabled={loading}
       title="Reload discovery runs"
@@ -263,7 +263,7 @@
                 <!-- Footer: View in Swarm -->
                 <div class="run-footer">
                   <button
-                    class="toolbar-btn"
+                    class="btn small"
                     onclick={() => viewInSwarm(summary)}
                   >
                     View in Swarm →
@@ -316,36 +316,6 @@
     color: var(--text);
     font-size: 12px;
     cursor: pointer;
-  }
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .toolbar-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .toolbar-btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   /* ── States ──────────────────────────────────────────────────────── */
