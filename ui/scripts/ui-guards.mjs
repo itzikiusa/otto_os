@@ -167,7 +167,7 @@ function styleBlocks(f) {
   if (f.path.endsWith('.css')) return STYLE_EXCLUDE.has(f.rel) ? [] : [{ css: f.text, offset: 0 }];
   if (!f.path.endsWith('.svelte')) return [];
   const out = [];
-  for (const m of f.text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
+  for (const m of f.text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style[^>]*>/gi)) {
     out.push({ css: m[1], offset: m.index + m[0].indexOf('>') + 1 });
   }
   return out;
@@ -254,8 +254,8 @@ function tagEnd(text, i) {
 for (const f of files) {
   if (!f.path.endsWith('.svelte')) continue;
   const markup = f.text
-    .replace(/<script[\s\S]*?<\/script>/g, blank)
-    .replace(/<style[\s\S]*?<\/style>/g, blank)
+    .replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, blank)
+    .replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank)
     .replace(/<!--[\s\S]*?-->/g, blank);
   for (const m of markup.matchAll(/<button(?=[\s>])/g)) {
     const end = tagEnd(markup, m.index + 7);
