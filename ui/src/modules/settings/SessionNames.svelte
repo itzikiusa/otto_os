@@ -271,10 +271,10 @@
     vertical-align: middle;
   }
   .badge-on {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: #052e10;
-    background: #7ee787;
+    color: var(--success);
+    background: var(--success-soft);
     border-radius: 4px;
     padding: 1px 5px;
   }
@@ -285,7 +285,7 @@
     text-overflow: ellipsis;
   }
   .theme-cap {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .custom-list {
     list-style: none;

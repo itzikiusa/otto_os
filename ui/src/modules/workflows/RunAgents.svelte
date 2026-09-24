@@ -270,7 +270,7 @@
   }
   .grp-count {
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 0 6px;
@@ -306,7 +306,7 @@
     max-width: 50%;
   }
   .s-provider {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .fallback {
     padding: 4px 8px 8px;
@@ -315,11 +315,11 @@
   }
   .s-status {
     text-transform: capitalize;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .s-id {
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .subs {

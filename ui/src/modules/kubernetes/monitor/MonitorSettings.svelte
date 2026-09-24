@@ -469,7 +469,7 @@
     display: block;
     margin-top: 4px;
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-word;
     user-select: all;
@@ -601,7 +601,7 @@
   }
   .preview {
     margin: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-all;
     max-height: 120px;

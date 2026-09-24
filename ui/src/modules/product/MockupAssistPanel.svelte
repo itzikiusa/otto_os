@@ -223,11 +223,11 @@
   }
   .embedded .ma-format button {
     padding: 2px 7px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .ma-format button.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ma-format button:disabled {
     cursor: default;
@@ -256,7 +256,7 @@
   }
   .ma-working {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .ma-close {

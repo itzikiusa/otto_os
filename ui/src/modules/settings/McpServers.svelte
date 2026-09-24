@@ -613,7 +613,7 @@
     color: var(--text-dim);
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
@@ -622,7 +622,7 @@
     color: var(--text-dim);
   }
   .badge.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }

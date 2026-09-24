@@ -84,7 +84,7 @@
     <EmptyState icon="radar" title="Mission Control unavailable" body={error} />
   {:else if summary}
     <div class="stats">
-      <div class="stat"><span class="n working">{summary.active}</span><span class="l">active</span></div>
+      <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>
       <div class="stat"><span class="n" class:needs={summary.needs_approval > 0}>{summary.needs_approval}</span><span class="l">need approval</span></div>
       <div class="stat"><span class="n">{summary.total}</span><span class="l">items</span></div>
       <div class="stat"><span class="n">{fmtCost(summary.total_cost)}</span><span class="l">spend</span></div>
@@ -140,19 +140,20 @@
     border-radius: var(--radius-s);
   }
   .n {
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
+  /* Tone only when there is something to see: a green "0 working" was noise. */
   .n.working {
-    color: var(--status-working);
+    color: var(--success);
   }
   .n.needs {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .chips {
@@ -165,7 +166,7 @@
     align-items: center;
     gap: 4px;
     padding: 1px 7px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--text-dim);
@@ -213,7 +214,7 @@
     min-width: 0;
   }
   .st {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .ago {
     color: var(--text-dim);

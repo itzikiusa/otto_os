@@ -99,7 +99,7 @@
     color: var(--text);
   }
   .sc-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .sc-grid {
@@ -116,7 +116,7 @@
   }
   .sc-cat {
     margin: 0 0 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -141,7 +141,7 @@
   }
   kbd {
     font-family: var(--font-ui);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);

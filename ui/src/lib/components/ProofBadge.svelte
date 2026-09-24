@@ -37,7 +37,7 @@
     height: 18px;
     padding: 0 7px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.01em;
     white-space: nowrap;
@@ -56,7 +56,7 @@
     border-color: color-mix(in srgb, var(--status-exited) 35%, transparent);
   }
   .proof-badge.accent {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }

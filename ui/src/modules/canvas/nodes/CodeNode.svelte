@@ -104,7 +104,7 @@
     border-bottom: 1px solid var(--border);
   }
   .lang {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);

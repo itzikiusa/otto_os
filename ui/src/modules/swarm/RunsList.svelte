@@ -186,7 +186,7 @@
     justify-content: flex-end;
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -199,7 +199,7 @@
   }
   .badge.done {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .badge.error {
     background: color-mix(in srgb, var(--status-exited) 22%, transparent);

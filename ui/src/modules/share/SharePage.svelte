@@ -328,7 +328,7 @@
   }
   .otp-icon {
     font-size: 36px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .error-card h2 {
     font-size: 17px;
@@ -390,7 +390,7 @@
   .otp-link {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
     padding: 2px 4px;
@@ -447,7 +447,7 @@
 
   /* Status pill — mirrors the palette chip colours. */
   .status-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 2px 8px;
@@ -464,7 +464,7 @@
 
   /* Read-only badge — subtle, top-right inside the header. */
   .ro-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);

@@ -410,14 +410,14 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
 
   /* Status badges */
   .status-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -427,7 +427,7 @@
   }
   .status-done {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .status-running {
     background: color-mix(in srgb, var(--warning) 18%, transparent);
@@ -457,7 +457,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     font-weight: 500;
     cursor: pointer;
@@ -479,7 +479,7 @@
   }
 
   .section-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;

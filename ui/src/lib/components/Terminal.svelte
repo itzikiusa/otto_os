@@ -1666,7 +1666,7 @@
   }
   /* Scrollback match count / spinner badge next to the input */
   .find-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     user-select: none;
@@ -1708,7 +1708,7 @@
     min-width: 36px;
     text-align: end;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .find-result-text {
     overflow: hidden;
@@ -1718,7 +1718,7 @@
   }
   .find-result-more {
     padding: 3px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-ui);
     text-align: center;
@@ -1737,21 +1737,21 @@
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border: 1px solid var(--border);
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     opacity: 0.9;
   }
   .term-overlay.dim {
     opacity: 0.7;
   }
   .term-overlay .badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0;
     background: none;
     border: none;
   }
   .term-overlay .btn {
     padding: 1px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .badge {
     font-size: 11px;
@@ -1772,7 +1772,7 @@
     top: 8px;
     inset-inline-end: 8px;
     z-index: 4;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -1873,10 +1873,10 @@
     color: var(--text);
   }
   .tb-btn.tb-active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-size {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 28px;
     text-align: center;

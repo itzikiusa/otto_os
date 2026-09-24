@@ -223,7 +223,7 @@
   .h { margin: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
   .goal { font-size: 0.92rem; line-height: 1.45; }
   .src-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; flex-wrap: wrap; }
-  .link { color: var(--accent); }
+  .link { color: var(--accent-text); }
   .muted { color: var(--text-dim); }
   .mono { font-family: var(--font-mono); font-size: 0.78rem; }
   .dot { color: var(--text-dim); }
@@ -282,6 +282,6 @@
   .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

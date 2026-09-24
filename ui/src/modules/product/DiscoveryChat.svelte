@@ -380,14 +380,14 @@
     gap: 6px;
   }
   .bubble-role {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
   .bubble-time {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 

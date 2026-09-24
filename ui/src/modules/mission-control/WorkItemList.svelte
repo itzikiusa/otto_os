@@ -79,14 +79,10 @@
   .wi-row:hover {
     border-color: var(--accent);
   }
+  /* Selection is the accent tint, like every other list in the app. */
   .wi-row.active {
-    background: #7ee787;
-    color: #0a0a0a;
-    border-color: var(--success);
-  }
-  .wi-row.active .wi-sub,
-  .wi-row.active .wi-time {
-    color: #0a3d12;
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .wi-icon {
     flex: 0 0 auto;
@@ -94,7 +90,7 @@
     color: var(--text-dim);
   }
   .wi-row.active .wi-icon {
-    color: #0a0a0a;
+    color: var(--accent-text);
   }
   .wi-main {
     display: flex;
@@ -105,13 +101,13 @@
   }
   .wi-title {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-m);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .wi-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     display: flex;
     align-items: center;
@@ -131,7 +127,7 @@
   }
   .chip-status,
   .chip-risk {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 7px;
     border-radius: 999px;
@@ -144,25 +140,23 @@
     opacity: 0.92;
   }
   .badge-approve {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 2px 7px;
     border-radius: 999px;
-    background: #ffd33d;
-    color: #3a2c00;
+    background: var(--warning-soft);
+    color: var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
     white-space: nowrap;
   }
   .wi-cost {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 48px;
     text-align: right;
   }
-  .wi-row.active .wi-cost {
-    color: #0a3d12;
-  }
   .wi-time {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     min-width: 28px;
     text-align: right;
   }

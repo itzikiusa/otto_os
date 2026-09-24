@@ -429,7 +429,7 @@
     <div class="section">
       <div class="label">PR &amp; commit draft model</div>
       <div class="row">
-        <select bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
+        <select class="select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
           <option value="">Fastest (haiku)</option>
           {#each DRAFT_MODELS as m (m)}
             <option value={m}>{m}</option>
@@ -708,11 +708,11 @@
     text-align: center;
   }
   .chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row {
     display: flex;

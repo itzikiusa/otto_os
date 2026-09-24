@@ -204,8 +204,8 @@
     color: var(--status-working);
   }
   .status.succeeded {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
     font-weight: 600;
   }
   .status.failed,

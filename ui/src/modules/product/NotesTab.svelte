@@ -282,13 +282,13 @@
   }
   .accent-btn {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     font-weight: 600;
   }
   .accent-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Notes list ──────────────────────────────────────────────────── */
@@ -327,21 +327,21 @@
     flex: 1;
   }
   .section-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 2px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .n-meta {
     font-size: 11px;
     color: var(--text-dim);
   }
   .n-author {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     opacity: 0.7;
   }
@@ -428,7 +428,7 @@
     margin: 0 0 0.6em;
     font-style: italic;
   }
-  .n-body :global(a) { color: var(--accent); text-decoration: none; }
+  .n-body :global(a) { color: var(--accent-text); text-decoration: none; }
   .n-body :global(a:hover) { text-decoration: underline; }
 
   /* ── Inline edit ─────────────────────────────────────────────────── */

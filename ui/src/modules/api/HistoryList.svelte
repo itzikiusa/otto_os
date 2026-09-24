@@ -177,7 +177,7 @@
     gap: 2px;
   }
   .icon-btn.on {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .list-search {
@@ -232,7 +232,7 @@
     flex-shrink: 0;
   }
   .rm-get { color: var(--status-working); }
-  .rm-post { color: var(--accent); }
+  .rm-post { color: var(--accent-text); }
   .rm-put,
   .rm-patch { color: #d2691e; }
   .rm-delete { color: var(--status-exited); }
@@ -241,7 +241,7 @@
     min-width: 0;
   }
   .status-dot {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 6px;
     height: 16px;
@@ -252,14 +252,14 @@
     flex-shrink: 0;
   }
   .status-dot.ok { color: var(--status-working); background: color-mix(in srgb, var(--status-working) 16%, transparent); }
-  .status-dot.redirect { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .status-dot.redirect { color: var(--accent-text); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   .status-dot.client { color: #d2691e; background: color-mix(in srgb, #d2691e 18%, transparent); }
   .status-dot.server { color: var(--status-exited); background: color-mix(in srgb, var(--status-exited) 16%, transparent); }
   .src-chip {
     height: 16px;
     padding: 0 6px;
     border-radius: 999px;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     font-size: 9px;
     font-weight: 700;
@@ -267,7 +267,7 @@
     flex-shrink: 0;
   }
   .htime {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }

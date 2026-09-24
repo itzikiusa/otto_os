@@ -124,15 +124,14 @@ unified toolbar. The row is also the window's drag surface in Tauri:
 the row pads itself past the traffic lights.
 
 ```
-[leading] [icon] Title [badge]  [tabs (inline)]      [secondary…] [primary] [⋯]
-                 subtitle
+[leading] [icon] Title [badge] subtitle…  [tabs (inline)]  [secondary…] [primary] [⋯]
 ```
 
 | Prop | Type | Use |
 |---|---|---|
 | `title` | `string` | Required. The module name, or the selected item's name on a detail page. It is also the accessible name and the tooltip. |
 | `icon` | `IconName` | Optional dim icon before the title. Most pages omit it; the sidebar already shows it. |
-| `subtitle` | `string` | One line, truncated with an ellipsis. Hidden on phone. |
+| `subtitle` | `string` | One dim line on the title's baseline (`--fs-s`), so the title sits at the same height on every page. It yields first when space runs out (ellipsis; full text in the tooltip). Hidden on phone. |
 | `badge` | snippet | A status pill or count next to the title. |
 | `leading` | snippet | A back button (phone detail views). |
 | `crumbs` | `{label, onclick}[]` | A breadcrumb trail for sub-pages (`Kubernetes / Monitor / Fleet`). |

@@ -702,7 +702,7 @@
     flex: none;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     border-radius: 8px;
@@ -815,7 +815,7 @@
     font-weight: 600;
   }
   .ro {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited, #ff5f57);
     border: 1px solid currentColor;
     border-radius: 4px;
@@ -825,7 +825,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -988,7 +988,7 @@
       font-size: 15px;
     }
     .env {
-      font-size: 10px;
+      font-size: var(--fs-xs);
       padding: 2px 6px;
     }
     .sec-name {

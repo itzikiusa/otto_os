@@ -455,7 +455,7 @@
     justify-content: flex-end;
   }
   .icon-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .tree-wrap {
@@ -547,7 +547,7 @@
     flex-shrink: 0;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 14px;
     text-align: center;
@@ -587,7 +587,7 @@
     flex-shrink: 0;
   }
   .rm-get { color: var(--status-working); }
-  .rm-post { color: var(--accent); }
+  .rm-post { color: var(--accent-text); }
   .rm-put,
   .rm-patch { color: #d2691e; }
   .rm-delete { color: var(--status-exited); }

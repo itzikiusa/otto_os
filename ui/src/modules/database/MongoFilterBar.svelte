@@ -161,7 +161,7 @@
   }
   .mfb-seg.on {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .mfb-run {
@@ -179,7 +179,7 @@
   }
   .mfb-run:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mfb-chips {
     flex: 1 0 100%;
@@ -195,15 +195,15 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .mfb-chip:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .mfb-more {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>
