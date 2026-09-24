@@ -6,19 +6,13 @@
   // stays in lockstep with the actual chords.
   import Modal from '../lib/components/Modal.svelte';
   import { KEYMAP } from '../lib/keys';
+  import { shortcutChips } from '../lib/shortcutChips';
 
   interface Props {
     open: boolean;
     onclose: () => void;
   }
   let { open, onclose }: Props = $props();
-
-  /** Split a chord like "⌘⇧B" into individual <kbd> tokens; leave words like
-   *  "Tab" / ranges like "⌃1…⌃9" intact. */
-  function tokens(keys: string): string[] {
-    // Keep modifier glyphs as separate keys, but don't split multi-char tokens.
-    return keys.match(/⌘|⌃|⌥|⇧|[^⌘⌃⌥⇧]+/g) ?? [keys];
-  }
 </script>
 
 {#if open}
@@ -31,7 +25,9 @@
             <div class="sc-row">
               <span class="sc-label">{b.label}</span>
               <span class="sc-keys">
-                {#each tokens(b.keys) as t, i (i)}<kbd>{t}</kbd>{/each}
+                {#each shortcutChips(b.keys) as c, i (i)}{#if c.kind === 'sep'}<span
+                      class="sc-sep">{c.text}</span
+                    >{:else}<kbd>{c.text}</kbd>{/if}{/each}
               </span>
             </div>
           {/each}
@@ -81,7 +77,12 @@
   .sc-keys {
     flex-shrink: 0;
     display: inline-flex;
+    align-items: center;
     gap: 3px;
+  }
+  .sc-sep {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   kbd {
     font-family: var(--font-ui);
