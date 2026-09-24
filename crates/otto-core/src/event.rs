@@ -584,6 +584,42 @@ pub enum Event {
         pods_failed: u32,
         cycle_ms: u64,
     },
+    /// Otto Assistant: a turn was indexed into a thread (a user send echo, a
+    /// landed reply with its provider badge, or a system line — memory chip,
+    /// delegation, reminder, route/limit notice). `turn` / `thread` are the
+    /// serialized `otto_state::AssistantTurn` / `AssistantThread` (otto-core
+    /// can't depend on otto-state); `thread` is `null` when it didn't change.
+    /// OWNER-scoped: delivered only to `user_id`'s connections.
+    AssistantTurn {
+        user_id: Id,
+        thread_id: Id,
+        turn: serde_json::Value,
+        thread: Option<serde_json::Value>,
+    },
+    /// Otto Assistant: a task was created or changed state. Owner-scoped.
+    AssistantTaskUpdate {
+        user_id: Id,
+        task: serde_json::Value,
+    },
+    /// Otto Assistant: a task entered or left the needs-you queue;
+    /// `open_count` is the queue size after the change. Owner-scoped.
+    AssistantNeedsYou {
+        user_id: Id,
+        task: serde_json::Value,
+        open_count: i64,
+    },
+    /// Otto Assistant: a provider usage limit was detected on a thread's
+    /// route. `suggestion` is the route to continue on (null when none);
+    /// `task_id` the "continue on X?" needs-you item; `auto_switched` means
+    /// auto-failover already moved the thread. Owner-scoped.
+    AssistantLimit {
+        user_id: Id,
+        thread_id: Option<Id>,
+        limit: serde_json::Value,
+        suggestion: Option<serde_json::Value>,
+        task_id: Option<Id>,
+        auto_switched: bool,
+    },
 }
 
 #[cfg(test)]
@@ -642,6 +678,56 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
+    }
+
+    /// Otto Assistant events: snake_case tags; `thread` / `thread_id` /
+    /// `suggestion` / `task_id` travel as explicit `null` (the contract's
+    /// `| null`), never omitted.
+    #[test]
+    fn assistant_event_wire_shapes() {
+        let v = serde_json::to_value(Event::AssistantTurn {
+            user_id: "u1".into(),
+            thread_id: "t1".into(),
+            turn: serde_json::json!({"id":"x","role":"assistant","provider":"claude"}),
+            thread: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_turn");
+        assert_eq!(v["user_id"], "u1");
+        assert_eq!(v["turn"]["provider"], "claude");
+        assert!(v.get("thread").is_some_and(|t| t.is_null()));
+
+        let v = serde_json::to_value(Event::AssistantTaskUpdate {
+            user_id: "u1".into(),
+            task: serde_json::json!({"id":"k1","state":"running"}),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_task_update");
+        assert_eq!(v["task"]["state"], "running");
+
+        let v = serde_json::to_value(Event::AssistantNeedsYou {
+            user_id: "u1".into(),
+            task: serde_json::json!({"id":"k1","state":"needs_you"}),
+            open_count: 2,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_needs_you");
+        assert_eq!(v["open_count"], 2);
+
+        let v = serde_json::to_value(Event::AssistantLimit {
+            user_id: "u1".into(),
+            thread_id: Some("t1".into()),
+            limit: serde_json::json!({"provider":"claude","limited":true}),
+            suggestion: None,
+            task_id: None,
+            auto_switched: false,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_limit");
+        assert_eq!(v["limit"]["provider"], "claude");
+        assert!(v.get("suggestion").is_some_and(|s| s.is_null()));
+        assert!(v.get("task_id").is_some_and(|s| s.is_null()));
+        assert_eq!(v["auto_switched"], false);
     }
 
     /// Design Hall events: snake_case tags, and the optional ids / `content`

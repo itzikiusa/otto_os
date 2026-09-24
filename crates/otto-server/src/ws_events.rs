@@ -169,6 +169,9 @@ enum Scope<'a> {
         session_id: &'a Id,
         owner: Option<&'a Id>,
     },
+    /// Strictly one user's: delivered ONLY to that user's connections — not to
+    /// workspace members and not to root (the Otto Assistant is personal).
+    Owner(&'a Id),
 }
 
 /// Classify an event into its delivery [`Scope`]. Pure (no I/O), so the routing
@@ -327,6 +330,11 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::K8sClusterUpdated { .. }
         | Event::K8sInstallUpdated { .. }
         | Event::K8sMonitorCycle { .. } => Scope::Everyone,
+        // Otto Assistant events are personal: the owner only (no root fan-out).
+        Event::AssistantTurn { user_id, .. }
+        | Event::AssistantTaskUpdate { user_id, .. }
+        | Event::AssistantNeedsYou { user_id, .. }
+        | Event::AssistantLimit { user_id, .. } => Scope::Owner(user_id),
     }
 }
 
@@ -348,6 +356,7 @@ async fn allowed(
                 Some(target) => user.is_root || &user.id == target,
             };
         }
+        Scope::Owner(target) => return &user.id == target,
         Scope::Workspace(workspace_id) => (workspace_id, None),
         Scope::Session {
             workspace_id,
@@ -793,6 +802,42 @@ mod tests {
             }),
             Scope::Workspace(_)
         ));
+    }
+
+    /// Otto Assistant events are owner-only — never workspace-wide or global.
+    #[test]
+    fn assistant_events_are_owner_scoped() {
+        let evs = [
+            Event::AssistantTurn {
+                user_id: "alice".into(),
+                thread_id: "t1".into(),
+                turn: serde_json::json!({}),
+                thread: None,
+            },
+            Event::AssistantTaskUpdate {
+                user_id: "alice".into(),
+                task: serde_json::json!({}),
+            },
+            Event::AssistantNeedsYou {
+                user_id: "alice".into(),
+                task: serde_json::json!({}),
+                open_count: 1,
+            },
+            Event::AssistantLimit {
+                user_id: "alice".into(),
+                thread_id: None,
+                limit: serde_json::json!({}),
+                suggestion: None,
+                task_id: None,
+                auto_switched: false,
+            },
+        ];
+        for ev in &evs {
+            assert!(
+                matches!(scope_of(ev), Scope::Owner(u) if u == "alice"),
+                "expected Scope::Owner(alice) for {ev:?}"
+            );
+        }
     }
 
     /// Design Hall graph events are workspace-member scoped (like the canvas /
