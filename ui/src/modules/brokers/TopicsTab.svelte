@@ -324,7 +324,13 @@
         <span class="muted"
           >{pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}</span
         >
-        <button class="btn tiny" disabled={page <= 1} onclick={() => (page = Math.max(1, page - 1))}>
+        <button
+          class="btn tiny"
+          disabled={page <= 1}
+          onclick={() => (page = Math.max(1, page - 1))}
+          aria-label="Previous page"
+          title="Previous page"
+        >
           <Icon name="chevronLeft" size={12} />
         </button>
         <span class="muted">{Math.min(page, pageCount)} / {pageCount}</span>
@@ -332,6 +338,8 @@
           class="btn tiny"
           disabled={page >= pageCount}
           onclick={() => (page = Math.min(pageCount, page + 1))}
+          aria-label="Next page"
+          title="Next page"
         >
           <Icon name="chevronRight" size={12} />
         </button>
