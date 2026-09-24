@@ -56,7 +56,7 @@
   const cards: Card[] = $derived([
     { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.', more: () => router.go('agents') },
     { id: 'running', title: 'Running', icon: 'play', rows: today.running, empty: 'No agents or workflows are working.', more: () => router.go('mission-control') },
-    { id: 'next', title: 'Up next', icon: 'calendar', rows: today.upNext, empty: 'Nothing scheduled today. Reminders you ask Otto for land here.', more: () => router.go('settings/notifications') },
+    { id: 'next', title: 'Up next', icon: 'calendar', rows: today.upNext, empty: 'Nothing scheduled today. Reminders you ask Otto for land here.', more: () => router.go('assistant/tasks') },
     { id: 'recent', title: 'Recent', icon: 'clock', rows: today.recent, empty: 'Designs and pull requests you touch show up here.', more: () => router.go('design'), fetched: true },
   ]);
 </script>

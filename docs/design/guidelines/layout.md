@@ -348,11 +348,12 @@ PageHeader: Home  [01 Overview][02][03] + ⋯           [30s]  [+ Add widget]
   only (the greeting and today's line).
 - **Today** (`HomeToday.svelte`, data in `today.svelte.ts`): four glance cards,
   built from data Otto already has.
-  - *Needs you*: pending MCP approvals, sessions waiting on input, work items
-    awaiting approval, unread warnings.
-  - *Running*: working sessions and in-flight workflow runs.
-  - *Up next*: the assistant's reminders (a typed `Reminder` slot, empty until
-    the assistant API lands), then today's notices.
+  - *Needs you*: assistant tasks waiting on you, pending MCP approvals,
+    sessions waiting on input, work items awaiting approval, unread warnings.
+  - *Running*: running assistant tasks, working sessions and in-flight
+    workflow runs.
+  - *Up next*: the assistant's reminders due in the next 24 hours (the typed
+    `Reminder` slot), then today's notices.
   - *Recent*: Design Hall artifacts and pull requests from the work graph.
 
   Each card shows at most three rows plus "N more", and has its own loading and

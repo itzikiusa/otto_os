@@ -2,11 +2,12 @@
 // you, what is running, what is next, what you touched recently. Built from
 // data Otto already has (no new endpoints):
 //
-//   Needs you  pending MCP approvals · sessions waiting on input · work items
-//              awaiting approval · unread warnings
-//   Running    working agent sessions · in-flight workflow runs
-//   Up next    assistant reminders (the slot — empty until the assistant API
-//              lands) · today's notices
+//   Needs you  assistant tasks waiting on you · pending MCP approvals ·
+//              sessions waiting on input · work items awaiting approval ·
+//              unread warnings
+//   Running    assistant tasks running · working agent sessions · in-flight
+//              workflow runs
+//   Up next    the assistant's reminders due in the next 24 h · today's notices
 //   Recent     Design Hall artifacts · pull requests from the work graph
 //
 // The live parts (ws, notifications) are derived; the fetched parts poll on a
@@ -16,9 +17,10 @@ import { api } from '../../lib/api/client';
 import { listArtifacts } from '../../lib/api/design';
 import { missionControlApi } from '../../lib/api/missionControl';
 import type { IconName } from '../../lib/components/Icon.svelte';
-import type { DesignArtifact, McpApproval, Notice, WorkItem } from '../../lib/api/types';
+import type { AssistantTask, DesignArtifact, McpApproval, Notice, WorkItem } from '../../lib/api/types';
 import { router } from '../../lib/router.svelte';
 import { auth } from '../../lib/stores/auth.svelte';
+import { assistant } from '../../lib/stores/assistant.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
 import { isForeground, ws } from '../../lib/stores/workspace.svelte';
 import { poll, type Poller } from './boxes/poll';
@@ -35,8 +37,8 @@ export interface TodayRow {
   open: () => void;
 }
 
-/** An assistant reminder (the Up next slot). The assistant core owns these;
- *  until its API lands the list is empty and the slot shows today's notices. */
+/** An upcoming reminder (the Up next slot) — today, the assistant's
+ *  `reminder` tasks; any other source can map into the same shape. */
 export interface Reminder {
   id: string;
   title: string;
@@ -48,6 +50,16 @@ export interface Reminder {
 }
 
 const POLL_MS = 60_000;
+/** Reminders due within this window show under Up next. */
+const UP_NEXT_MS = 24 * 60 * 60 * 1000;
+
+function openAssistant(t: AssistantTask): void {
+  router.go(t.thread_id ? `assistant/${t.thread_id}` : 'assistant');
+}
+
+function timeOfDay(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 function isToday(iso: string): boolean {
   const d = new Date(iso);
@@ -68,8 +80,20 @@ class TodayStore {
   prs: WorkItem[] = $state([]);
   /** First fetch settled (success or not) — the fetched rows stop skeletoning. */
   loaded = $state(false);
-  /** Assistant reminders — see {@link Reminder}. */
-  reminders: Reminder[] = $state([]);
+  /** The assistant's reminders due soon, earliest first — see {@link Reminder}. */
+  reminders: Reminder[] = $derived.by(() => {
+    const now = Date.now();
+    return assistant.tasks.data
+      .filter((t) => t.kind === 'reminder' && t.state === 'queued' && t.run_at && Date.parse(t.run_at) - now < UP_NEXT_MS)
+      .sort((a, b) => Date.parse(a.run_at ?? '') - Date.parse(b.run_at ?? ''))
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        due: t.run_at ?? t.created_at,
+        channel: timeOfDay(t.run_at ?? t.created_at),
+        open: () => openAssistant(t),
+      }));
+  });
 
   private users = 0;
   private poller: Poller | null = null;
@@ -80,6 +104,17 @@ class TodayStore {
 
   needs: TodayRow[] = $derived.by(() => {
     const rows: TodayRow[] = [];
+    for (const t of assistant.needs.items) {
+      rows.push({
+        id: `assistant:${t.id}`,
+        title: t.title,
+        detail: t.needs_you?.prompt ? `Assistant · ${t.needs_you.prompt}` : 'Assistant',
+        icon: 'assistant',
+        tone: 'warning',
+        at: t.updated_at,
+        open: () => openAssistant(t),
+      });
+    }
     for (const a of this.approvals) {
       rows.push({
         id: `approval:${a.id}`,
@@ -131,6 +166,17 @@ class TodayStore {
   });
 
   running: TodayRow[] = $derived.by(() => {
+    const tasks: TodayRow[] = assistant.tasks.data
+      .filter((t) => t.state === 'running')
+      .map((t) => ({
+        id: `assistant:${t.id}`,
+        title: t.title,
+        detail: t.detail ? `Assistant · ${t.detail}` : 'Assistant',
+        icon: 'assistant' as IconName,
+        tone: 'working' as const,
+        at: t.updated_at,
+        open: () => openAssistant(t),
+      }));
     const rows: TodayRow[] = ws.sessions
       .filter((s) => !s.archived && ws.statusMap[s.id] === 'working' && isForeground(s))
       .map((s) => ({
@@ -153,7 +199,7 @@ class TodayStore {
         open: () => router.go('workflows'),
       });
     }
-    return rows;
+    return [...tasks, ...rows];
   });
 
   /** Today's notices not already under Needs you, newest first. */
@@ -163,7 +209,7 @@ class TodayStore {
       id: `reminder:${r.id}`,
       title: r.title,
       detail: r.channel ? `Reminder · ${r.channel}` : 'Reminder',
-      icon: 'clock',
+      icon: 'bell',
       tone: 'accent',
       at: r.due,
       open: r.open ?? (() => {}),
@@ -209,6 +255,10 @@ class TodayStore {
 
   private async load(): Promise<boolean> {
     const mine = ++this.seq;
+    // The assistant store stays live over the WS once loaded; this re-syncs it
+    // on the same quiet cadence (its loaders guard their own stale results).
+    void assistant.loadNeedsYou();
+    void assistant.loadTasks();
     const wsId = ws.currentId;
     const can = (f: Parameters<typeof auth.can>[0]) => auth.can(f, 'view');
     const settle = <T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> =>
