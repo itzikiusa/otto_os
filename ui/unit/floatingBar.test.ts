@@ -270,8 +270,8 @@ const base: PresenceInput = {
   overlay: false,
 };
 
-test('presence: auto rests, docks while working, is full when open or on Home', () => {
-  assert.equal(barPresence(base), 'rest');
+test('presence: auto docks off Home and while working, is full when open or on Home', () => {
+  assert.equal(barPresence(base), 'dock');
   assert.equal(barPresence({ ...base, surface: true }), 'full');
   assert.equal(barPresence({ ...base, scrolling: true }), 'dock');
   assert.equal(barPresence({ ...base, workFocus: true }), 'dock');

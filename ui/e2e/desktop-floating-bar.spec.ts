@@ -52,7 +52,7 @@ test.beforeEach(async ({ page }, info) => {
   await page.goto('/#/git', { waitUntil: 'domcontentloaded' });
   // The first load of a run compiles the app in a fresh Vite server.
   await expect(page.locator('.shell')).toBeVisible({ timeout: 150_000 });
-  await expect(bar(page)).toHaveAttribute('data-presence', 'rest');
+  await expect(bar(page)).toHaveAttribute('data-presence', 'dock');
 });
 
 test.afterEach(async () => {
@@ -123,7 +123,7 @@ test('Esc clears the query first, then closes the bar', async ({ page }) => {
   await expect(input(page)).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(input(page)).not.toBeFocused();
-  await expect(bar(page)).toHaveAttribute('data-presence', 'rest');
+  await expect(bar(page)).toHaveAttribute('data-presence', 'dock');
 });
 
 test('⌃1–⌃4 switch spaces inside the bar, and spaces persist per device', async ({ page }) => {

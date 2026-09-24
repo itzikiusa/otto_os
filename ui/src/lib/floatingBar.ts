@@ -335,7 +335,10 @@ export function barPresence(i: PresenceInput): BarPresence {
   if (i.pref === 'docked') return 'dock';
   if (i.pref === 'pinned') return i.workFocus ? 'rest' : 'full';
   if (i.scrolling || i.workFocus) return 'dock';
-  return i.surface ? 'full' : 'rest';
+  // Auto floats the pill only on Home (the bar's surface). On every other page
+  // a floating pill covers working content (API responses, result grids,
+  // diffs), so it docks as the status-bar chip; ⌘K still opens it in full.
+  return i.surface ? 'full' : 'dock';
 }
 
 export function parseBarPref(v: string | null): BarPref {

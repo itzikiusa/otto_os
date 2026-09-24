@@ -529,13 +529,14 @@ the pill is drawn in the SAME surface — never a second glass layer.
 
 | State | When | Looks like |
 |---|---|---|
-| `full` | focused/open, Home, or "Always full" | the whole pill |
-| `rest` | idle on other pages | a 260 px "✦ Type or speak… ⌘K" pill |
-| `dock` | scrolling, or a terminal / editor / other field has focus, or "Docked" | a 20 px chip *inside the status bar* — covers no content, takes no keys |
+| `full` | focused/open, Home, or "Always full" (while no field has focus) | the whole pill |
+| `rest` | "Always full" while a terminal / editor / field has focus | a 260 px "✦ Type or speak… ⌘K" pill |
+| `dock` | Auto on any page but Home, scrolling, a terminal / editor / field has focus, or "Docked" | a 20 px chip *inside the status bar* — covers no content, takes no keys |
 | `away` | a Modal, sheet or the palette is up | hidden and `inert` |
 | `off` | "Hidden" | not mounted; ⌘K opens the palette |
 
-While the bar can rest over content it sets `--fb-clearance` on the content
+In Auto the pill floats only on Home; every other page (API responses, result
+grids, diffs) gets the chip. While the bar can rest over content it sets `--fb-clearance` on the content
 column; `PageBody` (and Home) pad their scroll end by it so the last row can
 always scroll clear. The panel is clamped to the window (`panelBudget`) and
 scrolls; e2e asserts it with `expectFullyInViewport`
