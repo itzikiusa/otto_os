@@ -667,6 +667,8 @@
   {#key router.parts[1]}
     <SnipEditor />
   {/key}
+  <!-- Its "Delete…" asks first — the shell's own dialog host isn't mounted here. -->
+  <ConfirmDialog />
 {:else}
 <!-- Center column: banners + (agents) TabBar + the module
      router. Extracted to a snippet so the desktop 3-pane and the mobile

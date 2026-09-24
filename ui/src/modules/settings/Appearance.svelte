@@ -266,7 +266,8 @@
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
-    menu. Choose what happens, or be asked each time.
+    menu. Choose what happens, or be asked each time. Deleting always asks first, and so does
+    closing several session tabs at once.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
     <label class="switch-row">
@@ -279,7 +280,7 @@
     </label>
     <label class="switch-row">
       <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
-      <span>Always delete — stop it and remove its history</span>
+      <span>Always delete — stop it and remove its history (asks to confirm)</span>
     </label>
   </div>
 

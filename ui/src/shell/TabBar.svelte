@@ -281,7 +281,7 @@
             void ws.requestCloseTab(id);
           }}
           aria-label="Close tab"
-          title="Close (⌘W)"
+          title={ws.closeTabTitle(id)}
         >
           <Icon name="x" size={9} />
         </button>

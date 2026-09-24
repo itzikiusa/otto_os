@@ -201,7 +201,7 @@
         dragKey={node.key}
         ondragpane={(phase) => (layout.dragKey = phase === 'start' ? node.key : null)}
         onfocus={() => ws.focusPane(idx)}
-        closeTitle="Close session (⌘W)"
+        closeTitle={ws.closeTabTitle(node.session, 'session')}
         onclosepane={() => void ws.requestCloseTab(node.session)}
       />
     {/if}

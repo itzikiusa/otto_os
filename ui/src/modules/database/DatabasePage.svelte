@@ -1458,7 +1458,17 @@
               <span class="ellipsis">{q.name}</span>
             </button>
             <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={11} /></button>
-            <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query" title="Delete"><Icon name="trash" size={11} /></button>
+            <button
+              class="icon-btn row-del"
+              onclick={async () => {
+                const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
+                  title: 'Delete saved query',
+                  confirmLabel: 'Delete query',
+                });
+                if (ok) void database.deleteSavedQuery(q.id);
+              }}
+              aria-label="Delete saved query “{q.name}”…"
+              title="Delete…"><Icon name="trash" size={11} /></button>
           {/if}
         </div>
       {/each}

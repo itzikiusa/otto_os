@@ -7,6 +7,9 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
   import DiffViewer from './DiffViewer.svelte';
@@ -213,17 +216,37 @@
     }
   }
 
+  // Approve and Decline are posted to the provider under the user's account and
+  // notify the author + reviewers, so both confirm where / what / who first.
+  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+
   async function action(kind: 'approve' | 'decline'): Promise<void> {
+    const approve = kind === 'approve';
+    const ok = await confirmOutward({
+      verb: approve ? 'Approve PR' : 'Decline PR',
+      title: approve ? `Approve PR #${number}?` : `Decline PR #${number}?`,
+      where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
+      what: approve
+        ? 'Your approval, posted under your git account.'
+        : 'The PR is closed without merging. It can be reopened on the provider.',
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      danger: !approve,
+    });
+    if (!ok) return;
     busy = kind;
     try {
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
-      toasts.error(`${kind} failed`, e instanceof Error ? e.message : String(e));
+      toasts.error(approve ? "Couldn't approve the PR" : "Couldn't decline the PR", e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
+  }
+
+  function moreMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, [{ label: 'Decline PR…', icon: 'x', danger: true, action: () => void action('decline') }]);
   }
 
   async function openAsSession(): Promise<void> {
@@ -393,7 +416,7 @@
         <section class="prd-actions card">
           <button class="btn" disabled={busy !== ''} onclick={() => action('approve')}>
             <Icon name="check" size={12} />
-            {busy === 'approve' ? 'Approving…' : 'Approve'}
+            {busy === 'approve' ? 'Approving…' : 'Approve…'}
           </button>
           <button
             class="btn warn"
@@ -410,9 +433,17 @@
             </button>
           </div>
           <span class="grow"></span>
-          <button class="btn danger" disabled={busy !== ''} onclick={() => action('decline')}>
-            {busy === 'decline' ? 'Declining…' : 'Decline'}
-          </button>
+          <!-- Decline is destructive + outward: kept out of the primary row
+               (next to Merge) and behind a ⋯ menu that then confirms. -->
+          <button
+            class="icon-btn"
+            disabled={busy !== ''}
+            data-testid="prd-more"
+            aria-label="More PR actions"
+            title="More PR actions"
+            onclick={moreMenu}
+            onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && moreMenu(e)}
+          >⋯</button>
         </section>
         {#if showRequestChanges}
           <section class="prd-request-changes card">

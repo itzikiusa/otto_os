@@ -10,6 +10,8 @@
   import { router } from '../../lib/router.svelte';
   import { snipApi } from '../../lib/snip';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { isTauri } from '../../lib/stores/ui.svelte';
   import {
     PALETTE,
@@ -442,6 +444,11 @@
   }
 
   async function deleteSnip(): Promise<void> {
+    const ok = await confirmer.ask('Delete this snip and its annotations? This can’t be undone.', {
+      title: 'Delete snip',
+      confirmLabel: 'Delete snip',
+    });
+    if (!ok) return;
     try {
       await snipApi.remove(snipId);
       toasts.info('Snip deleted');
@@ -530,14 +537,19 @@
       <button class="tb" data-act="undo" title="Undo (⌘Z)" disabled={!undoStack.length} onclick={undo}>↺</button>
       <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" disabled={!redoStack.length} onclick={redo}>↻</button>
     </div>
+    <!-- Delete lives in its own group, away from the primary Copy, and asks first. -->
+    <div class="group">
+      <button class="tb snip-del" data-act="delete-snip" title="Delete this snip…" aria-label="Delete this snip…" onclick={() => void deleteSnip()}>
+        <Icon name="trash" size={13} />
+      </button>
+    </div>
     <div class="spacer"></div>
     <span class="snip-copied" class:ok={copyState === 'copied' || copyState === 'idle'} class:bad={copyState === 'failed'}
       >{copyLabel}</span
     >
     <div class="group actions">
-      <button class="tb primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}>Copy</button>
-      <button class="tb" data-act="delete-snip" title="Delete this snip" onclick={() => void deleteSnip()}>Delete</button>
       <button class="tb" data-act="close" title="Close" onclick={() => void close()}>Close</button>
+      <button class="tb primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}>Copy</button>
     </div>
   </header>
 
@@ -636,6 +648,10 @@
     color: var(--text);
     border-color: var(--accent);
     background: var(--accent);
+  }
+  .tb.snip-del:hover {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   .tb:disabled {
     opacity: 0.4;

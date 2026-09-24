@@ -23,6 +23,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { mergeRunProgress } from './runProgress';
@@ -461,14 +462,28 @@
     }
   }
 
+  // Deleting cascades (runs, triggers, node cache all go with it), so it asks
+  // first; when the open workflow goes, open its neighbour instead of leaving
+  // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
+    const ok = await confirmer.ask(
+      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can't be undone.`,
+      { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
+    );
+    if (!ok) return;
     try {
       await api.del(`/workflows/${wf.id}`);
+      const idx = workflows.findIndex((w) => w.id === wf.id);
       workflows = workflows.filter((w) => w.id !== wf.id);
       if (current?.id === wf.id) {
-        current = null;
-        graph = { nodes: [], edges: [] };
+        const next = workflows[Math.min(Math.max(idx, 0), workflows.length - 1)] ?? null;
+        if (next) open(next);
+        else {
+          current = null;
+          graph = { nodes: [], edges: [] };
+        }
       }
+      toasts.success('Workflow deleted', wf.name);
     } catch (e) {
       toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
     }
@@ -1539,7 +1554,7 @@
             <button class="row-edit" title="Duplicate" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
               <Icon name="copy" size={12} />
             </button>
-            <button class="row-del" title="Delete" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
+            <button class="row-del" title="Delete workflow…" aria-label="Delete workflow “{wf.name}”…" data-testid="wf-delete-btn" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}

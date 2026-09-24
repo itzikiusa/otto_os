@@ -14,6 +14,8 @@
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
   import type { ProductAttachment } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
@@ -51,14 +53,12 @@
   let transitionsLoading = $state(false);
   let transitionsLoaded = $state(false);
   let transitionWorking = $state(false);
-  let statusOpen = $state(false);
 
   // Assignee
   let assignables = $state<JiraUser[]>([]);
   let assignablesLoading = $state(false);
   let assignablesLoaded = $state(false);
   let assigneeWorking = $state(false);
-  let assigneeOpen = $state(false);
 
   // ── Development info (linked branches / commits / PRs via Jira dev-status) ──
   // Lazily fetched once the issue opens or the section is expanded.
@@ -215,8 +215,6 @@
     transitionsLoaded = false;
     assignables = [];
     assignablesLoaded = false;
-    statusOpen = false;
-    assigneeOpen = false;
     // Reset development info.
     devStatus = null;
     devLoaded = false;
@@ -443,13 +441,68 @@
     }
   }
 
-  async function applyTransition(tid: string): Promise<void> {
+  // ── Live Jira writes ────────────────────────────────────────────────────
+  // Status, assignee and comments change the real issue that the whole team
+  // sees (and may fire Jira notifications / automations), so each one goes
+  // through `confirmOutward` naming the issue key and the new value. The
+  // pickers are global `ctxMenu` menus (viewport-clamped, height-capped, Esc
+  // to close) anchored under their button.
+
+  /** Destination line for a Jira write: "Jira GS-123 “Summary”". */
+  function jiraWhere(): string {
+    const key = story?.source_key ?? '';
+    const summary = issueFull?.summary ?? story?.title ?? '';
+    return summary ? `Jira ${key} “${summary}”` : `Jira ${key}`;
+  }
+
+  /** Open a ctxMenu directly under `el` (works for mouse and keyboard). */
+  function menuUnder(el: HTMLElement, items: MenuItem[], opts?: MenuOptions): void {
+    const r = el.getBoundingClientRect();
+    ctxMenu.show(new MouseEvent('click', { clientX: r.left, clientY: r.bottom + 4 }), items, opts);
+  }
+
+  async function openTransitionMenu(e: MouseEvent): Promise<void> {
+    const el = e.currentTarget as HTMLElement;
+    await loadTransitions();
+    if (!transitionsLoaded) return;
+    const items: MenuItem[] =
+      transitions.length === 0
+        ? [{ label: 'No transitions available', disabled: true }]
+        : transitions.map((t) => ({
+            label: t.name === t.to_status ? `${t.name}…` : `${t.name} → ${t.to_status}…`,
+            action: () => void applyTransition(t),
+          }));
+    menuUnder(el, items);
+  }
+
+  async function openAssigneeMenu(e: MouseEvent): Promise<void> {
+    const el = e.currentTarget as HTMLElement;
+    await loadAssignables();
+    if (!assignablesLoaded) return;
+    const items: MenuItem[] = [
+      { label: 'Unassign…', icon: 'x', pinned: true, disabled: !issueFull?.assignee, action: () => void assignUser(null) },
+      ...(assignables.length === 0
+        ? [{ label: 'No users found', disabled: true } as MenuItem]
+        : assignables.map((u) => ({ label: `${u.display_name}…`, action: () => void assignUser(u) }) as MenuItem)),
+    ];
+    menuUnder(el, items, { filter: assignables.length > 8, filterPlaceholder: 'Find a person…', maxVisible: 12 });
+  }
+
+  async function applyTransition(t: JiraTransition): Promise<void> {
     if (!story) return;
+    const key = story.source_key;
+    const ok = await confirmOutward({
+      verb: `Move to ${t.to_status}`,
+      title: `Move ${key} to ${t.to_status}?`,
+      where: jiraWhere(),
+      what: `Status: ${issueFull?.status ?? 'current'} → ${t.to_status}${t.name !== t.to_status ? ` (transition “${t.name}”)` : ''}`,
+      who: `Everyone with access to ${key} sees the change; watchers are notified and Jira workflow rules may run.`,
+    });
+    if (!ok) return;
     transitionWorking = true;
-    statusOpen = false;
     try {
       await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
-        transition_id: tid,
+        transition_id: t.id,
       });
       toasts.info('Status updated');
       await loadIssueFull();
@@ -476,13 +529,23 @@
     }
   }
 
-  async function assignUser(accountId: string): Promise<void> {
+  /** Assign `u`, or unassign when null — confirmed first (see Live Jira writes). */
+  async function assignUser(u: JiraUser | null): Promise<void> {
     if (!story) return;
+    const key = story.source_key;
+    const cur = issueFull?.assignee?.display_name ?? 'Unassigned';
+    const ok = await confirmOutward({
+      verb: u ? `Assign to ${u.display_name}` : 'Unassign',
+      title: u ? `Assign ${key}?` : `Unassign ${key}?`,
+      where: jiraWhere(),
+      what: `Assignee: ${cur} → ${u ? u.display_name : 'Unassigned'}`,
+      who: `Jira notifies the old and new assignee and ${key}'s watchers.`,
+    });
+    if (!ok) return;
     assigneeWorking = true;
-    assigneeOpen = false;
     try {
       await api.put(`/issue/${story.account_id}/${story.source_key}/assignee`, {
-        account_id: accountId,
+        account_id: u ? u.account_id : '',
       });
       toasts.info('Assignee updated');
       await loadIssueFull();
@@ -906,6 +969,15 @@
 
   async function addComment(): Promise<void> {
     if (!story || !newCommentBody.trim()) return;
+    const key = story.source_key;
+    const ok = await confirmOutward({
+      verb: 'Post comment',
+      title: `Post comment to ${key}?`,
+      where: jiraWhere(),
+      what: newCommentBody.trim(),
+      who: `Everyone with access to ${key} in Jira; watchers are notified.`,
+    });
+    if (!ok) return;
     postingComment = true;
     try {
       await api.post(`/issue/${story.account_id}/${story.source_key}/comment`, {
@@ -1451,7 +1523,7 @@
                         onclick={addComment}
                         disabled={postingComment || !newCommentBody.trim()}
                       >
-                        {postingComment ? 'Posting…' : 'Comment'}
+                        {postingComment ? 'Posting…' : `Post comment to ${story.source_key}…`}
                       </button>
                     </div>
                   </div>
@@ -1602,42 +1674,16 @@
                   <span class="jira-section-label">Status</span>
                   <div class="status-control">
                     <span class="status-badge">{issueFull.status}</span>
-                    <div class="transition-wrap">
-                      <button
-                        class="change-btn"
-                        onclick={async () => {
-                          if (!statusOpen) {
-                            await loadTransitions();
-                            statusOpen = true;
-                          } else {
-                            statusOpen = false;
-                          }
-                        }}
-                        disabled={transitionWorking}
-                        title="Change status"
-                      >
-                        {transitionWorking ? 'Working…' : 'Transition ▾'}
-                      </button>
-                      {#if statusOpen}
-                        <div class="dropdown-menu">
-                          {#if transitionsLoading}
-                            <div class="dropdown-loading">Loading…</div>
-                          {:else if transitions.length === 0}
-                            <div class="dropdown-empty">No transitions available</div>
-                          {:else}
-                            {#each transitions as t (t.id)}
-                              <button
-                                class="dropdown-item"
-                                onclick={() => applyTransition(t.id)}
-                              >
-                                {t.name}
-                                <span class="dropdown-item-sub">→ {t.to_status}</span>
-                              </button>
-                            {/each}
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
+                    <button
+                      class="change-btn"
+                      onclick={openTransitionMenu}
+                      disabled={transitionWorking || transitionsLoading}
+                      title="Change the status of {story.source_key} in Jira"
+                      aria-haspopup="menu"
+                      data-testid="ov-transition-btn"
+                    >
+                      {transitionWorking ? 'Working…' : transitionsLoading ? 'Loading…' : 'Transition ▾'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1659,44 +1705,16 @@
                     {:else}
                       <span class="unassigned">Unassigned</span>
                     {/if}
-                    <div class="transition-wrap">
-                      <button
-                        class="change-btn"
-                        onclick={async () => {
-                          if (!assigneeOpen) {
-                            await loadAssignables();
-                            assigneeOpen = true;
-                          } else {
-                            assigneeOpen = false;
-                          }
-                        }}
-                        disabled={assigneeWorking}
-                        title="Change assignee"
-                      >
-                        {assigneeWorking ? 'Working…' : 'Change ▾'}
-                      </button>
-                      {#if assigneeOpen}
-                        <div class="dropdown-menu">
-                          {#if assignablesLoading}
-                            <div class="dropdown-loading">Loading…</div>
-                          {:else if assignables.length === 0}
-                            <div class="dropdown-empty">No users found</div>
-                          {:else}
-                            <button class="dropdown-item" onclick={() => assignUser('')}>
-                              <span class="unassigned-opt">Unassign</span>
-                            </button>
-                            {#each assignables as u (u.account_id)}
-                              <button class="dropdown-item" onclick={() => assignUser(u.account_id)}>
-                                {#if u.avatar_url}
-                                  <img class="avatar-sm" src={u.avatar_url} alt={u.display_name} />
-                                {/if}
-                                {u.display_name}
-                              </button>
-                            {/each}
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
+                    <button
+                      class="change-btn"
+                      onclick={openAssigneeMenu}
+                      disabled={assigneeWorking || assignablesLoading}
+                      title="Change the assignee of {story.source_key} in Jira"
+                      aria-haspopup="menu"
+                      data-testid="ov-assignee-btn"
+                    >
+                      {assigneeWorking ? 'Working…' : assignablesLoading ? 'Loading…' : 'Change ▾'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -2648,15 +2666,8 @@
     color: var(--text-dim);
     font-style: italic;
   }
-  .unassigned-opt {
-    color: var(--text-dim);
-    font-style: italic;
-  }
 
-  /* ── Dropdown ──────────────────────────────────────────────── */
-  .transition-wrap {
-    position: relative;
-  }
+  /* ── Status / assignee pickers (menus are the global ctxMenu) ── */
   .change-btn {
     height: 24px;
     padding: 0 9px;
@@ -2677,50 +2688,11 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .dropdown-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    inset-inline-end: 0;
-    z-index: 50;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    min-width: 180px;
-    max-height: 240px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-  }
-  .dropdown-loading,
-  .dropdown-empty {
+  .dropdown-loading {
     font-size: 12px;
     color: var(--text-dim);
     padding: 10px 12px;
     font-style: italic;
-  }
-  .dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 7px 12px;
-    background: none;
-    border: none;
-    text-align: start;
-    font-size: 12.5px;
-    color: var(--text);
-    cursor: pointer;
-    transition: background 80ms;
-    white-space: nowrap;
-  }
-  .dropdown-item:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent-text);
-  }
-  .dropdown-item-sub {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-inline-start: 4px;
   }
 
   /* ── Details grid ──────────────────────────────────────────── */

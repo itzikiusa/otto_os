@@ -428,6 +428,16 @@
   }
 
   async function restart(): Promise<void> {
+    // Restart kills the live process and respawns it — a working agent loses
+    // its in-flight turn, so that one case asks first (idle/exited don't).
+    if (status === 'working') {
+      const name = session?.title?.trim() || 'this session';
+      const ok = await confirmer.ask(
+        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
+        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
+      );
+      if (!ok) return;
+    }
     try {
       await ws.restartSession(sessionId);
       // Nudge the embedded Terminal to drop its exited overlay and reconnect to
@@ -457,15 +467,13 @@
     }
   }
 
-  // "Always delete" (Settings → Appearance) is the answer to this confirm
-  // already, so it skips the dialog — same as the tab ×.
+  // Always asked — even under "Always delete" (Settings → Appearance), same as
+  // the tab ×: a remembered preference never skips an irreversible delete.
   async function del(): Promise<void> {
-    const ok =
-      ui.closeTabPref === 'delete' ||
-      (await confirmer.ask(
-        'Delete this session and its entire history? This cannot be undone.',
-        { title: 'Delete session', confirmLabel: 'Delete' },
-      ));
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
     if (!ok) return;
     try {
       await ws.killSession(sessionId);
@@ -788,12 +796,13 @@
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.toggleMaximize(sessionId)}
         title={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
+        aria-label={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
       >
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
     {/if}
     {#if !readOnly && isAgent && tier < 5}
-      <button class="icon-btn" onclick={restart} title="Restart session"><Icon name="refresh" size={13} /></button>
+      <button class="icon-btn" onclick={restart} title={status === 'working' ? 'Restart session (asks first — it is working)' : 'Restart session'} aria-label="Restart session"><Icon name="refresh" size={13} /></button>
     {/if}
     {#if !readOnly || tier >= 4}
       <!-- The overflow menu. `title="More…"` is a pinned selector; the title
