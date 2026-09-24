@@ -245,6 +245,16 @@
         action: () => database.togglePinTab(i),
       },
       { label: 'Rename', icon: 'edit', action: () => startRename(i, t) },
+      ...(database.supportsBuilder
+        ? [
+            {
+              label: 'Open in Builder',
+              icon: 'layers' as const,
+              disabled: !t.statement.trim(),
+              action: () => database.openInBuilder(t.statement),
+            },
+          ]
+        : []),
       { separator: true },
       { label: `Close others${keeps}`, disabled: others === 0, action: () => closeOthersAt(i) },
       { label: `Close all${keeps}`, action: () => closeAll() },

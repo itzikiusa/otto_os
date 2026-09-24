@@ -808,6 +808,16 @@ class DatabaseStore {
 
   // ── UI tabs ────────────────────────────────────────────────────────────────
   mainTab: DbMainTab = $state('query');
+  /** A statement handed to the Builder ("Open in Builder" on a query tab): the
+   *  builder parses it into its model on mount and clears this. Scoped to the
+   *  connection it came from so a switch can't import it into another server. */
+  builderImport: { connId: Id; sql: string } | null = $state(null);
+  /** Send a statement to the Builder tab (round trip from the editor). */
+  openInBuilder(sql: string): void {
+    if (!this.selectedConnId || !this.supportsBuilder) return;
+    this.builderImport = { connId: this.selectedConnId, sql };
+    this.setMainTab('builder');
+  }
   // Default to the connection picker — it's the global view shown before any
   // connection is open. Opening a connection switches to 'schema' (see
   // loadConnectionFresh); snapshots never restore 'connections' (captureSnapshot).

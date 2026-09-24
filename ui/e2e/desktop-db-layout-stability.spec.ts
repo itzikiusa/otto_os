@@ -18,11 +18,13 @@ import { mockDbRoutes, seedMockDbConnection } from './db-mock';
 
 let workspaceId = '';
 let connId = '';
+// Unique per worker: connection profiles are global, and a retried worker re-seeds.
+const CONN = `mock-layout-${Math.random().toString(36).slice(2, 8)}`;
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  connId = await seedMockDbConnection(ctx, base, workspaceId, 'mock-shop');
+  connId = await seedMockDbConnection(ctx, base, workspaceId, CONN);
   await ctx.dispose().catch(() => {});
 });
 
@@ -39,7 +41,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openMock(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: 'mock-shop' });
+  const c = page.locator('.conn-list .conn-name', { hasText: CONN });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
