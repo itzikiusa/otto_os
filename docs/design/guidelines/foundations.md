@@ -94,7 +94,7 @@ graphics. They are what `StatusDot` renders:
 | `--status-working` | live and actively working (pulses) |
 | `--status-idle` | idle |
 | `--status-exited` | exited or failed |
-| `--status-warn` / `--status-warn-soft` | attention: reconnectable, ahead/behind, waiting |
+| `--status-warn` / `--status-warn-soft` | attention: needs you, ahead/behind, waiting (a suspended session is a hollow idle ring, not amber) |
 
 Use a tone token for text and a status token for dots. Don't write a status
 label in `--status-working`; use `--success`.

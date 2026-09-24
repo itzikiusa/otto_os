@@ -145,14 +145,17 @@ it switches content:
 |---|---|
 | `.chip` | A neutral pill (`--fs-xs`, 20 px): tags, kinds, env, counts |
 | `.chip.ok` / `.chip.bad` / `.chip.accent` | A tone pill: success / danger / selected-or-link |
-| `StatusDot` | The live state of a session: `status` = `running`, `working` (pulses), `idle`, `exited` or `reconnectable`; `needsYou` gives an amber pulse |
+| `StatusDot` | The live state of a session. Pass `state={sessionState(…)}` (lib/status.ts); the legacy `status` + `needsYou` props derive the same state. `role="img"` + `aria-label`; pulses stop under reduced motion. See [patterns.md §1](./patterns.md#1-agent-presence-and-live-status) |
+| `StatusBadge` | Dot + sentence-case word for any status: `status={runStatus(raw)}` for runs/steps/jobs, or `tone` + `label`. `variant="pill"` (tinted) or `"text"` (dense rows) |
+| `EnvBadge` | A connection / cluster / account environment: prod (danger), staging (warning), dev (neutral); `readOnly` shows "RO" on non-prod |
 | `ProofStatusChip`, `ProofBadge(s)` | Proof-pack status and badges |
-| `modules/mcp/McpPill.svelte` | **The pattern to copy.** One component maps a domain vocabulary to a tone (`ok` / `warn` / `bad` / `neutral` / `info`) in one place |
+| `modules/mcp/McpPill.svelte` | One component maps a domain vocabulary to a tone (`ok` / `warn` / `bad` / `neutral` / `info`) in one place |
 
 Rules:
 
-- **Map domain values to tones in one pure function per domain** (as McpPill
-  does). Don't pick colours at each call site.
+- **Map domain values to tones in one pure function per domain** (`lib/status.ts`:
+  `sessionState`, `runStatus`, `envTone`; McpPill for MCP). Don't pick colours
+  at each call site.
 - There is no `.chip.warn` or `.chip.info` yet. Write the variant from tokens:
   ```css
   .chip.warn {
