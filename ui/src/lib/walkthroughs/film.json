@@ -2,6 +2,112 @@
   "file": "otto-tour.mp4",
   "poster": "otto-tour-poster.jpg",
   "captions": "otto-tour.vtt",
-  "duration": 0,
-  "chapters": []
+  "duration": 177.03,
+  "chapters": [
+    {
+      "id": "intro",
+      "section": "getting-started",
+      "title": "Meet Otto",
+      "start": 0,
+      "duration": 7.5
+    },
+    {
+      "id": "home",
+      "section": "home",
+      "title": "Home",
+      "start": 7.5,
+      "duration": 10.8
+    },
+    {
+      "id": "command-bar",
+      "section": "command-bar",
+      "title": "The command bar",
+      "start": 18.3,
+      "duration": 16.93
+    },
+    {
+      "id": "assistant",
+      "section": "assistant",
+      "title": "Assistant",
+      "start": 35.23,
+      "duration": 9.63
+    },
+    {
+      "id": "agents",
+      "section": "agents",
+      "title": "Agents and History",
+      "start": 44.87,
+      "duration": 14.73
+    },
+    {
+      "id": "mission-control",
+      "section": "mission-control",
+      "title": "Run with Otto and Mission Control",
+      "start": 59.6,
+      "duration": 10.7
+    },
+    {
+      "id": "swarm",
+      "section": "swarm",
+      "title": "Swarms and Goal Loops",
+      "start": 70.3,
+      "duration": 10.13
+    },
+    {
+      "id": "workflows",
+      "section": "workflows",
+      "title": "Workflows and schedules",
+      "start": 80.43,
+      "duration": 10.53
+    },
+    {
+      "id": "git",
+      "section": "git",
+      "title": "Git, reviews and proof",
+      "start": 90.97,
+      "duration": 12.47
+    },
+    {
+      "id": "vault",
+      "section": "vault",
+      "title": "Product and Vault",
+      "start": 103.43,
+      "duration": 7.73
+    },
+    {
+      "id": "design",
+      "section": "design",
+      "title": "Design Hall and Skills Lab",
+      "start": 111.17,
+      "duration": 15.1
+    },
+    {
+      "id": "database",
+      "section": "database",
+      "title": "Database Explorer",
+      "start": 126.27,
+      "duration": 17.03
+    },
+    {
+      "id": "infra",
+      "section": "connections",
+      "title": "Connections and cloud",
+      "start": 143.3,
+      "duration": 14.43
+    },
+    {
+      "id": "insights",
+      "section": "insights",
+      "title": "Insights and Usage",
+      "start": 157.73,
+      "duration": 7.47
+    },
+    {
+      "id": "outro",
+      "section": "phone-and-remote",
+      "title": "Everywhere",
+      "start": 165.2,
+      "duration": 11.83
+    }
+  ]
 }

@@ -1,0 +1,99 @@
+{
+  "title": "Otto — product tour",
+  "chapters": [
+    {
+      "id": "intro",
+      "section": "getting-started",
+      "title": "Meet Otto",
+      "minSeconds": 7.5,
+      "leadIn": 1.2,
+      "text": "This is Otto. Every coding agent you run, in one native Mac app."
+    },
+    {
+      "id": "home",
+      "section": "home",
+      "title": "Home",
+      "text": "Otto feels at home on macOS: a grouped sidebar, one clean header per page, and Home as your desktop, showing what needs you, what's running, and what's next."
+    },
+    {
+      "id": "command-bar",
+      "section": "command-bar",
+      "title": "The command bar",
+      "text": "The floating bar is the front door. Press ⌘K, type or speak, and Otto runs the command, or answers in one of four spaces. It docks into the status bar while you work, and ⌥Space calls it from anywhere on your Mac, with the menu bar and pop-out windows close by."
+    },
+    {
+      "id": "assistant",
+      "section": "assistant",
+      "title": "Assistant",
+      "text": "The Assistant is your personal agent. It keeps threads, remembers what matters, tracks tasks and reminders, and asks before anything leaves your Mac."
+    },
+    {
+      "id": "agents",
+      "section": "agents",
+      "title": "Agents and History",
+      "text": "Agents run Claude Code, Codex or a shell as real sessions. Keep them in tabs, tile them side by side, or work through a queue of what needs you. Broadcast one prompt to many agents, and pick up any past conversation from History."
+    },
+    {
+      "id": "mission-control",
+      "section": "mission-control",
+      "title": "Run with Otto and Mission Control",
+      "text": "Run with Otto turns a ticket or a message into a finished branch with one click, and Mission Control shows the whole work graph: what's running, what's waiting, approvals and spend."
+    },
+    {
+      "id": "swarm",
+      "section": "swarm",
+      "title": "Swarms and Goal Loops",
+      "text": "Then automate. A swarm gives agents roles, an org chart and a shared board. Goal loops plan, execute and evaluate until every acceptance check passes."
+    },
+    {
+      "id": "workflows",
+      "section": "workflows",
+      "title": "Workflows and schedules",
+      "text": "Workflows chain agents, approvals and tools into pipelines. Scheduled tasks run on a cadence, and personal agents keep their own soul, schedule and memory."
+    },
+    {
+      "id": "git",
+      "section": "git",
+      "title": "Git, reviews and proof",
+      "text": "Git is built in: a commit graph with your work in progress, branches, pull requests, and multi-agent AI review with findings you can act on. Proof packs keep the evidence behind every change."
+    },
+    {
+      "id": "vault",
+      "section": "vault",
+      "title": "Product and Vault",
+      "text": "Product turns stories into analysis and drafts, and the Vault keeps your docs as linked markdown with a live knowledge graph."
+    },
+    {
+      "id": "design",
+      "section": "design",
+      "title": "Design Hall and Skills Lab",
+      "text": "Design Hall brings every studio under one roof: frames, templates, Site Studio, brand kits and 3D, with references to earlier work and a log of what Otto learned from your team. Skills Lab evaluates and sharpens your agent skills."
+    },
+    {
+      "id": "database",
+      "section": "database",
+      "title": "Database Explorer",
+      "text": "Your infrastructure lives here too. The Database Explorer speaks MySQL, Postgres, MongoDB, Redis and ClickHouse. Build a query visually, with GROUP BY, HAVING and ORDER BY, then read the results in a grid, or one record at a time in the vertical view."
+    },
+    {
+      "id": "infra",
+      "section": "connections",
+      "title": "Connections and cloud",
+      "text": "Connections hold SSH terminals and SFTP. Browse Kafka topics, AWS and Kubernetes, call APIs, read the web in the built-in browser, and govern every agent tool call through the MCP control plane."
+    },
+    {
+      "id": "insights",
+      "section": "insights",
+      "title": "Insights and Usage",
+      "text": "Insights turns your activity into reports with key findings, and Usage tracks tokens, cost and machine load."
+    },
+    {
+      "id": "outro",
+      "section": "phone-and-remote",
+      "title": "Everywhere",
+      "minSeconds": 10,
+      "tail": 3.2,
+      "text": "Snip anything on screen, bridge your agents to Slack and Telegram, and reach Otto from your phone. Otto. All your agents, one home."
+    }
+  ]
+}

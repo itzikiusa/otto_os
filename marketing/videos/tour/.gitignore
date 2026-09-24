@@ -1,0 +1,6 @@
+node_modules/
+out/
+public/capture/
+public/audio/
+.cache/
+*.log
