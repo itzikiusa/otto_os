@@ -686,6 +686,7 @@
                   </label>
                   <div class="ed-model">
                     <ModelPicker
+                      id="fb-space-model"
                       {provider}
                       value={space.model}
                       onchange={(m) => barStore.patchSpace(spaceIdx, { model: m })}

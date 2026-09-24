@@ -30,8 +30,6 @@
     bulb: 'M6 12.5h4M6.6 14h2.8M8 2a4 4 0 0 0-2.5 7.1c.4.4.7.9.7 1.4v.5h3.6v-.5c0-.5.3-1 .7-1.4A4 4 0 0 0 8 2Z',
     // four-point spark — a prompt / generation
     sparkle: 'M7 2l1.2 3.3L11.5 6.5 8.2 7.7 7 11 5.8 7.7 2.5 6.5l3.3-1.2L7 2Zm5 7.5.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z',
-    // voice input (the floating bar's hold-to-talk button)
-    mic: 'M8 2.5a2 2 0 0 1 2 2V8a2 2 0 0 1-4 0V4.5a2 2 0 0 1 2-2ZM4.5 7.5a3.5 3.5 0 0 0 7 0M8 11v2.5M6 13.5h4',
     // three dots — a "More actions" menu (ringed dots so they read at 12–14px)
     more: 'M3.2 8a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0',
     // two side-by-side panes — Compare
@@ -119,6 +117,15 @@
     target: 'M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15M8 4.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4ZM8 7.3a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4Z',
     // Live-tab "click to interact" pointer (browser panel).
     cursor: 'M3.5 2.5 12.5 7.3 8.5 8.5 6.7 12.5 3.5 2.5ZM8.5 8.5l3.6 3.6',
+    // Assistant (module): a speech bubble holding a spark — the one front door
+    // you talk to (distinct from `sparkle`, the in-page "generate" verb).
+    assistant: 'M3 2.8h10a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1H7.2L4.5 13.5v-2.3H3a1 1 0 0 1-1-1V3.8a1 1 0 0 1 1-1Zm5 1.9.6 1.6 1.6.6-1.6.6L8 9.1l-.6-1.6-1.6-.6 1.6-.6L8 4.7Z',
+    // Microphone — push-to-talk / dictation.
+    mic: 'M8 2a2 2 0 0 1 2 2v3.5a2 2 0 0 1-4 0V4a2 2 0 0 1 2-2ZM4.2 7.4a3.8 3.8 0 0 0 7.6 0M8 11.2V14m-2 0h4',
+    // Curved back-arrow — undo a just-made change (a remembered memory).
+    undo: 'M5.2 3.8 2.5 6.5l2.7 2.7M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7',
+    // Raised hand — an approval or a question waiting on you.
+    hand: 'M5.5 8V3.8a1 1 0 0 1 2 0V7.5m0-4.7a1 1 0 0 1 2 0v4.7m0-3.7a1 1 0 0 1 2 0V9a4.5 4.5 0 0 1-4.5 4.5H7a3.5 3.5 0 0 1-2.9-1.6L2.6 9.6a1 1 0 0 1 1.6-1.2L5.5 10',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

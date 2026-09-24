@@ -680,6 +680,55 @@ export interface RepoResolveResp {
   matched_by: RepoMatchedBy;
 }
 
+/** Kinds the agent discovery routes (`GET /refs/directory`, `GET /refs/resolve`)
+ *  know — the same set every agent tool's friendly id argument resolves. */
+export type AgentRefKind =
+  | 'workspace'
+  | 'workflow'
+  | 'connection'
+  | 'broker_cluster'
+  | 'swarm'
+  | 'scheduled_task'
+  | 'goal_loop'
+  | 'agent_room'
+  | 'canvas_scene'
+  | 'product_story'
+  | 'vault'
+  | 'api_request'
+  | 'api_automation'
+  | 'api_environment'
+  | 'issue_account'
+  | 'aws_account'
+  | 'k8s_cluster'
+  | 'design_artifact';
+
+/** `GET /refs/directory?kind=&workspace_id=&prefer_workspace_id=` — every
+ *  object of `kind` across the workspaces the caller can read (a token's
+ *  workspace pin applied). Rows are the kind's own list rows (projected for
+ *  heavy kinds — no workflow graph, no connection params); per-workspace kinds
+ *  add `workspace_id`, `workspace_name` and `current`, current workspace first. */
+export interface AgentRefDirectory {
+  kind: AgentRefKind;
+  items: Array<Record<string, unknown>>;
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** `GET /refs/resolve?kind=&ref=&arg=&workspace_id=&prefer_workspace_id=` —
+ *  one reference (id, or name / title / Jira key / label) resolved. 404 lists
+ *  near misses or what IS available, 409 the ambiguous candidates (both in the
+ *  Problem `message`). `matched_by` is `id`, the matched field name, or
+ *  `only_candidate` (an omitted issue account with exactly one account). */
+export interface AgentRefResolveResp {
+  kind: AgentRefKind;
+  id: string;
+  label: string;
+  workspace_id: Id | null;
+  workspace_name: string | null;
+  matched_by: string;
+  item: Record<string, unknown>;
+}
+
 /** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
  *  `name` is the provider-native handle to submit in `CreatePrReq.reviewers`. */
 export interface Collaborator {
@@ -1224,6 +1273,42 @@ export type OttoEvent =
       doc: unknown;
     }
   | {
+      /** Otto Assistant: a turn was indexed (user send echo, landed reply,
+       *  memory chip, delegation, reminder, route/limit notice). Owner-only.
+       *  Clients append/replace by `turn.id`; `thread` is the row after the
+       *  change, or null when unchanged. */
+      type: 'assistant_turn';
+      user_id: Id;
+      thread_id: Id;
+      turn: AssistantTurn;
+      thread: AssistantThread | null;
+    }
+  | {
+      /** Otto Assistant: a task was created or changed state. Owner-only. */
+      type: 'assistant_task_update';
+      user_id: Id;
+      task: AssistantTask;
+    }
+  | {
+      /** Otto Assistant: an item entered or left the needs-you queue.
+       *  `open_count` = queue size after the change (menu-bar dot, phone badge). */
+      type: 'assistant_needs_you';
+      user_id: Id;
+      task: AssistantTask;
+      open_count: number;
+    }
+  | {
+      /** Otto Assistant: a provider usage limit was detected on a thread's
+       *  route. Nothing switches unless `auto_switched` (auto-failover on). */
+      type: 'assistant_limit';
+      user_id: Id;
+      thread_id: Id | null;
+      limit: AssistantLimitState;
+      suggestion: AssistantRouteTarget | null;
+      task_id: Id | null;
+      auto_switched: boolean;
+    }
+  | {
       /** The canvas Ask-AI agent session became live (turn start) — the Canvas
        *  Assistant panel attaches its shell immediately for the matching scene. */
       type: 'canvas_session_started';
@@ -1389,6 +1474,27 @@ export type OttoEvent =
       type: 'browser_annotation_added';
       workspace_id: Id;
       annotation: unknown;
+    }
+  | {
+      /** A tab's remote live session opened / became ready / crashed / closed.
+       *  Carries no URL/title (sessions are owner-private) — fetch
+       *  `GET /browser/tabs/{id}/live` for details. Workspace-scoped. */
+      type: 'browser_live_session_updated';
+      workspace_id: Id;
+      tab_id: Id;
+      owner_id: Id;
+      state: BrowserLiveSessionState;
+    }
+  | {
+      /** The Chromium download job changed state (machine-wide). Progress
+       *  ticks ≤ 4/s while downloading. */
+      type: 'browser_engine_install_updated';
+      build: BrowserChromeBuild;
+      version: string;
+      state: BrowserEngineInstallState;
+      received_bytes: number;
+      total_bytes: number | null;
+      error: string | null;
     }
   | {
       /** New turns folded from a live session's provider transcript on disk
@@ -7060,8 +7166,10 @@ export interface BrowserTab {
   workspace_id: Id;
   url: string;
   title: string;
-  /** `"reader"` (fetched + rendered as markdown/HTML) or `"live"` (embedded
-   *  iframe; the daemon never fetches it). */
+  /** `"reader"` (fetched + rendered as markdown/HTML) or `"live"` (a real
+   *  browser: the desktop WKWebView — engine `native` — or a daemon-owned
+   *  Chromium streamed over WS — engine `remote`, see `BrowserLiveSession`).
+   *  The engine is not stored on the tab row. */
   mode: 'reader' | 'live';
   created_at: string;
 }
@@ -7229,6 +7337,254 @@ export interface BrowserLoginResp {
   engine: string;
 }
 
+// ── Browser — remote live view (daemon-owned Chromium) ──────────────────────
+// Contract: docs/contracts/api.md "Browser — remote live view" + ws.md §1b.
+
+/** Which engine renders a `mode:"live"` tab. `native` = the desktop app's
+ *  WKWebView (desktop-only, no daemon state); `remote` = a daemon-owned
+ *  Chromium streamed over `WS /ws/browser/{tab_id}/live` (desktop, PWA and
+ *  remote web sessions). A property of the live session, not the tab row. */
+export type BrowserLiveEngine = 'native' | 'remote';
+
+/** The pluggable Chromium binary. `chrome` (default) = full Chrome for
+ *  Testing in new headless mode (~180 MB download); `chrome-headless-shell` =
+ *  the lighter headless-only shell (~98 MB). */
+export type BrowserChromeBuild = 'chrome' | 'chrome-headless-shell';
+
+export type BrowserEngineInstallState =
+  | 'downloading'
+  | 'verifying'
+  | 'extracting'
+  | 'installed'
+  | 'failed';
+
+export type BrowserLiveSessionState = 'starting' | 'ready' | 'crashed' | 'closed';
+
+/** Who drives a live session. Agent actions pause while a human drives. */
+export type BrowserLiveController = 'none' | 'human' | 'agent';
+
+/** Daemon-wide remote-live settings (settings KV key `browser_live`).
+ *  `PUT /browser/live/settings` takes a partial of this. */
+export interface BrowserLiveSettings {
+  /** Default `'chrome'`. */
+  build: BrowserChromeBuild;
+  /** "Show the window on this Mac" — launch Chrome with a visible window on
+   *  the daemon host (still screencast-streamed). Default `false`; requires
+   *  `build === 'chrome'`. */
+  headed: boolean;
+  /** Live sessions daemon-wide (1..=16, default 6). */
+  max_sessions: number;
+  /** Close a session with no viewer and no activity after this long
+   *  (60..=86400, default 900). */
+  idle_timeout_secs: number;
+  /** Page-initiated downloads: refused, or saved (never opened) into the
+   *  per-profile quarantine folder. Default `'quarantine'`. */
+  downloads: 'block' | 'quarantine';
+}
+
+/** One pinned Chromium build as seen by `GET /browser/live/status`. */
+export interface BrowserEngineBuildStatus {
+  build: BrowserChromeBuild;
+  /** Pinned Chrome for Testing version, e.g. `"149.0.7827.55"`. */
+  version: string;
+  platform: string;
+  installed: boolean;
+  /** Approximate download size in bytes (for the enable/download copy). */
+  download_bytes: number;
+  /** Human copy, e.g. `"Chrome for Testing — full browser (~180 MB)"`. */
+  label: string;
+  /** `false` when this daemon build ships no sha256 pin for it — install is
+   *  refused (fail closed). */
+  sha256_pinned: boolean;
+  /** Where the binary lives when installed (or the `OTTO_CHROME_BIN` path). */
+  path: string | null;
+  /** `managed` = downloaded into the data dir; `env` = `OTTO_CHROME_BIN`. */
+  source: 'managed' | 'env' | null;
+}
+
+/** The (single, daemon-wide) Chromium download job. */
+export interface BrowserEngineInstallJob {
+  build: BrowserChromeBuild;
+  version: string;
+  state: BrowserEngineInstallState;
+  received_bytes: number;
+  total_bytes: number | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** `GET /browser/live/status`. */
+export interface BrowserLiveStatus {
+  /** `false` off mac-arm64 — the remote engine can't be installed here. */
+  platform_supported: boolean;
+  builds: BrowserEngineBuildStatus[];
+  settings: BrowserLiveSettings;
+  /** The current/last install job this daemon run, if any. */
+  install: BrowserEngineInstallJob | null;
+  /** Running Chromium processes. */
+  processes: number;
+  /** Open live sessions (daemon-wide). */
+  sessions: number;
+}
+
+/** `POST /browser/live/install` body. */
+export interface BrowserEngineInstallReq {
+  build?: BrowserChromeBuild;
+}
+
+/** Viewport in CSS px. */
+export interface BrowserViewport {
+  width: number;
+  height: number;
+  device_scale_factor?: number;
+}
+
+/** A tab's remote live session. Private to `owner_id` (plus ws Admin/root). */
+export interface BrowserLiveSession {
+  tab_id: Id;
+  workspace_id: Id;
+  owner_id: Id;
+  engine: 'remote';
+  build: BrowserChromeBuild;
+  version: string;
+  /** `'ephemeral'` (own incognito-like context, wiped on close) or a named
+   *  persistent profile scoped to (workspace, owner, name). */
+  profile: string;
+  headed: boolean;
+  state: BrowserLiveSessionState;
+  url: string;
+  title: string;
+  loading: boolean;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+  viewport: Required<BrowserViewport>;
+  controller: BrowserLiveController;
+  controller_user_id: Id | null;
+  /** Attached WS viewers. */
+  viewers: number;
+  created_at: string;
+  last_activity_at: string;
+}
+
+/** `POST /browser/tabs/{id}/live` body. `engine` must be `'remote'` (a
+ *  native tab needs no daemon session). `profile` matches `[a-z0-9_-]{1,40}`
+ *  (default `'ephemeral'`). `url` defaults to the tab's url. */
+export interface BrowserLiveCreateReq {
+  engine?: 'remote';
+  viewport?: BrowserViewport;
+  profile?: string;
+  url?: string;
+}
+
+export type BrowserLiveNavAction = 'goto' | 'back' | 'forward' | 'reload' | 'stop';
+
+/** `POST /browser/tabs/{id}/live/nav` body — `url` required for `goto`. */
+export interface BrowserLiveNavReq {
+  action: BrowserLiveNavAction;
+  url?: string;
+}
+
+/** `POST /browser/tabs/{id}/live/control` body. */
+export interface BrowserLiveControlReq {
+  action: 'take_over' | 'hand_back';
+}
+
+/** `POST /browser/tabs/{id}/live/screenshot` body — responds with the image
+ *  bytes (`image/png` | `image/jpeg`), not JSON. */
+export interface BrowserScreenshotReq {
+  mode?: 'viewport' | 'full_page' | 'element';
+  /** Required for `mode: 'element'`. */
+  selector?: string;
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 1..100. */
+  quality?: number;
+}
+
+/** Header of a binary screencast frame on `WS /ws/browser/{tab_id}/live`:
+ *  `[u8 version=1][u32 BE header length N][N bytes JSON header][image bytes]`. */
+export interface BrowserLiveFrameHeader {
+  seq: number;
+  mime: 'image/jpeg';
+  /** Image pixel size. */
+  width: number;
+  height: number;
+  /** Viewport in CSS px — map pointer coords with these. */
+  device_width: number;
+  device_height: number;
+  page_scale_factor: number;
+  offset_top: number;
+  scroll_x: number;
+  scroll_y: number;
+  timestamp: number;
+}
+
+/** CDP modifier bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8. */
+export type BrowserLiveModifiers = number;
+
+/** Client → daemon frames on `WS /ws/browser/{tab_id}/live`. */
+export type BrowserLiveClientMsg =
+  | { type: 'ack'; seq: number }
+  | {
+      type: 'mouse';
+      action: 'move' | 'down' | 'up' | 'wheel';
+      x: number;
+      y: number;
+      button?: 'left' | 'middle' | 'right' | 'back' | 'forward' | 'none';
+      buttons?: number;
+      click_count?: number;
+      delta_x?: number;
+      delta_y?: number;
+      modifiers?: BrowserLiveModifiers;
+    }
+  | {
+      type: 'key';
+      action: 'down' | 'up';
+      key: string;
+      code: string;
+      text?: string;
+      key_code?: number;
+      location?: number;
+      repeat?: boolean;
+      modifiers?: BrowserLiveModifiers;
+    }
+  | { type: 'text'; text: string }
+  | { type: 'ime'; text: string; selection_start: number; selection_end: number }
+  | { type: 'paste'; text: string }
+  | { type: 'nav'; action: BrowserLiveNavAction; url?: string }
+  | { type: 'resize'; width: number; height: number; device_scale_factor?: number }
+  | { type: 'control'; action: 'take_over' | 'hand_back' }
+  | { type: 'dialog'; accept: boolean; prompt_text?: string };
+
+/** Daemon → client JSON frames on `WS /ws/browser/{tab_id}/live` (binary
+ *  frames are screencast images — see `BrowserLiveFrameHeader`). */
+export type BrowserLiveServerMsg =
+  | { type: 'state'; session: BrowserLiveSession }
+  | { type: 'cursor'; cursor: string }
+  | {
+      type: 'dialog';
+      dialog_type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+      message: string;
+      default_prompt: string;
+      url: string;
+    }
+  | { type: 'blocked'; host: string; reason: 'ssrf' }
+  | { type: 'popup'; url: string }
+  | { type: 'download'; status: 'blocked' | 'quarantined'; filename: string; bytes: number | null }
+  | { type: 'approval'; approval_id: Id; status: 'pending' | 'approved' | 'denied'; title: string }
+  | {
+      type: 'error';
+      code:
+        | 'forbidden'
+        | 'not_driver'
+        | 'bad_frame'
+        | 'nav_failed'
+        | 'input_failed'
+        | 'engine_unavailable';
+      message: string;
+    }
+  | { type: 'closed'; reason: 'closed' | 'idle' | 'crashed' | 'revoked' | 'replaced' };
+
 // ---------------------------------------------------------------------------
 // Personal Agents (mirror of otto_state::personal_agents — keep in lockstep)
 // ---------------------------------------------------------------------------
@@ -7266,7 +7622,9 @@ export interface PersonalAgent {
 export interface PersonalAgentSchedule {
   id: Id;
   agent_id: Id;
-  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`. */
+  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`,
+   *  or the one-shot `{cadence:'once', run_at}` (RFC3339 or local
+   *  `YYYY-MM-DDTHH:MM` in `timezone`; the schedule disables itself after its run). */
   schedule: Record<string, unknown>;
   timezone: string;
   /** The run's task prompt for this schedule. */
@@ -9639,4 +9997,288 @@ export interface BrandImpactResp {
   hidden_count: number;
   contrast: BrandContrastReport;
   warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// ── Otto Assistant (mirror of crates/otto-server/src/assistant/types.rs —
+// docs/contracts/api.md "Otto Assistant"; keep in lockstep)
+// ---------------------------------------------------------------------------
+
+/** Where a request came from — reminders and replies are delivered back there. */
+export type AssistantOrigin = 'app' | 'thread' | 'bar' | 'phone' | 'channel';
+
+/** The router's request classes (local keyword rules, no LLM call). */
+export type AssistantRouteKind = 'chat' | 'code' | 'hard' | 'voice';
+
+/** Why a turn went to its provider: thread pin, `@claude`/`@codex` mention,
+ *  a keyword rule, the chat default, or a (confirmed / auto) failover. */
+export type AssistantRouteReason = 'pin' | 'mention' | 'rule' | 'default' | 'failover';
+
+/** One assistant thread = one resumable CLI session (resumed on demand). */
+export interface AssistantThread {
+  id: Id;
+  /** Floating-bar space 1–4 (unique per user), or null when unslotted. */
+  space_slot: 1 | 2 | 3 | 4 | null;
+  title: string;
+  /** The provider of the CURRENT backing session ('claude' | 'codex' | …). */
+  provider: string;
+  model: string | null;
+  account_id: string | null;
+  /** True when the user pinned provider/model (the model chip); rules are off. */
+  route_pinned: boolean;
+  /** The current backing session (null until the first turn). */
+  session_id: Id | null;
+  /** No memory reads/writes; deleted 24 h after the last turn. */
+  incognito: boolean;
+  /** The per-thread answer to "continue on X?" when a limit hits. */
+  failover_choice: 'ask' | 'switch' | 'stay';
+  /** asleep = no live session (resumed on the next send). */
+  status: 'asleep' | 'idle' | 'working';
+  last_turn_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantAttachment {
+  id: Id;
+  name: string;
+  /** Absolute path under the assistant's `inbox/`. */
+  path: string;
+  mime: string;
+  size: number;
+}
+
+/** `data` of a `kind:'memory'` turn — the memory chip. */
+export interface AssistantMemoryChip {
+  action: 'remembered' | 'forgot' | 'pending';
+  memory_ids: Id[];
+  undo:
+    | { kind: 'delete'; memory_id: Id }
+    | { kind: 'restore'; undo_tokens: string[] }
+    | null;
+}
+
+/** One indexed turn. The canonical text of a reply stays in the provider
+ *  transcript; `text` here is the indexed copy (search, hand-offs, phone). */
+export interface AssistantTurn {
+  id: Id;
+  thread_id: Id;
+  role: 'user' | 'assistant' | 'system';
+  kind: 'message' | 'memory' | 'delegation' | 'task' | 'reminder' | 'route' | 'limit' | 'approval';
+  text: string;
+  /** Provider badge (assistant turns; the routed provider on user turns). */
+  provider: string | null;
+  model: string | null;
+  route_reason: AssistantRouteReason | null;
+  session_id: Id | null;
+  attachments: AssistantAttachment[];
+  /** Kind-specific payload: AssistantMemoryChip for 'memory', `{task_id}` for
+   *  'task' / 'reminder' / 'delegation' / 'approval', `{from, to}` for 'route'. */
+  data: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface AssistantSendReq {
+  text: string;
+  attachment_ids?: Id[];
+  origin?: AssistantOrigin;
+  voice?: boolean;
+}
+
+export interface AssistantRouteTarget {
+  provider: string;
+  model: string | null;
+  account_id: string | null;
+}
+
+export interface AssistantRouteDecision extends AssistantRouteTarget {
+  kind: AssistantRouteKind;
+  reason: AssistantRouteReason;
+  /** Keywords / mention that decided it (for the badge tooltip). */
+  matched: string[];
+  /** The text that will be pasted (a leading @mention stripped). */
+  text: string;
+}
+
+export interface AssistantSendResp {
+  turn: AssistantTurn;
+  route: AssistantRouteDecision;
+  thread: AssistantThread;
+}
+
+export interface CreateAssistantThreadReq {
+  title?: string;
+  space_slot?: 1 | 2 | 3 | 4 | null;
+  /** Given ⇒ the thread starts pinned to it. */
+  provider?: string;
+  model?: string | null;
+  account_id?: string | null;
+  incognito?: boolean;
+}
+
+export interface UpdateAssistantThreadReq {
+  title?: string;
+  space_slot?: 1 | 2 | 3 | 4 | null;
+}
+
+/** `POST …/route` — `provider: null` clears the pin. */
+export interface AssistantRouteReq {
+  provider: string | null;
+  model?: string | null;
+  account_id?: string | null;
+}
+
+export interface AssistantRoutingSettings {
+  targets: Record<AssistantRouteKind, AssistantRouteTarget>;
+  /** User keywords added to the built-in rules. */
+  extra_keywords: { code: string[]; hard: string[] };
+  /** Switch provider by itself when a limit hits (default false). */
+  auto_failover: boolean;
+  /** Agent memory writes queue for review (default false). */
+  memory_approval: boolean;
+  updated_at: string | null;
+}
+
+export interface AssistantLimitState {
+  provider: string;
+  account_id: string | null;
+  limited: boolean;
+  /** When the provider said the limit resets, if it said. */
+  until: string | null;
+  message: string;
+  source: 'pty' | 'transcript' | 'probe';
+  detected_at: string;
+}
+
+/** The guideline approval shape: where / what / who sees it / reason. */
+export interface AssistantApprovalCard {
+  where: string;
+  what: string;
+  who_sees: string;
+  reason: string;
+  tool: string | null;
+  destination: string | null;
+  category: 'send' | 'post' | 'publish' | 'purchase' | 'delete' | 'submit' | 'prod' | 'other';
+  /** False for purchase / prod — "always allow" is never offered. */
+  always_allow_allowed: boolean;
+}
+
+export interface AssistantNeedsYou {
+  kind: 'approval' | 'question' | 'takeover' | 'limit' | 'memory';
+  prompt: string;
+  approval?: AssistantApprovalCard;
+  options?: string[];
+  limit?: AssistantLimitState;
+  suggestion?: AssistantRouteTarget;
+  memory_id?: Id;
+}
+
+export type AssistantTaskState =
+  | 'queued'
+  | 'running'
+  | 'needs_you'
+  | 'done'
+  | 'failed'
+  | 'cancelled';
+
+export interface AssistantTask {
+  id: Id;
+  thread_id: Id | null;
+  kind:
+    | 'task'
+    | 'reminder'
+    | 'approval'
+    | 'question'
+    | 'takeover'
+    | 'limit'
+    | 'delegation'
+    | 'memory_review';
+  state: AssistantTaskState;
+  title: string;
+  detail: string;
+  origin: AssistantOrigin;
+  /** Reminders: when it fires (UTC RFC3339). */
+  run_at: string | null;
+  timezone: string;
+  /** A `once` Personal Agent schedule backing this task, if any. */
+  schedule_id: Id | null;
+  /** Delegation: the Personal Agent + its run. */
+  agent_id: Id | null;
+  agent_run_id: Id | null;
+  needs_you: AssistantNeedsYou | null;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface AssistantCreateTaskReq {
+  kind: 'task' | 'reminder';
+  title: string;
+  detail?: string;
+  thread_id?: Id;
+  /** RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone`. Required for reminders. */
+  run_at?: string;
+  timezone?: string;
+  origin?: AssistantOrigin;
+}
+
+export type AssistantTaskAction = 'approve' | 'deny' | 'takeover' | 'handback' | 'cancel';
+
+export interface AssistantDecisionReq {
+  reason?: string;
+  /** Answer to a `question` item. */
+  answer?: string;
+  /** Approval: remember for this destination + tool (refused for purchase/prod). */
+  always_allow?: boolean;
+  /** Limit item: the provider to continue on. */
+  provider?: string;
+}
+
+export interface AssistantDelegateReq {
+  agent_id: Id;
+  directive: string;
+}
+
+export interface AssistantMemory {
+  id: Id;
+  text: string;
+  kind: string;
+  tags: string[];
+  state: 'accepted' | 'pending';
+  source: { kind: 'agent' | 'user' | 'hermes'; thread_id: Id | null; file: string | null };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantProfileDoc {
+  content: string;
+  /** Opaque; send back with a save (409 when stale). */
+  version: string;
+  exists: boolean;
+}
+
+export interface AssistantMemoryView {
+  profile: AssistantProfileDoc;
+  memories: AssistantMemory[];
+  /** Awaiting review (memory approval on, or a Hermes import). */
+  pending: AssistantMemory[];
+  memory_approval: boolean;
+}
+
+export interface AssistantForgetResp {
+  forgotten: AssistantMemory[];
+  undo_tokens: string[];
+}
+
+export interface AssistantHermesPreview {
+  available: boolean;
+  files: { name: string; entries: number }[];
+  entries: { file: string; text: string; duplicate: boolean }[];
+}
+
+export interface AssistantHermesImportResp {
+  queued: number;
+  duplicates: number;
+  files: string[];
 }

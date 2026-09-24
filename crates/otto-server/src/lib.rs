@@ -3,12 +3,14 @@
 //! otto-connections / otto-git are mounted via `build_router`'s extras at
 //! integration time.
 
+pub mod agent_refs;
 pub mod agent_run;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;
 pub mod api_scripts;
 pub mod api_secrets;
+pub mod assistant;
 pub mod auth;
 pub mod browser_login_throttle;
 pub mod cadence;

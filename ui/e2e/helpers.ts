@@ -6,6 +6,7 @@ import AxeBuilder from '@axe-core/playwright';
 export const PAGES = [
   'agents',
   'home',
+  'assistant',
   'mission-control',
   'api',
   'aws',

@@ -32,9 +32,11 @@
     if (id === DB_PANE_ID) return 'Database Explorer';
     const s = ws.sessions.find((x) => x.id === id);
     if (!s) return 'Double-click to rename';
-    const parts = [s.title, s.provider, s.cwd].filter((p) => p !== '' && p != null);
-    const base = parts.join(' · ');
-    return isResumable(id) ? `${base} — ${SUSPENDED_TIP}` : `${base} — double-click to rename`;
+    // One short line per fact: a single very long line made a native tooltip
+    // wider than the window, pinned to its edge and clipped.
+    const title = s.title.length > 80 ? `${s.title.slice(0, 79).trimEnd()}…` : s.title;
+    const parts = [title, [s.provider, s.cwd].filter((p) => p !== '' && p != null).join(' · ')].filter(Boolean);
+    return [...parts, isResumable(id) ? SUSPENDED_TIP : 'Double-click to rename'].join('\n');
   }
 
   // ── Keep the active tab visible + surface overflow ────────────────────────
