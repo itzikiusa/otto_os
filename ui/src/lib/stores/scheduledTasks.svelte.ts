@@ -24,12 +24,15 @@ class ScheduledTasksStore {
     this.wsId = workspaceId;
     this.loadingList = true;
     try {
-      this.list = await scheduledTasksApi.list(workspaceId);
+      const list = await scheduledTasksApi.list(workspaceId);
+      // A slower load for a workspace we've since left must not land here.
+      if (this.wsId !== workspaceId) return;
+      this.list = list;
       this.listError = null;
     } catch (e) {
-      this.listError = loadErrorText(e);
+      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
     } finally {
-      this.loadingList = false;
+      if (this.wsId === workspaceId) this.loadingList = false;
     }
   }
 

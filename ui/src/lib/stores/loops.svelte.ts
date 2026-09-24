@@ -34,12 +34,15 @@ class LoopsStore {
     this.listWs = workspaceId;
     this.loadingList = true;
     try {
-      this.list = await api.get<GoalLoop[]>(`/workspaces/${workspaceId}/goal-loops`);
+      const list = await api.get<GoalLoop[]>(`/workspaces/${workspaceId}/goal-loops`);
+      // A slower load for a workspace we've since left must not land here.
+      if (this.listWs !== workspaceId) return;
+      this.list = list;
       this.listError = null;
     } catch (e) {
-      this.listError = loadErrorText(e);
+      if (this.listWs === workspaceId) this.listError = loadErrorText(e);
     } finally {
-      this.loadingList = false;
+      if (this.listWs === workspaceId) this.loadingList = false;
     }
   }
 

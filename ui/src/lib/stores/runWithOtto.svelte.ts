@@ -44,15 +44,17 @@ class RunWithOttoStore {
     this.loadingList = true;
     try {
       const runs = await runWithOttoApi.list(workspaceId);
+      // A slower load for a workspace we've since left must not land here.
+      if (this.wsId !== workspaceId) return;
       this.list = runs;
       const next = { ...this.byId };
       for (const r of runs) next[r.id] = r;
       this.byId = next;
       this.listError = null;
     } catch (e) {
-      this.listError = loadErrorText(e);
+      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
     } finally {
-      this.loadingList = false;
+      if (this.wsId === workspaceId) this.loadingList = false;
     }
   }
 
