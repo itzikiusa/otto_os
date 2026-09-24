@@ -14,6 +14,7 @@
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -618,24 +619,13 @@
   {/if}
 
   {#if reportOpen}
-    <div
-      class="modal-bg"
-      onclick={(e) => { if (e.target === e.currentTarget) reportOpen = false; }}
-      onkeydown={(e) => { if (e.key === 'Escape') reportOpen = false; }}
-      role="presentation"
-    >
-      <div class="modal" role="dialog" aria-label="Report" aria-modal="true" tabindex="-1">
-        <header class="modal-head">
-          <strong>Report</strong>
-          <button class="btn small" onclick={() => (reportOpen = false)}>Close</button>
-        </header>
-        {#if reportLoading}
-          <div class="muted">Loading…</div>
-        {:else}
-          <pre class="report">{reportText}</pre>
-        {/if}
-      </div>
-    </div>
+    <Modal title="Report" width={760} onclose={() => (reportOpen = false)}>
+      {#if reportLoading}
+        <div class="muted">Loading…</div>
+      {:else}
+        <pre class="report">{reportText}</pre>
+      {/if}
+    </Modal>
   {/if}
 </div>
 </PageBody>
@@ -692,8 +682,5 @@
   .toggles { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.25rem 0; }
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0 0 0.25rem; }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-  .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .modal { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-l); width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; box-shadow: var(--shadow); }
-  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
-  .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
+  .report { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
 </style>

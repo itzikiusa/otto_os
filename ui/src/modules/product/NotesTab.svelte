@@ -4,6 +4,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import type { ProductNote, NewNoteReq } from './types';
 
   // ── Load notes when story is selected / changes ────────────────────────────
@@ -185,44 +186,37 @@
 
     <!-- ── Add note modal ────────────────────────────────────────────────────── -->
     {#if addOpen}
-      <div class="modal-backdrop" role="presentation" onclick={closeAdd}>
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-        <div class="modal-box" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-          <div class="modal-head">
-            <span class="modal-title">Add Note</span>
-            <button class="modal-close" onclick={closeAdd} aria-label="Close">✕</button>
-          </div>
-          <div class="modal-body">
-            <label class="form-label">Note <span class="req">*</span>
-              <textarea
-                class="form-textarea"
-                bind:value={newBody}
-                rows={5}
-                placeholder="Write a note… Markdown supported."
-                disabled={addWorking}
-              ></textarea>
-            </label>
-            <label class="form-label">Section (optional)
-              <input
-                class="form-input"
-                bind:value={newSection}
-                placeholder="e.g. scope, edge-cases, decisions"
-                disabled={addWorking}
-              />
-            </label>
-          </div>
-          <div class="modal-footer">
-            <button
-              class="action-btn accent-btn"
-              onclick={addNote}
-              disabled={addWorking || !newBody.trim()}
-            >
-              {addWorking ? 'Adding…' : 'Add note'}
-            </button>
-            <button class="action-btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
-          </div>
+      <Modal title="Add Note" width={480} onclose={closeAdd}>
+        <div class="nt-add-body">
+          <label class="form-label">Note <span class="req">*</span>
+            <textarea
+              class="form-textarea"
+              bind:value={newBody}
+              rows={5}
+              placeholder="Write a note… Markdown supported."
+              disabled={addWorking}
+            ></textarea>
+          </label>
+          <label class="form-label">Section (optional)
+            <input
+              class="form-input"
+              bind:value={newSection}
+              placeholder="e.g. scope, edge-cases, decisions"
+              disabled={addWorking}
+            />
+          </label>
         </div>
-      </div>
+        {#snippet footer()}
+          <button class="action-btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
+          <button
+            class="action-btn accent-btn"
+            onclick={addNote}
+            disabled={addWorking || !newBody.trim()}
+          >
+            {addWorking ? 'Adding…' : 'Add note'}
+          </button>
+        {/snippet}
+      </Modal>
     {/if}
   </div>
 {/if}
@@ -456,63 +450,10 @@
   }
 
   /* ── Add note modal ──────────────────────────────────────────────── */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: color-mix(in srgb, #000 45%, transparent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-  }
-  .modal-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    width: 480px;
-    max-width: 94vw;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 12px 32px color-mix(in srgb, #000 40%, transparent);
-  }
-  .modal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px 10px;
-    border-bottom: 1px solid var(--border);
-  }
-  .modal-title {
-    font-size: 13.5px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .modal-close {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 14px;
-    cursor: pointer;
-    padding: 2px 6px;
-    line-height: 1;
-    border-radius: var(--radius-s);
-  }
-  .modal-close:hover {
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .modal-body {
-    padding: 14px;
+  .nt-add-body {
     display: flex;
     flex-direction: column;
     gap: 10px;
-  }
-  .modal-footer {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px 14px;
-    border-top: 1px solid var(--border);
   }
   .form-label {
     display: flex;
