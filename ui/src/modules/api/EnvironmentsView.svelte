@@ -5,6 +5,7 @@
   // environment's variables as a full-width table on the right.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -172,7 +173,16 @@
     {/if}
   </header>
 
-  {#if apiClient.environments.length === 0}
+  {#if apiClient.environments.length === 0 && (apiClient.loadError || apiClient.loading)}
+    <!-- A failed/in-flight load is not "No environments yet". -->
+    <LoadState
+      what="environments"
+      loading={apiClient.loading}
+      error={apiClient.loadError}
+      empty
+      onretry={() => void apiClient.loadAll()}
+    />
+  {:else if apiClient.environments.length === 0}
     <EmptyState
       icon="globe"
       title="No environments yet"

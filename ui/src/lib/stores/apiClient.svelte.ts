@@ -535,13 +535,22 @@ class ApiClientStore {
     }
   }
 
+  /** A single-list refresh (after an action) failed. With nothing on screen it
+   *  becomes the inline `loadError` (Retry = loadAll) — an empty sidebar must
+   *  never read as "No saved requests yet"; over live rows the rows stay and
+   *  the failed refresh is reported as the action result it followed. */
+  private refreshFailed(what: string, empty: boolean, e: unknown): void {
+    if (empty) this.loadError = errMsg(e);
+    else toasts.error(`Could not refresh ${what}`, errMsg(e));
+  }
+
   async loadCollections(): Promise<void> {
     const base = this.base();
     if (!base) return;
     try {
       this.collections = await api.get<ApiCollection[]>(`${base}/collections`);
     } catch (e) {
-      toasts.error('Could not load collections', errMsg(e));
+      this.refreshFailed('collections', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
@@ -551,7 +560,7 @@ class ApiClientStore {
     try {
       this.requests = await api.get<ApiRequest[]>(`${base}/requests`);
     } catch (e) {
-      toasts.error('Could not load requests', errMsg(e));
+      this.refreshFailed('requests', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
@@ -561,7 +570,7 @@ class ApiClientStore {
     try {
       this.environments = await api.get<ApiEnvironment[]>(`${base}/environments`);
     } catch (e) {
-      toasts.error('Could not load environments', errMsg(e));
+      this.refreshFailed('environments', this.environments.length === 0, e);
     }
   }
 

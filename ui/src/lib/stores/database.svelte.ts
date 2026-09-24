@@ -635,6 +635,10 @@ class DatabaseStore {
   /** Non-DB profiles (ssh/custom) — rendered in the unified sidebar tree;
    *  opening one spawns a terminal session instead of a workbench tab. */
   otherConnections: Connection[] = $state([]);
+  /** Connection-list load state: a failed load renders inline with Retry in the
+   *  sidebar — never as "No connections yet". */
+  connectionsLoading = $state(false);
+  connectionsError: string | null = $state(null);
   selectedConnId: Id | null = $state(null);
   /** Connections currently open as top-level tabs, in display order. */
   openConnIds: Id[] = $state([]);
@@ -1604,9 +1608,11 @@ class DatabaseStore {
     const wid = ws.currentId;
     const accessEpoch=this.accessEpoch;
     if (!wid) return;
+    this.connectionsLoading = true;
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
       if(accessEpoch!==this.accessEpoch)return;
+      this.connectionsError = null;
       const next = all.filter((c) => isDbKind(c.kind));
       this.otherConnections = all.filter((c) => !isDbKind(c.kind));
       this.connections = next;
@@ -1630,7 +1636,9 @@ class DatabaseStore {
         this.schemaRoot = [];
       }
     } catch (e) {
-      toasts.error('Could not load connections', errMsg(e));
+      if (accessEpoch === this.accessEpoch) this.connectionsError = errMsg(e);
+    } finally {
+      this.connectionsLoading = false;
     }
   }
 
@@ -1985,8 +1993,9 @@ class DatabaseStore {
     } catch (e) {
       if (!this.connLive(id, epoch)) return; // closed tab: no status, no toast
       // A hard failure drops any stale health data (replace, not merge).
+      // SchemaTree renders this phase inline ("Couldn't connect" + Retry) — no
+      // toast on top of it.
       this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
-      toasts.error('Could not load schema', errMsg(e));
     } finally {
       // The singleton loading flag tracks the selected connection's tree.
       if (this.selectedConnId === id) this.schemaLoading = false;
