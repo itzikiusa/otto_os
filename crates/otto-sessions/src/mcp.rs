@@ -18,7 +18,7 @@
 //! The browser MCP binary is discovered in this order:
 //!   1. `OTTO_BROWSER_MCP` env (explicit command, shell-split)
 //!   2. loom's `loom-mcp-browser` next to the daemon / on PATH
-//!   3. fallback: `npx -y @playwright/mcp@latest`
+//!   3. fallback: `npx -y @playwright/mcp@<PLAYWRIGHT_MCP_VERSION>` (pinned)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +50,12 @@ const MANAGED_KEY: &str = "ottoManagedServers";
 /// the surrounding TOML keys).
 const MANAGED_KEY_TOML: &str = "otto_managed_servers";
 
+/// The exact `@playwright/mcp` release the fallback launches. Pinned — never
+/// `@latest` — so every agent spawn runs a known package instead of whatever
+/// the registry serves that minute (a supply-chain hop on every session start).
+/// Bump deliberately, after reviewing the release.
+pub const PLAYWRIGHT_MCP_VERSION: &str = "0.0.82";
+
 /// The command Otto uses to launch the browser MCP server.
 pub fn browser_command() -> (String, Vec<String>) {
     if let Ok(cmd) = std::env::var("OTTO_BROWSER_MCP") {
@@ -63,7 +69,10 @@ pub fn browser_command() -> (String, Vec<String>) {
     }
     (
         "npx".to_string(),
-        vec!["-y".into(), "@playwright/mcp@latest".into()],
+        vec![
+            "-y".into(),
+            format!("@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}"),
+        ],
     )
 }
 

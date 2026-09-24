@@ -146,7 +146,7 @@ module-level **Rooms** view (live feed, membership editor, user post box).
 - **Model list empty/stale** — Settings → Providers → Models catalog →
   Refresh; check `last_error` in `GET /providers/models`.
 - **No browser tools in a run** — the agent's Browser toggle must be on; the
-  Playwright MCP is fetched via `npx @playwright/mcp` unless `OTTO_BROWSER_MCP`
+  Playwright MCP is fetched via `npx @playwright/mcp@<pinned version>` (`PLAYWRIGHT_MCP_VERSION` in `otto-sessions/src/mcp.rs`, never `@latest`) unless `OTTO_BROWSER_MCP`
   points elsewhere.
 - **Rooms: agent post rejected** — the agent isn't a member of the room, or the
   post exceeded 16 KB.
