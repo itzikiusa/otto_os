@@ -17,6 +17,7 @@ import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
 import { browser } from './stores/browser.svelte';
+import { browserLive } from './stores/browserLive.svelte';
 import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
@@ -607,6 +608,9 @@ class EventsClient {
         ) {
           // Browser page: tab strip / annotation list refresh in place.
           browser.applyEvent(parsed);
+        } else if (parsed.type === 'browser_engine_install_updated') {
+          // Browser page / Settings → Browser: Chromium download progress.
+          browserLive.applyEvent(parsed);
         } else if (
           parsed.type === 'assistant_turn' ||
           parsed.type === 'assistant_task_update' ||

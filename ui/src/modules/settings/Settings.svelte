@@ -16,6 +16,7 @@
   import McpServers from './McpServers.svelte';
   import InsightsSettings from './InsightsSettings.svelte';
   import SnipSettings from './SnipSettings.svelte';
+  import BrowserSettings from './BrowserSettings.svelte';
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
@@ -53,6 +54,7 @@
           { id: 'session-names', label: 'Session Names' },
           { id: 'notifications', label: 'Notifications' },
           { id: 'snipping', label: 'Snipping' },
+          ...(auth.can('browser', 'view') ? [{ id: 'browser', label: 'Browser' }] : []),
           { id: 'tokens', label: 'API Tokens' },
         ],
       },
@@ -163,6 +165,8 @@
       <InsightsSettings />
     {:else if page === 'snipping'}
       <SnipSettings />
+    {:else if page === 'browser' && auth.can('browser', 'view')}
+      <BrowserSettings />
     {:else if page === 'skills' && auth.can('settings', 'admin')}
       <SkillsLibrary />
     {:else if page === 'skill-eval' && auth.can('settings', 'admin')}
