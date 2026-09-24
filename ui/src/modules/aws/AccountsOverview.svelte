@@ -13,7 +13,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import EnvPill from './EnvPill.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { fmtAgo, roleFromArn } from './util';
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
@@ -111,7 +111,7 @@
           <div class="card-top">
             <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
             <h2 class="name">{a.name}</h2>
-            <EnvPill env={a.environment} />
+            <EnvBadge env={a.environment} />
             <button class="more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions">⋯</button>
           </div>
           <dl class="meta">

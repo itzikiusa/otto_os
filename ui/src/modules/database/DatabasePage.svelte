@@ -4,6 +4,7 @@
   // Structure / Dashboards) over the active view.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
@@ -812,7 +813,8 @@
   type EnvGuarded = Pick<Connection, 'environment' | 'read_only'>;
   const isProdConn = (c: EnvGuarded): boolean => c.environment === 'prod';
   const isGuardedConn = (c: EnvGuarded): boolean => c.environment === 'prod' || c.read_only;
-  // Short badge label, or '' when neither (dev/staging, not read-only).
+  // Short badge label, or '' when neither (dev, not read-only) — also the guard
+  // for rendering the shared <EnvBadge>, which draws prod/staging/RO itself.
   function envBadge(c: EnvGuarded): string {
     if (c.environment === 'prod') return 'PROD';
     if (c.read_only) return 'RO';
@@ -989,7 +991,7 @@
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
-              {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
+              {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
             {#if st?.phase === 'connecting'}
               <span class="conn-tab-spin spin" title="Connecting…"><Icon name="refresh" size={10} /></span>
@@ -1019,7 +1021,7 @@
             <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
               <span class="conn-tab-name ellipsis">{cl.name}</span>
-              {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+              {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
               <Icon name="x" size={11} />
@@ -1259,8 +1261,8 @@
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name">{c.name}</span>
       <span class="kind-tag mono">{c.kind}</span>
-      {#if opening[c.id]}<span class="env-badge mono">…</span>{/if}
-      {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
+      {#if opening[c.id]}<span class="kind-tag" title="Opening…">…</span>{/if}
+      {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">
       {#if auth.isRoot || connectionAccess(c,'manage_access','admin')}<button class="icon-btn" aria-label={`Access for ${c.name}`} title="Access" onclick={() => accessFor=c}><Icon name="key" size={11} /></button>{/if}
@@ -1305,7 +1307,7 @@
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
       <span class="conn-name">{cl.name}</span>
       <span class="kind-tag mono">kafka</span>
-      {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+      {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
       <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
@@ -1499,7 +1501,7 @@
       <div class="schema-conn" title="{sc.name} · {sc.kind}">
         <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
         <span class="schema-conn-name ellipsis">{sc.name}</span>
-        {#if envBadge(sc)}<span class="env-badge mono" class:prod={isProdConn(sc)}>{envBadge(sc)}</span>{/if}
+        {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
         <span class="kind-tag mono">{sc.kind}</span>
       </div>
     {/if}
@@ -2014,17 +2016,6 @@
     border-bottom-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
     font-weight: 600;
   }
-  /* Environment badge on connection tabs / rows. */
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
   /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
      env badge keeps the color signal. */
   .schema-conn {
@@ -2076,10 +2067,6 @@
     color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {

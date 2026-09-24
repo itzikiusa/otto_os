@@ -577,6 +577,6 @@ test.describe('workflows page (desktop)', () => {
     await running.getByText('E2E Live').click();
     const label = page.locator('.insp-bar .tl-label');
     await expect(label).toBeVisible({ timeout: 10_000 });
-    await expect(label).toContainText('success', { timeout: 25_000 });
+    await expect(label).toContainText('Succeeded', { timeout: 25_000 });
   });
 });

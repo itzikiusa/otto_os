@@ -20,7 +20,7 @@
   import ClusterWizard from './ClusterWizard.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import { envBadge } from './k8s-util';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
 
   const isAdmin = $derived(auth.isRoot);
   let wizardOpen = $state(false);
@@ -149,7 +149,7 @@
           <div class="row1">
             <span class="dot" style="background:{c.color || 'var(--accent)'}"></span>
             <span class="name" title={c.name}>{c.name}</span>
-            <span class="env-badge mono" class:prod={c.environment === 'prod'}>{envBadge(c.environment)}</span>
+            <EnvBadge env={c.environment} />
             <button class="icon-btn more" aria-label="Cluster actions" onclick={(e) => { e.stopPropagation(); menu(e, c); }}>
               <Icon name="grip" size={13} />
             </button>
@@ -267,20 +267,6 @@
   }
   .mono {
     font-family: var(--font-mono);
-  }
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   @media (max-width: 640px) {
     .grid {

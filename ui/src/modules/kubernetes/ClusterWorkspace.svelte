@@ -34,7 +34,8 @@
   import InstallPanel from './InstallPanel.svelte';
   import type { ActionDef } from './actions';
   import { actionsFor, runAction } from './actions';
-  import { envBadge, formatAge, kindDef, visibleKinds } from './k8s-util';
+  import { formatAge, kindDef, visibleKinds } from './k8s-util';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
 
   interface Props {
     cluster: K8sCluster;
@@ -354,7 +355,7 @@
     </select>
   {/snippet}
   {#snippet badge()}
-    <span class="env-badge mono" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
+    <EnvBadge env={cluster.environment} />
     {#if k8s.caps?.server_version}<span class="ver mono" title="Server version">{k8s.caps.server_version}</span>{/if}
   {/snippet}
   {#snippet actions()}
@@ -704,20 +705,6 @@
     flex: 1;
     min-height: 0;
     background: #000;
-  }
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .hints {
     display: grid;

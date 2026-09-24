@@ -115,7 +115,7 @@ test('an access_keys account seeded via the API renders as a card with its envir
     await openPage(page, 'aws');
     const card = page.getByTestId('aws-account-card').filter({ hasText: ACCOUNT_NAME });
     await expect(card).toBeVisible({ timeout: 15_000 });
-    const pill = card.locator('.env-pill');
+    const pill = card.locator('.env-badge');
     await expect(pill).toHaveText(/prod/i);
     await expect(pill).toHaveAttribute('data-env', 'prod');
     // Deep link into a service view for the new account renders its toolbar.

@@ -166,7 +166,7 @@
     padding: 2px 6px;
   }
   .sub-note.err {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
   }
   .sub-children {
     display: flex;

@@ -30,7 +30,7 @@
   import AthenaView from './AthenaView.svelte';
   import EksView from './EksView.svelte';
   import RdsView from './RdsView.svelte';
-  import EnvPill from './EnvPill.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'rds'];
@@ -132,7 +132,7 @@
   {/snippet}
   {#snippet badge()}
     {#if routeAccountId && account}
-      <EnvPill env={account.environment} />
+      <EnvBadge env={account.environment} />
       {#if routeService}<span class="svc-badge">{SERVICE_LABEL[routeService]}</span>{/if}
     {/if}
   {/snippet}

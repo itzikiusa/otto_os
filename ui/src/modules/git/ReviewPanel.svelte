@@ -29,6 +29,8 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import FindingsBoard from './FindingsBoard.svelte';
   // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
   // re-fetch when the running review for this PR completes/errors, replacing the
@@ -1062,7 +1064,7 @@
             <!-- Unresolved findings -->
             {@const unresolved = mergeReadiness.unresolved_total}
             {#if unresolved > 0}
-              <span class="chip rp-readiness-chip" style="background:color-mix(in srgb,var(--status-exited)12%,transparent);color:var(--status-exited)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
+              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
             {:else}
               <span class="chip ok rp-readiness-chip">No open findings</span>
             {/if}
@@ -1071,7 +1073,7 @@
             {#if mergeable === true}
               <span class="chip ok rp-readiness-chip">Mergeable</span>
             {:else if mergeable === false}
-              <span class="chip rp-readiness-chip" style="color:var(--status-exited)">Conflicts</span>
+              <span class="chip rp-readiness-chip" style="color:var(--danger)">Conflicts</span>
             {/if}
           {/if}
         </div>
@@ -1189,7 +1191,7 @@
                 aria-expanded={isOpen}
               >
                 <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
-                <span class="chip rp-status-{run.status}" style="font-size:10px;padding:1px 5px">{run.status}</span>
+                <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
@@ -1449,14 +1451,14 @@
     flex-wrap: wrap;
   }
   .rp-merge-ok {
-    background: color-mix(in srgb, var(--status-working) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-working) 40%, var(--border));
-    color: var(--status-working);
+    background: var(--success-soft);
+    border: 1px solid color-mix(in srgb, var(--success) 40%, var(--border));
+    color: var(--success);
   }
   .rp-merge-blocked {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 35%, var(--border));
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+    color: var(--danger);
   }
   .rp-verdict {
     margin-inline-start: auto;
@@ -1487,9 +1489,9 @@
     padding: 2px 7px;
   }
   /* CI status pill colours */
-  .rp-ci-success { background: color-mix(in srgb, var(--status-working) 12%, transparent); color: var(--status-working); }
-  .rp-ci-failure { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
-  .rp-ci-pending { background: color-mix(in srgb, var(--status-warn) 12%, transparent); color: var(--status-warn); }
+  .rp-ci-success { background: var(--success-soft); color: var(--success); }
+  .rp-ci-failure { background: var(--danger-soft); color: var(--danger); }
+  .rp-ci-pending { background: var(--warning-soft); color: var(--warning); }
   .rp-ci-none    { background: var(--surface-2); color: var(--text-dim); }
 
   /* Pre-check banner: missing / outdated review skills */
@@ -1499,15 +1501,15 @@
     gap: 8px;
     padding: 7px 10px;
     margin: 0 0 10px;
-    border: 1px solid color-mix(in srgb, var(--status-warn) 35%, var(--border));
-    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+    background: var(--warning-soft);
     border-radius: var(--radius-s, 4px);
     font-size: 11.5px;
     line-height: 1.4;
     flex-wrap: wrap;
   }
   .rp-precheck-icon {
-    color: var(--status-warn);
+    color: var(--warning);
     flex-shrink: 0;
   }
   .rp-precheck-msg {
@@ -1620,49 +1622,13 @@
     margin-top: 3px;
   }
 
-  /* Status pills */
-  .rp-status-pill {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .rp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .rp-status-done {
-    background: color-mix(in srgb, var(--status-working) 15%, transparent);
-    color: var(--status-working);
-  }
-  .rp-status-error {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
-  .rp-status-cancelled {
-    background: color-mix(in srgb, var(--text-dim) 15%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-waiting {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-  }
 
   /* Per-agent: "waiting for input" callout + expandable findings */
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .rp-term {
     height: min(360px, 65vh);
@@ -1699,7 +1665,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
-    color: var(--status-exited);
+    color: var(--danger);
     margin-top: 8px;
   }
   .rp-error-msg {
@@ -1782,12 +1748,12 @@
     color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .sev-bug {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   /* Diff snippet */
@@ -1823,11 +1789,11 @@
     white-space: pre;
   }
   .rp-diff-add {
-    background: color-mix(in srgb, var(--status-working) 12%, transparent);
+    background: var(--success-soft);
     color: var(--text);
   }
   .rp-diff-del {
-    background: color-mix(in srgb, var(--status-exited, #c0392b) 12%, transparent);
+    background: var(--danger-soft);
     color: var(--text);
   }
   .rp-diff-context {
@@ -2035,7 +2001,7 @@
     color: var(--text);
   }
   .cfg-preset-del:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
 
   /* Jira attachment row */

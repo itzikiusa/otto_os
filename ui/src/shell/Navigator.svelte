@@ -34,7 +34,9 @@
     type SidebarPluginEntry,
     type SidebarSection,
   } from '../lib/sidebar';
-  import type { Session, SessionStatus } from '../lib/api/types';
+  import type { Session } from '../lib/api/types';
+  import { events } from '../lib/events.svelte';
+  import { sessionState, type SessionStateInfo } from '../lib/status';
 
   // Load the per-session task roll-up for the current workspace (sidebar chips);
   // it then stays fresh from the events WS (tasks_updated / trail_appended).
@@ -50,21 +52,21 @@
     if (w) void proof.loadSummary(w);
   });
 
-  // A session is "suspended / resumable" — parked to save memory, but its
-  // provider session is intact so opening it auto-resumes (`--resume`).
-  // True when it's `reconnectable`, or an exited agent session that still
-  // carries a provider_session_id. A plain exited shell is genuinely "ended".
-  function isResumable(s: Session, status: SessionStatus): boolean {
-    if (status === 'reconnectable') return true;
-    return status === 'exited' && s.kind === 'agent' && s.provider_session_id != null;
-  }
-  const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
+  // One session vocabulary (lib/status.ts): a row's dot, tooltip and resume
+  // affordance all come from `sessionState`. While the events socket is down
+  // the live claims are stale — "Reconnecting…", no pulse (patterns.md §1).
+  const staleEvents = $derived(events.state !== 'connected');
   /** Session-row tooltip: a long title made one very wide native tooltip that
    *  WKWebView pinned against the window edge and clipped over the page. Keep
-   *  it short and put the hint on its own line. */
-  function rowTip(title: string, resumable: boolean): string {
+   *  it short and put the state + secondary signals on their own lines. */
+  function rowTip(title: string, st: SessionStateInfo, tasks: { done: number; total: number; in_progress?: string | null } | null): string {
     const t = title.length > 80 ? `${title.slice(0, 79).trimEnd()}…` : title;
-    return `${t}\n${resumable ? SUSPENDED_TIP : 'Double-click to rename'}`;
+    const lines = [t, st.hint ?? st.label];
+    if (tasks && tasks.total > 0) {
+      lines.push(tasks.in_progress ? `Now: ${tasks.in_progress} · ${tasks.done}/${tasks.total} tasks` : `${tasks.done}/${tasks.total} tasks done`);
+    }
+    if (!st.resumable) lines.push('Double-click to rename');
+    return lines.join('\n');
   }
 
   let agentsOpen = $state(true);
@@ -980,10 +982,11 @@
 
 {#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
   {@const status = ws.statusMap[s.id] ?? s.status}
-  {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
   {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
+  {@const st = sessionState(s, status, needsYou, { stale: staleEvents })}
+  {@const resumable = st.resumable}
   {@const dnd = rowsDraggable && reorderable}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
@@ -1040,34 +1043,39 @@
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
-        title={rowTip(s.title, resumable)}
+        title={rowTip(s.title, st, sum)}
+        data-state={st.key}
       >
+        <!-- Row = state dot · title · (needs-you bell) · provider. Task and
+             proof roll-ups are secondary: in the tooltip, and revealed on
+             hover / the active row so the list stays scannable. -->
         {#if resumable}
-          <span class="susp-dot" aria-hidden="true">
-            <Icon name="refresh" size={9} />
+          <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+            <Icon name="refresh" size={10} />
           </span>
         {:else}
-          <StatusDot {status} />
+          <StatusDot state={st} />
         {/if}
         <span class="grow ellipsis">{s.title}</span>
-        {#if needsYou}
-          <span class="needs-you-dot" title="Waiting on you" aria-label="Needs you">
-            <Icon name="bell" size={9} />
+        {#if needsYou && !st.inactive}
+          <span class="needs-you-dot" role="img" title="Waiting on you" aria-label="Needs you">
+            <Icon name="bell" size={10} />
           </span>
         {/if}
-        {#if sum && sum.total > 0}
-          <span
-            class="task-chip"
-            class:done={sum.done === sum.total}
-            class:active={sum.in_progress != null}
-            title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
-          >{sum.done}/{sum.total}</span>
-        {/if}
-        {#if proofRow}
-          <ProofStatusChip status={proofRow.status} risk={proofRow.risk_score} compact />
-        {/if}
-        {#if resumable}
-          <span class="susp-pill" title={SUSPENDED_TIP}>resumable</span>
+        {#if (sum && sum.total > 0) || proofRow}
+          <span class="row-secondary">
+            {#if sum && sum.total > 0}
+              <span
+                class="task-chip"
+                class:done={sum.done === sum.total}
+                class:active={sum.in_progress != null}
+                title={sum.in_progress ? `Now: ${sum.in_progress}` : `${sum.done}/${sum.total} tasks done`}
+              >{sum.done}/{sum.total}</span>
+            {/if}
+            {#if proofRow}
+              <ProofStatusChip status={proofRow.status} risk={proofRow.risk_score} compact />
+            {/if}
+          </span>
         {/if}
         {#if hasProviderIcon(s.provider)}
           <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
@@ -1416,25 +1424,28 @@
   .nested-item.resumable:not(.active):hover {
     opacity: 1;
   }
+  /* ↻ = suspended, resumes on open. Calm (dim), never amber — amber is
+     reserved for "needs you". */
   .susp-dot {
     display: grid;
     place-items: center;
-    width: 7px;
-    height: 7px;
+    width: 10px;
+    height: 10px;
     flex-shrink: 0;
-    color: var(--warning);
+    color: var(--text-dim);
   }
-  .susp-pill {
+  /* Secondary roll-ups (tasks, proof): revealed on hover / focus / the active
+     row; always summarised in the row tooltip. */
+  .row-secondary {
+    display: none;
+    align-items: center;
+    gap: 4px;
     flex-shrink: 0;
-    padding: 0 5px;
-    height: 14px;
-    line-height: 14px;
-    border-radius: 999px;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
+  }
+  .nested-item:hover .row-secondary,
+  .nested-item:focus-visible .row-secondary,
+  .nested-item.active .row-secondary {
+    display: inline-flex;
   }
   .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
@@ -1463,7 +1474,7 @@
     color: var(--text);
   }
   .row-action.danger:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   /* Text-bearing toolbar actions (bulk Archive / Delete): declared AFTER
      .row-action so they beat its fixed 22px grid square — otherwise the label
@@ -1474,7 +1485,7 @@
     border: 1px solid var(--border); border-radius: var(--radius-s, 4px); white-space: nowrap;
   }
   .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
-  .arch-tools .row-action.danger:not(:disabled) { color: var(--status-exited); border-color: color-mix(in srgb, var(--status-exited) 40%, transparent); }
+  .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
   .nav-item.subtle {
     color: var(--text-dim);
   }
@@ -1555,22 +1566,22 @@
   .task-chip {
     flex-shrink: 0;
     padding: 0 5px;
-    height: 14px;
-    line-height: 14px;
+    height: 16px;
+    line-height: 16px;
     border-radius: 999px;
-    font-size: 9px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    background: var(--surface-2);
   }
   .task-chip.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--accent-soft);
   }
   .task-chip.done {
-    color: var(--status-working, #3fb950);
-    background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
+    color: var(--success);
+    background: var(--success-soft);
   }
   /* "Needs you" — sticky flag for a session blocked on operator input. Amber to
      stand out from the calmer status colors, without shouting. */
@@ -1638,8 +1649,8 @@
     place-items: center;
   }
   .count-chip.working {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
+    background: var(--success-soft);
+    color: var(--success);
   }
   /* Needs you (the Assistant's approvals/questions): the one attention tone. */
   .count-chip.needs {

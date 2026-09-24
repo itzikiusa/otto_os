@@ -12,14 +12,33 @@ actions and keyboard use.
 People need to see at a glance **which agents exist, what each one is doing,
 and whether one needs them**.
 
-| Signal | Component and token | Meaning |
-|---|---|---|
-| Working | `StatusDot status="working"`, `--status-working`, pulsing | Actively producing output right now |
-| Running | `StatusDot status="running"`, `--accent` | Alive, not currently producing |
-| Idle | `StatusDot status="idle"`, `--status-idle` | Waiting, nothing expected |
-| Needs you | `StatusDot needsYou`, amber pulse (`--status-warn`) plus a "Needs you" label | Blocked on a person: a question, an approval, or input |
-| Exited / failed | `StatusDot status="exited"`, `--status-exited` | Stopped. Say why in words nearby. |
-| Reconnectable | `StatusDot status="reconnectable"`, `--status-warn` | Can be resumed |
+Every surface (sidebar row, tab, tile, pane header, composer, terminal
+overlay) derives the state from **one function**, `sessionState(session,
+liveStatus, needsYou, { stale })` in `ui/src/lib/status.ts`, and draws it with
+`StatusDot state={…}` (and, where words fit, its `label`/`hint`). One state is
+one dot, one label and one tone everywhere:
+
+| State (`key`) | Label | Dot | Tone | Meaning |
+|---|---|---|---|---|
+| `working` | Working | `--status-working`, pulsing | success | Actively producing output right now |
+| `running` | Running | `--accent` | info | Alive, not currently producing |
+| `idle` | Idle | `--status-idle` | neutral | Waiting, nothing expected |
+| `needs-you` | Needs you | `--status-warn`, pulsing | warning | Blocked on a person: a question, an approval, or input. **The only amber state.** |
+| `suspended` | Suspended — resumes on open | hollow `--status-idle` ring (↻ in the sidebar and tabs) | neutral | Parked to save memory; opening it resumes (`--resume`). Calm, not an alert. |
+| `ended` | Ended | faded `--status-idle` | neutral | Stopped normally, not resumable |
+| `failed` | Failed (exit N) | `--status-exited` | danger | Exited with a non-zero code. Say why in words nearby. |
+| `stale` | Reconnecting… | hollow `--status-working` ring, no pulse | neutral | Was working/running, but the events socket is down, so the claim can't be trusted |
+
+Runs, steps and jobs (Workflows, Swarm, Mission Control, Scheduled Tasks,
+Reviews, Skills eval) use `runStatus(raw)` from the same file and render with
+`StatusBadge`: success/ok/done/completed → **Succeeded** (success), error/failed
+→ **Failed** (danger), pending/queued → **Queued** (neutral), waiting →
+**Waiting** (warning), running → **Running** (info, pulsing dot),
+cancelled/canceled → **Cancelled** (neutral), skipped → **Skipped** (neutral).
+Running is never the success green. Environments use `EnvBadge` (`envTone`):
+prod → danger, staging → warning, dev → neutral.
+
+Pulses (`StatusDot`, `StatusBadge`) stop under `prefers-reduced-motion`.
 
 Rules:
 
@@ -36,7 +55,8 @@ Rules:
   story* · 2m ago · Open session". Use `rel()` from `lib/stores/now.svelte.ts`
   for the time; it ticks by itself.
 - **The live count lives in the chrome, not in every page.** The status bar
-  shows "● N working" and the Agents row shows a count. A page shows presence
+  shows "● N working · N need you" (the second is a button that applies
+  `ws.needsYouFilter`) and the Agents row shows a count. A page shows presence
   only for agents that belong to it.
 - **Long-running work shows progress honestly.** A stage rail (see
   `run-with-otto/RunStageRail.svelte`) or "step 3 of 5" plus elapsed time is
@@ -44,7 +64,8 @@ Rules:
   while something runs.
 - **Stale is a state.** If live updates stop (the WebSocket drops, the daemon
   restarts), say so ("Reconnecting…", "Last update 5m ago"). Don't keep
-  showing "working" forever.
+  showing "working" forever: pass `{ stale: events.state !== 'connected' }` to
+  `sessionState`, which turns a working/running claim into `stale` (no pulse).
 
 ## 2. Agent-authored content
 

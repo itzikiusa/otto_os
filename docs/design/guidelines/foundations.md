@@ -94,7 +94,7 @@ graphics. They are what `StatusDot` renders:
 | `--status-working` | live and actively working (pulses) |
 | `--status-idle` | idle |
 | `--status-exited` | exited or failed |
-| `--status-warn` / `--status-warn-soft` | attention: reconnectable, ahead/behind, waiting |
+| `--status-warn` / `--status-warn-soft` | attention: needs you, ahead/behind, waiting (a suspended session is a hollow idle ring, not amber) |
 
 Use a tone token for text and a status token for dots. Don't write a status
 label in `--status-working`; use `--success`.
@@ -132,9 +132,13 @@ label in `--status-working`; use `--success`.
   `--studio-whiteboard`, `--studio-brand` and `--studio-spatial` fill a
   studio's small badge tile behind a `--studio-glyph` icon, always next to the
   studio's name. They are never text, status or a large area.
-- **Proposed:** a categorical palette for charts (`--cat-1…6`, per scheme).
-  Until it exists, charts use `--accent` plus the four tones, and other kinds
-  are told apart by icon and label.
+- **Git worktree identity**: `--worktree` (pip fill, tints, borders) and
+  `--worktree-text` (text-safe) mark a branch checked out in another
+  worktree, so it never reads as the local-branch accent. Defined per scheme.
+- **Chart series** use the categorical palette `--cat-1…6` (per scheme,
+  graphics only: bars, segments, legend swatches — never text or status).
+  Always pair a series with its legend label. Other kinds (sources, features)
+  are told apart by icon and label on a neutral chip.
 - **Proposed:** an `--agent` identity colour for agent-authored accents (the
   Design Hall mockup uses violet). It isn't defined, so don't use it. See
   [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content)

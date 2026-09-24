@@ -5,6 +5,8 @@
   import {RunBodyCache, mergeCheckpointPage} from './runProgress';
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -308,7 +310,7 @@
       {#each checkpointRows.filter(c=>c.iteration>0) as summary (summary.node_id)}
         {@const checkpoint=displayedCheckpoint(summary)}
         <details open={checkpointExpanded[summary.node_id]??false} ontoggle={(event)=>checkpointExpanded[summary.node_id]=event.currentTarget.open}>
-          <summary>{summary.name} · iteration {summary.iteration} · {summary.status} · {summary.attempts} attempt(s)</summary>
+          <summary>{summary.name} · iteration {summary.iteration} · {runStatus(summary.status).label} · {summary.attempts} attempt(s)</summary>
           {#if checkpointExpanded[summary.node_id]}
             {#if bodyLoading[`c:${summary.node_id}`]}<p>Loading details…</p>{/if}
             {#if bodyErrors[`c:${summary.node_id}`]}<p class="err">{bodyErrors[`c:${summary.node_id}`]} <button onclick={()=>void loadBody(summary,true,true)}>Retry</button></p>{/if}
@@ -333,9 +335,9 @@
       data-status={ns.status}
     >
       <summary>
-        <span class="dot {ns.status}"></span>
+        <span class="dot {runStatus(ns.status).key}" aria-hidden="true"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
-        <span class="status">{ns.status}</span>
+        <StatusBadge status={runStatus(ns.status)} variant="text" dot={false} />
         {#if (ns.attempts ?? 1) > 1}<span class="chip" title="step was retried">×{ns.attempts} attempts</span>{/if}
         <span class="sp-grow"></span>
         {#if ns.duration_ms != null}
@@ -506,8 +508,8 @@
   }
   .chip {
     font-size: var(--fs-xs);
-    color: var(--status-warn, #b07a00);
-    background: color-mix(in srgb, var(--status-warn, #b07a00) 16%, transparent);
+    color: var(--warning);
+    background: var(--warning-soft);
     padding: 1px 7px;
     border-radius: 99px;
   }
@@ -557,10 +559,10 @@
     overflow: hidden;
   }
   .step[data-status='error'] {
-    border-color: color-mix(in srgb, var(--status-exited) 45%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   }
   .step[data-status='success'] {
-    border-color: color-mix(in srgb, var(--status-working, #28c840) 35%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 35%, var(--border));
   }
   summary {
     display: flex;
@@ -579,11 +581,6 @@
     font-weight: 600;
     color: var(--text);
   }
-  .status {
-    text-transform: capitalize;
-    color: var(--text-dim);
-    font-size: 11.5px;
-  }
   .ms {
     margin-inline-start: auto;
     font-size: var(--fs-xs);
@@ -591,7 +588,7 @@
     font-family: var(--font-mono);
   }
   .ms.live {
-    color: var(--status-working, #28c840);
+    color: var(--info);
   }
   .body {
     padding: 0 12px 12px;
@@ -600,9 +597,9 @@
     gap: 8px;
   }
   .err {
-    color: var(--status-exited);
+    color: var(--danger);
     font-size: 11.5px;
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
+    background: var(--danger-soft);
     padding: 7px 9px;
     border-radius: var(--radius-s);
   }
@@ -628,7 +625,7 @@
     color: var(--warning);
   }
   .logs .ok-line {
-    color: var(--status-working, #28c840);
+    color: var(--success);
   }
   .product-h {
     display: flex;
@@ -718,23 +715,25 @@
     font-size: 11.5px;
     color: var(--text-dim);
   }
+  /* Leading step dot — the shared run vocabulary (lib/status.ts): running is
+     info-blue, never the succeeded green. */
   .dot {
     width: 9px;
     height: 9px;
     border-radius: 50%;
     flex-shrink: 0;
+    background: var(--text-dim);
   }
-  .dot.success {
-    background: var(--status-working, #28c840);
+  .dot.succeeded {
+    background: var(--status-working);
   }
-  .dot.error {
+  .dot.failed {
     background: var(--status-exited);
   }
   .dot.running {
-    background: var(--status-working, #28c840);
+    background: var(--info);
   }
-  .dot.pending,
-  .dot.skipped {
-    background: var(--text-dim);
+  .dot.waiting {
+    background: var(--status-warn);
   }
 </style>

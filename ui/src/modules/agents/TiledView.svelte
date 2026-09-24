@@ -16,6 +16,8 @@
   import SessionView from './SessionView.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
+  import { sessionState, type SessionLike, type SessionStateInfo } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -363,13 +365,14 @@
     layout.focusIndex(0);
   }
 
-  /** Placeholder subline: only a session with no live PTY is "suspended" — a
-   *  running-but-over-budget/off-screen one is just not attached here. */
-  function placeholderHint(id: string, fallback: string): string {
-    const st = ws.statusMap[id] ?? fallback;
-    return st === 'working' || st === 'running' || st === 'idle'
-      ? 'Running — not attached'
-      : 'Suspended — not connected';
+  /** The shared session state (lib/status.ts) for a placeholder tile. */
+  function tileState(s: SessionLike & { id: string }): SessionStateInfo {
+    return sessionState(s, ws.statusMap[s.id], ws.needsYou[s.id] === true, { stale: events.state !== 'connected' });
+  }
+  /** Placeholder subline: only a session with no live PTY is "suspended" /
+   *  "ended" — a running-but-over-budget/off-screen one is just not attached. */
+  function placeholderHint(st: SessionStateInfo): string {
+    return st.inactive ? (st.hint ?? st.label) : `${st.label} — not attached`;
   }
 </script>
 
@@ -501,7 +504,7 @@
               ondragstart={(e) => onTileDragStart(e, s.id)}
               ondragend={onTileDragEnd}
             >
-              <StatusDot status={ws.statusMap[s.id] ?? s.status ?? 'idle'} />
+              <StatusDot state={tileState(s)} />
               <span class="ph-title">{s.title ?? s.id}</span>
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
             </header>
@@ -511,7 +514,7 @@
               {#if atCapacity}
                 <span class="ph-hint">Live tiles capped at {MAX_LIVE_TILES} to save memory</span>
               {:else}
-                <span class="ph-hint">{placeholderHint(s.id, s.status ?? 'idle')}</span>
+                <span class="ph-hint">{placeholderHint(tileState(s))}</span>
               {/if}
             </div>
           </button>

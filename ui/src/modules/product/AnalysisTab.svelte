@@ -4,6 +4,13 @@
   import { product } from '../../lib/stores/product.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus, type StatusInfo } from '../../lib/status';
+  /** Shared run vocabulary (lib/status.ts); `partial` (some agents failed)
+   *  is analysis-specific and reads as a warning. */
+  function anStatus(s: string): StatusInfo {
+    return s === 'partial' ? { key: 'partial', label: 'Partial', tone: 'warning' } : runStatus(s);
+  }
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
@@ -457,7 +464,7 @@
           <div class="section-head">Synthesized Summary</div>
           {#if summarizerAgent}
             <div class="summarizer-badge">
-              <span class="rp-status-pill rp-status-{summarizerAgent.status}">{summarizerAgent.status}</span>
+              <span class="rp-status-pill" data-status={summarizerAgent.status}><StatusBadge status={anStatus(summarizerAgent.status)} /></span>
               {#if summarizerAgent.session_id}
                 <button
                   class="btn small ghost"
@@ -484,12 +491,7 @@
       <section class="agents-section">
         <div class="agents-header">
           <span class="section-head">Agents</span>
-          <span class="rp-status-pill rp-status-{analysisStatus}">
-            {#if analysisStatus === 'running' || analysisStatus === 'waiting'}
-              <span class="spinner-xs"></span>
-            {/if}
-            {analysisStatus}
-          </span>
+          <span class="rp-status-pill" data-status={analysisStatus}><StatusBadge status={anStatus(analysisStatus)} /></span>
         </div>
         <div class="rp-agents">
           {#each currentAgents as agent (agent.id)}
@@ -525,12 +527,7 @@
                     {stoppingAgents.has(agent.id) ? 'Stopping…' : 'Stop'}
                   </button>
                 {/if}
-                <span class="rp-status-pill rp-status-{agent.status}">
-                  {#if agent.status === 'running' || agent.status === 'waiting'}
-                    <span class="spinner-xs"></span>
-                  {/if}
-                  {agent.status}
-                </span>
+                <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={anStatus(agent.status)} /></span>
               </div>
               {#if agent.error && agent.status === 'error' && !isLens}
                 <p class="rp-agent-note error-note">{agent.error}</p>
@@ -581,7 +578,7 @@
                       {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                     </button>
                   {/if}
-                  <span class="rp-status-pill rp-status-done">done</span>
+                  <span class="rp-status-pill" data-status="done"><StatusBadge status={anStatus('done')} /></span>
                 </div>
               </div>
 
@@ -755,7 +752,7 @@
                     {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                   </button>
                 {/if}
-                <span class="rp-status-pill rp-status-error">error</span>
+                <span class="rp-status-pill" data-status="error"><StatusBadge status={anStatus('error')} /></span>
               </div>
             </div>
             {#if agent.session_id && openTerminals.has(agent.session_id)}
@@ -1136,42 +1133,12 @@
     background: #1b1b1b;
   }
 
-  /* ── Status pills — mirror PR review's .rp-status-* ───────────── */
+  /* ── Status pills — the shared StatusBadge (same as PR review);
+     this wrapper is only the layout hook. ─────────────────────────── */
   .rp-status-pill {
     flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-  }
-  .rp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .rp-status-waiting {
-    background: color-mix(in srgb, var(--warning) 20%, transparent);
-    color: var(--warning);
-  }
-  .rp-status-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
-  }
-  .rp-status-error {
-    background: color-mix(in srgb, var(--status-exited, #ef4444) 15%, transparent);
-    color: var(--status-exited, #b91c1c);
-  }
-  .rp-status-partial {
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
-    color: var(--warning);
   }
 
   /* ── Findings card ────────────────────────────────────────────── */
@@ -1328,22 +1295,6 @@
     line-height: 1.5;
     margin: 4px 0 0;
     font-family: var(--font-mono, monospace);
-  }
-
-  /* ── Spinner (mirrors ReviewAgents) ───────────────────────────── */
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 2px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
 

@@ -3,6 +3,8 @@
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
+  import { sessionState } from '../../lib/status';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
@@ -97,6 +99,9 @@
   // Sticky "needs you" flag — the session is blocked on operator input. Distinct
   // from plain idle; cleared by the store when the user opens/inputs.
   const needsYou = $derived(ws.needsYou[sessionId] === true);
+  /** The one shared session state (lib/status.ts) — a suspended session reads
+   *  "Suspended", not a red "exited"; stale while the events socket is down. */
+  const paneState = $derived(sessionState(session, status, needsYou, { stale: events.state !== 'connected' }));
   /** True when this agent session can be resumed after exiting. */
   const resumable = $derived(
     session?.kind === 'agent' && session?.provider_session_id != null,
@@ -645,7 +650,7 @@
     bind:this={headEl}
     bind:clientWidth={headW}
   >
-    <StatusDot {status} {needsYou} />
+    <StatusDot state={paneState} />
     {#if renaming}
       <!-- svelte-ignore a11y_autofocus -->
       <input
@@ -701,10 +706,12 @@
     {#if typeof session?.meta?.account_label === 'string'}
       <span class="chip" title="Subscription account pinned to this session">{session.meta.account_label}</span>
     {/if}
-    {#if needsYou}
+    {#if paneState.key === 'needs-you'}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
-        <Icon name="bell" size={10} /> Needs you
+        <Icon name="bell" size={11} /> Needs you
       </span>
+    {:else if paneState.key === 'suspended' || paneState.key === 'stale'}
+      <span class="state-note" title={paneState.hint}>{paneState.label}</span>
     {/if}
     {#if summary && summary.total > 0}
       <span
@@ -937,9 +944,7 @@
   }
   .provider-chip {
     height: 16px;
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    font-size: var(--fs-xs);
   }
   /* "Needs you" — session blocked on operator input. Amber, attention-grabbing
      but tasteful; distinct from the (calmer) status dot for idle/working. */
@@ -948,37 +953,43 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    height: 16px;
-    padding: 0 6px;
+    height: 18px;
+    padding: 0 7px;
     border-radius: 99px;
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 16%, transparent);
+    background: var(--warning-soft);
+    white-space: nowrap;
+  }
+  /* Quiet state word next to the dot for the states a dot alone can't say
+     (suspended, reconnecting). */
+  .state-note {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     white-space: nowrap;
   }
   /* Per-session task roll-up "done/total" — matches the sidebar chip. */
   .task-chip {
     flex-shrink: 0;
     padding: 0 5px;
-    height: 15px;
-    line-height: 15px;
+    height: 16px;
+    line-height: 16px;
     border-radius: 999px;
-    font-size: 9px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    background: var(--surface-2);
   }
   .task-chip.active {
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .task-chip.done {
-    color: var(--status-working, #3fb950);
-    background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
+    color: var(--success);
+    background: var(--success-soft);
   }
   /* "now: «task»" — what the agent is doing this moment. Truncates so it never
      pushes the header controls off-screen in a narrow tile. */
@@ -1223,6 +1234,7 @@
   .pane-head.t4 .term-ctl,
   .pane-head.t4 .now-task,
   .pane-head.t4 .idle-hint,
+  .pane-head.t4 .state-note,
   .pane-head.t4 .handover-crumb,
   .pane-head.t4 .handover-pending {
     display: none;

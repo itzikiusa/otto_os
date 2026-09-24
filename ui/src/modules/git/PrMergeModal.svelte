@@ -80,7 +80,8 @@
     if (state === 'success') return { glyph: '✓', cls: 'ok' };
     if (state === 'failure') return { glyph: '✗', cls: 'bad' };
     if (state === 'skipped' || state === 'neutral') return { glyph: '–', cls: 'dim' };
-    return { glyph: '●', cls: 'dim' };
+    // Anything else is still pending / in progress — waiting on CI.
+    return { glyph: '●', cls: 'warn' };
   }
 
   /** Persist the Review tab and route to the PR — PrDetail honours the stored
@@ -331,10 +332,13 @@
     font-weight: 700;
   }
   .ok {
-    color: var(--status-idle, #34c759);
+    color: var(--success);
   }
   .bad {
-    color: var(--status-exited);
+    color: var(--danger);
+  }
+  .warn {
+    color: var(--warning);
   }
   .dim {
     color: var(--text-dim);
@@ -370,7 +374,7 @@
     accent-color: var(--accent);
   }
   .anyway {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .err {
     display: flex;
@@ -378,8 +382,8 @@
     gap: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
     font-size: 11.5px;
     line-height: 1.45;
   }
@@ -395,7 +399,7 @@
   }
   .reasons {
     font-size: 11.5px;
-    color: var(--status-exited);
+    color: var(--danger);
     overflow-wrap: anywhere;
   }
   .reasons.muted {

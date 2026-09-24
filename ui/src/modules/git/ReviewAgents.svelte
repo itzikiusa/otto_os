@@ -8,6 +8,8 @@
   import type { Review } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
 
   interface Props {
     review: Review;
@@ -150,12 +152,7 @@
               : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
           </button>
         {/if}
-        <span class="rp-status-pill rp-status-{agent.status}">
-          {#if agent.status === 'running' || agent.status === 'waiting'}
-            <span class="spinner-xs"></span>
-          {/if}
-          {agent.status}
-        </span>
+        <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
       </div>
       {#if agent.note && (view === 'running' || agent.status !== 'done' || i === lastRetryable)}
         <!-- The summarizer's note ("N final comments" / fallback) stays visible
@@ -228,8 +225,8 @@
   }
   .rp-fallback-chip {
     font-size: var(--fs-xs);
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .rp-agent-note {
     margin: 4px 0 0;
@@ -238,47 +235,18 @@
     line-height: 1.4;
   }
 
+  /* Status pill: the shared StatusBadge (runStatus → one label/tone set);
+     this wrapper is only the layout/test hook. */
   .rp-status-pill {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-  }
-  .rp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .rp-status-done {
-    background: color-mix(in srgb, var(--status-working) 15%, transparent);
-    color: var(--status-working);
-  }
-  .rp-status-error {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
-  .rp-status-waiting {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-  }
-  .rp-status-skipped {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
   }
 
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .rp-term {
     height: min(360px, 65vh);
@@ -331,27 +299,12 @@
     color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .sev-bug {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
-
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 3px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .grow { flex: 1; }
@@ -366,9 +319,9 @@
     letter-spacing: 0.03em;
     flex-shrink: 0;
   }
-  .rp-state-fixing    { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
-  .rp-state-resolved  { background: color-mix(in srgb, var(--status-working) 12%, transparent); color: var(--status-working); }
-  .rp-state-regressed { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
+  .rp-state-fixing    { background: var(--warning-soft); color: var(--warning); }
+  .rp-state-resolved  { background: var(--success-soft); color: var(--success); }
+  .rp-state-regressed { background: var(--danger-soft); color: var(--danger); }
   .rp-state-declined  { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
 
   /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────

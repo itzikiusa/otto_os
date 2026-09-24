@@ -249,10 +249,10 @@
     cache_write_tokens: number;
   };
   const TOKEN_CATS = [
-    { label: 'Input', color: 'var(--accent)', pick: (o: TokenParts) => o.input_tokens },
-    { label: 'Cache write', color: '#f59e0b', pick: (o: TokenParts) => o.cache_write_tokens },
-    { label: 'Cache read', color: '#10b981', pick: (o: TokenParts) => o.cache_read_tokens },
-    { label: 'Output', color: '#8b5cf6', pick: (o: TokenParts) => o.output_tokens },
+    { label: 'Input', color: 'var(--cat-1)', pick: (o: TokenParts) => o.input_tokens },
+    { label: 'Cache write', color: 'var(--cat-2)', pick: (o: TokenParts) => o.cache_write_tokens },
+    { label: 'Cache read', color: 'var(--cat-3)', pick: (o: TokenParts) => o.cache_read_tokens },
+    { label: 'Output', color: 'var(--cat-4)', pick: (o: TokenParts) => o.output_tokens },
   ] as const;
 
   type Seg = { label: string; color: string; v: number; pct: number };
@@ -1040,10 +1040,16 @@
     border-color: var(--accent);
     color: var(--accent-text);
   }
+  /* The local .btn above re-sets the background at the same specificity as the
+     global .btn.primary, so restate the global primary from tokens (no #fff —
+     Warm dark's accent fill carries dark text). */
   .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: transparent;
+    color: var(--accent-contrast);
+  }
+  .btn.primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent-solid) 88%, black);
   }
   .btn:disabled {
     opacity: 0.55;
@@ -1391,38 +1397,14 @@
   }
   .kind-badge {
     flex-shrink: 0;
-    font-size: 9.5px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    /* Kinds are categories, not statuses: one neutral chip, told apart by the
+       word (foundations.md — no categorical rainbows). */
+    background: var(--surface-2);
     color: var(--text-dim);
-  }
-  .kind-review {
-    background: color-mix(in srgb, var(--warning) 20%, transparent);
-    color: var(--warning);
-  }
-  .kind-product {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
-  }
-  .kind-channel {
-    background: color-mix(in srgb, var(--status-working, #4a9eff) 20%, transparent);
-    color: var(--status-working, #4a9eff);
-  }
-  .kind-agent {
-    background: color-mix(in srgb, #8b5cf6 20%, transparent);
-    color: #8b5cf6;
-  }
-  .kind-swarm {
-    background: color-mix(in srgb, var(--success) 22%, transparent);
-    color: #0f9d6e;
-  }
-  .kind-connection {
-    background: color-mix(in srgb, #64748b 22%, transparent);
-    color: #64748b;
   }
 
   /* By-feature rows: widen the label column so the feature badge fits. */

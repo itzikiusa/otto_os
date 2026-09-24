@@ -5,6 +5,8 @@
   import { untrack } from 'svelte';
   import { marked } from 'marked';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -207,26 +209,39 @@
   // same way FileTree previews markdown: `marked` → a sandboxed iframe
   // (srcdoc, no scripts run) — that's the only "sanitizer" FileTree applies,
   // so mirror it exactly rather than injecting raw HTML into the page.
+  // The srcdoc is themed from the app's tokens (resolved values copied in,
+  // like PluginFrame's `otto:init` theme) so it reads in light AND dark; it
+  // re-renders when the theme/scheme/accent changes (`finalOutputSrcdoc`).
   const FINAL_OUTPUT_CSS = `
-    :root { color-scheme: light dark; }
-    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
-    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
-    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
-    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
-    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+    body { font: 14px/1.6 var(--font-ui); margin: 16px; color: var(--text); background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid var(--border); padding-bottom: .2em; }
+    a { color: var(--accent-text); } code { background: var(--surface-2); padding: .15em .35em; border-radius: 4px; font-family: var(--font-mono); }
+    pre { background: var(--surface-2); padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid var(--border); padding: 4px 8px; }
+    blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 12px; color: var(--text-dim); }
     img { max-width: 100%; }
   `;
+  const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
+  /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
   function renderFinalOutputSrcdoc(md: string): string {
-    let inner: string;
     try {
-      inner = marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
+      return marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
     } catch {
-      inner = `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
+      return `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
     }
-    return `<!doctype html><html><head><meta charset="utf-8"><style>
-  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }${FINAL_OUTPUT_CSS}</style></head><body>${inner}</body></html>`;
   }
+  function themedFinalOutput(body: string, scheme: 'light' | 'dark'): string {
+    const cs = getComputedStyle(document.documentElement);
+    const vars = FINAL_OUTPUT_TOKENS.map((v) => `${v}: ${cs.getPropertyValue(v).trim()};`).join(' ');
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+  :root { color-scheme: ${scheme}; ${vars} }${FINAL_OUTPUT_CSS}</style></head><body>${body}</body></html>`;
+  }
+  const finalOutputSrcdoc = $derived.by(() => {
+    // Theme inputs are read so the frame re-themes when they change.
+    void ui.theme;
+    void ui.accent;
+    return finalOutputHtml ? themedFinalOutput(finalOutputHtml, ui.resolvedScheme) : '';
+  });
   async function loadFinalOutput(runId: string, contextDir: string): Promise<void> {
     finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
     finalOutputAvailable = false;
@@ -859,9 +874,14 @@
 
   // The daemon caps parallel workflow runs; a `pending` run is one PARKED in
   // its FIFO queue (it starts the moment a slot frees). Say so — "pending"
-  // read as "about to start any second" and made the queue look stuck.
+  // read as "about to start any second" and made the queue look stuck. The
+  // shared run vocabulary (lib/status.ts) already maps pending → "Queued".
   function runStatusLabel(status: string): string {
-    return status === 'pending' ? 'queued' : status;
+    return runStatus(status).label;
+  }
+  /** Normalised run/step key for the status dot (`succeeded`, `failed`, …). */
+  function dotKey(status: string): string {
+    return runStatus(status).key;
   }
   const activeRunOrdinals = $derived.by(() => {
     const counts: Record<string, number> = {};
@@ -1473,7 +1493,7 @@
             onclick={() => openRunById(r.workflow_id, r.run_id)}
             title={`${r.workflow_name} — ${runStatusLabel(r.status)}`}
           >
-            <span class="dot {r.status}"></span>
+            <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
             <span class="run-name">{r.workflow_name}</span>
             {#if activeWfRunCounts[r.workflow_id] > 1}
               <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
@@ -1559,7 +1579,7 @@
           {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
           {#each runs as r (r.id)}
             <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
-              <span class="dot {r.status}"></span>
+              <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
               <span class="run-status">{runStatusLabel(r.status)}</span>
               <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
               <span class="grow"></span>
@@ -1777,7 +1797,7 @@
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
-              <span class="tl-label"><span class="dot {run.status}"></span>{runStatusLabel(run.status)}</span>
+              <span class="tl-label"><StatusBadge status={runStatus(run.status)} testid="run-status" /></span>
               <span class="grow"></span>
               {#if runActive}
                 <button
@@ -1807,7 +1827,7 @@
                   data-status={ns.status}
                   onclick={() => (selectedId = ns.node_id)}
                 >
-                  <span class="dot {ns.status}"></span>
+                  <span class="dot {dotKey(ns.status)}" role="img" aria-label={runStatusLabel(ns.status)}></span>
                   <span class="tl-name">{nodeName(ns.node_id)}</span>
                   {#if ns.duration_ms != null}<span class="tl-ms">{fmtMs(ns.duration_ms)}</span>{/if}
                 </button>
@@ -1822,7 +1842,7 @@
                   <Icon name="check" size={13} />
                   <span>Final output</span>
                 </summary>
-                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
               </details>
             {/if}
             {#if run.context_dir && !viewport.isDesktop}
@@ -1845,7 +1865,7 @@
             <div class="insp-h">
               <strong>{selectedNode.name || selectedNode.kind}</strong>
               <span class="mono dim">{selectedNode.kind}</span>
-              {#if selectedRun}<span class="dot {selectedRun.status}"></span>{selectedRun.status}{/if}
+              {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
@@ -2851,7 +2871,7 @@
               <Icon name="check" size={13} />
               <span>Final output</span>
             </summary>
-            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
           </details>
         {/if}
         <div class="ctx-body">
@@ -3636,17 +3656,11 @@
     height: 320px;
     border: none;
     border-top: 1px solid var(--border);
-    background: #1a1a1a; /* FINAL_OUTPUT_CSS in the srcdoc is dark-only */
+    background: var(--surface); /* the srcdoc body is transparent + token-themed */
   }
   .tl-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
     flex-shrink: 0;
     padding-inline-end: 4px;
   }
@@ -3667,10 +3681,10 @@
     border-color: var(--accent);
   }
   .tl-step[data-status='success'] {
-    border-color: color-mix(in srgb, var(--status-working, #28c840) 55%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 55%, var(--border));
   }
   .tl-step[data-status='error'] {
-    border-color: color-mix(in srgb, var(--status-exited) 55%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
   .tl-step[data-status='running'] {
     border-color: var(--accent);
@@ -3853,7 +3867,6 @@
     flex: 1;
     text-align: start;
     font-size: 12px;
-    text-transform: capitalize;
   }
   .run-when {
     font-size: var(--fs-xs);
@@ -3869,18 +3882,35 @@
     border-radius: 50%;
     display: inline-block;
   }
-  .dot.success {
-    background: var(--status-working, #28c840);
+  /* Run/step dots use the shared run vocabulary (lib/status.ts runStatus):
+     running is info-blue and pulses — never the succeeded green. */
+  .dot.succeeded {
+    background: var(--status-working);
   }
-  .dot.error {
+  .dot.failed {
     background: var(--status-exited);
   }
   .dot.running {
-    background: var(--status-working, #28c840);
+    background: var(--info);
+    animation: wf-dot-pulse 1.6s ease-in-out infinite;
   }
-  .dot.pending,
+  .dot.waiting {
+    background: var(--status-warn);
+  }
+  .dot.queued,
+  .dot.cancelled,
   .dot.skipped {
     background: var(--text-dim);
+  }
+  @keyframes wf-dot-pulse {
+    50% {
+      opacity: 0.4;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot.running {
+      animation: none;
+    }
   }
   .spin {
     width: 11px;

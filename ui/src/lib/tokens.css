@@ -96,6 +96,23 @@
   --studio-spatial: #0d9488;
   --studio-glyph: #ffffff;
 
+  /* Git worktree identity (a branch checked out in ANOTHER worktree): violet,
+     so it never reads as the local-branch accent. --worktree is the indicator
+     (pip fill, tints, borders); --worktree-text is text-safe (>= 4.5:1 on
+     --surface/--surface-2 and on its own 18% tint). Light values below. */
+  --worktree: #a78bfa;
+  --worktree-text: #c4b5fd;
+
+  /* Categorical chart series (bars, stacked segments, legend swatches) —
+     GRAPHICS only (>= 3:1 on --surface), never text or status. Always pair a
+     series with its legend label. Light values below. */
+  --cat-1: #6cb2ff;
+  --cat-2: #e3b341;
+  --cat-3: #3fcf8e;
+  --cat-4: #b18cff;
+  --cat-5: #ff8fb1;
+  --cat-6: #5ad1d1;
+
   /* Native form controls (checkboxes, radios, scrollbars, date pickers,
      select popups) follow the scheme and tint with the theme accent, so a
      dark page never shows a white system checkbox. */
@@ -115,6 +132,14 @@ html[data-scheme='light']:not([data-theme='pro-dark']) {
   --status-exited: #b3261e;
   --status-warn: #8a5100;
   --status-warn-soft: rgba(138, 81, 0, 0.12);
+  --worktree: #7c3aed;
+  --worktree-text: #6d28d9;
+  --cat-1: #1f6fd1;
+  --cat-2: #b26a00;
+  --cat-3: #178a4c;
+  --cat-4: #7a4fd6;
+  --cat-5: #c2417a;
+  --cat-6: #0f8a8a;
 }
 
 /* ---------- Native theme (default) ---------- */

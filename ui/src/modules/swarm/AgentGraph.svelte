@@ -308,7 +308,7 @@
                   <span class="node-body">
                     <span class="node-top">
                       <span class="node-name">{a.name}</span>
-                      <span class="node-state st-{act}" title={statusLine(a)}></span>
+                      <span class="node-state st-{act}" role="img" aria-label={statusLine(a)} title={statusLine(a)}></span>
                     </span>
                     <span class="node-status dim">{statusLine(a)}</span>
                     <span class="node-foot">
@@ -510,8 +510,9 @@
   .node-state.st-working {
     background: var(--status-working);
   }
+  /* Waiting on a queue slot / a person: the attention tone, not idle grey. */
   .node-state.st-waiting {
-    background: var(--status-idle, #d8a200);
+    background: var(--status-warn);
   }
   .node-state.st-open {
     background: var(--accent);
@@ -524,10 +525,8 @@
     align-items: center;
     gap: 8px;
     margin-top: 2px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
   }
   .node-foot .role {
     overflow: hidden;
@@ -645,10 +644,10 @@
     flex: none;
   }
   .stat.done {
-    color: var(--status-working);
+    color: var(--success);
   }
   .stat.addr.has {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .search {
     display: flex;
@@ -729,8 +728,8 @@
     color: var(--text-dim);
   }
   .pchip.prio-urgent {
-    background: color-mix(in srgb, var(--status-exited) 20%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .pchip.prio-high {
     background: color-mix(in srgb, #e6883c 22%, transparent);

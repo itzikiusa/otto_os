@@ -1,6 +1,8 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -320,18 +322,6 @@
     return ((t.destination?.type as string) ?? 'none') as string;
   }
 
-  function statusClass(status: string | null | undefined): string {
-    switch (status) {
-      case 'ok':
-        return 'pill ok';
-      case 'error':
-        return 'pill bad';
-      case 'running':
-        return 'pill working';
-      default:
-        return 'pill';
-    }
-  }
 </script>
 
 <div class="sched-page">
@@ -572,8 +562,9 @@
               <div class="task-info">
                 <strong class="name">{t.name}</strong>
                 <span class="meta">{cadenceLabel(t)} · → {destLabel(t)}</span>
-                {#if t.last_status}<span class={statusClass(t.last_status)}>{t.last_status}</span>{/if}
-                {#if !t.enabled}<span class="pill">paused</span>{/if}
+                <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed. -->
+                {#if t.last_status}<StatusBadge status={runStatus(t.last_status)} />{/if}
+                {#if !t.enabled}<span class="pill">Paused</span>{/if}
               </div>
               <div class="task-actions">
                 <button class="btn small" onclick={() => runNow(t)} disabled={busy}>Run now</button>
@@ -591,7 +582,7 @@
               <div class="runs">
                 {#each scheduledTasks.runsByTask[t.id] ?? [] as r (r.id)}
                   <div class="run">
-                    <span class={statusClass(r.status)}>{r.status}</span>
+                    <StatusBadge status={runStatus(r.status)} />
                     <span class="run-when">{r.started_at}</span>
                     <span class="run-sum">{r.summary || '(no summary)'}</span>
                     {#if r.report_rel}
@@ -637,8 +628,8 @@
   .sched-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
   }
   .notice {
@@ -662,9 +653,7 @@
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { font-size: var(--fs-xs); padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
   .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .pill.bad { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
   .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
-  .pill.working { background: var(--info-soft); color: var(--info); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 720px; }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }
