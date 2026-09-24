@@ -254,7 +254,7 @@
       <h2>Couldn't load this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
-      <button class="btn" onclick={() => void loadSession()}>Retry</button>
+      <button class="btn ec-retry" onclick={() => void loadSession()}>Retry</button>
     </div>
   </div>
 
@@ -364,7 +364,7 @@
     opacity: 0.7;
     overflow-wrap: anywhere;
   }
-  .error-card .btn {
+  .ec-retry {
     align-self: center;
   }
   .dim {

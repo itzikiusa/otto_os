@@ -52,7 +52,7 @@
       <h3>Couldn't load {what}</h3>
       <p class="ls-detail">{error}</p>
       {#if onretry}
-        <button class="btn" onclick={onretry} disabled={loading}>
+        <button class="btn ls-retry" onclick={onretry} disabled={loading}>
           <Icon name="refresh" size={13} />
           {loading ? 'Retrying…' : 'Retry'}
         </button>
@@ -118,7 +118,7 @@
     line-height: 1.5;
     overflow-wrap: anywhere;
   }
-  .ls-error .btn {
+  .ls-retry {
     margin-top: 8px;
     display: inline-flex;
     align-items: center;
