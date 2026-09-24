@@ -131,7 +131,7 @@
     height: 18px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 25%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 9.5px;
     font-weight: 700;
     display: grid;
@@ -142,7 +142,7 @@
     font-weight: 600;
   }
   .cmt-date {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .cmt-body {
     font-size: 12.5px;

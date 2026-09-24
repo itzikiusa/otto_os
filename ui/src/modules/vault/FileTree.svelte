@@ -490,11 +490,11 @@
     min-width: 0;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .prov {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--accent, #9ab4ff);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;

@@ -283,7 +283,7 @@
     background: var(--surface-2);
   }
   .ns-opt.current {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ns-opt-label {
     overflow: hidden;

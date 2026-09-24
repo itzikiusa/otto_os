@@ -911,7 +911,7 @@
   .pal-ask {
     border-top: 1px solid var(--border);
     border-radius: 0 0 var(--radius-s) var(--radius-s);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .pal-empty {
     padding: 16px;
@@ -994,7 +994,7 @@
   }
   .pal-section-header {
     padding: 6px 10px 2px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1044,7 +1044,7 @@
   }
   .pal-hit-btn {
     padding: 1px 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -1055,7 +1055,7 @@
   .pal-hit-btn:hover {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   @keyframes fade-in {
     from {

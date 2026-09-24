@@ -269,7 +269,7 @@
   }
   .bchip.tgt {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .arrow {
     color: var(--text-dim);
@@ -287,7 +287,7 @@
     font-weight: 600;
   }
   .section-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     color: var(--text-dim);

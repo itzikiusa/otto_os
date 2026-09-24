@@ -223,7 +223,8 @@ a client that never acks gets one frame and then nothing.
   keydown, `rawKeyDown` otherwise; `windowsVirtualKeyCode` derived from `code`
   when `key_code` is absent). macOS editing shortcuts (⌘A/⌘C/⌘V/⌘X/⌘Z) are sent
   as the matching editing `commands`.
-- Mouse moves are coalesced server-side (latest wins, ≥ 8 ms apart).
+- Mouse moves closer than 8 ms to the previous dispatched move are dropped
+  server-side (clicks, wheels and keys never are).
 - Input from a viewer while `controller == "agent"` → `not_driver` (send
   `take_over` first). The first input while `controller == "none"` makes this
   viewer's user the driver.
@@ -252,7 +253,10 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `workspace_id`; other **workspace-scoped events** (improvement, swarm,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 51
+**owner-scoped events** (`assistant_turn`, `assistant_task_update`,
+`assistant_needs_you`, `assistant_limit`) reach only the user named by their
+`user_id` (not root);
+**broadcast events** (`Notice`) reach every authenticated client. There are 69
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -1155,3 +1159,43 @@ after workflow completion. No new event type is introduced.
 Personal Agent Memory/Context document edits use the versioned HTTP responses
 documented in `api.md`; they do not introduce a WS event. New runs/chats snapshot
 saved Context, while existing sessions retain their initial context.
+
+### `assistant_turn` / `assistant_task_update` / `assistant_needs_you` / `assistant_limit`
+
+Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
+the assistant owner's `user_id` and is delivered ONLY to that user's
+connections — not to workspace members and not to root (the assistant is
+personal). Emitted by `crates/otto-server/src/assistant.rs` and its submodules.
+Reply prose still streams over the session-family `transcript_live` /
+`transcript_appended` events of `thread.session_id`; these four events carry the
+assistant's own index and queue.
+
+```json
+{"type":"assistant_turn","user_id":"…","thread_id":"…","turn":{…AssistantTurn…},"thread":{…AssistantThread…}}
+{"type":"assistant_task_update","user_id":"…","task":{…AssistantTask…}}
+{"type":"assistant_needs_you","user_id":"…","task":{…AssistantTask…},"open_count":2}
+{"type":"assistant_limit","user_id":"…","thread_id":"…","limit":{…AssistantLimitState…},"suggestion":{"provider":"codex","model":null,"account_id":null},"task_id":"…","auto_switched":false}
+```
+
+- `assistant_turn` — a turn was added to a thread's index: the user's own send
+  (echoed so the bar, the window and the phone stay in step), an assistant reply
+  once it has landed in the transcript (with its provider badge), or a system
+  line — a memory chip (`kind:"memory"`, `data.undo` says how to undo it), a
+  delegation ("Asked *Daily Recap*…"), a delivered reminder, a route change or a
+  limit notice. `thread` is the thread row after the change (its `status`,
+  provider and `updated_at` moved), or `null` when unchanged. Clients append by
+  `turn.id` (idempotent — a re-sent id replaces).
+- `assistant_task_update` — a task was created or changed state
+  (`queued → running → needs_you → done | failed | cancelled`). Carries the full
+  row; clients replace by `task.id`.
+- `assistant_needs_you` — an item entered OR left the needs-you queue (a task
+  moved into or out of `needs_you`). `open_count` is the queue size after the
+  change, so the menu-bar dot and phone badge update without a re-fetch.
+- `assistant_limit` — a provider usage limit was detected for the thread's
+  current route (PTY or transcript text such as "usage limit reached … resets
+  2pm"). `suggestion` is the route the user can continue on (`null` when no other
+  provider is configured); `task_id` is the `limit` needs-you item asking
+  "continue on X?". `auto_switched: true` means `auto_failover` was on and the
+  thread already moved (a `route` turn follows); otherwise nothing switches until
+  the user answers.
+- TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Otto Assistant`).

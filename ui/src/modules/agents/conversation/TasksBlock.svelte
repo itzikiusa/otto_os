@@ -53,7 +53,7 @@
     text-decoration: line-through;
   }
   li.in_progress .mark {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ttl {
     overflow-wrap: anywhere;

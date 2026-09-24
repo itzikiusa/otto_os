@@ -452,7 +452,7 @@
   .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
-  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-color: transparent; }
+  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); border-color: transparent; }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); border-color: transparent; }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); border-color: transparent; }
   .pill.working { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); border-color: transparent; }

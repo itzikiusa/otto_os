@@ -467,7 +467,7 @@
     align-items: center;
   }
   .td-hdr {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -499,7 +499,7 @@
     padding-top: 10px;
   }
   .td-section-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -556,7 +556,7 @@
     cursor: pointer;
   }
   .td-add:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .td-preview {

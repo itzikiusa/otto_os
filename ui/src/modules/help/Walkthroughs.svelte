@@ -434,13 +434,13 @@
 </div>
 
 <style>
-  .film-duration { color: var(--text-dim); font-size: 10.5px; margin: 3px 0; }
+  .film-duration { color: var(--text-dim); font-size: var(--fs-xs); margin: 3px 0; }
   .chapter-list { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; max-height: 160px; overflow-y: auto; padding: 2px; }
   .chapter-entry { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; }
   .chapter-button { display: flex; align-items: center; gap: 8px; padding: 9px 10px; background: transparent; border: 0; color: var(--text); cursor: pointer; text-align: start; font-size: 12px; border-radius: 5px; }
-  .chapter-active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .chapter-active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); }
   .chapter-time { color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 11px; }
-  .chapter-guide { color: var(--text-dim); font-size: 10px; padding: 9px; white-space: nowrap; text-decoration: none; }
+  .chapter-guide { color: var(--text-dim); font-size: var(--fs-xs); padding: 9px; white-space: nowrap; text-decoration: none; }
   .chapter-button:focus-visible, .chapter-guide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .wt-page {
@@ -541,7 +541,7 @@
   }
 
   .rail-section-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -563,12 +563,12 @@
 
   .rail-guide .ext {
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
 
   .doc-link {
     margin-inline-start: 6px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
     white-space: nowrap;
   }
@@ -583,7 +583,7 @@
     height: 18px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;
@@ -612,7 +612,7 @@
   }
 
   .rail-item.active .item-title {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .item-desc {
@@ -735,7 +735,7 @@
 
   .fallback-link {
     font-size: 12.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
     padding: 5px 10px;
     border-radius: var(--radius-s, 5px);

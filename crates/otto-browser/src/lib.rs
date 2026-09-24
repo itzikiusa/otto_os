@@ -15,6 +15,7 @@ pub mod cdp;
 pub mod engine;
 pub mod extract;
 pub mod lightpanda;
+pub mod live;
 
 pub use cdp::LightpandaEngine;
 pub use engine::{BrowserEngine, EngineError, MatchedNode, Page, PAGE_BYTE_CAP, PAGE_TIMEOUT_SECS};

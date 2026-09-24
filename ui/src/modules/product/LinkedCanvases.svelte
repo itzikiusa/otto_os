@@ -254,7 +254,7 @@
   .lc-btn:hover,
   .lc-btn.on {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .lc-btn.primary {
     background: var(--accent);
@@ -310,7 +310,7 @@
   }
   .lc-new-menu small {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .lc-picker {
     display: flex;

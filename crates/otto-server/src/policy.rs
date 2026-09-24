@@ -130,7 +130,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         p,
         "/auth/me" | "/auth/logout" | "/auth/tokens" | "/auth/capabilities"
     ) || p.starts_with("/auth/tokens/")
-        || p == "/auth/provider-accounts" || p.starts_with("/auth/provider-accounts/")
+        || p == "/auth/provider-accounts"
+        || p.starts_with("/auth/provider-accounts/")
         || p.starts_with("/auth/shares")
     {
         return Exempt;
@@ -172,6 +173,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Host filesystem access: authenticated; OS permissions enforced by I/O.
     // Share/MCP endpoint scopes are still checked before this exemption.
     if matches!(p, "/fs/browse" | "/fs/read") {
+        return Exempt;
+    }
+    // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
+    // and not feature-gated HERE because it spans many features — every lookup
+    // it performs is a self-call of that kind's own list route AS the caller,
+    // which that route's policy entry + handler RBAC re-authorize, so it can
+    // never show more than the caller could already list. Share-link and
+    // MCP-restricted tokens are refused in-handler (and by the scope guards).
+    // Only GET is mounted (other verbs 405 at the router).
+    if p == "/refs/directory" || p == "/refs/resolve" {
         return Exempt;
     }
     // Static catalogs (no per-user data; safe to read for any authed user).
@@ -439,7 +450,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, if get { View } else { Edit });
     }
 
-    if p == "/workspaces/{id}/network-profiles" || p.starts_with("/network-profiles/") || p == "/sessions/{id}/network" {
+    if p == "/workspaces/{id}/network-profiles"
+        || p.starts_with("/network-profiles/")
+        || p == "/sessions/{id}/network"
+    {
         return Require(Connections, if get { View } else { Edit });
     }
 
@@ -1050,6 +1064,19 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
 
+    // ---- Otto Assistant ---------------------------------------------------
+    // The personal assistant (threads, turns, tasks, memory, routing, agent
+    // tools). Every row is the CALLER's own (handlers 404 anyone else's id), so
+    // there is no workspace axis; the feature axis is `Agents` like the session
+    // routes it drives. The route preview is a read that happens to POST.
+    // Delegation's extra `scheduled_tasks:Edit` + Editor check is in-handler.
+    if p == "/assistant/route/preview" {
+        return Require(Agents, View);
+    }
+    if p.starts_with("/assistant/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
     // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
     // workspace-scoped; the flat by-id routes load the run and re-check the role on
     // its workspace (the IDOR guard). (The webhook entry is Exempt above.)
@@ -1108,6 +1135,27 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // — this axis only answers "can this caller use the Browser feature at
     // all", same separation as everywhere else in this file.
     if p == "/workspaces/{wid}/browser/login" {
+        return Require(Browser, Edit);
+    }
+    // Remote live view (daemon Chromium). Status + listing + reading a tab's
+    // session are reads; opening/closing/driving/screenshotting a session are
+    // Edit; the daemon-wide engine settings and the one-time engine download
+    // (a ~100-180 MB binary into the data dir) are Admin. The handlers add the
+    // workspace role on the tab's workspace and the owner/ws-Admin/root
+    // session axis on top.
+    if p == "/browser/live/status" || p == "/workspaces/{wid}/browser/live" {
+        return Require(Browser, View);
+    }
+    if p == "/browser/live/settings" || p == "/browser/live/install" {
+        return Require(Browser, Admin);
+    }
+    if p == "/browser/tabs/{id}/live" {
+        return Require(Browser, if get { View } else { Edit });
+    }
+    if p == "/browser/tabs/{id}/live/nav"
+        || p == "/browser/tabs/{id}/live/control"
+        || p == "/browser/tabs/{id}/live/screenshot"
+    {
         return Require(Browser, Edit);
     }
 
@@ -1242,7 +1290,10 @@ mod tests {
             Require(Design, View)
         );
         assert_eq!(
-            pol(Method::GET, "/api/v1/design/artifacts/{id}/versions/{v}/content"),
+            pol(
+                Method::GET,
+                "/api/v1/design/artifacts/{id}/versions/{v}/content"
+            ),
             Require(Design, View)
         );
         for path in [
@@ -1262,7 +1313,10 @@ mod tests {
             (Method::POST, "/api/v1/design/artifacts/{id}/versions"),
             (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
             (Method::POST, "/api/v1/design/artifacts/{id}/links"),
-            (Method::DELETE, "/api/v1/design/artifacts/{id}/links/{link_id}"),
+            (
+                Method::DELETE,
+                "/api/v1/design/artifacts/{id}/links/{link_id}",
+            ),
             (Method::POST, "/api/v1/design/signals"),
             // design_assist.rs — agent turns, variants, learned rules.
             (Method::POST, "/api/v1/design/artifacts/{id}/assist"),
@@ -1442,6 +1496,55 @@ mod tests {
             pol(Method::DELETE, "/api/v1/snips/{id}"),
             Require(Agents, Edit),
         );
+    }
+
+    // ---- Otto Assistant -----------------------------------------------------
+
+    #[test]
+    fn assistant_routes_ride_the_agents_feature() {
+        for path in [
+            "/api/v1/assistant/threads",
+            "/api/v1/assistant/threads/{id}",
+            "/api/v1/assistant/threads/{id}/turns",
+            "/api/v1/assistant/needs-you",
+            "/api/v1/assistant/tasks",
+            "/api/v1/assistant/tasks/{id}",
+            "/api/v1/assistant/memory",
+            "/api/v1/assistant/memory/import/hermes",
+            "/api/v1/assistant/routing",
+            "/api/v1/assistant/limits",
+        ] {
+            assert_eq!(pol(Method::GET, path), Require(Agents, View), "{path}");
+        }
+        for (m, path) in [
+            (Method::POST, "/api/v1/assistant/threads"),
+            (Method::PATCH, "/api/v1/assistant/threads/{id}"),
+            (Method::DELETE, "/api/v1/assistant/threads/{id}"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/turns"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/attachments"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/route"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/delegate"),
+            (Method::POST, "/api/v1/assistant/tasks"),
+            (Method::POST, "/api/v1/assistant/tasks/{id}/{action}"),
+            (Method::PUT, "/api/v1/assistant/memory"),
+            (Method::POST, "/api/v1/assistant/memory"),
+            (Method::DELETE, "/api/v1/assistant/memory/{id}"),
+            (Method::POST, "/api/v1/assistant/memory/{id}/accept"),
+            (Method::POST, "/api/v1/assistant/memory/undo"),
+            (Method::POST, "/api/v1/assistant/forget"),
+            (Method::POST, "/api/v1/assistant/memory/import/hermes"),
+            (Method::PUT, "/api/v1/assistant/routing"),
+            (Method::POST, "/api/v1/assistant/agent/{tool}"),
+        ] {
+            assert_eq!(pol(m.clone(), path), Require(Agents, Edit), "{m} {path}");
+        }
+        // The preview is a read that happens to POST.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/assistant/route/preview"),
+            Require(Agents, View)
+        );
+        // The bare prefix is not a route: still fail closed.
+        assert_eq!(pol(Method::GET, "/api/v1/assistant"), Deny);
     }
 
     // ---- Proof Packs --------------------------------------------------------
@@ -1728,6 +1831,10 @@ mod tests {
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
+        // Agent discovery: every lookup is a self-call re-authorized by the
+        // listed kind's own route, so the discovery route itself is exempt.
+        assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);
+        assert_eq!(pol(Method::GET, "/api/v1/refs/resolve"), Exempt);
         // Per-user email sender (Gmail App Password → Keychain): self-owned.
         assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
         assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);
@@ -2406,6 +2513,44 @@ mod tests {
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
             Require(Browser, Edit)
         );
+    }
+
+    #[test]
+    fn browser_live_routes_are_classified() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/browser/live/status"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/browser/live/settings"),
+            Require(Browser, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/live/install"),
+            Require(Browser, Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/browser/live"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, Edit)
+        );
+        for p in ["nav", "control", "screenshot"] {
+            assert_eq!(
+                pol(Method::POST, &format!("/api/v1/browser/tabs/{{id}}/live/{p}")),
+                Require(Browser, Edit)
+            );
+        }
     }
 
     #[test]

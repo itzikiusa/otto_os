@@ -229,7 +229,7 @@
   }
   .step-trunc {
     height: 16px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .step-dot {
     width: 7px;
@@ -325,7 +325,7 @@
     box-shadow: inset 3px 0 0 var(--status-exited, #e5534b);
   }
   .step-stats {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
     white-space: nowrap;
   }

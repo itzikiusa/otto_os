@@ -29,21 +29,21 @@
   let loaded = $state(false);
   let artifacts = $state<Artifact[]>([]);
 
-  // Proof-status pill palette: passed=light-green, failed=red, partial=amber,
-  // waived=accent-blue, anything else (missing/empty)=dim grey.
-  const grey = { bg: 'var(--text-dim)', fg: '#000' };
+  // Proof-status pill palette: soft tone tint + text-safe tone, per the
+  // design tokens (passed/failed/partial/waived; anything else = neutral).
+  const grey = { bg: 'var(--surface-2)', fg: 'var(--text-dim)' };
   const PROOF: Record<string, { bg: string; fg: string }> = {
-    passed: { bg: '#7ee787', fg: '#000' },
-    failed: { bg: '#d66', fg: '#fff' },
-    partial: { bg: '#d8a657', fg: '#000' },
-    waived: { bg: 'var(--accent)', fg: '#fff' },
+    passed: { bg: 'var(--success-soft)', fg: 'var(--success)' },
+    failed: { bg: 'var(--danger-soft)', fg: 'var(--danger)' },
+    partial: { bg: 'var(--warning-soft)', fg: 'var(--warning)' },
+    waived: { bg: 'var(--accent-soft)', fg: 'var(--accent-text)' },
   };
   const proofTone = $derived(score ? (PROOF[score.proof_status] ?? grey) : grey);
 
   function barColor(s: number): string {
-    if (s >= 80) return '#7ee787';
-    if (s >= 50) return '#d8a657';
-    return '#d66';
+    if (s >= 80) return 'var(--status-working)';
+    if (s >= 50) return 'var(--status-warn)';
+    return 'var(--status-exited)';
   }
 
   type Row = { label: string; score: number; detail: string; ran: boolean };
@@ -60,8 +60,8 @@
   );
 
   function dotTone(status: string): string {
-    if (status === 'passed') return '#7ee787';
-    if (status === 'failed') return '#d66';
+    if (status === 'passed') return 'var(--status-working)';
+    if (status === 'failed') return 'var(--status-exited)';
     return 'var(--text-dim)';
   }
 
@@ -176,7 +176,7 @@
   .composite .lbl, .done, .rlabel, .pmsg { font-size: 11px; color: var(--text-dim); }
   .composite .lbl { text-transform: uppercase; letter-spacing: 0.04em; }
   .meta { display: flex; align-items: center; gap: 8px; }
-  .proof { padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
+  .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
   .done { font-variant-numeric: tabular-nums; }
   .signals { display: flex; flex-direction: column; gap: 5px; }
   .row { display: grid; grid-template-columns: 54px 1fr 28px; align-items: center; gap: 8px; }
@@ -186,7 +186,7 @@
   .notrun { position: absolute; left: 6px; top: -4px; font-size: 9px; color: var(--text-dim); }
   .rscore { font-size: 11px; font-weight: 600; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
-  .rdetail { grid-column: 2 / -1; font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proofpack-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; font-size: 11px; color: var(--text-dim); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-m); cursor: pointer; }
   .proofpack-btn:hover { color: var(--text); border-color: var(--accent); }
   .pack { display: flex; flex-direction: column; gap: 8px; }
@@ -196,5 +196,5 @@
   .akind { font-weight: 600; }
   .sep, .atitle, .astatus { color: var(--text-dim); }
   .astatus { text-transform: uppercase; letter-spacing: 0.02em; }
-  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: 10px; line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
+  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
 </style>

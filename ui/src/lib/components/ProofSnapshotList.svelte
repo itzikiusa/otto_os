@@ -161,7 +161,7 @@
   }
   .sha {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s);
@@ -190,7 +190,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0 2px;

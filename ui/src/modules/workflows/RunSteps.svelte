@@ -497,15 +497,15 @@
     margin-bottom: 8px;
   }
   .rm-ver {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
     border-radius: 99px;
   }
   .chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-warn, #b07a00);
     background: color-mix(in srgb, var(--status-warn, #b07a00) 16%, transparent);
     padding: 1px 7px;
@@ -537,7 +537,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -586,7 +586,7 @@
   }
   .ms {
     margin-inline-start: auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono);
   }
@@ -633,7 +633,7 @@
   .product-h {
     display: flex;
     align-items: center;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -650,7 +650,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
     padding: 2px 8px;

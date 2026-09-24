@@ -434,7 +434,7 @@
     flex-shrink: 0;
   }
   .s3d-hier-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -462,7 +462,7 @@
   }
   .s3d-section {
     padding: 8px 8px 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -525,7 +525,7 @@
     white-space: nowrap;
   }
   .s3d-row-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;

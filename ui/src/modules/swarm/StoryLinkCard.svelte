@@ -96,7 +96,7 @@
     flex-wrap: wrap;
   }
   .slc-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -123,7 +123,7 @@
   }
   .chip.accent {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip.done {
     background: color-mix(in srgb, var(--success) 10%, transparent);

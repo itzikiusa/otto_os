@@ -207,7 +207,7 @@
     gap: 2px;
   }
   :global(.icon-btn.lock-on) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .env-title {
     font-size: 11px;
@@ -267,7 +267,7 @@
     min-width: 0;
   }
   .env-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }

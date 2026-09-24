@@ -184,7 +184,7 @@ pub struct Session {
 /// kept byte-identical, and every engine that stamps a `meta.source` on the
 /// sessions it owns must list that source here — otherwise its sessions render
 /// as foreground agents AND become durable (exempt from volume cleanup).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 23] = [
+pub const BACKGROUND_SESSION_SOURCES: [&str; 24] = [
     "channel",
     "review",
     "review_summarizer",
@@ -208,6 +208,9 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 23] = [
     "discovery_chat",
     "scheduled_task",
     "finding",
+    // Otto Assistant threads: resumed on demand, reached through the
+    // Assistant module (never the sidebar's Agents group).
+    "assistant",
 ];
 
 impl Session {
@@ -2832,12 +2835,13 @@ mod tests {
             "discovery_chat",
             "scheduled_task",
             "finding",
+            "assistant",
         ] {
             assert!(
                 BACKGROUND_SESSION_SOURCES.contains(&src),
                 "{src} missing from BACKGROUND_SESSION_SOURCES"
             );
         }
-        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 23);
+        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 24);
     }
 }

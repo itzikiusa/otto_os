@@ -181,8 +181,8 @@
     color: var(--status-working);
   }
   .pill.ok {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
     font-weight: 600;
   }
   .pill.bad {

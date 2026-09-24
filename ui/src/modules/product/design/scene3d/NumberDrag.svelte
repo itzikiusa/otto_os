@@ -145,7 +145,7 @@
   .nd-label {
     flex: 0 0 auto;
     padding: 0 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     cursor: ew-resize;
@@ -158,7 +158,7 @@
     background: var(--surface-2);
   }
   .nd.dragging .nd-label {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .nd-input {
     flex: 1 1 auto;
@@ -174,7 +174,7 @@
   }
   .nd-unit {
     padding: 0 5px 0 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

@@ -155,7 +155,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-size: 0.72rem;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     cursor: pointer;
     white-space: nowrap;

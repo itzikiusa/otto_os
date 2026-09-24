@@ -38,6 +38,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { ProofArtifactView } from '../../lib/api/types';
 
   const MEDIA_KINDS = new Set(['screenshot', 'video']);
@@ -220,6 +221,19 @@
   }
 
   // ---- pack-level actions --------------------------------------------------
+  // Anchored under the button (not at the cursor); ctxMenu clamps it.
+  function openAddMenu(e: MouseEvent): void {
+    let r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Collapsed into the header's ⋯ menu: anchor to that button instead.
+    if (r.width === 0) r = document.querySelector('.ph-more')?.getBoundingClientRect() ?? r;
+    ctxMenu.show({ preventDefault() {}, stopPropagation() {}, clientX: r.left, clientY: r.bottom + 4 } as unknown as MouseEvent, [
+      { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
+      { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
+      { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
+      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; } },
+    ]);
+  }
+
   async function assemble(): Promise<void> {
     if (!detail) return;
     const cwd = await confirmer.promptText('Working directory to assemble proof from:', {
@@ -558,15 +572,15 @@
     {/snippet}
     {#snippet actions()}
       {#if detail}
-        <button class="btn small" data-icon="plus" onclick={() => { resetAdd(); addOpen = true; }}><Icon name="plus" size={12} /> Add artifact</button>
-        <button class="btn small" data-icon="file" onclick={() => { resetMedia(); mediaOpen = true; }}><Icon name="file" size={12} /> Add media</button>
-        <button class="btn small" data-icon="db" onclick={() => { resetEvidence(); evidenceOpen = true; }}><Icon name="db" size={12} /> Add evidence</button>
-        <button class="btn small" data-icon="pr" onclick={() => { resetPr(); prOpen = true; }}><Icon name="pr" size={12} /> PR check</button>
+        <!-- Destructive first (collapses first, never beside the primary). -->
+        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>
+        <button class="btn small" data-overflow="-1" data-icon="check" onclick={() => { waiveReason = ''; waiveOpen = true; }}><Icon name="check" size={12} /> Waive</button>
         {#if detail.pack.repo_id}
           <button class="btn small" data-icon="fetch" onclick={refreshCi}><Icon name="fetch" size={12} /> Refresh CI</button>
         {/if}
-        <button class="btn small" data-overflow="-1" data-icon="check" onclick={() => { waiveReason = ''; waiveOpen = true; }}><Icon name="check" size={12} /> Waive</button>
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete pack" onclick={removePack} aria-label="Delete pack" title="Delete pack"><Icon name="trash" size={14} /></button>
+        <!-- The four ways to attach evidence share one menu: four sibling
+             "Add …" buttons made this the busiest header in the app. -->
+        <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={11} /></button>
         <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
       {/if}
     {/snippet}
@@ -638,10 +652,10 @@
 
         <!-- Pack-level tools: report export (R9) + repo requirements (R3). -->
         <div class="tools-row">
-          <button class="btn small" onclick={() => exportReport('md')}><Icon name="file" size={12} /> Export .md</button>
-          <button class="btn small" onclick={() => exportReport('html')}><Icon name="external" size={12} /> Export .html</button>
+          <button class="btn small ghost" onclick={() => exportReport('md')}><Icon name="file" size={12} /> Export .md</button>
+          <button class="btn small ghost" onclick={() => exportReport('html')}><Icon name="external" size={12} /> Export .html</button>
           {#if detail.pack.repo_id}
-            <button class="btn small" onclick={openConfig}><Icon name="gear" size={12} /> Requirements</button>
+            <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Requirements</button>
           {/if}
         </div>
 
@@ -668,7 +682,7 @@
 
         <!-- Artifacts grouped by kind. -->
         {#if detail.artifacts.length === 0}
-          <p class="dim empty">No artifacts yet — Assemble or Add artifact to attach evidence.</p>
+          <p class="dim empty">No artifacts yet. Assemble, or use Add to attach evidence.</p>
         {:else}
           {#each artifactGroups as [kind, items] (kind)}
             <section class="art-group">
@@ -1030,7 +1044,7 @@
   .chip-btn.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rail-list {
     overflow-y: auto;
@@ -1074,7 +1088,7 @@
     flex-wrap: wrap;
   }
   .kind-tag {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
@@ -1083,7 +1097,7 @@
     text-transform: capitalize;
   }
   .kind-tag.pr {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     text-transform: none;
   }
@@ -1216,7 +1230,7 @@
     background: var(--accent);
   }
   .art-status-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -1233,7 +1247,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0 2px;
@@ -1286,7 +1300,7 @@
     min-width: 0;
   }
   .done-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
@@ -1305,7 +1319,7 @@
   }
   .sha-chip {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s);
@@ -1334,7 +1348,7 @@
   .char-hint {
     display: block;
     margin-top: 4px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .char-hint.short {

@@ -370,14 +370,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     background: var(--surface-2);
@@ -411,7 +411,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0;
     text-transform: none;
@@ -419,7 +419,7 @@
   }
   .add-task-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .task-add {
     display: flex;
@@ -483,7 +483,7 @@
     align-self: center;
   }
   .badge.board {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .badge.queued {
@@ -534,7 +534,7 @@
   }
   .task-glyph {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     width: 12px;
     text-align: center;
     color: var(--text-dim);
@@ -544,7 +544,7 @@
     word-break: break-word;
   }
   .task-in_progress .task-glyph {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .task-in_progress .task-title {
     color: var(--text);
@@ -647,7 +647,7 @@
   }
   .note-btn:not(:disabled):hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* Trail */
@@ -683,7 +683,7 @@
   .kind-command .row-icon,
   .kind-skill .row-icon,
   .src-user .row-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .lvl-warn .row-icon {
     color: var(--status-warn, #d29922);
@@ -724,7 +724,7 @@
     color: var(--text-dim);
   }
   .src-user .row-src {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row-time {
     font-size: 9.5px;
@@ -735,7 +735,7 @@
     padding: 6px 8px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
     white-space: pre-wrap;

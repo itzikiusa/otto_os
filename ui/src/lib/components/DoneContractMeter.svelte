@@ -212,7 +212,7 @@
     border: 1px solid transparent;
   }
   .tag.req {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }

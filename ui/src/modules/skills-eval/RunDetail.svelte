@@ -787,7 +787,7 @@
     font-weight: 700;
   }
   .reg {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--status-idle, #3a8c3a);
   }
@@ -831,7 +831,7 @@
   }
   .worktree {
     margin: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     word-break: break-all;
   }
@@ -911,7 +911,7 @@
     color: var(--status-idle, #3a8c3a);
   }
   .loc {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -952,7 +952,7 @@
   }
 
   .status-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -969,7 +969,7 @@
   .ist-running,
   .ist-pending {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .st-done,
   .ist-done {
@@ -988,7 +988,7 @@
   }
 
   .pf {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     padding: 2px 6px;
@@ -1010,7 +1010,7 @@
     border-radius: 999px;
   }
   .score-badge.sm {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
   }
   .score-badge.good,
@@ -1033,14 +1033,14 @@
     display: inline-block;
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .sev-info {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-warn {
     background: color-mix(in srgb, var(--warning) 20%, transparent);
@@ -1089,7 +1089,7 @@
   .chip-toggle.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .spinner-xs {

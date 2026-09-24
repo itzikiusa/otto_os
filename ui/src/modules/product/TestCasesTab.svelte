@@ -1084,7 +1084,7 @@
   }
   .action-btn.primary {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     font-weight: 600;
   }
@@ -1137,7 +1137,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     font-weight: 600;
     text-decoration: none;
@@ -1338,7 +1338,7 @@
   /* ── Priority badge ──────────────────────────────────────────── */
   .priority-badge {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1361,7 +1361,7 @@
   /* ── Status pills ────────────────────────────────────────────── */
   .pill {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1386,7 +1386,7 @@
   }
   .pill-published {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Case action buttons ─────────────────────────────────────── */
@@ -1434,7 +1434,7 @@
   }
   .case-btn.edit {
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .case-btn.edit:hover:not(:disabled) {
@@ -1477,7 +1477,7 @@
     gap: 4px;
   }
   .steps-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;

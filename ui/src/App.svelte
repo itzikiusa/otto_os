@@ -5,6 +5,8 @@
   import Login from './modules/settings/Login.svelte';
   import Toasts from './lib/components/Toasts.svelte';
   import SharePage from './modules/share/SharePage.svelte';
+  import BarHost from './modules/desktop/BarHost.svelte';
+  import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
@@ -29,6 +31,14 @@
        route must bypass the login/onboarding gate entirely and render the
        single-session SharePage using the token captured from the URL fragment. -->
   <SharePage sessionId={router.parts[1] ?? ''} />
+{:else if router.module === 'bar'}
+  <!-- Desktop shell's assistant bar panel (`otto-bar`): a transparent
+       chromeless window, so it never renders the boot screens or the Shell —
+       the bar handles signed-out/offline states itself. -->
+  <BarHost />
+{:else if router.module === 'tray'}
+  <!-- Desktop shell's menu-bar popover (`otto-tray`); same rules as the bar. -->
+  <TrayPage />
 {:else if auth.phase === 'loading'}
   <div class="boot">
     <div class="boot-mark">Otto</div>

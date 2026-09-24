@@ -864,7 +864,7 @@
   }
   .seg.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .urlbar {
     display: flex;

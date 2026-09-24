@@ -665,7 +665,7 @@
     color: var(--text-dim);
   }
   .snip-copied.ok {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .snip-copied.bad {
     color: var(--danger);

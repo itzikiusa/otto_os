@@ -264,7 +264,7 @@
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Local-file export dialog ─────────────────────────────────────────────── */

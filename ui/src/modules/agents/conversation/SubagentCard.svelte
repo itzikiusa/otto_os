@@ -105,7 +105,7 @@
   }
   .sub-icon {
     display: inline-flex;
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .sub-title {
@@ -130,7 +130,7 @@
   .sub-model,
   .sub-kids {
     height: 16px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .sub-dot {
     width: 7px;

@@ -406,7 +406,7 @@
   }
   .action-btn.primary {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     font-weight: 600;
   }
@@ -453,7 +453,7 @@
     min-width: 200px;
   }
   .cn-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -510,7 +510,7 @@
   }
   .segmented button.active {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -551,7 +551,7 @@
   }
   .suggested-label {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .pane-meta {
     font-size: 11px;
@@ -631,7 +631,7 @@
     font-style: italic;
   }
   .md-body :global(a) {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .md-body :global(a:hover) {

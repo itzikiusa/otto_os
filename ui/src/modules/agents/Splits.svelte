@@ -219,7 +219,7 @@
   }
   .broadcast-toggle.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
   }
   .broadcast-toggle:hover {

@@ -450,14 +450,14 @@
   }
   .use:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip {
     font-size: 9.5px;
     padding: 1px 5px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }

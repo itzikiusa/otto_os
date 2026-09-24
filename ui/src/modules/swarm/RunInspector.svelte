@@ -290,7 +290,7 @@
     gap: 3px;
   }
   .stat .k {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -309,7 +309,7 @@
   }
   h3 {
     margin: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -320,7 +320,7 @@
     align-items: center;
   }
   .count {
-    color: var(--accent);
+    color: var(--accent-text);
     margin-inline-start: 4px;
   }
   .summary {
@@ -421,7 +421,7 @@
     font-weight: 600;
   }
   .time {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .post-body {
     font-size: 12px;
@@ -431,7 +431,7 @@
   .chip {
     border: 1px solid var(--border);
     background: transparent;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
   }
@@ -442,7 +442,7 @@
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -475,7 +475,7 @@
     border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
   }
   .sev-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     white-space: nowrap;
@@ -489,7 +489,7 @@
   }
   .sev-chip.warn {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-chip.info {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -500,7 +500,7 @@
     word-break: break-word;
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -513,7 +513,7 @@
   }
   .badge.done {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .badge.error,
   .badge.stopped {

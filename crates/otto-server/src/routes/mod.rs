@@ -15,6 +15,7 @@ pub mod auth_routes;
 pub mod backup;
 pub mod backup_git;
 pub mod browser;
+pub mod browser_live;
 pub mod capabilities;
 pub mod channel_webhook;
 pub mod connection_export;
@@ -36,6 +37,7 @@ pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
 pub mod personal_agents;
+pub mod assistant;
 pub mod provider_accounts;
 pub mod product_memory;
 pub mod proof;
@@ -295,6 +297,11 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(crate::repo_directory::repo_directory),
         )
         .route("/git/repos/resolve", get(crate::repo_directory::repo_resolve))
+        // --- The same discovery for every OTHER id an agent tool takes
+        //     (workflows, connections, issue accounts, clusters, …):
+        //     cross-workspace directory + friendly-reference resolution. -----
+        .route("/refs/directory", get(crate::agent_refs::refs_directory))
+        .route("/refs/resolve", get(crate::agent_refs::refs_resolve))
         // --- MCP Control Plane: outward "Otto as MCP server" + gateway + the
         //     capability endpoints behind the otto.* tools. (The registry /
         //     governance routes live in the otto-mcp module router.) ----------
@@ -648,6 +655,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .merge(snips::snips_routes())
         // --- Browser (reader/annotate tabs + on-demand page fetch) -------
         .merge(browser::routes())
+        // --- Browser remote live view (daemon Chromium) ------------------
+        .merge(browser_live::routes())
 }
 
 // ── The `scratch` workspace is a SESSION home, not a workspace API ──────────

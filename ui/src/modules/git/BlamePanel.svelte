@@ -176,12 +176,12 @@
     cursor: pointer;
   }
   .bl-commit:hover .bl-sha {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .bl-sha,
   .bl-date {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .bl-summary {
     padding: 3px 8px;

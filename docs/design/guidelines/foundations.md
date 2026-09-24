@@ -209,8 +209,8 @@ Two families only:
 
 | Token | px | Use |
 |---|---|---|
-| `--fs-xs` | 11 | **The floor.** Metadata, chip text, subtitles in `PageHeader`, hints, section titles (uppercase), table meta columns |
-| `--fs-s` | 12 | Secondary body, labels, small buttons (`.btn.small`), segmented controls, code and mono (`code`, `pre`, `.mono`) |
+| `--fs-xs` | 11 | **The floor.** Metadata, chip text, hints, section titles (uppercase), table meta columns |
+| `--fs-s` | 12 | Secondary body, the `PageHeader` subtitle, labels, small buttons (`.btn.small`), segmented controls, code and mono (`code`, `pre`, `.mono`) |
 | `--fs-m` | 13 | **Body default** (`body`), buttons, inputs, list rows |
 | `--fs-l` | 15 | The page title (`PageHeader` h1), page-level empty-state title |
 | `--fs-xl` | 18 | Hero numbers in KPI tiles, rare in-content headings |

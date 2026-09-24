@@ -289,7 +289,7 @@
     font-size: 13px;
   }
   .name:hover .nm {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .desc {
     font-size: 11px;
@@ -300,7 +300,7 @@
     max-width: 100%;
   }
   .endpoint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     opacity: 0.8;
     overflow: hidden;
@@ -320,7 +320,7 @@
     color: var(--text-dim);
   }
   .lat {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .actions {

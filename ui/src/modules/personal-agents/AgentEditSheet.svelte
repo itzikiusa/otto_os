@@ -248,7 +248,7 @@
   }
   .note {
     font-size: 0.78rem;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }

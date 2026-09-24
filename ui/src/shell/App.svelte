@@ -76,6 +76,7 @@
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
+  import { isPopout, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   // Old bookmarks lead to the workspace's existing context editor.
@@ -96,6 +97,20 @@
   import { now } from '../lib/stores/now.svelte';
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
+
+  // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
+  // view behind the page, so the document goes transparent and ONLY chrome
+  // lets it through — the sidebar's `.sidebar-material` 78% tint and the
+  // titlebar strips — while `.center` / right panel / status bar stay opaque.
+  // Off for the full-screen routes (snip editor, share view) and under
+  // reduced transparency (CSS below).
+  const vibrant = $derived(
+    isTauri && (viewport.isDesktop || isPopout) && router.module !== 'snip' && router.module !== 's',
+  );
+  $effect(() => {
+    document.documentElement.classList.toggle('otto-vibrant', vibrant);
+    return () => document.documentElement.classList.remove('otto-vibrant');
+  });
   // Phone top-bar title: the registry label ("Mission Control", "Skills Lab"),
   // a plugin's own name, never the raw route id.
   const moduleTitle = $derived(
@@ -472,6 +487,7 @@
       { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2', run: () => router.go('canvas') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
+      ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in New Window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toasts.error('Could not open window', e instanceof Error ? e.message : String(e))) }] : []),
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
       { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'Appearance', run: () => ui.setTheme('pro-dark') },
       { id: 'core.theme-warm', title: 'Theme: Warm', group: 'Appearance', run: () => ui.setTheme('warm') },
@@ -736,8 +752,10 @@
   </div>
 {/snippet}
 
-{#if viewport.isDesktop}
-<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. -->
+{#if viewport.isDesktop || isPopout}
+<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. A pop-out window
+     (`?popout=1`, desktop shell `open_popout`) renders the same shell at any
+     width minus the sidebar + status bar, under a slim unified title strip. -->
 <!-- App zoom: Tauri uses the native WKWebView page-zoom (applyNativeZoom). In a
      BROWSER we used to apply CSS `zoom:${ui.zoom}` here, but CSS zoom (a) stretches
      the WebGL terminal canvas (oversized + clipped fit) and (b) breaks click
@@ -745,8 +763,17 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell">
+<div class="shell" class:vibrant>
+  {#if isPopout && isTauri}
+    <!-- Pop-out title strip: the overlaid traffic lights sit in it and it
+         drags the window (double-click zooms), like a unified title bar. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="popout-titlebar sidebar-material" data-tauri-drag-region onmousedown={startWindowDrag}>
+      <span class="popout-title">{popoutTitle()}</span>
+    </div>
+  {/if}
   <div class="shell-main">
+    {#if !isPopout}
     <div class="sidebar" class:tauri-top={isTauri}>
       <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
            window can be moved by dragging the top-left (the native title bar is
@@ -762,6 +789,7 @@
         <Rail />
       {/if}
     </div>
+    {/if}
 
     <div class="center">
       {@render centerContent()}
@@ -776,7 +804,9 @@
     {/if}
   </div>
 
-  <StatusBar />
+  {#if !isPopout}
+    <StatusBar />
+  {/if}
 </div>
 {:else}
 <!-- MOBILE (phone ≤640px / tablet 641–1024px): single-pane content with the
@@ -826,8 +856,10 @@
 
   <!-- Phone-only quick-action bar: exposes ⌘K/⌘T/⌘W/⌘F/⌘⇧B to touch users
        who can't produce those chords. Wired to the exact same functions the
-       keyboard map calls; desktop is completely unaffected. -->
-  {#if viewport.isPhone}
+       keyboard map calls; desktop is completely unaffected. Session verbs, so
+       it rides with the Agents page only — elsewhere it was a third chrome row
+       (the palette stays one tap away under BottomNav → More). -->
+  {#if viewport.isPhone && moduleName === 'agents'}
     <MobileActionBar
       onpalette={mobileOpenPalette}
       onnewSession={mobileNewSession}
@@ -854,7 +886,11 @@
     <BottomNav />
   {/if}
 
-  <StatusBar />
+  <!-- The phone already spends a top bar + bottom nav on chrome; the status
+       bar only earns its row there when the event stream needs attention. -->
+  {#if !viewport.isPhone || events.state !== 'connected'}
+    <StatusBar />
+  {/if}
 </div>
 
 <!-- Phone: Navigator lives in a LEFT drawer with its own open-state
@@ -948,6 +984,47 @@
     height: 26px;
     z-index: 5;
   }
+  /* Native vibrancy (see `vibrant` in the script): the document is transparent
+     so the window's NSVisualEffectView shows through chrome only; content
+     columns keep an opaque background. The traffic-lights strip gets the same
+     78% tint as `.sidebar-material` so the sidebar reads as one surface. */
+  :global(html.otto-vibrant),
+  :global(html.otto-vibrant body),
+  .shell.vibrant {
+    background: transparent;
+  }
+  .shell.vibrant .center {
+    background: var(--bg);
+  }
+  .shell.vibrant .titlebar-drag {
+    background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    :global(html.otto-vibrant body),
+    .shell.vibrant {
+      background: var(--bg);
+    }
+  }
+  /* Pop-out window title strip (unified title bar: traffic lights at the
+     start, centred title). */
+  .popout-titlebar {
+    flex-shrink: 0;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 80px;
+    border-block-end: 1px solid var(--border);
+    user-select: none;
+  }
+  .popout-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-s);
+    font-weight: 600;
+    color: var(--text-dim);
+  }
   .center {
     flex: 1;
     min-width: 0;
@@ -990,7 +1067,7 @@
     color: var(--text);
   }
   .mtop-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .mtop-title {

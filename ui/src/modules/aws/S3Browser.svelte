@@ -468,7 +468,7 @@
   .crumb {
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 2px 4px;
     border-radius: 4px;
