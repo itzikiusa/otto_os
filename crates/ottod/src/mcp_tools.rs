@@ -10,7 +10,10 @@
 //! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
 //! and the API-client writers `otto_api_execute` (sends one saved request),
 //! `otto_api_upsert_request` (persists a saved request), and
-//! `otto_api_run_automation` (runs a human-authored automation)
+//! `otto_api_run_automation` (runs a human-authored automation), and the Otto
+//! Assistant tools `assistant_*` (advertised to `source: "assistant"` sessions
+//! only; they write the owner's OWN assistant data — memories with Undo,
+//! tasks, reminders — and open approvals, never an outward action themselves)
 //! — which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
 //! to be agent-drawable, the vault is the agents' documentation home
@@ -576,7 +579,127 @@ fn tail_text(text: &str, max: usize) -> (String, bool) {
 
 /// The static tool catalog returned by `tools/list`. Kept in one place so the
 /// `tools/call` dispatch and the advertised schema can't drift.
+/// The full native catalog: the static first-party tools plus the Otto
+/// Assistant tools (which [`tool_catalog_for_source`] shows only to
+/// assistant sessions).
 fn tool_catalog() -> Value {
+    let mut catalog = base_tool_catalog();
+    if let Some(tools) = catalog["tools"].as_array_mut() {
+        tools.extend(assistant_tool_specs());
+    }
+    catalog
+}
+
+// ---------------------------------------------------------------------------
+// Otto Assistant tools (native; only advertised to `source: "assistant"`
+// sessions). Each posts to `POST /assistant/agent/{tool}` AS THE SESSION
+// OWNER with this session's id; the daemon resolves the session to its
+// assistant thread (the token's session binding wins over the body), so a
+// session can only ever act for its own thread. They write only the owner's
+// own assistant data (memories with chips + Undo, tasks, reminders); the
+// outward-action tool OPENS an approval, it never performs the action.
+// ---------------------------------------------------------------------------
+
+/// `(native tool name, /assistant/agent/{tool} segment)`.
+const ASSISTANT_TOOLS: [(&str, &str); 8] = [
+    ("assistant_remember", "remember"),
+    ("assistant_forget", "forget"),
+    ("assistant_recall", "recall"),
+    ("assistant_create_reminder", "reminder"),
+    ("assistant_create_task", "task"),
+    ("assistant_update_task", "task_update"),
+    ("assistant_delegate", "delegate"),
+    ("assistant_request_approval", "approval"),
+];
+
+/// The session source that sees the assistant tools.
+const ASSISTANT_SOURCE: &str = "assistant";
+
+fn assistant_tool_specs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "assistant_remember",
+            "description": "Otto Assistant: save ONE short, atomic fact about the user (a preference, a person, a recurring plan). Never store secrets. The user sees it as a chip with Undo; with memory approval on it waits for their review.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "kind": { "type": "string", "description": "fact | decision | learning … (default fact)" },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["text"] }
+        }),
+        json!({
+            "name": "assistant_forget",
+            "description": "Otto Assistant: forget the user's memories matching `query` (\"forget my old address\"). Up to 10 go; the user can undo. Say what was forgotten.",
+            "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+        }),
+        json!({
+            "name": "assistant_recall",
+            "description": "Otto Assistant: read the user's profile and the memories matching `query` (omit it for the most recent). Use before answering anything personal.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string" },
+                "k": { "type": "integer", "minimum": 1, "maximum": 20 }
+            } }
+        }),
+        json!({
+            "name": "assistant_create_reminder",
+            "description": "Otto Assistant: remind the user at `run_at` (RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone`, default the Mac's). Delivered into this thread and as a notification.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "run_at": { "type": "string" },
+                "timezone": { "type": "string", "description": "IANA name, e.g. Asia/Jerusalem" }
+            }, "required": ["text", "run_at"] }
+        }),
+        json!({
+            "name": "assistant_create_task",
+            "description": "Otto Assistant: open a task card for a longer job (it starts `running`). Keep it current with assistant_update_task.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string" },
+                "detail": { "type": "string" }
+            }, "required": ["title"] }
+        }),
+        json!({
+            "name": "assistant_update_task",
+            "description": "Otto Assistant: move a task you created to `running`, `needs_you` (with a `question`, optional `options`), `done` or `failed` (optional `result` object).",
+            "inputSchema": { "type": "object", "properties": {
+                "task_id": { "type": "string" },
+                "state": { "type": "string", "enum": ["running", "needs_you", "done", "failed"] },
+                "question": { "type": "string" },
+                "options": { "type": "array", "items": { "type": "string" } },
+                "result": { "type": "object" }
+            }, "required": ["task_id", "state"] }
+        }),
+        json!({
+            "name": "assistant_delegate",
+            "description": "Otto Assistant: hand a directive to one of the user's Personal Agents (`agent` = its id or exact name). It runs in the background; its summary is posted back into this thread. Tell the user who you asked.",
+            "inputSchema": { "type": "object", "properties": {
+                "agent": { "type": "string" },
+                "directive": { "type": "string" }
+            }, "required": ["agent", "directive"] }
+        }),
+        json!({
+            "name": "assistant_request_approval",
+            "description": "Otto Assistant: REQUIRED before anything outward (send, post, publish, purchase, delete, submit a form, anything touching production). State `where` it goes, `what` is sent, `who_sees` it and your `reason`; add `tool` + `destination` when known and a `category`. Returns `approved`, `denied` or `pending` (pass `wait_seconds` ≤ 30 to wait). Proceed ONLY on approved.",
+            "inputSchema": { "type": "object", "properties": {
+                "where": { "type": "string" },
+                "what": { "type": "string" },
+                "who_sees": { "type": "string" },
+                "reason": { "type": "string" },
+                "tool": { "type": "string" },
+                "destination": { "type": "string" },
+                "category": { "type": "string", "enum": ["send", "post", "publish", "purchase", "delete", "submit", "prod", "other"] },
+                "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 30 }
+            }, "required": ["where", "what", "who_sees", "reason"] }
+        }),
+    ]
+}
+
+/// The `/assistant/agent/{tool}` segment of a native assistant tool name.
+fn assistant_segment(name: &str) -> Option<&'static str> {
+    ASSISTANT_TOOLS
+        .iter()
+        .find_map(|(n, seg)| (*n == name).then_some(*seg))
+}
+
+fn base_tool_catalog() -> Value {
     json!({
         "tools": [
             {
@@ -1223,6 +1346,15 @@ fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
 
 fn tool_catalog_for_source(source: Option<&str>) -> Value {
     let mut catalog = tool_catalog();
+    if source != Some(ASSISTANT_SOURCE) {
+        if let Some(tools) = catalog["tools"].as_array_mut() {
+            tools.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| assistant_segment(name).is_none())
+            });
+        }
+    }
     if is_vault_docs_reviewer(source) {
         if let Some(tools) = catalog["tools"].as_array_mut() {
             tools.retain(|tool| {
@@ -1267,6 +1399,10 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("design_get", "design_get"),
     ("design_links", "design_links"),
     ("design_search", "design_search"),
+    // Otto Assistant memory: served natively (session-bound, chip + Undo).
+    ("assistant_remember", "assistant_remember"),
+    ("assistant_forget", "assistant_forget"),
+    ("assistant_recall", "assistant_recall"),
 ];
 
 /// How long a governed call waits for a human decision before returning
@@ -2359,6 +2495,20 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     &format!("{base}/automations/{}/run", seg(&automation_id)),
                     &json!({}),
                 )
+                .await?;
+            Ok(finalize(raw))
+        }
+        // Otto Assistant tools: forward the arguments plus this session's id;
+        // the daemon resolves the session to its thread (the token's own
+        // session binding wins) and refuses non-assistant sessions.
+        name if assistant_segment(name).is_some() => {
+            let seg_name = assistant_segment(name).unwrap_or_default();
+            let mut body = if args.is_object() { args.clone() } else { json!({}) };
+            if let Some(sid) = ctx.session_id.clone() {
+                body["session_id"] = json!(sid);
+            }
+            let raw = ctx
+                .post_json(&format!("/assistant/agent/{seg_name}"), &body)
                 .await?;
             Ok(finalize(raw))
         }
@@ -5067,6 +5217,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("workspace"));
+    }
+
+    #[test]
+    fn assistant_tools_are_shown_only_to_assistant_sessions() {
+        let names = |source: Option<&str>| -> Vec<String> {
+            tool_catalog_for_source(source)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let assistant = names(Some("assistant"));
+        for (tool, _) in ASSISTANT_TOOLS {
+            assert!(assistant.contains(&tool.to_string()), "assistant catalog missing {tool}");
+        }
+        // Everyone else keeps the normal catalog without them.
+        for source in [None, Some("personal_agent"), Some("vault-docs")] {
+            let other = names(source);
+            assert!(other.contains(&"otto_db_schema".to_string()));
+            assert!(
+                !other.iter().any(|n| n.starts_with("assistant_")),
+                "{source:?} leaked assistant tools"
+            );
+        }
+        // Every assistant spec is well formed and maps to one endpoint segment.
+        for spec in assistant_tool_specs() {
+            let name = spec["name"].as_str().unwrap();
+            assert!(assistant_segment(name).is_some(), "{name}");
+            assert_eq!(spec["inputSchema"]["type"], json!("object"), "{name}");
+            if let Some(req) = spec["inputSchema"]["required"].as_array() {
+                for r in req {
+                    assert!(spec["inputSchema"]["properties"]
+                        .get(r.as_str().unwrap())
+                        .is_some());
+                }
+            }
+        }
+        assert_eq!(assistant_tool_specs().len(), ASSISTANT_TOOLS.len());
+    }
+
+    #[test]
+    fn assistant_memory_tools_win_over_their_governed_twins() {
+        // The governed otto.assistant_* catalog entries are covered natively,
+        // so `otto_assistant_remember` is never advertised twice.
+        for n in ["assistant_remember", "assistant_forget", "assistant_recall"] {
+            assert!(governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(), "{n}");
+        }
+        let enabled = vec!["otto.assistant_recall".to_string()];
+        assert!(governed_tools_for(&enabled).is_empty());
+    }
+
+    #[tokio::test]
+    async fn assistant_tool_call_surfaces_a_daemon_error() {
+        let mut ctx = test_ctx();
+        ctx.source = Some("assistant".into());
+        let resp = handle(
+            &ctx,
+            json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{
+                "name":"assistant_remember","arguments":{"text":"likes tea"}
+            }}),
+        )
+        .await
+        .unwrap();
+        // The daemon is unreachable in tests: a tool error, never "unknown tool".
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("unknown tool"), "{text}");
     }
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
