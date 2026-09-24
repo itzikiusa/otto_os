@@ -56,17 +56,17 @@ pub struct Pin {
 /// chrome `buJBBrGIX2ireeELGVumkA==`, headless shell
 /// `nqCm0W5G3MaF1GLSENeBFg==`) come from the object metadata of
 /// `storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/mac-arm64/`.
-/// The CfT JSON publishes no sha256 and this build was prepared without
-/// downloading the archives, so the sha256 pins are EMPTY: fill them from a
-/// one-time `curl -sL <url> | shasum -a 256` on a trusted machine (or set the
-/// env override) — until then install is refused.
+/// The CfT JSON publishes no sha256, so the pins were taken once with
+/// `curl -sL <url> | shasum -a 256` (streamed byte counts matched `size`).
+/// Bumping `CFT_VERSION` means re-taking both; an empty pin refuses install
+/// unless the env override supplies one.
 pub const PINS: &[Pin] = &[
     Pin {
         build: ChromeBuild::Chrome,
         platform: "mac-arm64",
         version: CFT_VERSION,
         url: "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/mac-arm64/chrome-mac-arm64.zip",
-        sha256: "",
+        sha256: "311211b54c429245e2cec0314ee1e314085e9c00350215b95e1a879350786630",
         size: 179_277_110,
         exe: "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
         label: "Chrome for Testing — full browser (~180 MB)",
@@ -76,7 +76,7 @@ pub const PINS: &[Pin] = &[
         platform: "mac-arm64",
         version: CFT_VERSION,
         url: "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/mac-arm64/chrome-headless-shell-mac-arm64.zip",
-        sha256: "",
+        sha256: "302f82603be06683947594ecd60f849e362a8fe3dd82a89bd4408477c97e75a6",
         size: 98_043_456,
         exe: "chrome-headless-shell-mac-arm64/chrome-headless-shell",
         label: "Chrome Headless Shell — lighter, headless only (~98 MB)",
@@ -616,8 +616,8 @@ mod tests {
                 .starts_with("https://storage.googleapis.com/chrome-for-testing-public/"));
             assert!(p.url.contains(CFT_VERSION));
             assert!(p.size > 50_000_000 && p.size < MAX_DOWNLOAD_BYTES);
-            // Either a real sha256 or empty (install refused) — never junk.
-            assert!(p.sha256.is_empty() || is_sha256_hex(p.sha256));
+            // Shipped pins are real — an empty one would refuse every install.
+            assert!(is_sha256_hex(p.sha256), "{b:?} pin has no sha256");
         }
         assert!(pin_for(ChromeBuild::Chrome, "linux64").is_none());
     }
