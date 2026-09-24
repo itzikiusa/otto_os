@@ -75,14 +75,14 @@ test('⌘K focuses the bar and a command runs with Enter', async ({ page }) => {
 
   await page.keyboard.press('Enter');
   await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/vault');
-  await expect(input(page)).not.toBeFocused();
-  await expect(input(page)).toHaveValue('');
+  await expect(rawInput(page)).not.toBeFocused();
+  await expect(rawInput(page)).toHaveValue('');
 
   // ⌘K again focuses; ⌘K while focused closes.
   await page.keyboard.press('Meta+k');
   await expect(input(page)).toBeFocused();
   await page.keyboard.press('Meta+k');
-  await expect(input(page)).not.toBeFocused();
+  await expect(rawInput(page)).not.toBeFocused();
 });
 
 test('free text defaults to Ask Otto and the answer lands in the thread', async ({ page }) => {
@@ -122,7 +122,7 @@ test('Esc clears the query first, then closes the bar', async ({ page }) => {
   await expect(input(page)).toHaveValue('');
   await expect(input(page)).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(input(page)).not.toBeFocused();
+  await expect(rawInput(page)).not.toBeFocused();
   await expect(bar(page)).toHaveAttribute('data-presence', 'dock');
 });
 

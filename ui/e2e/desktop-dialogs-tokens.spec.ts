@@ -166,7 +166,7 @@ test('light: Usage "Cost Attribution" heading + Group-by select are readable', a
 
 test('browser address bar: icon buttons keep full-size icons', async ({ page }) => {
   await openPage(page, 'browser');
-  const go = page.locator('button.btn[title="Go"]').first();
+  const go = page.getByRole('button', { name: 'Go', exact: true }).first();
   await expect(go).toBeVisible({ timeout: 15_000 });
   const box = await go.locator('svg').boundingBox();
   expect(box, 'Go icon rendered').not.toBeNull();

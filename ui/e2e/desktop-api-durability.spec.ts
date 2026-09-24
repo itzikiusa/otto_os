@@ -113,7 +113,7 @@ test('scripts/docs/settings persist with the saved request (server-side)', async
 });
 
 test('saved bearer token is Keychain-migrated and rendered masked', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   const name = `secret-${Date.now()}`;
 
   await urlInput(page).fill('https://example.com/secret');
