@@ -51,6 +51,7 @@ async function findMore(page: Page) {
 }
 
 test('⋯ menu opens under its button and is keyboard-drivable', async ({ page }) => {
+  test.setTimeout(120_000); // findMore may visit a few pages/widths
   const more = await findMore(page);
   const menu = page.locator('.ctx-menu');
 
