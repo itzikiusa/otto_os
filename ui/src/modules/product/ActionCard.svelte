@@ -242,7 +242,7 @@
   <div class="action-card applied-row">
     <span class="applied-text">✓ {appliedLabel}</span>
     {#if undoApplicable()}
-      <button class="undo-btn" onclick={onUndo} disabled={undoing}>
+      <button class="btn small" onclick={onUndo} disabled={undoing}>
         {undoing ? 'Undoing…' : 'Undo'}
       </button>
     {/if}
@@ -272,7 +272,7 @@
         </div>
       </div>
       <div class="card-actions">
-        <button class="apply-btn danger" onclick={applyDraft} disabled={applying}>
+        <button class="btn small danger" onclick={applyDraft} disabled={applying}>
           {applying ? 'Replacing…' : 'Replace draft'}
         </button>
       </div>
@@ -303,7 +303,7 @@
       </div>
       <div class="card-actions">
         <button
-          class="apply-btn"
+          class="btn small primary"
           onclick={applyQuestions}
           disabled={applying || checkedCount === 0}
         >
@@ -337,7 +337,7 @@
       </div>
       <div class="card-actions">
         <button
-          class="apply-btn"
+          class="btn small primary"
           onclick={applyNotes}
           disabled={applying || checkedCount === 0}
         >
@@ -361,7 +361,7 @@
         </div>
       {/if}
       <div class="card-actions">
-        <button class="apply-btn" onclick={applyCanvas} disabled={applying}>
+        <button class="btn small primary" onclick={applyCanvas} disabled={applying}>
           {applying ? 'Opening…' : 'Open in Canvas'}
         </button>
       </div>
@@ -385,15 +385,17 @@
     padding: 7px 10px;
     border-bottom: 1px solid var(--border);
   }
+  /* The proposal's kind: a neutral micro-label at the 11px floor. */
   .card-kind {
-    font-size: 9.5px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -486,7 +488,7 @@
   }
   .item-cat {
     align-self: flex-start;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -527,30 +529,6 @@
     padding: 8px 10px;
     border-top: 1px solid var(--border);
   }
-  .apply-btn {
-    padding: 5px 12px;
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s);
-    background: var(--accent);
-    color: #fff;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: opacity 110ms;
-  }
-  .apply-btn:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .apply-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .apply-btn.danger {
-    background: var(--danger-solid);
-    border-color: var(--danger-solid);
-  }
-
   /* ── Applied (sticky confirmation) row ──────────────────────────────────── */
   .applied-row {
     display: flex;
@@ -558,30 +536,12 @@
     justify-content: space-between;
     gap: 8px;
     padding: 7px 11px;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--success-soft);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .applied-text {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 600;
-    color: var(--accent-text);
-  }
-  .undo-btn {
-    padding: 3px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .undo-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .undo-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    color: var(--success);
   }
 </style>

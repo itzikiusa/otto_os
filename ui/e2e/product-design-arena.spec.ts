@@ -132,7 +132,7 @@ test('arena: a scene3d opens with the Hierarchy pane and an object count', async
   // Play toggle + Blender section in the inspector (installed or not, the
   // script download is always offered).
   await expect(page.locator('.stage-toolbar .tb-btn', { hasText: 'Play' })).toBeVisible();
-  await expect(page.locator('.arena-inspector .p-btn', { hasText: 'Download script' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.arena-inspector .btn', { hasText: 'Download script' })).toBeVisible({ timeout: 15_000 });
   // Back to the asset list via the switch.
   await page.locator('.pane-switch .ss', { hasText: 'Assets' }).click();
   await expect(page.locator('.mockup-row', { hasText: 'level.scene3d.json' })).toBeVisible();
@@ -174,7 +174,7 @@ test('arena: New ▾ → template creates an HTML screen in a device frame (sand
   test.setTimeout(90_000);
   await openArena(page);
 
-  await page.locator('.arena-assets .p-btn', { hasText: 'New' }).first().click();
+  await page.locator('.arena-assets .btn', { hasText: 'New' }).first().click();
   const menu = page.locator('.ctx-menu');
   await expect(menu).toBeVisible();
   await menu.locator('.ctx-search-input').fill('Landing');

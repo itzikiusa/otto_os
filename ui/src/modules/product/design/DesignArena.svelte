@@ -796,15 +796,15 @@
         <span class="pane-title">Assets</span>
       {/if}
       <div class="list-actions">
-        <button class="p-btn" onclick={newMenu} title="New artifact (blank or from a template)">
+        <button class="btn small" onclick={newMenu} title="New artifact (blank or from a template)">
           <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={10} />
         </button>
-        <label class="p-btn" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
+        <label class="btn small" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
           <Icon name="arrowUp" size={12} />
           {importing ? 'Importing…' : 'Import'}
           <input type="file" multiple accept={IMPORT_ACCEPT} style="display:none" onchange={importFiles} disabled={importing} />
         </label>
-        <button class="act-btn p-btn primary" onclick={aiMenu} title="Generate an artifact with AI">
+        <button class="act-btn btn small primary" onclick={aiMenu} title="Generate an artifact with AI">
           <Icon name="zap" size={12} /> Create with AI
         </button>
       </div>
@@ -1049,15 +1049,15 @@
             {:else if blender.installed}
               <p class="insp-hint">Blender {blender.version ?? ''} <span class="mono">{blender.path}</span></p>
               <div class="insp-actions">
-                <button class="p-btn primary" onclick={renderInBlender} disabled={rendering}>
+                <button class="btn small" onclick={renderInBlender} disabled={rendering}>
                   {rendering ? `Rendering… ${renderJob?.status ?? ''}` : 'Render + export GLB'}
                 </button>
-                <button class="p-btn" onclick={downloadBlenderScript}>Download script</button>
+                <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {:else}
               <p class="insp-hint">Blender isn't installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
               <div class="insp-actions">
-                <button class="p-btn" onclick={downloadBlenderScript}>Download script</button>
+                <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {/if}
           </section>
@@ -1065,7 +1065,7 @@
 
         {#if !assistDocked && isText}
           <section class="insp-sec">
-            <button class="p-btn primary wide" onclick={() => att && refine(att)}>
+            <button class="btn small" onclick={() => att && refine(att)}>
               <Icon name="zap" size={12} /> Refine with AI
             </button>
           </section>
@@ -1608,9 +1608,6 @@
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
-  }
-  .wide {
-    justify-content: center;
   }
   .insp-assist {
     flex: 1 1 55%;

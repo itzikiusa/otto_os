@@ -109,7 +109,7 @@
     <!-- ── Toolbar ──────────────────────────────────────────────────────────── -->
     <div class="toolbar">
       <span class="grow"></span>
-      <button class="action-btn accent-btn" onclick={openAdd}>+ Add note</button>
+      <button class="btn small primary" onclick={openAdd}>+ Add note</button>
     </div>
 
     <!-- ── Notes list ───────────────────────────────────────────────────────── -->
@@ -163,14 +163,14 @@
                 ></textarea>
                 <div class="edit-actions">
                   <button
-                    class="action-btn accent-btn"
+                    class="btn small primary"
                     onclick={() => saveEdit(n.id)}
                     disabled={savingId === n.id || !editBody.trim()}
                   >
                     {savingId === n.id ? 'Saving…' : 'Save'}
                   </button>
                   <button
-                    class="action-btn"
+                    class="btn small ghost"
                     onclick={cancelEdit}
                     disabled={savingId === n.id}
                   >Cancel</button>
@@ -207,9 +207,9 @@
           </label>
         </div>
         {#snippet footer()}
-          <button class="action-btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
+          <button class="btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
           <button
-            class="action-btn accent-btn"
+            class="btn primary"
             onclick={addNote}
             disabled={addWorking || !newBody.trim()}
           >
@@ -248,41 +248,6 @@
   }
   .grow {
     flex: 1;
-  }
-
-  /* ── Action buttons ──────────────────────────────────────────────── */
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 100ms, border-color 100ms, color 100ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .accent-btn {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-weight: 600;
-  }
-  .accent-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent-text);
   }
 
   /* ── Notes list ──────────────────────────────────────────────────── */
