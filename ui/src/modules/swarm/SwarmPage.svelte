@@ -192,12 +192,30 @@
     { id: 'board', label: 'Feed', icon: 'comment' },
   ];
 
+  const LIFECYCLE_FAILED: Record<'start' | 'pause' | 'abort' | 'resume', string> = {
+    start: "Couldn't start the swarm",
+    pause: "Couldn't pause the swarm",
+    abort: "Couldn't abort the swarm",
+    resume: "Couldn't resume the swarm",
+  };
+
   async function lifecycle(action: 'start' | 'pause' | 'abort' | 'resume') {
     if (!detail) return;
+    // Abort kills every swarm session and cancels queued/running runs — the
+    // in-flight work is lost, so it names the blast radius and asks first.
+    if (action === 'abort') {
+      const agents = running === 1 ? '1 running agent is' : `${running} running agents are`;
+      const q = queued === 1 ? '1 queued run is' : `${queued} queued runs are`;
+      const ok = await confirmer.ask(
+        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} cancelled. Work in progress is lost.`,
+        { title: 'Abort swarm', confirmLabel: 'Abort all' },
+      );
+      if (!ok) return;
+    }
     try {
       await swarm.lifecycle(action, detail.id);
     } catch (e) {
-      toasts.error(`${action} failed`, e instanceof Error ? e.message : String(e));
+      toasts.error(LIFECYCLE_FAILED[action], e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -391,10 +409,10 @@
         <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete swarm" onclick={deleteSwarm} aria-label="delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
         {#if detail.status === 'active'}
-          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
+          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
           <button class="btn small" data-keep onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
         {:else if detail.status === 'paused'}
-          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
+          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
           {#if detail.pause_reason}
             <button class="btn small" data-overflow="1" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume</button>
           {/if}
