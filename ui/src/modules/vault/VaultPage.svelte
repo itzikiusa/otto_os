@@ -735,7 +735,10 @@
   }
   .vault-statusbar {
     display: flex;
-    gap: 14px;
+    /* A phone wraps whole items onto a second row ("0 backlinks" never
+       splits into "0" over "backlinks"). */
+    flex-wrap: wrap;
+    gap: 2px 14px;
     align-items: center;
     padding: 4px 14px;
     border-top: 1px solid var(--border);
@@ -748,10 +751,12 @@
   .vault-statusbar .bad {
     color: var(--danger);
   }
-  .vs-counts {
+  .vault-statusbar > span {
     white-space: nowrap;
   }
   .vault-statusbar .dim {
+    min-width: 0;
+    max-width: 100%;
     opacity: 0.7;
     overflow: hidden;
     text-overflow: ellipsis;
