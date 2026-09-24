@@ -226,7 +226,7 @@
                 </div>
                 {#if a.status === 'pending'}
                   <div class="ap-actions">
-                    <button class="btn small ok" disabled={busy} onclick={() => decide(a.id, 'approved')}>Approve</button>
+                    <button class="btn small primary" disabled={busy} onclick={() => decide(a.id, 'approved')}>Approve</button>
                     <button class="btn small danger" disabled={busy} onclick={() => decide(a.id, 'rejected')}>Reject</button>
                   </div>
                 {:else if a.decided_by}
