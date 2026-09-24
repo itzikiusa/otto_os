@@ -441,7 +441,6 @@
     "src/modules/product/design/scene3d/Hierarchy.svelte": 1,
     "src/modules/proof/ProofPage.svelte": 1,
     "src/modules/settings/Channels.svelte": 1,
-    "src/modules/settings/IssueAccounts.svelte": 2,
     "src/modules/settings/SkillEvalSettings.svelte": 1,
     "src/modules/skills-eval/GoldenTasksView.svelte": 2,
     "src/modules/skills-eval/MatrixView.svelte": 1,

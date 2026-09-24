@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { tick } from 'svelte';
   import { api } from '../../lib/api/client';
@@ -133,7 +134,7 @@
 </script>
 
 <div class="settings-section logs-section">
-  <PageHeader title="Logs" subtitle={payload?.log_dir ?? '~/Library/Logs/Otto'}>
+  <PageHeader title={sectionLabel('logs')} subtitle={payload?.log_dir ?? '~/Library/Logs/Otto'}>
     {#snippet actions()}
       <button class="btn" disabled={refreshing || loading} onclick={refreshFull}>
         <Icon name="refresh" size={13} />

@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // MCP Servers settings page: per-workspace, user-managed MCP servers that Otto
   // merges into the workspace's `.mcp.json` when an agent session spawns there
@@ -244,7 +245,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="MCP Servers" subtitle="Per-workspace Model Context Protocol servers.">
+  <PageHeader title={sectionLabel('mcp-servers')} subtitle="Per-workspace Model Context Protocol servers">
     {#snippet actions()}
       {#if wsId}
         <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>

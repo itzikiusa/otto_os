@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Language Servers: shows LSP server availability and lets users
   // install missing servers via a spawned shell session.
@@ -97,7 +98,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Language Servers" subtitle="Servers are detected on your PATH.">
+  <PageHeader title={sectionLabel('language-servers')} subtitle="Servers are detected on your PATH">
     {#snippet actions()}
       {#if missingWithInstall.length > 0}
         <button class="btn primary" disabled={installingAll} onclick={installAll}>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings export/import and state backup/restore (C3).
   // Routes used:
@@ -168,7 +169,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Backup & Restore" subtitle="Back up saved Otto data, restore an archive, or transfer settings." />
+  <PageHeader title={sectionLabel('backup')} subtitle="Back up Otto data, restore an archive or transfer settings" />
   <PageBody width="readable">
 
   <FullBackup />

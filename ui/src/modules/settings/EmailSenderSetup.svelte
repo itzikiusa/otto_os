@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
@@ -142,8 +144,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Sharing — Email Sender" subtitle="Configure a Gmail sender so Otto can email one-time codes to guests before they attach to a shared session." />
+  <PageHeader title={sectionLabel('sharing')} subtitle="Emails one-time codes to guests of shared sessions" />
   <PageBody width="readable">
+  <SectionIntro>Configure a Gmail sender so Otto can email one-time codes to guests before they attach to a shared session.</SectionIntro>
 
   <!-- ── Status card ── -->
   <div class="section-title">Current sender</div>

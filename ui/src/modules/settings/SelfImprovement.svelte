@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Self-Improvement settings page: per-workspace scheduled self-reflection.
   // Periodically reviews recent sessions and improves the workspace's memory
@@ -265,8 +267,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Self-Improvement" subtitle="Periodically review this workspace's recent agent sessions and improve its memory and handling skills. Safe edits apply automatically; risky ones wait for your approval below." />
+  <PageHeader title={sectionLabel('self-improvement')} subtitle="Improve memory and skills from recent sessions" />
   <PageBody width="readable">
+  <SectionIntro>Otto periodically reviews this workspace's recent agent sessions and improves its memory and handling skills. <strong>Safe edits apply automatically; risky ones wait for your approval below.</strong></SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->

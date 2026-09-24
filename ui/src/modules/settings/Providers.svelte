@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
   // session provider. Stored in the `providers` settings key; the daemon
@@ -355,7 +356,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Providers" subtitle="Agent CLIs Otto can spawn as sessions.">
+  <PageHeader title={sectionLabel('providers')} subtitle="Agent CLIs Otto can spawn as sessions">
     {#snippet actions()}
       <button class="btn primary" onclick={updateAllCLIs} disabled={updating || loading}>
         {updating ? 'Updating…' : 'Update all CLIs'}

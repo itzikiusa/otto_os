@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Root-only defaults for the Skills Evaluator: the validations, improver
   // agent, iterations, and validation passes pre-filled into the start form.
@@ -79,10 +81,11 @@
 
 <div class="settings-section">
   <PageHeader
-    title="Skills Evaluator"
-    subtitle="Defaults pre-filled into the start form. Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations."
+    title={sectionLabel('skill-eval')}
+    subtitle="Defaults pre-filled into the start form"
   />
   <PageBody width="readable">
+  <SectionIntro>Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations.</SectionIntro>
   <div class="eval-body">
 
   {#if loading || !cfg}

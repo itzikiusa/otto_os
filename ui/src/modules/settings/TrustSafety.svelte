@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Trust & Safety Center (root only): a derived security-posture summary plus
   // the filterable, paged security audit log. Reads `GET /security-posture` and
@@ -185,7 +186,7 @@
 </script>
 
 <div class="settings-section trust-section">
-  <PageHeader title="Trust & Safety" subtitle="Security posture and the append-only audit log.">
+  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and the append-only audit log">
     {#snippet actions()}
       <button
         class="btn"

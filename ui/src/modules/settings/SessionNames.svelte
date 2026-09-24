@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Session name themes: pick the theme new agent sessions are auto-named from
   // (e.g. "Ronaldo", "Messi") and manage your own custom name lists (family
@@ -97,7 +98,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Session Names" subtitle="New agent sessions are auto-named from your active theme." />
+  <PageHeader title={sectionLabel('session-names')} subtitle="New agent sessions are auto-named from your theme" />
   <PageBody width="readable">
   <p class="section-intro">New agent sessions are auto-named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</p>
 

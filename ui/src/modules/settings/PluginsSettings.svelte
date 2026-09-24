@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Runtime custom-plugins management (root). Install from a local path or git
   // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
@@ -82,7 +83,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Plugins" subtitle="Custom plugins are external sidecar processes installed at runtime (no app rebuild)." />
+  <PageHeader title={sectionLabel('plugins')} subtitle="Sidecar processes installed at runtime, no rebuild" />
   <PageBody width="readable">
   <p class="lead">
     Install from a local folder or a git URL, then enable to run it. Grant non-root users

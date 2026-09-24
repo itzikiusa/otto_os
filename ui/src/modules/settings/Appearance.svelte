@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
@@ -106,7 +107,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Appearance" subtitle="Themes apply instantly and persist per device." />
+  <PageHeader title={sectionLabel('appearance')} subtitle="Themes apply instantly and persist per device" />
   <PageBody width="readable">
 
   <div class="section-title">Theme</div>

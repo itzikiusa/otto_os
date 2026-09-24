@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Context Library (root-only): author and edit the Otto-owned library of
   // skills, souls, and context snippets — the single source of truth that gets
@@ -212,8 +214,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Context Library" subtitle="The Otto-owned library of skills, souls, and context snippets — the single source of truth materialized into each workspace's CLIs. Edits here propagate at the next session spawn." />
+  <PageHeader title={sectionLabel('context-library')} subtitle="Otto’s library of skills, souls and context snippets" />
   <PageBody width="readable">
+  <SectionIntro>The single source of truth materialized into each workspace's CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions.</SectionIntro>
 
   <!-- Default soul selector (souls tab only) -->
   {#if tab === 'souls'}

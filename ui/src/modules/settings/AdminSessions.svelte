@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Admin active-sessions overview: list every session daemon-wide; terminate
   // (kill the PTY, keep the row) or remove (delete the row + history), one at a
@@ -139,7 +140,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Sessions" subtitle="All sessions across all users.">
+  <PageHeader title={sectionLabel('sessions')} subtitle="All sessions across all users">
     {#snippet actions()}
       {#if exitedCount > 0}
         <button class="btn small" onclick={removeExited} disabled={bulkBusy || loading}>

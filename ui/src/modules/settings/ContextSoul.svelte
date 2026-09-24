@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Context & Soul settings page: per-workspace context provisioning. Pick which
   // library skills are active, which soul (persona) to use, free-form extra
@@ -195,8 +197,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Workspace context" subtitle={`${ws.current?.name ?? 'Your workspace'} is the shared project for its sessions. Goals, instructions, memory and references apply across agent providers when sessions start or restart. Running conversations keep their current context.`} />
+  <PageHeader title={sectionLabel('context-soul')} subtitle="Shared goals, instructions and memory for sessions" />
   <PageBody width="readable">
+  <SectionIntro><strong>{ws.current?.name ?? 'Your workspace'}</strong> is the shared project for its sessions. Goals, instructions, memory and references apply across agent providers when sessions start or restart. Running conversations keep their current context.</SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->

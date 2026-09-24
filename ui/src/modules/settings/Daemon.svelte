@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
   import { api } from '../../lib/api/client';
@@ -24,7 +25,15 @@
   let port = $state(7700);
   let sandboxEnabled = $state(false);
   let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
-  let savingSandbox = $state(false);
+  // Last-saved values: the ONE Save (in the header) sends only the groups
+  // that differ from these, and is disabled while nothing does.
+  let savedListener = $state<NetworkListener>({ enabled: false, port: 7700 });
+  let savedSandbox = $state<ProcessSandbox>({ enabled: false, network: 'full' });
+  const listenerDirty = $derived(enabled !== savedListener.enabled || port !== savedListener.port);
+  const sandboxDirty = $derived(
+    sandboxEnabled !== savedSandbox.enabled || sandboxNetwork !== savedSandbox.network,
+  );
+  const dirty = $derived(listenerDirty || sandboxDirty);
   // Latest full settings object (the PUT response). Saves send ONLY the keys
   // they change: PUT /settings upserts exactly the keys in the body, so
   // spreading this page-load snapshot reverted keys written since (auto-update
@@ -41,11 +50,13 @@
           enabled = nl.enabled;
           port = nl.port;
         }
+        savedListener = { enabled, port };
         const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
         if (sb) {
           sandboxEnabled = sb.enabled;
           sandboxNetwork = sb.network ?? 'full';
         }
+        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
       } catch {
         toasts.error('Could not load daemon settings');
       } finally {
@@ -55,40 +66,51 @@
   });
 
   async function save(): Promise<void> {
+    if (!dirty) return;
+    // Only the changed groups: an unchanged network_listener in the body would
+    // still write a network-listener audit entry.
+    const body: Record<string, unknown> = {};
+    if (listenerDirty) body.network_listener = { enabled, port };
+    if (sandboxDirty) body.process_sandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    const saveListener = listenerDirty;
+    const saveSandbox = sandboxDirty;
     saving = true;
     try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
-        network_listener: { enabled, port },
-      });
-      toasts.success('Daemon settings saved', enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
-      if (auth.meta) auth.meta.network_listener = enabled;
+      allSettings = await api.put<Record<string, unknown>>('/settings', body);
+      const notes: string[] = [];
+      if (saveListener) {
+        savedListener = { enabled, port };
+        if (auth.meta) auth.meta.network_listener = enabled;
+        notes.push(enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
+      }
+      if (saveSandbox) {
+        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+        notes.push(sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off');
+      }
+      toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save daemon settings', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
-    }
-  }
-
-  async function saveSandbox(): Promise<void> {
-    savingSandbox = true;
-    try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
-        process_sandbox: { enabled: sandboxEnabled, network: sandboxNetwork },
-      });
-      toasts.success(
-        'Sandbox settings saved',
-        sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off',
-      );
-    } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      savingSandbox = false;
     }
   }
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Daemon" subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`} />
+  <PageHeader title={sectionLabel('daemon')} subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`}>
+    {#snippet actions()}
+      {#if !loading}
+        <button
+          class="btn small primary"
+          disabled={!dirty || saving}
+          title={dirty ? 'Save network and sandbox settings' : 'No changes to save'}
+          onclick={() => void save()}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
   <PageBody width="readable">
 
   {#if loading}
@@ -115,9 +137,6 @@
           disabled={!enabled}
         />
       </div>
-      <button class="btn primary" disabled={saving} onclick={save}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
     </div>
 
     <div class="section-title">Process sandbox</div>
@@ -149,9 +168,6 @@
         Non-`full` network blocks agent CLIs from reaching their model API — use only
         for offline shells.
       </p>
-      <button class="btn primary" disabled={savingSandbox} onclick={saveSandbox}>
-        {savingSandbox ? 'Saving…' : 'Save'}
-      </button>
     </div>
 
     <div class="section-title">Logs</div>

@@ -57,6 +57,7 @@
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
   import { GUIDES } from '../modules/help/sections';
+  import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
   import ProductPage from '../modules/product/ProductPage.svelte';
   import CanvasPage from '../modules/canvas/CanvasPage.svelte';
   import DesignHallPage from '../modules/design-hall/DesignHallPage.svelte';
@@ -487,7 +488,6 @@
       { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-walkthroughs', title: 'Open Help', group: 'Navigate', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding', run: () => router.go('walkthroughs') },
-      { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
       // but stays a route of its own — keep it one ⌘K away.
@@ -525,6 +525,25 @@
         detail: groupLabel(m.group),
         keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
         run: () => router.go(m.id),
+      })),
+    );
+  });
+
+  // ---- palette commands: Settings sections ----
+  // One "Settings: <section>" per section the role can open, generated from
+  // the Settings registry (modules/settings/sections.ts) the same way Go-to
+  // commands come from the sidebar — a new section is ⌘K-reachable for free.
+  $effect(() => {
+    const sections = availableSections(auth);
+    return registry.register(
+      'settings',
+      sections.map((s) => ({
+        id: `settings.${s.id}`,
+        title: `Settings: ${s.label}`,
+        group: 'Settings',
+        detail: settingsGroupLabel(s.group),
+        keywords: `settings preferences ${s.id.replace(/-/g, ' ')} ${s.keywords ?? ''}`,
+        run: () => router.go(`settings/${s.id}`),
       })),
     );
   });

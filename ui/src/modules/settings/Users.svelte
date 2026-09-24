@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Users admin (root): create/disable users + per-workspace role matrix + feature grants.
   import { api } from '../../lib/api/client';
@@ -340,7 +341,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Users" subtitle="Root manages accounts and per-workspace roles.">
+  <PageHeader title={sectionLabel('users')} subtitle="Root manages accounts and per-workspace roles">
     {#snippet actions()}
       <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
     {/snippet}
