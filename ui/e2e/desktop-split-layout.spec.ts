@@ -187,7 +187,7 @@ test('closing a session whose neighbour is already on screen collapses its split
   // leaf of that session onto the fallback — which is already on screen, so the
   // replaced leaf is deduped away and its split node collapses.
   const rui = page.locator('.pane', { hasText: 'Rui Costa' }).first();
-  await rui.locator('button[aria-label="Close session (⌘W)"]').click();
+  await rui.locator('button[aria-label^="Close session (⌘W)"]').click();
   await page.getByRole('button', { name: 'Delete session' }).click();
 
   await expect(leaves(page)).toHaveCount(2, { timeout: 15_000 });
