@@ -121,10 +121,7 @@ impl LiveSettings {
             return Self::default();
         };
         let patch: LiveSettingsPatch = serde_json::from_value(v.clone()).unwrap_or_default();
-        match Self::default().patched(&patch) {
-            Ok(s) => s,
-            Err(_) => Self::default(),
-        }
+        Self::default().patched(&patch).unwrap_or_default()
     }
 
     /// Apply `patch` on top of `self` and validate the result.

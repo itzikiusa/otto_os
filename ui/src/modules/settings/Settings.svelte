@@ -16,6 +16,7 @@
   import McpServers from './McpServers.svelte';
   import InsightsSettings from './InsightsSettings.svelte';
   import SnipSettings from './SnipSettings.svelte';
+  import BrowserSettings from './BrowserSettings.svelte';
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
@@ -26,6 +27,7 @@
   import EmailSenderSetup from './EmailSenderSetup.svelte';
   import PersonalAccessTokens from './PersonalAccessTokens.svelte';
   import BackupRestore from './BackupRestore.svelte';
+  import AssistantSettings from './AssistantSettings.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -52,6 +54,7 @@
           { id: 'session-names', label: 'Session Names' },
           { id: 'notifications', label: 'Notifications' },
           { id: 'snipping', label: 'Snipping' },
+          ...(auth.can('browser', 'view') ? [{ id: 'browser', label: 'Browser' }] : []),
           { id: 'tokens', label: 'API Tokens' },
         ],
       },
@@ -69,6 +72,7 @@
       {
         label: 'Agents',
         items: [
+          { id: 'assistant', label: 'Assistant' },
           ...(auth.can('settings', 'admin') ? [{ id: 'providers', label: 'Providers' }] : []),
           { id: 'context-soul', label: 'Workspace context' },
           { id: 'self-improvement', label: 'Self-Improvement' },
@@ -149,6 +153,8 @@
       <IssueAccounts />
     {:else if page === 'channels'}
       <Channels />
+    {:else if page === 'assistant'}
+      <AssistantSettings />
     {:else if page === 'notifications'}
       <Notifications />
     {:else if page === 'self-improvement'}
@@ -159,6 +165,8 @@
       <InsightsSettings />
     {:else if page === 'snipping'}
       <SnipSettings />
+    {:else if page === 'browser' && auth.can('browser', 'view')}
+      <BrowserSettings />
     {:else if page === 'skills' && auth.can('settings', 'admin')}
       <SkillsLibrary />
     {:else if page === 'skill-eval' && auth.can('settings', 'admin')}

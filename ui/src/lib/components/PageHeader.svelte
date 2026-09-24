@@ -241,7 +241,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
   bind:this={rootEl}
-  class="page-header-bar {klass}"
+  class="page-header-bar chrome-material {klass}"
   class:tauri-pad={padTraffic}
   class:has-below={tabsBelow}
   data-tauri-drag-region
@@ -280,8 +280,7 @@
           aria-label="More actions"
           aria-haspopup="menu"
         >
-          <!-- Icon.svelte has no "more" glyph; the ellipsis reads as one. -->
-          <span class="ph-more-glyph" aria-hidden="true">⋯</span>
+          <Icon name="more" size={16} />
         </button>
       {/if}
     </div>
@@ -298,8 +297,9 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
+    /* Chrome: the toolbar glass over the ambient backdrop (tokens.css
+       .chrome-material, applied in the markup), a quiet hairline under it. */
+    border-bottom: 1px solid var(--separator);
     user-select: none;
     -webkit-user-select: none;
     min-width: 0;
@@ -473,12 +473,6 @@
     flex-shrink: 0;
     width: 28px;
     height: 28px;
-  }
-  .ph-more-glyph {
-    font-size: var(--fs-l);
-    line-height: 1;
-    font-weight: 700;
-    letter-spacing: 0.02em;
   }
   .ph-tabs-below {
     display: flex;

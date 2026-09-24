@@ -76,10 +76,9 @@ Ambitious workflows* — followed by stats and charts that explain the period:
   satisfaction**, and a light "fun ending" closer.
 
 Each generated period produces a **triple** of artifacts (HTML report + markdown
-summary + metrics JSON) plus a rolling `index.json` ledger (§5). The UI's report
-card shows the report `kind`, the period range, the created-at time, and a
-plain-text **summary** (the first ~80 lines of the markdown summary) so you can
-skim without opening the HTML.
+summary + metrics JSON) plus a rolling `index.json` ledger (§5). The UI parses
+the markdown summary into a headline, KPI tiles and an Action Plan checklist and
+renders the rest, so you can act on a report without opening the HTML (§6).
 
 ---
 
@@ -164,9 +163,10 @@ Insights are **multi-provider** in two senses:
 
 ### Run on demand
 
-From the **Insights** view header (Reports tab), the *Run now* control picks a
-**period** (`Yesterday (day)` / `Last week` / `Last month`) and an **offset**
-(`Previous` = 1, `2/3/4 periods ago`), then issues `POST /insights/run`. Over the
+From the **Insights** view header (Reports tab), a period picker (`Yesterday`,
+`2 days ago`, `Last week`, `2 weeks ago`, `Last month`, `2 months ago` — a
+`period` + `offset`) and the *Run now* primary issue `POST /insights/run`. With
+no reports yet, the empty page offers *Run yesterday's report* instead. Over the
 API:
 
 ```bash
@@ -229,33 +229,49 @@ itself never deletes report files.
 
 ## 6. Viewing reports (list & open the HTML)
 
-The **Insights → Reports** tab lists every stored report, **newest first** (by
-period end, then start). Each card shows the cadence chip, the period range, the
-created-at time, and the text summary. `GET /insights/reports` returns a
-`ReportView[]`:
+**Insights → Reports** is a list/detail page. It opens on the last report you
+viewed (else the newest) — never on an empty pane.
 
-| Field | Meaning |
-|---|---|
-| `kind` | `daily` \| `weekly` \| `monthly` (the report's cadence word) |
-| `period_start` / `period_end` | inclusive period bounds (`YYYY-MM-DD`) |
-| `html_path` | absolute path of the `report-*.html`, or `null` if only the summary/metrics exist yet |
-| `summary` | first ~80 lines of the `summary-*.md` (plain text) |
-| `created_at` | RFC3339 mtime of the freshest artifact (HTML preferred) |
+**Left: the report timeline**, newest first (by period end, then start), with
+period chips (`All / Daily / Weekly / Monthly / Ad-hoc`, only the kinds that
+exist, each with a count). Each row shows the cadence, the period, when it was
+generated, the summary's **one-line headline**, up to three KPI deltas vs the
+previous report of the same cadence (sessions, tool errors, achievement — green
+when better, amber when worse), and the Action Plan's status mix ("2 regressed ·
+1 improved · 1 new").
 
-> A report can appear with `html_path: null` if a run hasn't finished writing the
-> HTML yet (metrics/summary landed first) — re-list shortly. The UI's filter bar
-> also lists an **Ad-hoc** kind; the backend currently only writes
-> `daily`/`weekly`/`monthly` artifacts, so that filter is forward-looking.
+**Right: the report, rendered**, with a **Preview / Markdown / HTML** switch:
 
-**Opening a report.** Clicking a card resolves the HTML through
-`GET /insights/report?path=<html_path>` (the daemon reads the file with the auth
-token and hands back a revocable object URL) and renders it in a full-screen
-**iframe overlay**. From the overlay you can **Open in new tab** (Tauri webview),
-**Download** the HTML to a file, or **Close**. Because the HTML is fully
-self-contained, the downloaded file opens anywhere.
+- **Preview** — *key findings* parsed from the summary markdown, then the rest
+  of the summary rendered (GFM, through the allowlist sanitizer):
+  - **KPI tiles** — sessions, turns, tool errors, spend, achievement %, each
+    with its delta and a sparkline over the last 12 reports of that cadence.
+    Values come from the summary prose first (it's what the agent reported —
+    the collector under-counts errors) and fall back to the `index.json`
+    `series` row.
+  - **Action plan** — the `## Action Plan` items as a checklist: title, the
+    targeted metric with `current → target`, `Effort S/M/L`, status chips
+    (Regressed = warning, Improved/Closed = success, New = info, Carried over =
+    neutral) and the `act-YYYYMMDD-NN` ids. **Ledger** expands each id's
+    `index.json` `action_ledger` entry (opened, latest, target, status).
+  - Parsing is best-effort (`ui/src/modules/insights/insightsParse.ts`, unit
+    tested): when a summary doesn't have the expected shape, the key-findings
+    block is simply omitted and the markdown shows as-is.
+- **Markdown** — the summary source, verbatim.
+- **HTML** — the full agent-written report in a **sandboxed iframe**
+  (`srcdoc`, `allow-scripts` but never `allow-same-origin`, so its charts run
+  while the app's storage and token stay out of reach). Disabled, with a
+  reason, for a period whose HTML isn't written yet.
 
-Filtering: the chip row (`All / Daily / Weekly / Monthly / Ad-hoc`) filters the
-list client-side by `kind`.
+Tools: **Export .md** (the summary), **Download HTML report**, and **Open in new
+window** — a native pop-out window of `#/insights/r/<kind>/<start>/<end>` in the
+desktop app, or (in a browser) a new tab whose only content is the report in the
+same sandboxed iframe. The same route deep-links to one report in the main
+window.
+
+The UI reads the full `summary-*.md` and `index.json` through the same
+path-gated `GET /insights/report?path=` endpoint (siblings of `html_path` inside
+the insights dir); the list payload's 80-line `summary` is the fallback.
 
 ### Days-back filtering (the `weekly-insights` skill)
 

@@ -8,6 +8,7 @@
   import { startWindowDrag } from '../lib/windowDrag';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { popoutItems } from '../lib/popoutMenu';
   import ShareModal from '../modules/agents/ShareModal.svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
@@ -31,9 +32,11 @@
     if (id === DB_PANE_ID) return 'Database Explorer';
     const s = ws.sessions.find((x) => x.id === id);
     if (!s) return 'Double-click to rename';
-    const parts = [s.title, s.provider, s.cwd].filter((p) => p !== '' && p != null);
-    const base = parts.join(' · ');
-    return isResumable(id) ? `${base} — ${SUSPENDED_TIP}` : `${base} — double-click to rename`;
+    // One short line per fact: a single very long line made a native tooltip
+    // wider than the window, pinned to its edge and clipped.
+    const title = s.title.length > 80 ? `${s.title.slice(0, 79).trimEnd()}…` : s.title;
+    const parts = [title, [s.provider, s.cwd].filter((p) => p !== '' && p != null).join(' · ')].filter(Boolean);
+    return [...parts, isResumable(id) ? SUSPENDED_TIP : 'Double-click to rename'].join('\n');
   }
 
   // ── Keep the active tab visible + surface overflow ────────────────────────
@@ -153,7 +156,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="tabbar"
+  class="tabbar chrome-material"
   class:tauri-pad={isTauri && !ui.railExpanded}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
@@ -218,6 +221,9 @@
           ...(id !== DB_PANE_ID
             ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) }]
             : []),
+          ...(id === DB_PANE_ID
+            ? popoutItems('database', 'Database')
+            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
           { separator: true },
           {
             label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
@@ -331,8 +337,9 @@
     gap: 4px;
     height: 38px;
     padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    /* Chrome: the toolbar glass over the ambient (.chrome-material), like
+       every other page's PageHeader row. */
+    border-bottom: 1px solid var(--separator);
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {

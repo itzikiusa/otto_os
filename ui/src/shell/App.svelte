@@ -27,6 +27,8 @@
   import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
+  import FloatingBar from '../lib/components/FloatingBar.svelte';
+  import { barStore } from '../lib/stores/bar.svelte';
   import ShortcutsOverlay from './ShortcutsOverlay.svelte';
   import Handover from '../modules/agents/Handover.svelte';
   import AttachIssue from '../modules/agents/AttachIssue.svelte';
@@ -64,6 +66,7 @@
   import ProofPage from '../modules/proof/ProofPage.svelte';
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
+  import AssistantPage from '../modules/assistant/AssistantPage.svelte';
   import AwsPage from '../modules/aws/AwsPage.svelte';
   import KubernetesPage from '../modules/kubernetes/KubernetesPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
@@ -353,7 +356,10 @@
     return installKeyMap((action, _e, index) => {
       switch (action) {
         case 'palette':
+          // Desktop: ⌘K focuses the floating bar (the one command surface).
+          // Phone/tablet, pop-outs and a hidden bar keep the palette sheet.
           if (ui.paletteOpen) ui.paletteOpen = false;
+          else if (barStore.mounted) barStore.requestFocus();
           else ui.openPalette('commands');
           break;
         case 'askOtto':
@@ -583,6 +589,20 @@
     return unreg;
   });
 
+  // ---- palette commands: repos ("open repo <name>") ----
+  $effect(() => {
+    return registry.register(
+      'repos',
+      git.repos.map((r) => ({
+        id: `repo.${r.id}`,
+        title: `Open Repo: ${r.name}`,
+        group: 'Git',
+        keywords: `repository ${r.path}`,
+        run: () => router.go(`git/${r.id}`),
+      })),
+    );
+  });
+
   // ---- palette commands: connections ("connect <name>") ----
   $effect(() => {
     const wsId = ws.currentId;
@@ -678,6 +698,10 @@
       <AgentsPage />
     {:else if moduleName === 'home'}
       <HomePage />
+    {:else if moduleName === 'assistant'}
+      <!-- Otto Assistant: threads (Spaces 01–04 + Recent) and a chat rendered
+           from the CLI transcript, with Tasks · Memory · Permissions tabs. -->
+      <AssistantPage />
     {:else if moduleName === 'history'}
       <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
            read-only conversation view. `#/history`, not `#/agents/…`, whose
@@ -793,6 +817,12 @@
 
     <div class="center">
       {@render centerContent()}
+      {#if !isPopout && viewport.isDesktop}
+        <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
+             centre over the content column, docking into the status bar
+             while you scroll or type elsewhere. -->
+        <FloatingBar host="app" />
+      {/if}
     </div>
 
     <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
@@ -957,7 +987,12 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    /* The ambient backdrop (tokens.css) lives on the window itself: the
+       sidebar's glass blurs it; content columns stay opaque (.center). */
+    background-color: var(--bg);
+    background-image: var(--ambient-image);
+    background-size: cover;
+    background-position: center;
   }
   .shell-main {
     flex: 1;
@@ -988,22 +1023,25 @@
      so the window's NSVisualEffectView shows through chrome only; content
      columns keep an opaque background. The traffic-lights strip gets the same
      78% tint as `.sidebar-material` so the sidebar reads as one surface. */
+  /* The ambient image stays: a Subtle wash is translucent, so the native
+     material shows through it; a Wallpaper paints its own opaque base. */
   :global(html.otto-vibrant),
   :global(html.otto-vibrant body),
   .shell.vibrant {
-    background: transparent;
-  }
-  .shell.vibrant .center {
-    background: var(--bg);
+    background-color: transparent;
   }
   .shell.vibrant .titlebar-drag {
-    background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
+    background: var(--glass-tint-native);
   }
   @media (prefers-reduced-transparency: reduce) {
     :global(html.otto-vibrant body),
     .shell.vibrant {
-      background: var(--bg);
+      background-color: var(--bg);
     }
+  }
+  :global(html.otto-vibrant[data-transparency='reduced'] body),
+  :global(html[data-transparency='reduced']) .shell.vibrant {
+    background-color: var(--bg);
   }
   /* Pop-out window title strip (unified title bar: traffic lights at the
      start, centred title). */
@@ -1014,7 +1052,7 @@
     align-items: center;
     justify-content: center;
     padding-inline: 80px;
-    border-block-end: 1px solid var(--border);
+    border-block-end: 1px solid var(--separator);
     user-select: none;
   }
   .popout-title {
@@ -1031,6 +1069,9 @@
     display: flex;
     flex-direction: column;
     position: relative;
+    /* Content is opaque: the ambient backdrop only ever shows through chrome
+       (and on Home, which paints it on purpose — HomePage.svelte). */
+    background: var(--bg);
   }
 
   /* ---------- mobile shell (phone ≤640 / tablet 641–1024) ---------- */

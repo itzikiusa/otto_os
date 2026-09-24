@@ -183,7 +183,7 @@ must not break:
   - Loading, empty, error and loaded.
   - List/detail pages open on an item, never on an empty "pick one" pane.
   - A failed load shows inline with Retry, not as a raw exception in a toast.
-- **Vibrancy on chrome only** (sidebar, toolbar, the proposed floating bar), never behind
+- **Vibrancy on chrome only** (sidebar, toolbar, the floating command bar), never behind
   tables, editors, logs or forms. Animations respect `prefers-reduced-motion`.
 - **Agents are visible and ask first.**
   - Agent output is attributed and stays a draft until a person applies it.

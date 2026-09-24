@@ -6,6 +6,7 @@ import AxeBuilder from '@axe-core/playwright';
 export const PAGES = [
   'agents',
   'home',
+  'assistant',
   'mission-control',
   'api',
   'aws',
@@ -143,4 +144,28 @@ export async function expectAccessible(
     `critical a11y violations: ${critical.map((v) => v.id).join(', ')}`,
   ).toEqual([]);
   return results.violations;
+}
+
+/**
+ * Run a ⌘K command by title. On desktop ⌘K focuses the floating bar (the one
+ * command surface — FloatingBar.svelte); the row is picked by its visible
+ * title and the bar closes once the command runs.
+ */
+export async function runBarCommand(page: Page, title: string): Promise<void> {
+  const input = page.getByRole('combobox', { name: 'Ask Otto or search commands' });
+  await page.keyboard.press('Meta+k');
+  await expect(input).toBeFocused({ timeout: 10_000 });
+  await page.keyboard.type(title);
+  await page
+    .getByTestId('floating-bar')
+    .getByRole('option')
+    .filter({ hasText: title })
+    .filter({ hasNotText: 'Ask Otto' })
+    .first()
+    .click();
+  // Raw locator: once a terminal takes focus the bar docks and its input
+  // leaves the accessibility tree.
+  await expect(page.getByTestId('floating-bar').locator('input.input-main')).not.toBeFocused({
+    timeout: 10_000,
+  });
 }

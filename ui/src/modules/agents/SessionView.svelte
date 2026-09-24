@@ -17,6 +17,7 @@
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -566,6 +567,7 @@
       ...(tier >= 7
         ? [{ label: session?.title ?? sessionId, disabled: true } as MenuItem, { separator: true } as MenuItem]
         : []),
+      ...popoutItems(`agents/${sessionId}`, session?.title),
       // Editing rows are hidden from viewers (the ⋯ button itself only appears
       // for a viewer once a tier has folded something into it).
       ...(readOnly

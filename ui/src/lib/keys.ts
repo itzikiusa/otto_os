@@ -1,7 +1,7 @@
 // Global keyboard map (spec §7.4). One window-level keydown listener which
 // translates chords into named actions; App.svelte supplies the dispatcher.
 //
-// ⌘K palette · ⌘I ask Otto (plain English) · ⌘⇧B broadcast · ⌘⇧R hard reload · ⌘1 rail ·
+// ⌘K palette (focuses the floating bar when it's mounted) · ⌘I ask Otto (plain English) · ⌘⇧B broadcast · ⌘⇧R hard reload · ⌘1 rail ·
 // ⌘J right panel · ⌘T new session · ⌘W close tab (⌃⇧T / ⌃⇧W in a browser tab,
 // which reserves the ⌘ pair for itself) ·
 // ⌃Tab / ⌃⇧Tab cycle tabs · ⌘[ / ⌘] prev/next session · ⌃1…⌃9 jump to session N ·
@@ -43,6 +43,8 @@ export const keyContext: {
   terminalFocused: boolean;
   /** focused terminal registers its find-bar opener here */
   openFind: (() => void) | null;
+  /** The in-app floating bar has focus: ⌃1–⌃4 switch ITS spaces. */
+  barFocused: boolean;
   /** A mounted page may claim ⌘-chords before the global map sees them (the
    *  API client's ⌘T new request tab / ⌘D duplicate). Return true when handled;
    *  the page clears it on unmount. */
@@ -50,6 +52,7 @@ export const keyContext: {
 } = {
   terminalFocused: false,
   openFind: null,
+  barFocused: false,
   pageChords: null,
 };
 
@@ -112,6 +115,8 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     // ⌃1…⌃9 → jump straight to the Nth session tab (ctrl specifically, so it
     // doesn't collide with ⌘1 = toggle rail). Handled before the meta switch.
     if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+      // Inside the floating bar ⌃1–⌃4 pick a space (the bar's own handler).
+      if (keyContext.barFocused && e.key <= '4') return;
       e.preventDefault();
       dispatch('jumpSession', e, Number(e.key));
       return;
@@ -279,7 +284,8 @@ export const KEYMAP: ShortcutGroup[] = [
   {
     category: 'General',
     bindings: [
-      { keys: '⌘K', label: 'Command palette' },
+      { keys: '⌘K', label: 'Floating bar — commands & Ask Otto (palette on phone/tablet)' },
+      { keys: '⌃1…⌃4', label: 'In the floating bar: switch space' },
       { keys: '⌘I', label: 'Ask Otto (plain English)' },
       { keys: '⌘⇧B', label: 'Broadcast to sessions' },
       { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs' },

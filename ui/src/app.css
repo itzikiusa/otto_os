@@ -314,10 +314,13 @@ textarea.input {
 
 /* ---------- cards & page scaffolding ---------- */
 
+/* Content card: elevation 1 — a hairline plus a whisper of shadow so cards
+   rest just above the page (and the Home desktop's ambient backdrop). */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
+  box-shadow: var(--shadow-card);
 }
 
 .page {

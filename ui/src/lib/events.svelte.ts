@@ -17,11 +17,13 @@ import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
 import { browser } from './stores/browser.svelte';
+import { browserLive } from './stores/browserLive.svelte';
 import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
 import { transcript } from './stores/transcript.svelte';
 import { apiClient } from './stores/apiClient.svelte';
+import { assistant } from './stores/assistant.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -416,6 +418,7 @@ class EventsClient {
       for (const s of ws.otherWsSessions) ws.statusMap[s.id] = s.status;
     });
     void notifications.load();
+    assistant.resync();
   }
 
   private connect(): void {
@@ -438,6 +441,9 @@ class EventsClient {
       this.state = 'connected';
       this.backoff = 1000;
       if (reconnected) this.resyncAfterReconnect();
+      // The Assistant's needs-you badge lives in the sidebar, so it loads on
+      // first connect too (quietly: an older daemon without the route → no badge).
+      else void assistant.loadNeedsYou();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
@@ -602,6 +608,17 @@ class EventsClient {
         ) {
           // Browser page: tab strip / annotation list refresh in place.
           browser.applyEvent(parsed);
+        } else if (parsed.type === 'browser_engine_install_updated') {
+          // Browser page / Settings → Browser: Chromium download progress.
+          browserLive.applyEvent(parsed);
+        } else if (
+          parsed.type === 'assistant_turn' ||
+          parsed.type === 'assistant_task_update' ||
+          parsed.type === 'assistant_needs_you' ||
+          parsed.type === 'assistant_limit'
+        ) {
+          // Assistant: thread turns/cards, task board, needs-you badge, limits.
+          assistant.applyEvent(parsed);
         } else if (parsed.type === 'personal_agent_run_updated') {
           // Personal Agents page refreshes the agent's runs + schedule cursors.
           personalAgents.applyRunEvent(parsed);
