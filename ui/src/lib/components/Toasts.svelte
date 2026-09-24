@@ -20,14 +20,16 @@
     position: fixed;
     inset-inline-end: 16px;
     bottom: 38px;
-    z-index: 300;
+    z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     gap: 8px;
     width: 320px;
     /* A burst of toasts must never stack past the top edge: cap the column and
-       let it scroll (newest stay visible at the bottom anchor). */
-    max-height: calc(100vh - 54px);
+       let it scroll (newest stay visible at the bottom anchor). A % of this
+       fixed box's containing block is the WINDOW height; 100vh in the
+       WKWebView is the screen's and let the stack run off the top. */
+    max-height: calc(100% - 54px);
     overflow-y: auto;
     overscroll-behavior: contain;
   }
@@ -36,10 +38,11 @@
     align-items: flex-start;
     gap: 10px;
     padding: 10px 10px 10px 0;
+    /* Opaque, but the same edge + elevation as every floating layer. */
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     animation: toast-in 160ms ease-out;
     overflow: hidden;
   }

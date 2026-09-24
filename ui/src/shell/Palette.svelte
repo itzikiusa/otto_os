@@ -173,12 +173,28 @@
   // Free text in commands mode is always offered as an orchestrator ask, so
   // "open 2 claude sessions" works without knowing about the English mode.
   const askRow = $derived(query.trim() !== '');
-  const totalRows = $derived(filtered.length + (askRow ? 1 : 0));
+  // One keyboard row model: commands, then the ask row, then search hits —
+  // ↑/↓ walk all three, so a cross-module hit is reachable without a mouse.
+  const hitBase = $derived(filtered.length + (askRow ? 1 : 0));
+  const totalRows = $derived(hitBase + searchHits.length);
 
   $effect(() => {
     void totalRows;
     if (selected >= totalRows) selected = Math.max(0, totalRows - 1);
   });
+
+  // Keep the keyboard selection visible in the scrolling list.
+  let listEl: HTMLDivElement | null = $state(null);
+  $effect(() => {
+    const id = `pal-opt-${selected}`;
+    listEl?.querySelector(`#${id}`)?.scrollIntoView({ block: 'nearest' });
+  });
+
+  /** The default action for a hit on Enter: open it when it can be opened. */
+  function hitDefault(hit: SearchHit): void {
+    const a = hit.actions.includes('open') ? 'open' : hit.actions[0];
+    if (a) hitAction(hit, a);
+  }
 
   function askOtto(): void {
     englishText = query;
@@ -236,6 +252,7 @@
       const item = filtered[selected];
       if (item) void run(item.cmd);
       else if (askRow && selected === filtered.length) askOtto();
+      else if (searchHits[selected - hitBase]) hitDefault(searchHits[selected - hitBase]);
     } else if (e.key === 'Escape') {
       close();
     }
@@ -385,11 +402,19 @@
             placeholder="Type a command…"
             onkeydown={onCommandsKey}
             spellcheck="false"
+            role="combobox"
+            aria-label="Search commands"
+            aria-expanded="true"
+            aria-controls="pal-listbox"
+            aria-autocomplete="list"
+            aria-activedescendant={totalRows > 0 ? `pal-opt-${selected}` : undefined}
           />
         </div>
-        <div class="pal-list" role="listbox">
+        <div class="pal-list" role="listbox" id="pal-listbox" aria-label="Commands" bind:this={listEl}>
           {#each filtered as item, i (item.cmd.id)}
             <button
+              id="pal-opt-{i}"
+              tabindex="-1"
               class="pal-item"
               class:selected={i === selected}
               role="option"
@@ -410,6 +435,8 @@
           {/each}
           {#if askRow}
             <button
+              id="pal-opt-{filtered.length}"
+              tabindex="-1"
               class="pal-item pal-ask"
               class:selected={selected === filtered.length}
               role="option"
@@ -429,8 +456,17 @@
               {searchBusy ? 'Searching…' : 'Results'}
             </div>
           {/if}
-          {#each searchHits as hit (hit.kind + ':' + hit.id)}
-            <div class="pal-hit">
+          {#each searchHits as hit, h (hit.kind + ':' + hit.id)}
+            <!-- svelte-ignore a11y_click_events_have_key_events (keyboard: ↑/↓ + Enter in the input) -->
+            <div
+              class="pal-hit"
+              class:selected={selected === hitBase + h}
+              id="pal-opt-{hitBase + h}"
+              role="option"
+              tabindex="-1"
+              aria-selected={selected === hitBase + h}
+              onmouseenter={() => (selected = hitBase + h)}
+            >
               <div class="pal-hit-main">
                 <Icon name={hitIcon(hit.kind)} size={12} />
                 <span class="pal-hit-title">{hit.title}</span>
@@ -442,7 +478,7 @@
               </div>
               <div class="pal-hit-actions">
                 {#each hit.actions as action}
-                  <button class="pal-hit-btn" onclick={() => hitAction(hit, action)}>
+                  <button class="pal-hit-btn" tabindex="-1" onclick={() => hitAction(hit, action)}>
                     {action}
                   </button>
                 {/each}
@@ -509,23 +545,31 @@
   .pal-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 150;
+    z-index: var(--z-command);
     background: rgba(0, 0, 0, 0.25);
     display: flex;
-    justify-content: center;
-    padding-top: 12vh;
+    flex-direction: column;
+    align-items: center;
     animation: fade-in 120ms ease-out;
+  }
+  /* The 12% top gap and the 60% height cap are percentages of the inset:0
+     backdrop (= the window), never vh — in the WKWebView vh resolves to the
+     SCREEN height, so a vh-sized palette overflowed short windows. */
+  .pal-backdrop::before {
+    content: '';
+    flex: 0 0 12%;
   }
   .palette {
     width: 560px;
-    max-width: calc(100vw - 48px);
-    max-height: 60vh;
+    max-width: calc(100% - 48px);
+    max-height: 60%;
+    min-height: 0;
+    flex: 0 1 auto;
     display: flex;
     flex-direction: column;
     /* Raised glass (tokens.css .glass-raised), like Spotlight. */
     border-radius: var(--radius-l);
     overflow: hidden;
-    align-self: flex-start;
     animation: pal-in 150ms ease-out;
   }
   .pal-mode-row {
@@ -699,7 +743,10 @@
     gap: 3px;
   }
   .pal-hit:hover {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--hover);
+  }
+  .pal-hit.selected {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .pal-hit-main {
     display: flex;
