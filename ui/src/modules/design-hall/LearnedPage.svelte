@@ -270,8 +270,8 @@
   }
   function modeMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
-      { label: 'Suggest only', icon: learned?.mode !== 'off' ? 'check' : undefined, action: () => void setMode('suggest') },
-      { label: 'Off', icon: learned?.mode === 'off' ? 'check' : undefined, action: () => void setMode('off') },
+      { label: 'Suggest only', checked: learned?.mode !== 'off', action: () => void setMode('suggest') },
+      { label: 'Off', checked: learned?.mode === 'off', action: () => void setMode('off') },
     ]);
   }
 

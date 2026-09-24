@@ -289,7 +289,8 @@
    *  button's own menu. Split is offered on the same rule as the inline tab. */
   function viewRows(prefixed: boolean): MenuItem[] {
     return VIEW_META.filter(([m]) => m !== 'split' || wide).map(([m, label, icon]) => ({
-      label: prefixed ? `View: ${label}${effView === m ? ' ✓' : ''}` : `${effView === m ? '✓ ' : ''}${label}`,
+      label: prefixed ? `View: ${label}` : label,
+      checked: effView === m,
       icon,
       action: () => setView(m),
     }));

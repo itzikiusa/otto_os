@@ -363,7 +363,8 @@
   // ── Kit switcher ──────────────────────────────────────────────────────────
   function kitMenu(e: MouseEvent): void {
     const items: MenuItem[] = kits.map((h) => ({
-      label: h.artifact.id === id ? `✓ ${h.artifact.title}` : h.artifact.title,
+      label: h.artifact.title,
+      checked: h.artifact.id === id,
       icon: 'palette',
       action: () => router.go(`design/brand/${encodeURIComponent(h.artifact.id)}`),
     }));

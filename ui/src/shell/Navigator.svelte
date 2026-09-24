@@ -188,9 +188,10 @@
   }
   function openSortMenu(e: MouseEvent | KeyboardEvent): void {
     ctxMenu.show(e, [
-      { label: `${sessionOrder.mode === 'recent' ? '✓ ' : ''}Sort: Recent`, action: () => sessionOrder.setMode('recent') },
+      { label: 'Sort: Recent', checked: sessionOrder.mode === 'recent', action: () => sessionOrder.setMode('recent') },
       {
-        label: `${sessionOrder.mode === 'manual' ? '✓ ' : ''}Sort: Manual (drag rows)`,
+        label: 'Sort: Manual (drag rows)',
+        checked: sessionOrder.mode === 'manual',
         action: () => sessionOrder.setMode('manual', fAgents.map((x) => x.id)),
       },
       { separator: true },
