@@ -70,10 +70,13 @@ function pin(isolation: boolean) {
 async function openSessionList(page: import('@playwright/test').Page) {
   await page.goto('/#/agents');
   const openNav = page.getByRole('button', { name: 'Open navigator' });
-  if (await openNav.isVisible().catch(() => false)) {
+  const list = page.locator('.nested-row .nav-item.nested-item');
+  // isVisible() doesn't wait: settle on the first paint (hamburger on phone,
+  // the inline list elsewhere) before deciding whether to open the drawer.
+  await expect(openNav.or(list).first()).toBeVisible({ timeout: 30_000 });
+  if (await openNav.isVisible()) {
     await openNav.click();
   }
-  const list = page.locator('.nested-row .nav-item.nested-item');
   // The Agents group is the default and should render at least the rows we seeded.
   await expect.poll(() => list.count(), { timeout: 30_000 }).toBeGreaterThan(0);
   return list;

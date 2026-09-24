@@ -285,7 +285,7 @@ test('D2 mode: a seeded scene renders SVG', async ({ page }) => {
   await ctx.dispose();
 
   await openScene(page, 'D2 Seeded');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 });
 
 test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ page }) => {
@@ -295,7 +295,7 @@ test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ pag
   await ctx.dispose();
 
   await openScene(page, 'D2 CodeEdit');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 
   // Open the Code panel — the D2 source editor.
   await page.getByRole('button', { name: /^Code$/i }).click();
@@ -317,7 +317,7 @@ test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ pag
   expect(body).toContain('"format":"d2"');
   expect(body).toContain('User added');
   // The edit still renders — a live diagram, not a broken one.
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 });
 
 test('D2: Ask AI → the agent writes canvas.d2 (on disk) + renders the stub diagram', async ({
@@ -334,10 +334,10 @@ test('D2: Ask AI → the agent writes canvas.d2 (on disk) + renders the stub dia
   await askAi(page, 'order flow with a validation decision');
 
   await expect(page.getByText(/drawn on canvas/i).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
   // The E2E stub's canned D2 diagram (crates/otto-orchestrator/src/e2e_stub.rs)
   // draws start/valid/process/reject nodes — assert one lands in the rendered SVG.
-  await expect(page.locator('.content svg').first()).toContainText(/Process order/);
+  await expect(page.locator('.surface .content svg').first()).toContainText(/Process order/);
   await expect
     .poll(() => canvasFiles('canvas.d2').length, { timeout: 15_000 })
     .toBeGreaterThan(0);
@@ -352,7 +352,7 @@ test('D2: Sketch toggle → PUT carries sketch:true and persists on reload', asy
   await ctx.dispose();
 
   await openScene(page, 'D2 Sketch');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 
   const saved = page.waitForResponse(
     (r) => r.request().method() === 'PUT' && /\/canvas\/scenes\//.test(r.url()),
@@ -377,7 +377,7 @@ test('D2: export buttons (PNG + SVG) render; Duplicate creates a "(copy)" scene'
   await ctx.dispose();
 
   await openScene(page, 'D2 Export');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
   await expect(page.getByRole('button', { name: 'Download SVG' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Download PNG' })).toBeVisible();
 
