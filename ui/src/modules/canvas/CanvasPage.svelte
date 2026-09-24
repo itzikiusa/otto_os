@@ -3,7 +3,10 @@
   // renders the scene's agent-edited `.mermaid` source (full rich diagrams), or a
   // hero to start a new canvas. You never write Mermaid — you describe what you
   // want in the Assistant and the agent edits the file; the board re-renders live.
+  import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -37,10 +40,41 @@
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
 
-  // Canvas is global — list the user's scenes across all workspaces.
+  // Canvas is global — list the user's scenes across all workspaces. A failure
+  // lands in `canvas.listError` and renders inline with Retry.
   $effect(() => {
     void canvas.loadScenes().catch(() => {});
   });
+
+  // List/detail: with scenes, open on one (the remembered scene, else the
+  // first) instead of the "start a new canvas" hero. Not on phone — opening a
+  // board collapses the scene list there, which is the first screen. Also
+  // re-picks after the open scene is deleted. A failed open stops the loop
+  // (it shows inline with Retry).
+  let picking = false;
+  $effect(() => {
+    if (viewport.isPhone || picking) return;
+    if (canvas.currentId || canvas.pendingOpenId || canvas.loadError) return;
+    if (canvas.listLoading || canvas.scenes.length === 0) return;
+    const id = initialSelection('canvas', canvas.scenes, (s) => s.id);
+    if (!id) return;
+    picking = true;
+    untrack(() => {
+      void canvas
+        .open(id)
+        .catch(() => {})
+        .finally(() => (picking = false));
+    });
+  });
+  $effect(() => {
+    if (canvas.currentId) rememberSelection('canvas', canvas.currentId);
+  });
+
+  /** The last failed scene open — Retry re-opens it. */
+  function retryOpen(): void {
+    const id = canvas.loadErrorId;
+    if (id) void canvas.open(id).catch(() => {});
+  }
 
   // Honor a deep-link request (e.g. Discovery-Chat "Open in Canvas").
   $effect(() => {
@@ -77,6 +111,8 @@
 
   /** No scenes anywhere → no empty list pane; the hero's mode cards are the CTA. */
   const noScenes = $derived(!canvas.listLoading && !canvas.listError && canvas.scenes.length === 0);
+  /** The list failed with nothing to show — the main pane owns the error + Retry. */
+  const listFailed = $derived(!!canvas.listError && canvas.scenes.length === 0);
 
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
@@ -115,12 +151,27 @@
   </div>
 {:else}
   <div class="canvas-page" class:phone={readonly}>
-    <aside class="scenes" class:hidden={(readonly && canvas.currentId) || noScenes}>
+    <aside class="scenes" class:hidden={(readonly && canvas.currentId) || noScenes || listFailed}>
       <SceneList />
     </aside>
 
     <section class="main">
-      {#if canvas.scene && canvas.currentId}
+      {#if canvas.loadError && canvas.scene && canvas.currentId}
+        <!-- Opening another scene failed: keep the open board, say so above it. -->
+        <LoadState what="that scene" variant="compact" error={canvas.loadError} empty onretry={retryOpen} />
+      {/if}
+      {#if listFailed}
+        <LoadState
+          what="scenes"
+          variant="page"
+          loading={canvas.listLoading}
+          error={canvas.listError}
+          empty
+          onretry={() => void canvas.loadScenes().catch(() => {})}
+        />
+      {:else if canvas.loadError && !(canvas.scene && canvas.currentId)}
+        <LoadState what="this scene" variant="page" error={canvas.loadError} empty onretry={retryOpen} />
+      {:else if canvas.scene && canvas.currentId}
         <!-- Remount the board when switching scenes so each loads its own source. -->
         {#key canvas.currentId}
           <div class="editor-split" class:with-convo={showConvo}>
@@ -148,6 +199,18 @@
             {/if}
           </div>
         {/key}
+      {:else if !noScenes}
+        {#if canvas.listLoading || canvas.scenes.length === 0 || !viewport.isPhone}
+          <!-- Listing / auto-opening a scene. -->
+          <LoadState what="scenes" variant="page" loading empty />
+        {:else}
+          <EmptyState
+            variant="page"
+            icon="shapes"
+            title="Pick a scene"
+            body="Open one from the list, or start a new one with New scene."
+          />
+        {/if}
       {:else}
         <div class="hero">
           <h2>Start a new canvas</h2>

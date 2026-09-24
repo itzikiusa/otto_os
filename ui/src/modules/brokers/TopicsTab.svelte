@@ -2,6 +2,8 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import TopicDetail from './TopicDetail.svelte';
   import type {
     BrokerCluster,
@@ -23,6 +25,8 @@
   // null = in-flight, 'err' = failed (retry available), TopicStats = loaded.
   let stats = $state<Record<string, TopicStats | null | 'err'>>({});
   let loading = $state(true);
+  /** Failed topic-list load — inline with Retry, never "No topics.". */
+  let loadError = $state<string | null>(null);
   let query = $state('');
   let showInternal = $state(false);
   let cleanupFilter = $state('');
@@ -67,9 +71,10 @@
       .get<TopicSummary[]>(`/brokers/clusters/${cluster.id}/topics`)
       .then((t) => {
         topics = t;
+        loadError = null;
         if (selected && !t.some((x) => x.name === selected)) selected = null;
       })
-      .catch((e) => toasts.error('Failed to load topics', String(e)))
+      .catch((e) => (loadError = loadErrorText(e)))
       .finally(() => (loading = false));
   }
 
@@ -130,6 +135,9 @@
     void cluster.id;
     selected = null;
     page = 1;
+    // Another cluster's topics are not "stale data" for this one.
+    topics = [];
+    loadError = null;
     load();
   });
 
@@ -269,7 +277,13 @@
     {/if}
 
     <div class="grid-wrap">
-      {#if loading}
+      {#if loadError}
+        <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
+        <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} />
+      {/if}
+      {#if loadError && topics.length === 0}
+        <!-- rendered above -->
+      {:else if loading}
         <p class="muted pad">Loading…</p>
       {:else if filtered.length === 0}
         <p class="muted pad">No topics.</p>

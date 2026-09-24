@@ -12,6 +12,8 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import type { McpApproval } from '../../lib/api/types';
@@ -23,6 +25,8 @@
   const canDecide = (a:McpApproval) => (a.requested_by!==auth.me?.id || requesterMayDecide(a)) && (a.server_id ? resourceAccess.can('mcp_server',a.server_id,'approve','mcp','admin',a.tool ?? undefined) : auth.can('mcp','admin'));
   $effect(()=>{for(const approval of approvals){if(approval.server_id)void resourceAccess.load('mcp_server',approval.server_id,approval.tool ?? undefined);}});
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
   let busy = $state<Record<string, boolean>>({});
   let notes = $state<Record<string, string>>({});
   let showAll = $state(false);
@@ -31,8 +35,9 @@
     loading = true;
     try {
       approvals = await mcpCpApi.cpApprovals(showAll ? undefined : 'pending');
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load approvals', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -92,7 +97,9 @@
     <button class="btn small" onclick={() => void load()} title="Refresh"><Icon name="refresh" size={13} /></button>
   </div>
 
-  {#if loading && approvals.length === 0}
+  {#if loadError && approvals.length === 0}
+    <LoadState what="approvals" {loading} error={loadError} empty onretry={() => void load()} />
+  {:else if loading && approvals.length === 0}
     <p class="muted pad">Loading…</p>
   {:else if approvals.length === 0}
     <div class="empty">

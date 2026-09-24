@@ -6,6 +6,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
@@ -544,17 +546,25 @@
       </div>
     {/if}
 
-    {#if list.length === 0}
-      <EmptyState
-        variant="page"
-        icon="clock"
-        title="No scheduled tasks yet"
-        body="Create one to run an agent on a cadence and deliver its report."
-        actionLabel="New task"
-        actionIcon="plus"
-        onaction={startCreate}
-      />
-    {:else}
+    <LoadState
+      what="scheduled tasks"
+      variant="page"
+      loading={scheduledTasks.loadingList}
+      error={scheduledTasks.listError}
+      empty={list.length === 0}
+      onretry={() => ws.currentId && void scheduledTasks.loadList(ws.currentId)}
+    >
+      {#snippet emptyView()}
+        <EmptyState
+          variant="page"
+          icon="clock"
+          title="No scheduled tasks yet"
+          body="Create one to run an agent on a cadence and deliver its report."
+          actionLabel="New task"
+          actionIcon="plus"
+          onaction={startCreate}
+        />
+      {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}
           <li class="task">
@@ -580,10 +590,19 @@
             </div>
             {#if expandedId === t.id}
               <div class="runs">
+                <LoadState
+                  what="runs"
+                  variant="compact"
+                  loading={!scheduledTasks.runsByTask[t.id] && !scheduledTasks.runsError[t.id]}
+                  error={scheduledTasks.runsError[t.id]}
+                  empty={(scheduledTasks.runsByTask[t.id] ?? []).length === 0}
+                  onretry={() => void scheduledTasks.loadRuns(t.id)}
+                >
+                  {#snippet emptyView()}<div class="muted">No runs yet.</div>{/snippet}
                 {#each scheduledTasks.runsByTask[t.id] ?? [] as r (r.id)}
                   <div class="run">
                     <StatusBadge status={runStatus(r.status)} />
-                    <span class="run-when">{r.started_at}</span>
+                    <span class="run-when"><RelTime iso={r.started_at} /></span>
                     <span class="run-sum">{r.summary || '(no summary)'}</span>
                     {#if r.report_rel}
                       <button class="btn small" onclick={() => viewReport(r)}>View report</button>
@@ -598,15 +617,14 @@
                     {#if r.proof_pack_id}<span class="pill ok" title="proof pack attached">proof</span>{/if}
                     {#if r.workflow_run_id}<span class="pill" title={r.workflow_run_id}>workflow</span>{/if}
                   </div>
-                {:else}
-                  <div class="muted">No runs yet.</div>
                 {/each}
+                </LoadState>
               </div>
             {/if}
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   {/if}
 
   {#if reportOpen}

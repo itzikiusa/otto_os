@@ -4,8 +4,9 @@
   // table is filterable by server, tool, and decision; rows show the decision,
   // ok/error, latency, bytes, and time.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { toasts } from '../../lib/toast.svelte';
   import type { McpCallLogRow, McpServerDetail } from '../../lib/api/types';
   import McpPill from './McpPill.svelte';
   import StatsTab from './StatsTab.svelte';
@@ -17,6 +18,8 @@
 
   let rows = $state<McpCallLogRow[]>([]);
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
   let fServer = $state('');
   let fTool = $state('');
   let fDecision = $state('');
@@ -32,8 +35,9 @@
         decision: fDecision || undefined,
         limit: 200,
       });
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load audit log', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -117,7 +121,9 @@
         </div>
       {/if}
     </div>
-    {#if loading && rows.length === 0}
+    {#if loadError && rows.length === 0}
+      <LoadState what="the audit log" {loading} error={loadError} empty onretry={() => void load()} />
+    {:else if loading && rows.length === 0}
       <p class="muted pad">Loading…</p>
     {:else if rows.length === 0}
       <div class="empty">

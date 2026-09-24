@@ -5,6 +5,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
@@ -1359,7 +1360,20 @@
 
 {#snippet connListBody()}
   {@render connSearchBox()}
-  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
+  {#if database.connectionsError}
+    <!-- A failed load is not "No connections yet" (brokers may still list below). -->
+    <LoadState
+      what="connections"
+      variant="compact"
+      loading={database.connectionsLoading}
+      error={database.connectionsError}
+      empty
+      onretry={() => void database.loadConnections()}
+    />
+  {/if}
+  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0 && (database.connectionsError || database.connectionsLoading)}
+    {#if !database.connectionsError}<LoadState what="connections" variant="compact" loading empty />{/if}
+  {:else if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
     <div class="conn-empty">
       No connections yet.
       <button class="link" disabled={!auth.isRoot} onclick={newConnection}>New connection →</button>

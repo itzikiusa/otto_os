@@ -2,6 +2,8 @@
   import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
 
@@ -14,6 +16,9 @@
 
   let groups = $state<GroupSummary[]>([]);
   let loading = $state(true);
+  /** Failed loads — inline with Retry, never "No consumer groups." / a blank detail. */
+  let loadError = $state<string | null>(null);
+  let detailError = $state<string | null>(null);
   // True when the broker's ACLs deny consumer-group access (probed once, cached
   // server-side). We show a clear banner instead of erroring, and skip re-probes.
   let accessDenied = $state(false);
@@ -76,6 +81,14 @@
     void cluster.id;
     selected = null;
     detail = null;
+    detailError = null;
+    // Another cluster's groups are not "stale data" for this one.
+    groups = [];
+    loadError = null;
+    loadGroups();
+  });
+
+  function loadGroups(): void {
     loading = true;
     accessDenied = false;
     api
@@ -83,6 +96,7 @@
       .then((g) => {
         groups = g;
         accessDenied = false;
+        loadError = null;
       })
       .catch((e) => {
         if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
@@ -91,21 +105,22 @@
           accessMsg = e.message;
           groups = [];
         } else {
-          toasts.error('Failed to load groups', String(e));
+          loadError = loadErrorText(e);
         }
       })
       .finally(() => (loading = false));
-  });
+  }
 
   function open(id: string) {
     selected = id;
     detail = null;
+    detailError = null;
     detailLoading = true;
     resetTopic = '';
     api
       .get<GroupDetail>(`/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(id)}`)
       .then((d) => (detail = d))
-      .catch((e) => toasts.error('Failed to describe group', String(e)))
+      .catch((e) => (detailError = loadErrorText(e)))
       .finally(() => (detailLoading = false));
   }
 
@@ -211,7 +226,12 @@
 
 <div class="groups">
   <div class="list" style="--groups-list-w:{listW}px">
-    {#if loading}
+    {#if loadError}
+      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups} />
+    {/if}
+    {#if loadError && groups.length === 0}
+      <!-- rendered above -->
+    {:else if loading}
       <p class="muted pad">Loading…</p>
     {:else if accessDenied}
       <div class="acl-denied pad">
@@ -252,6 +272,9 @@
   <div class="detail">
     {#if detailLoading}
       <p class="muted pad">Loading group…</p>
+    {:else if detailError && selected}
+      {@const gid = selected}
+      <LoadState what="this group" error={detailError} empty onretry={() => open(gid)} />
     {:else if detail}
       <header>
         <span class="gid big">{detail.group_id}</span>

@@ -84,11 +84,22 @@ async function askAi(page: Page, prompt: string): Promise<void> {
 test('the hero offers both modes; Excalidraw board mounts on create', async ({ page }) => {
   test.setTimeout(90_000);
   await openCanvas(page);
-  await expect(page.getByRole('button', { name: /Excalidraw board/i })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(page.getByRole('button', { name: /Mermaid diagram/i })).toBeVisible();
-  await page.getByRole('button', { name: /Excalidraw board/i }).click();
+  // Scenes are global and other (parallel) tests seed them. The hero is the
+  // empty state ONLY: with scenes, the page opens on one and "New scene" owns
+  // the format choice instead.
+  const heroCard = page.locator('.hero').getByRole('button', { name: /Excalidraw board/i });
+  const newScene = page.getByTestId('canvas-new-scene');
+  await expect(heroCard.or(newScene).first()).toBeVisible({ timeout: 30_000 });
+  if (await heroCard.isVisible()) {
+    await expect(page.locator('.hero').getByRole('button', { name: /Mermaid diagram/i })).toBeVisible();
+    await heroCard.click();
+  } else {
+    await expect(page.locator('.hero')).toHaveCount(0);
+    await newScene.click();
+    const menu = page.locator('.ctx-menu');
+    await expect(menu.getByRole('menuitem', { name: /Mermaid diagram/i })).toBeVisible();
+    await menu.getByRole('menuitem', { name: /Excalidraw board/i }).click();
+  }
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
 });
 

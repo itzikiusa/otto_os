@@ -3,19 +3,23 @@
   // rate, average / max latency, total bytes (the cost proxy — true USD is not
   // metered), and the last-called time. Read-only.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { toasts } from '../../lib/toast.svelte';
   import type { McpToolStats } from '../../lib/api/types';
 
   let stats = $state<McpToolStats[]>([]);
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
 
   async function load(): Promise<void> {
     loading = true;
     try {
       stats = await mcpCpApi.cpStats();
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load stats', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -43,7 +47,9 @@
     <button class="btn small" onclick={() => void load()} title="Refresh"><Icon name="refresh" size={13} /></button>
   </div>
 
-  {#if loading && stats.length === 0}
+  {#if loadError && stats.length === 0}
+    <LoadState what="tool stats" {loading} error={loadError} empty onretry={() => void load()} />
+  {:else if loading && stats.length === 0}
     <p class="muted pad">Loading…</p>
   {:else if stats.length === 0}
     <div class="empty">

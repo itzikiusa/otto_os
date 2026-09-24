@@ -5,6 +5,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
 
   let selectedId = $state<string | null>(null);
@@ -68,19 +69,25 @@
     </PageHeader>
     <PageBody>
 
-    {#if loops.loadingList && list.length === 0}
-      <p class="muted">Loading…</p>
-    {:else if list.length === 0}
-      <EmptyState
-        variant="page"
-        icon="refresh"
-        title="No goal loops yet"
-        body="Define a goal and a budget — agents iterate on an isolated branch until it's met."
-        actionLabel="New goal loop"
-        actionIcon="plus"
-        onaction={() => (creating = true)}
-      />
-    {:else}
+    <LoadState
+      what="goal loops"
+      variant="page"
+      loading={loops.loadingList}
+      error={loops.listError}
+      empty={list.length === 0}
+      onretry={() => ws.currentId && void loops.loadList(ws.currentId)}
+    >
+      {#snippet emptyView()}
+        <EmptyState
+          variant="page"
+          icon="refresh"
+          title="No goal loops yet"
+          body="Define a goal and a budget — agents iterate on an isolated branch until it's met."
+          actionLabel="New goal loop"
+          actionIcon="plus"
+          onaction={() => (creating = true)}
+        />
+      {/snippet}
       <ul class="cards">
         {#each list as l (l.id)}
           <li>
@@ -99,7 +106,7 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
     </PageBody>
   {/if}
 </div>
@@ -110,9 +117,6 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  .muted {
-    color: var(--text-dim);
   }
   .cards {
     list-style: none;
