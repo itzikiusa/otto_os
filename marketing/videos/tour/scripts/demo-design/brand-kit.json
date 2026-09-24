@@ -1,0 +1,25 @@
+{
+  "$schema": "otto-brand/1",
+  "name": "Acme",
+  "color": {
+    "primary": { "$value": "#4F46E5", "$description": "Buttons, links and the one thing to click" },
+    "accent": { "$value": "#F59E0B", "$description": "Highlights and badges" },
+    "ink": { "$value": "#111827", "$description": "Body text and dark surfaces" },
+    "surface": { "$value": "#FFFFFF" },
+    "surface-alt": { "$value": "#F5F3FF" },
+    "success": { "$value": "#059669" }
+  },
+  "font": {
+    "display": { "$value": "-apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif", "weights": [700, 800] },
+    "body": { "$value": "-apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif", "weights": [400, 600] },
+    "mono": { "$value": "ui-monospace, 'SF Mono', Menlo, monospace" }
+  },
+  "type": {
+    "display": { "size": 56, "line": 64, "weight": 800 },
+    "h2": { "size": 34, "line": 42, "weight": 700 },
+    "body": { "size": 17, "line": 27, "weight": 400 }
+  },
+  "radius": { "sm": { "$value": 8 }, "md": { "$value": 14 }, "lg": { "$value": 22 }, "pill": { "$value": 999 } },
+  "imagery": { "summary": "Clean product shots on soft indigo gradients." },
+  "voice": { "summary": "Warm, short, confident. Say what happens next." }
+}
