@@ -1056,10 +1056,11 @@ class ApiClientStore {
         const host = newHostConfirmHost(e);
         if (host === null) throw e;
         checkCurrent();
-        const ok = await confirmNewHost(host, {
-          method: reqCtx.method, url: reqCtx.url,
-          secrets: draftSecrets(draft, this.environments.find((e) => e.id === environmentId) ?? null),
-        });
+        // Show the URL as it will be sent: plain variables filled in (secret
+        // values are never resolved client-side).
+        const env = this.environments.find((e) => e.id === environmentId) ?? null;
+        const shownUrl = reqCtx.url.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, n: string) => runtimeVars[n] ?? env?.variables[n] ?? m);
+        const ok = await confirmNewHost(host, { method: reqCtx.method, url: shownUrl, secrets: draftSecrets(draft, env) });
         checkCurrent();
         if (!ok) throw new DOMException('Request canceled', 'AbortError');
         resp = await api.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
