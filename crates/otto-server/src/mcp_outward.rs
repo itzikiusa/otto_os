@@ -184,6 +184,11 @@ const DANGEROUS: &[&str] = &[
     "aws_athena_query",
     "aws_sqs_send",
     "k8s_action",
+    // Otto Assistant memory writes: an outside agent writing / erasing the
+    // user's personal memory is approval-gated (in-session assistant calls go
+    // through the native stdio tools, which chip + Undo every write).
+    "assistant_remember",
+    "assistant_forget",
 ];
 
 /// Non-mutating tools that are defined and enableable but stay **off by default**
@@ -198,6 +203,8 @@ const OPT_IN_READS: &[&str] = &[
     "open_pr_draft",
     "consume_broker_messages",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
+    // Recalled personal memory is content — off until the operator opts in.
+    "assistant_recall",
 ];
 const MAX_WAIT_SECS: u64 = 30;
 
@@ -630,6 +637,23 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["room_id"],"properties":{
                 "room_id":{"type":"string"},"after":{"type":"string"},"limit":{"type":"integer"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
+        // ---- Otto Assistant (the user's personal memory) ----
+        json!({"name":"otto.assistant_remember","mutating":true,"category":"Assistant",
+            "description":"Save ONE short, atomic fact about the user (a preference, a person, a recurring plan) to the Otto Assistant's private memory. Never store secrets. Shown to the user with Undo; queued for review when memory approval is on. DANGEROUS: writes the user's memory — approval-gated.",
+            "inputSchema":{"type":"object","required":["text"],"properties":{
+                "text":{"type":"string"},"kind":{"type":"string","description":"fact | decision | learning … (default fact)"},
+                "tags":{"type":"array","items":{"type":"string"}},
+                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+        json!({"name":"otto.assistant_forget","mutating":true,"category":"Assistant",
+            "description":"Forget the user's assistant memories that match `query` (up to 10; each can be restored with its undo token). DANGEROUS: erases personal memory — approval-gated.",
+            "inputSchema":{"type":"object","required":["query"],"properties":{
+                "query":{"type":"string"},
+                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+        json!({"name":"otto.assistant_recall","mutating":false,"category":"Assistant",
+            "description":"Recall the user's profile and the assistant memories matching `query` (keyword recall; omit `query` for the most recent). Read-only; off by default (personal content).",
+            "inputSchema":{"type":"object","properties":{
+                "query":{"type":"string"},"k":{"type":"integer","description":"max memories (1..20, default 10)"},
+                "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
         // ---- Scheduled Tasks ----
         json!({"name":"otto.list_scheduled_tasks","mutating":false,"category":"Scheduled Tasks",
             "description":"List a workspace's scheduled tasks (recurring agent jobs). Read-only.",
@@ -1003,6 +1027,20 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Post to swarm '{}' board",
             args.get("swarm_id").and_then(Value::as_str).unwrap_or("?")
         ),
+        "assistant_remember" => {
+            let text: String = args
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect();
+            format!("Remember about you (Otto Assistant memory): {text}")
+        }
+        "assistant_forget" => format!(
+            "Forget your Otto Assistant memories matching '{}'",
+            args.get("query").and_then(Value::as_str).unwrap_or("?")
+        ),
         "test_integration" => format!(
             "Send a test message to the '{}' channel of a workspace",
             args.get("channel").and_then(Value::as_str).unwrap_or("?")
@@ -1372,7 +1410,16 @@ pub(crate) async fn governed_invoke(
     let bound_session = auth.mcp_session_id.as_deref();
     let rebound;
     let arguments = match bound_session {
-        Some(sid) if matches!(short.as_str(), "room_post" | "room_read") => {
+        Some(sid)
+            if matches!(
+                short.as_str(),
+                "room_post"
+                    | "room_read"
+                    | "assistant_remember"
+                    | "assistant_forget"
+                    | "assistant_recall"
+            ) =>
+        {
             let mut a = arguments.clone();
             if let Some(o) = a.as_object_mut() {
                 o.insert("session_id".into(), json!(sid));
@@ -2796,6 +2843,27 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 seg(&room),
                 q.trim_start_matches('&')
             ))
+        }
+        // Otto Assistant memory: one agent-tool endpoint per verb; the body
+        // carries the (bound) calling session so chips land in its thread.
+        "assistant_remember" | "assistant_forget" | "assistant_recall" => {
+            let verb = tool.strip_prefix("assistant_").unwrap_or(tool);
+            let mut body = serde_json::Map::new();
+            for k in ["text", "kind", "tags", "query", "k", "session_id"] {
+                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                    body.insert(k.to_string(), v.clone());
+                }
+            }
+            if verb == "remember" {
+                arg_str(args, "text")?;
+            }
+            if verb == "forget" {
+                arg_str(args, "query")?;
+            }
+            SelfCall::post(
+                format!("/api/v1/assistant/agent/{verb}"),
+                Value::Object(body),
+            )
         }
         "list_scheduled_tasks" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -4629,6 +4697,46 @@ mod tests {
             &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn assistant_memory_tools_present_classified_and_routed() {
+        let names = spec_names();
+        for n in [
+            "otto.assistant_remember",
+            "otto.assistant_forget",
+            "otto.assistant_recall",
+        ] {
+            assert!(names.contains(&n.to_string()), "missing assistant spec {n}");
+        }
+        // Writes are approval-gated; the recall read is opt-in (personal content).
+        assert!(DANGEROUS.contains(&"assistant_remember"));
+        assert!(DANGEROUS.contains(&"assistant_forget"));
+        assert!(OPT_IN_READS.contains(&"assistant_recall"));
+        assert!(!DEFAULT_ENABLED.contains(&"assistant_recall"));
+        let c = route_for(
+            "assistant_remember",
+            &json!({"text":"prefers aisle seats","session_id":"s1","bogus":1}),
+        )
+        .unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/assistant/agent/remember");
+        let body = c.body.unwrap();
+        assert_eq!(body["text"], "prefers aisle seats");
+        assert_eq!(body["session_id"], "s1");
+        assert!(body.get("bogus").is_none(), "only declared args are forwarded");
+        assert_eq!(
+            route_for("assistant_forget", &json!({"query":"seats"})).unwrap().path,
+            "/api/v1/assistant/agent/forget"
+        );
+        assert_eq!(
+            route_for("assistant_recall", &json!({})).unwrap().path,
+            "/api/v1/assistant/agent/recall"
+        );
+        assert!(route_for("assistant_remember", &json!({})).is_err());
+        assert!(route_for("assistant_forget", &json!({})).is_err());
+        assert!(dangerous_detail("otto.assistant_remember", &json!({"text":"likes tea"}))
+            .contains("likes tea"));
     }
 
     #[test]

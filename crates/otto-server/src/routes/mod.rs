@@ -36,6 +36,7 @@ pub mod name_themes;
 pub mod notifications;
 pub mod onboarding;
 pub mod personal_agents;
+pub mod assistant;
 pub mod provider_accounts;
 pub mod product_memory;
 pub mod proof;

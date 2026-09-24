@@ -154,6 +154,9 @@ pub fn is_due_since(
             }
             Err(_) => false,
         },
+        // One shot: due once `run_at` has passed, and never again after the
+        // first completed run (the cursor is the "already fired" flag).
+        "once" => last_run.is_none() && once_at(spec, tz).is_some_and(|t| now >= t),
         _ => false,
     }
 }
@@ -193,12 +196,33 @@ pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
         "cron" => cron::Schedule::parse(cron_expr(spec))
             .ok()?
             .next_after(from, tz),
+        // Only a still-future `run_at` is a "next run"; once it has passed
+        // there is none (the schedule is spent).
+        "once" => once_at(spec, tz).filter(|t| from < *t),
         _ => None,
     }
 }
 
 fn cron_expr(spec: &Value) -> &str {
     spec.get("expr").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The single fire instant of a `once` cadence (`{cadence:"once", run_at}`):
+/// an RFC3339 instant as-is, or a LOCAL wall-clock `YYYY-MM-DDTHH:MM[:SS]`
+/// (a space instead of `T` is accepted) resolved in `tz` — DST-safe via
+/// [`resolve_local`] (a gap time fires at the first valid instant after the
+/// gap; an ambiguous fall-back time fires at the earlier one). `None` when
+/// `run_at` is missing or unparseable.
+pub fn once_at(spec: &Value, tz: Tz) -> Option<DateTime<Utc>> {
+    let raw = spec.get("run_at").and_then(Value::as_str)?.trim();
+    if let Ok(t) = DateTime::parse_from_rfc3339(raw) {
+        return Some(t.with_timezone(&Utc));
+    }
+    let norm = raw.replacen(' ', "T", 1);
+    ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"]
+        .iter()
+        .find_map(|f| NaiveDateTime::parse_from_str(&norm, f).ok())
+        .and_then(|naive| resolve_local(tz, naive))
 }
 
 /// Validate a schedule spec at create/update time.
@@ -235,9 +259,17 @@ pub fn validate(spec: &Value) -> Result<()> {
                 )));
             }
         }
+        "once" => {
+            if once_at(spec, Tz::UTC).is_none() {
+                return Err(Error::Invalid(
+                    "schedule.run_at must be an RFC3339 instant or a local 'YYYY-MM-DDTHH:MM'"
+                        .into(),
+                ));
+            }
+        }
         other => {
             return Err(Error::Invalid(format!(
-                "schedule.cadence must be interval|daily|weekly|cron (got '{other}')"
+                "schedule.cadence must be interval|daily|weekly|cron|once (got '{other}')"
             )))
         }
     }
@@ -263,6 +295,10 @@ pub fn describe(spec: &Value, tz: Tz) -> String {
             format!("weekly {} at {h:02}:{m:02} {tz}", names[wd])
         }
         "cron" => format!("cron `{}` ({tz})", cron_expr(spec)),
+        "once" => format!(
+            "once at {} ({tz})",
+            spec.get("run_at").and_then(Value::as_str).unwrap_or("?")
+        ),
         other => other.to_string(),
     }
 }
@@ -873,5 +909,67 @@ mod tests {
             next_run(&w, utc(2026, 10, 18, 7, 0), jlm()),
             Some(utc(2026, 10, 25, 7, 0))
         );
+    }
+
+    // ---- `once` (one-shot reminders / Personal Agent one-off runs) ----------
+
+    #[test]
+    fn once_fires_after_run_at_and_never_again() {
+        let s = json!({"cadence":"once","run_at":"2026-09-24T17:00:00Z"});
+        assert!(!is_due(&s, None, utc(2026, 9, 24, 16, 59), Tz::UTC));
+        assert!(is_due(&s, None, utc(2026, 9, 24, 17, 0), Tz::UTC));
+        // A missed fire (daemon down / Mac asleep) catches up once.
+        assert!(is_due(&s, None, utc(2026, 9, 25, 8, 0), Tz::UTC));
+        // Spent after the first completed run.
+        assert!(!is_due(&s, Some(utc(2026, 9, 24, 17, 0)), utc(2026, 9, 25, 8, 0), Tz::UTC));
+        assert_eq!(
+            next_run(&s, utc(2026, 9, 24, 12, 0), Tz::UTC),
+            Some(utc(2026, 9, 24, 17, 0))
+        );
+        assert_eq!(next_run(&s, utc(2026, 9, 24, 17, 0), Tz::UTC), None);
+    }
+
+    #[test]
+    fn once_local_time_resolves_in_the_schedule_timezone() {
+        // 17:00 in Jerusalem (IDT, UTC+3 on 2026-09-24) == 14:00 UTC.
+        let tz: Tz = "Asia/Jerusalem".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-09-24T17:00"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 9, 24, 14, 0)));
+        assert!(!is_due(&s, None, utc(2026, 9, 24, 13, 59), tz));
+        assert!(is_due(&s, None, utc(2026, 9, 24, 14, 0), tz));
+        // An explicit offset wins over the schedule timezone.
+        let abs = json!({"cadence":"once","run_at":"2026-09-24T17:00:00+00:00"});
+        assert_eq!(once_at(&abs, tz), Some(utc(2026, 9, 24, 17, 0)));
+        // A space separator is accepted too.
+        let spaced = json!({"cadence":"once","run_at":"2026-09-24 17:00"});
+        assert_eq!(once_at(&spaced, tz), Some(utc(2026, 9, 24, 14, 0)));
+    }
+
+    #[test]
+    fn once_in_the_spring_forward_gap_fires_right_after_it() {
+        // New York 2026-03-08: 02:00 → 03:00 local. 02:30 does not exist; it
+        // fires at the first valid instant after the gap (03:00 EDT = 07:00 UTC).
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-03-08T02:30"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 3, 8, 7, 0)));
+    }
+
+    #[test]
+    fn once_in_the_fall_back_overlap_takes_the_earlier_instant() {
+        // New York 2026-11-01: 01:30 happens twice; the first (EDT, UTC-4) is
+        // 05:30 UTC, the second (EST) 06:30 UTC.
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-11-01T01:30"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 11, 1, 5, 30)));
+    }
+
+    #[test]
+    fn once_validates_run_at() {
+        assert!(validate(&json!({"cadence":"once","run_at":"2026-09-24T17:00"})).is_ok());
+        assert!(validate(&json!({"cadence":"once","run_at":"2026-09-24T17:00:00Z"})).is_ok());
+        assert!(validate(&json!({"cadence":"once"})).is_err());
+        assert!(validate(&json!({"cadence":"once","run_at":"tomorrow at 5"})).is_err());
+        assert!(describe(&json!({"cadence":"once","run_at":"2026-09-24T17:00"}), Tz::UTC)
+            .starts_with("once at 2026-09-24T17:00"));
     }
 }

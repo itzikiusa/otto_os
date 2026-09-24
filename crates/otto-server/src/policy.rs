@@ -1050,6 +1050,19 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
 
+    // ---- Otto Assistant ---------------------------------------------------
+    // The personal assistant (threads, turns, tasks, memory, routing, agent
+    // tools). Every row is the CALLER's own (handlers 404 anyone else's id), so
+    // there is no workspace axis; the feature axis is `Agents` like the session
+    // routes it drives. The route preview is a read that happens to POST.
+    // Delegation's extra `scheduled_tasks:Edit` + Editor check is in-handler.
+    if p == "/assistant/route/preview" {
+        return Require(Agents, View);
+    }
+    if p.starts_with("/assistant/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
+
     // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
     // workspace-scoped; the flat by-id routes load the run and re-check the role on
     // its workspace (the IDOR guard). (The webhook entry is Exempt above.)
@@ -1442,6 +1455,55 @@ mod tests {
             pol(Method::DELETE, "/api/v1/snips/{id}"),
             Require(Agents, Edit),
         );
+    }
+
+    // ---- Otto Assistant -----------------------------------------------------
+
+    #[test]
+    fn assistant_routes_ride_the_agents_feature() {
+        for path in [
+            "/api/v1/assistant/threads",
+            "/api/v1/assistant/threads/{id}",
+            "/api/v1/assistant/threads/{id}/turns",
+            "/api/v1/assistant/needs-you",
+            "/api/v1/assistant/tasks",
+            "/api/v1/assistant/tasks/{id}",
+            "/api/v1/assistant/memory",
+            "/api/v1/assistant/memory/import/hermes",
+            "/api/v1/assistant/routing",
+            "/api/v1/assistant/limits",
+        ] {
+            assert_eq!(pol(Method::GET, path), Require(Agents, View), "{path}");
+        }
+        for (m, path) in [
+            (Method::POST, "/api/v1/assistant/threads"),
+            (Method::PATCH, "/api/v1/assistant/threads/{id}"),
+            (Method::DELETE, "/api/v1/assistant/threads/{id}"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/turns"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/attachments"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/route"),
+            (Method::POST, "/api/v1/assistant/threads/{id}/delegate"),
+            (Method::POST, "/api/v1/assistant/tasks"),
+            (Method::POST, "/api/v1/assistant/tasks/{id}/{action}"),
+            (Method::PUT, "/api/v1/assistant/memory"),
+            (Method::POST, "/api/v1/assistant/memory"),
+            (Method::DELETE, "/api/v1/assistant/memory/{id}"),
+            (Method::POST, "/api/v1/assistant/memory/{id}/accept"),
+            (Method::POST, "/api/v1/assistant/memory/undo"),
+            (Method::POST, "/api/v1/assistant/forget"),
+            (Method::POST, "/api/v1/assistant/memory/import/hermes"),
+            (Method::PUT, "/api/v1/assistant/routing"),
+            (Method::POST, "/api/v1/assistant/agent/{tool}"),
+        ] {
+            assert_eq!(pol(m.clone(), path), Require(Agents, Edit), "{m} {path}");
+        }
+        // The preview is a read that happens to POST.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/assistant/route/preview"),
+            Require(Agents, View)
+        );
+        // The bare prefix is not a route: still fail closed.
+        assert_eq!(pol(Method::GET, "/api/v1/assistant"), Deny);
     }
 
     // ---- Proof Packs --------------------------------------------------------

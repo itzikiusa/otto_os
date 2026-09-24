@@ -7918,6 +7918,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::proof_pack::routes(),
         crate::routes::scheduled_tasks::routes(),
         crate::routes::personal_agents::routes(),
+        // Otto Assistant — personal threads, tasks, memory, routing (`Agents`).
+        crate::routes::assistant::routes(),
         crate::routes::runs::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),

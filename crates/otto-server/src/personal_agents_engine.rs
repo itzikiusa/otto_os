@@ -247,7 +247,7 @@ pub async fn run_agent(
     trigger: &str,
 ) -> Result<String> {
     let run = open_agent_run(ctx, agent, schedule, trigger).await?;
-    complete_agent_run(ctx, agent, schedule, &run.id, trigger).await
+    complete_agent_run(ctx, agent, schedule, &run.id, trigger, None).await
 }
 
 /// Start a run in the BACKGROUND and return its `running` row at once — the
@@ -280,7 +280,44 @@ pub async fn spawn_agent_run(
         trigger.to_string(),
     );
     tokio::spawn(async move {
-        let _ = complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2).await;
+        let _ = complete_agent_run(&ctx2, &agent2, schedule2.as_ref(), &run_id, &trigger2, None)
+            .await;
+    });
+    Ok(run)
+}
+
+/// Start a run with an explicit `directive` in the BACKGROUND and return its
+/// `running` row at once — the Otto Assistant's delegation primitive
+/// (`assistant_delegate`: "Asked *Daily Recap*…"). Same 409-while-busy rule
+/// as [`spawn_agent_run`]; recorded as a `manual` run (no schedule cursor).
+pub async fn spawn_directive_run(
+    ctx: &ServerCtx,
+    agent: &PersonalAgent,
+    directive: &str,
+) -> Result<PersonalAgentRun> {
+    if directive.trim().is_empty() {
+        return Err(Error::Invalid("directive is required".into()));
+    }
+    let busy = repo(ctx)
+        .list_runs(&agent.id, 1)
+        .await?
+        .first()
+        .is_some_and(|r| r.status == "running");
+    if busy {
+        return Err(Error::Conflict(
+            "a run of this agent is already in progress".into(),
+        ));
+    }
+    let run = open_agent_run(ctx, agent, None, "manual").await?;
+    let (ctx2, agent2, run_id, directive2) = (
+        ctx.clone(),
+        agent.clone(),
+        run.id.clone(),
+        directive.to_string(),
+    );
+    tokio::spawn(async move {
+        let _ =
+            complete_agent_run(&ctx2, &agent2, None, &run_id, "manual", Some(&directive2)).await;
     });
     Ok(run)
 }
@@ -312,12 +349,14 @@ async fn complete_agent_run(
     schedule: Option<&PersonalAgentSchedule>,
     run_id: &str,
     trigger: &str,
+    directive_override: Option<&str>,
 ) -> Result<String> {
     let repo = repo(ctx);
     let run_id = run_id.to_string();
 
-    let directive = schedule
-        .map(|s| s.directive.clone())
+    let directive = directive_override
+        .map(str::to_string)
+        .or_else(|| schedule.map(|s| s.directive.clone()))
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "Check in: review your standing instructions and report status.".into());
 
@@ -419,6 +458,24 @@ async fn advance_cursor(
     let _ = repo(ctx)
         .set_schedule_runtime(&s.id, Some(&now.to_rfc3339()), next.as_deref())
         .await;
+    // A `once` schedule is spent after its one run: disable it so the list
+    // shows it as done instead of "enabled, never again due".
+    if is_one_shot(&s.schedule) {
+        let _ = repo(ctx)
+            .update_schedule(
+                &s.id,
+                otto_state::AgentSchedulePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+}
+
+/// True for a `{cadence:"once"}` schedule (fires one run, then disables).
+pub fn is_one_shot(schedule: &serde_json::Value) -> bool {
+    schedule.get("cadence").and_then(serde_json::Value::as_str) == Some("once")
 }
 
 /// What one execution produced.

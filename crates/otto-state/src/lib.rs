@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod api_client;
+pub mod assistant;
 pub mod audit;
 pub mod aws_accounts;
 pub mod broker_audit;
@@ -72,6 +73,11 @@ pub use activity::{normalize_title, ActivityRepo, NewTask, NewTrail, PendingNudg
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,
+};
+pub use assistant::{
+    AssistantAttachment, AssistantRepo, AssistantRoutingRow, AssistantTask, AssistantThread,
+    AssistantTurn, NewTask as NewAssistantTask, NewThread as NewAssistantThread,
+    NewTurn as NewAssistantTurn,
 };
 pub use audit::{AuditRepo, NewAuditEntry};
 pub use aws_accounts::{AwsAccountPatch, AwsAccountRow, AwsAccountsRepo, NewAwsAccount};
