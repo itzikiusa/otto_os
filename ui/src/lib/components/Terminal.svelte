@@ -2,6 +2,7 @@
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
   import { untrack } from 'svelte';
+  import { exitState } from '../status';
   import { Terminal } from '@xterm/xterm';
   // ILinkProvider isn't exported from the ambient module, so derive its shape
   // from registerLinkProvider's parameter (kept in lockstep with the version).
@@ -1514,8 +1515,11 @@
     ></div>
 
     {#if exitCode !== null}
+      <!-- Shared exit vocabulary (lib/status.ts): "Ended", "Suspended —
+           resumes on open", or "Failed (exit N)" — never a bare "exited (0)". -->
+      {@const ex = exitState(exitCode, resumable)}
       <div class="term-overlay">
-        <span class="badge {exitCode === 0 ? 'ok' : 'bad'}">exited ({exitCode})</span>
+        <span class="badge {ex.tone}" data-exit={ex.key} title={ex.hint}>{ex.key === 'suspended' ? ex.hint : ex.label}</span>
         {#if (restartable || resumable) && !readOnly}
           <button
             class="btn"
@@ -1767,11 +1771,9 @@
     color: var(--text-dim);
     border: 1px solid var(--border);
   }
-  .badge.ok {
-    color: var(--status-working);
-  }
-  .badge.bad {
-    color: var(--status-exited);
+  .badge.danger {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   .ro-chip {
     position: absolute;

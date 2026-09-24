@@ -3,6 +3,8 @@
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
+  import { events } from '../lib/events.svelte';
+  import { sessionState, type SessionStateInfo } from '../lib/status';
   import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
@@ -36,7 +38,8 @@
     // wider than the window, pinned to its edge and clipped.
     const title = s.title.length > 80 ? `${s.title.slice(0, 79).trimEnd()}…` : s.title;
     const parts = [title, [s.provider, s.cwd].filter((p) => p !== '' && p != null).join(' · ')].filter(Boolean);
-    return [...parts, isResumable(id) ? SUSPENDED_TIP : 'Double-click to rename'].join('\n');
+    const st = tabState(id);
+    return [...parts, st.resumable ? (st.hint ?? st.label) : 'Double-click to rename'].join('\n');
   }
 
   // ── Keep the active tab visible + surface overflow ────────────────────────
@@ -83,17 +86,16 @@
     (tabsEl?.querySelector(`[data-tab-id="${CSS.escape(target)}"]`) as HTMLElement | null)?.focus();
   }
 
-  // A tab is "suspended / resumable" — parked to save memory, but auto-resumes
-  // on open (`--resume`): status `reconnectable`, or an exited agent session
-  // that still has a provider_session_id. A plain exited shell is "ended".
-  function isResumable(id: string): boolean {
-    const status = ws.statusMap[id] ?? 'idle';
-    if (status === 'reconnectable') return true;
-    if (status !== 'exited') return false;
+  // One session vocabulary (lib/status.ts): the tab's dot/↻ and tooltip line
+  // come from `sessionState` — the same state the sidebar row shows. A stale
+  // events socket stops the working pulse ("Reconnecting…").
+  function tabState(id: string): SessionStateInfo {
     const s = ws.sessions.find((x) => x.id === id);
-    return s?.kind === 'agent' && s.provider_session_id != null;
+    return sessionState(s, ws.statusMap[id] ?? 'idle', needsYou(id), { stale: events.state !== 'connected' });
   }
-  const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
+  function isResumable(id: string): boolean {
+    return id !== DB_PANE_ID && tabState(id).resumable;
+  }
 
   // A tab "needs you" when its session is blocked on operator input — distinct
   // from idle. Cleared by the store when the session is opened / fed input.
@@ -239,12 +241,15 @@
       >
         {#if id === DB_PANE_ID}
           <Icon name="db" size={11} />
-        {:else if isResumable(id)}
-          <span class="susp-dot" title={SUSPENDED_TIP} aria-hidden="true">
-            <Icon name="refresh" size={8} />
-          </span>
         {:else}
-          <StatusDot status={ws.statusMap[id] ?? 'idle'} size={6} />
+          {@const st = tabState(id)}
+          {#if st.resumable}
+            <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+              <Icon name="refresh" size={9} />
+            </span>
+          {:else}
+            <StatusDot state={st} size={6} />
+          {/if}
         {/if}
         {#if renamingId === id}
           <!-- svelte-ignore a11y_autofocus -->
@@ -428,13 +433,14 @@
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
+  /* ↻ = suspended, resumes on open: calm/dim — amber is only "needs you". */
   .susp-dot {
     display: grid;
     place-items: center;
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     flex-shrink: 0;
-    color: var(--warning);
+    color: var(--text-dim);
   }
   .tab-title {
     overflow: hidden;

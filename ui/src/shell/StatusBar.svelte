@@ -1,5 +1,8 @@
 <script lang="ts">
-  // Status bar: working agents · network listener · current branch · clock.
+  // Status bar: working agents · needs you · event stream · current branch ·
+  // network listener · clock. While the events socket is down the live counts
+  // are stale: the working dot stops pulsing and the stream says
+  // "Reconnecting…" (patterns.md §1, "Stale is a state").
   import Icon from '../lib/components/Icon.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
@@ -13,6 +16,14 @@
     return () => clearInterval(t);
   });
 
+  const live = $derived(events.state === 'connected');
+
+  /** "· N need you" → narrow the sidebar to the sessions waiting on the user. */
+  function showNeedsYou(): void {
+    ws.needsYouFilter = true;
+    if (router.module !== 'agents') router.go('agents');
+  }
+
   const clock = $derived(
     now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   );
@@ -20,23 +31,33 @@
 
 <footer class="statusbar chrome-material">
   <div class="sb-group">
-    <span class="sb-item" title="Agents working">
-      <span class="working-dot" class:on={ws.workingCount > 0}></span>
+    <span class="sb-item" title={live ? 'Agents working' : 'Agents working (last known — reconnecting)'}>
+      <span class="working-dot" class:on={ws.workingCount > 0} class:stale={!live} aria-hidden="true"></span>
       {ws.workingCount} working
     </span>
-    {#if events.state === 'connected'}
+    {#if ws.needsYouCount > 0}
+      <button
+        class="sb-item sb-btn needs-you"
+        onclick={showNeedsYou}
+        title="Show only the sessions waiting on you"
+        data-testid="statusbar-needs-you"
+      >
+        · {ws.needsYouCount} need{ws.needsYouCount === 1 ? 's' : ''} you
+      </button>
+    {/if}
+    {#if live}
       <span class="sb-item dim" title="Event stream: live">
-        <span class="conn-dot connected"></span>
+        <span class="conn-dot connected" aria-hidden="true"></span>
         live
       </span>
     {:else}
       <button
         class="sb-item sb-btn dim"
         onclick={() => events.reconnectNow()}
-        title="Event stream: {events.state} — click to reconnect now"
+        title="Event stream: {events.state} — live status may be out of date. Click to reconnect now"
       >
-        <span class="conn-dot {events.state}"></span>
-        {events.state} ↻
+        <span class="conn-dot {events.state}" aria-hidden="true"></span>
+        Reconnecting…
       </button>
     {/if}
   </div>
@@ -102,6 +123,21 @@
   .working-dot.on {
     background: var(--status-working);
     animation: pulse 1.6s ease-in-out infinite;
+  }
+  /* Stale: last known count, not live — hollow ring, no pulse. */
+  .working-dot.on.stale {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--status-working);
+    animation: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .working-dot.on {
+      animation: none;
+    }
+  }
+  .needs-you {
+    color: var(--warning);
+    font-weight: 600;
   }
   .conn-dot {
     width: 6px;

@@ -60,7 +60,7 @@ test('a terminal whose shell exited comes back live when reopened', async ({ pag
     data: { text: 'exit', submit: true },
   });
   expect(r.ok(), 'send exit').toBeTruthy();
-  await expect(page.locator('.term-overlay .badge').filter({ hasText: /exited/ })).toBeVisible({
+  await expect(page.locator('.term-overlay .badge[data-exit]')).toBeVisible({
     timeout: 15_000,
   });
   await expect.poll(() => status(id), { timeout: 15_000 }).toBe('exited');
@@ -69,7 +69,7 @@ test('a terminal whose shell exited comes back live when reopened', async ({ pag
   // (A reload, not a re-`goto`: the URL already IS this session's route.)
   await page.reload();
   await awaitTerminal(page);
-  await expect(page.locator('.term-overlay .badge').filter({ hasText: /exited/ })).toHaveCount(0, {
+  await expect(page.locator('.term-overlay .badge[data-exit]')).toHaveCount(0, {
     timeout: 15_000,
   });
   await expect.poll(() => status(id), { timeout: 15_000 }).toMatch(/running|working|idle/);

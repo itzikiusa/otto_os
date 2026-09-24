@@ -344,7 +344,7 @@
   }
   .pending-label {
     font-weight: 600;
-    color: var(--status-warn, #e0a000);
+    color: var(--warning);
     white-space: nowrap;
   }
   .pending-text {

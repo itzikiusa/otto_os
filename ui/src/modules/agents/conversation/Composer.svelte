@@ -16,6 +16,10 @@
   import { fetchSlashCommands, submitPrompt, uploadInboxImage } from './api';
 
   import { transcript } from '../../../lib/stores/transcript.svelte';
+  import { ws } from '../../../lib/stores/workspace.svelte';
+  import { events } from '../../../lib/events.svelte';
+  import { sessionState } from '../../../lib/status';
+  import StatusDot from '../../../lib/components/StatusDot.svelte';
 
   interface Props {
     sessionId: string;
@@ -53,11 +57,19 @@
   }
   const attachments = $derived(transcript.attachments(ownerId));
 
-  const exited = $derived(status === 'exited' || status === 'reconnectable');
-  const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
-  const statusLabel = $derived(
-    status === 'working' ? 'Working…' : status === 'idle' ? 'Idle' : status === 'running' ? 'Running' : status,
+  // The shared session state (lib/status.ts): the same words the sidebar, tab
+  // and pane header use — a resumable session is "Suspended", not "ended".
+  const st = $derived(
+    sessionState(
+      ws.sessions.find((s) => s.id === sessionId),
+      status,
+      ws.needsYou[sessionId] === true,
+      { stale: events.state !== 'connected' },
+    ),
   );
+  const exited = $derived(st.inactive);
+  const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
+  const statusLabel = $derived(st.key === 'working' ? 'Working…' : st.label);
 
   // Three lines by default (rows=3 + line-height), growing with the text up
   // to ~40% of the window; the textarea itself never scrolls sideways (wrap +
@@ -221,7 +233,7 @@
 <div class="composer" data-status={status} ondragover={(e) => e.preventDefault()} ondrop={onDrop} role="group" aria-label="Message composer">
   {#if exited}
     <div class="exited">
-      <span class="dim">This session has ended.</span>
+      <span class="dim">{st.key === 'suspended' ? `${st.hint}.` : 'This session has ended.'}</span>
       <button class="btn small primary" onclick={onresume}>Resume</button>
     </div>
   {:else}
@@ -283,7 +295,7 @@
       </div>
     {/if}
     <div class="status" data-status-line>
-      <span class="sdot {status}"></span>
+      <StatusDot state={st} />
       <span>{statusLabel}</span>
       {#if uploading}<span class="dim">· uploading {uploading} image{uploading > 1 ? 's' : ''}…</span>{/if}
       {#if pendingNudges}
@@ -494,16 +506,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .sdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--status-idle, var(--text-dim));
-  }
-  .sdot.working,
-  .sdot.running {
-    background: var(--status-working, #3fb950);
   }
   .hint {
     overflow: hidden;
