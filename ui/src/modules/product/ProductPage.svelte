@@ -463,7 +463,8 @@
           {#if s.tree_kind === 'doc'}
             <span class="draft-badge doc">DOC</span>
           {:else if s.source_kind === 'draft'}
-            <span class="draft-badge">DRAFT</span>
+            <!-- A draft story's stage badge already says "draft". -->
+            {#if s.stage !== 'draft'}<span class="draft-badge">Draft</span>{/if}
           {:else}
             <span class="story-key mono">{s.source_key}</span>
           {/if}
@@ -847,17 +848,15 @@
     flex-shrink: 0;
   }
   .draft-badge {
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 1px 5px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    padding: 0 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .side-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -906,8 +905,9 @@
     cursor: pointer;
     text-align: start;
   }
-  .story-row.active {
-    color: var(--accent);
+  /* Selection is the row tint (set on the wrap); text stays --text. */
+  .story-row.active .story-title {
+    font-weight: 600;
   }
   /* Delete button — hidden until row is hovered or active */
   .delete-btn {
@@ -1013,14 +1013,14 @@
     opacity: 0.8;
   }
   .epic-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .draft-badge.doc {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -1090,7 +1090,7 @@
     gap: 3px;
   }
   .story-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     line-height: 1.3;
     display: -webkit-box;
@@ -1105,15 +1105,14 @@
     gap: 6px;
   }
   .story-key {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   /* Stage badges */
   .stage-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: capitalize;
     padding: 1px 6px;
     border-radius: 999px;
   }
@@ -1176,13 +1175,13 @@
     gap: 3px;
     margin-top: 1px;
   }
+  /* Tags are metadata, not selection: neutral chips. */
   .story-tag-chip {
-    font-size: 9px;
-    padding: 1px 5px;
+    font-size: var(--fs-xs);
+    padding: 0 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-    opacity: 0.85;
+    background: var(--surface-2);
+    color: var(--text-dim);
   }
 
 

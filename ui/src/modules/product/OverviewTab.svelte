@@ -2267,10 +2267,9 @@
     border-color: var(--accent);
   }
   .stage-badge {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: capitalize;
     padding: 2px 8px;
     border-radius: 999px;
     flex-shrink: 0;
@@ -2280,6 +2279,8 @@
     cursor: pointer;
     appearance: none;
     padding-inline: 8px 8px;
+    /* Hug the current stage, not the longest option (where supported). */
+    field-sizing: content;
   }
   .stage-draft {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -3304,14 +3305,8 @@
     display: flex;
     justify-content: flex-end;
   }
-  .save-btn {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .save-btn:hover:not(:disabled) {
-    opacity: 0.88;
-  }
+  /* Save is a quiet, neutral action; the publish bar below owns the one
+     filled button in this pane. */
 
   /* ── Transcripts (right column in draft mode) ──────────────── */
   .transcripts-section {
@@ -3427,27 +3422,27 @@
     flex-wrap: wrap;
   }
   .publish-btn {
-    height: 32px;
-    padding: 0 16px;
+    height: 28px;
+    padding: 0 14px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     cursor: pointer;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    transition: opacity 110ms;
+    border: 1px solid transparent;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    transition: background 130ms ease-out;
     white-space: nowrap;
   }
   .publish-btn:hover {
-    opacity: 0.88;
+    background: color-mix(in srgb, var(--accent-solid) 88%, black);
   }
   .publish-btn.secondary {
-    background: transparent;
-    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
   }
   .publish-btn.secondary:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    opacity: 1;
+    background: var(--surface-2);
   }
 </style>
