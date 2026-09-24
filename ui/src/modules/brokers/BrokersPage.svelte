@@ -518,9 +518,14 @@
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- The whole header toggles (the caret button stays the keyboard/AT
+       control); clicks on its own buttons don't. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="sec-head"
+    onclick={(e) => {
+      if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
+    }}
     class:drop={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedClusterId}
     style="padding-left: {depth * 14 + 6}px"
     draggable="true"
@@ -544,6 +549,8 @@
       class="caret"
       onclick={() => (collapsed[node.sec.id] = !collapsed[node.sec.id])}
       title={isOpen ? 'Collapse' : 'Expand'}
+      aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
+      aria-expanded={isOpen}
     >
       <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
@@ -656,7 +663,7 @@
     align-items: center;
     gap: 4px;
     padding: 6px 8px 6px 6px;
-    cursor: grab;
+    cursor: pointer;
     color: var(--text-dim);
     border-inline-start: 2px solid transparent;
     user-select: none;

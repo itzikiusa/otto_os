@@ -30,6 +30,12 @@ test.describe('connections hub', () => {
     });
     expect(secRes.ok(), `create section → ${secRes.status()} ${await secRes.text()}`).toBeTruthy();
     const sectionId = (await secRes.json()).id as string;
+    // A folder with nothing in it: it must stay visible (as a drop target) under
+    // every type filter — there is nothing in it to filter out.
+    const emptyRes = await ctx.post(`${base}/api/v1/workspaces/${wsId}/connection-sections`, {
+      data: { name: 'EMPTY-SEC' },
+    });
+    expect(emptyRes.ok(), `create empty section → ${emptyRes.status()}`).toBeTruthy();
 
     // ssh — ungrouped, no secret.
     const sshRes = await ctx.post(`${base}/api/v1/workspaces/${wsId}/connections`, {
@@ -120,6 +126,7 @@ test.describe('connections hub', () => {
     const clusterRow = page.locator('.conn-row', { hasText: 'hub-kafka' });
     const hubSec = page.locator('.sec-head', { hasText: 'HUB-SEC' });
     const ungrouped = page.locator('.sec-head.plain', { hasText: 'Ungrouped' });
+    const emptySec = page.locator('.sec-head', { hasText: 'EMPTY-SEC' });
     const y = async (l: Locator): Promise<number> => (await l.first().boundingBox())!.y;
 
     const ran: string[] = [];
@@ -146,6 +153,13 @@ test.describe('connections hub', () => {
       skipped.push('cluster-under-HUB-SEC (needs the new shared-tree daemon)');
     }
 
+    // (1b) clicking anywhere on a folder header (not just the caret) toggles it.
+    await hubSec.locator('.sec-name').click();
+    await expect(mysqlRow).toHaveCount(0);
+    await hubSec.locator('.sec-name').click();
+    await expect(mysqlRow).toBeVisible();
+    ran.push('header-click-toggles');
+
     // (2) Kafka chip → only the cluster; ssh + mysql hidden. A section shows only
     //     if it holds a matching descendant.
     await page.locator('[data-testid="connhub-filter-kafka"]').click();
@@ -163,7 +177,8 @@ test.describe('connections hub', () => {
     await expect(clusterRow).toHaveCount(0);
     await expect(mysqlRow).toHaveCount(0);
     await expect(hubSec).toHaveCount(0);
-    ran.push('ssh-filter');
+    await expect(emptySec).toBeVisible();
+    ran.push('ssh-filter', 'empty-folder-visible-under-filter');
 
     // (4) All restores every row.
     await page.locator('[data-testid="connhub-filter-all"]').click();

@@ -250,6 +250,48 @@
       n.items.length + n.clusters.length + n.children.reduce((sum, c) => sum + nodeCount(c), 0)
     );
   }
+  // Sections holding anything at all (any kind, unfiltered), ancestors
+  // included. A truly empty folder isn't "filtered out" — it has nothing to
+  // filter — so it stays visible under a type filter as a drop target.
+  const occupiedSectionIds = $derived.by(() => {
+    const parentOf = new Map(sections.map((s) => [s.id, s.parent_id ?? null]));
+    const occ = new Set<string>();
+    const mark = (id: string | null | undefined): void => {
+      let cur = id ?? null;
+      while (cur && parentOf.has(cur) && !occ.has(cur)) {
+        occ.add(cur);
+        cur = parentOf.get(cur) ?? null;
+      }
+    };
+    for (const c of database.connections) mark(c.section_id);
+    for (const c of database.otherConnections) mark(c.section_id);
+    for (const cl of brokers.clusters) mark(cl.section_id);
+    return occ;
+  });
+  // While anything is being dragged, a type filter reveals every folder so
+  // any section is a reachable drop target. Flipped on a macrotask: mutating
+  // the DOM inside `dragstart` makes WebKit abort the drag.
+  let dragReveal = $state(false);
+  $effect(() => {
+    const dragging = !!(draggedConnId || draggedClusterId || draggedSectionId);
+    if (!dragging) {
+      dragReveal = false;
+      return;
+    }
+    const t = setTimeout(() => (dragReveal = true), 0);
+    return () => clearTimeout(t);
+  });
+  /** Under a type filter a folder shows when it has matches, is empty, has a
+   *  visible sub-folder, or a drag is in progress. */
+  function nodeVisible(n: TreeNode): boolean {
+    return (
+      !filtering ||
+      dragReveal ||
+      nodeCount(n) > 0 ||
+      !occupiedSectionIds.has(n.sec.id) ||
+      n.children.some(nodeVisible)
+    );
+  }
 
   // --- Connection search / filter --------------------------------------------
   // A filter box over the connection list (mirrors SchemaTree's "Filter schema").
@@ -1127,10 +1169,15 @@
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  {#if !(filtering && nodeCount(node) === 0)}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+  {#if nodeVisible(node)}
+    <!-- The whole header toggles (the caret button stays the keyboard/AT
+         control); clicks on its own buttons — caret, row actions — don't. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="sec-head"
+      onclick={(e) => {
+        if (!(e.target as Element).closest('button')) toggleCollapse(node.sec.id);
+      }}
       class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) ||
         draggedConnId ||
         draggedClusterId}
@@ -1150,12 +1197,17 @@
         onSectionDrop(node.sec.id);
       }}
     >
-      <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
+      <button
+        class="caret"
+        onclick={() => toggleCollapse(node.sec.id)}
+        aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
+        aria-expanded={isOpen}
+      >
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       <Icon name="folder" size={12} />
       <span class="sec-name grow ellipsis">{node.sec.name}</span>
-      <span class="count">{nodeCount(node)}</span>
+      {#if nodeCount(node) > 0}<span class="count">{nodeCount(node)}</span>{/if}
       <div class="sec-actions">
         <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
           <Icon name="plus" size={11} />
@@ -1327,7 +1379,7 @@
     {/each}
 
     {#if sections.length > 0}
-      {#if !(filtering && ungrouped.length + ungroupedClusters.length === 0)}
+      {#if !(filtering && !dragReveal && ungrouped.length + ungroupedClusters.length === 0)}
         <!-- Ungrouped doubles as the root / no-section drop target. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -1703,7 +1755,7 @@
     height: 24px;
     padding: 0 6px;
     border-radius: var(--radius-s);
-    cursor: grab;
+    cursor: pointer;
     user-select: none;
     color: var(--text-dim);
   }
