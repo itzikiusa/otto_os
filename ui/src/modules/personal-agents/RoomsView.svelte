@@ -3,6 +3,7 @@
   // Room list + create on the left; the selected room's membership editor,
   // live message feed (WS agent_room_message + `after` paging) and the user
   // post box on the right.
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -201,7 +202,7 @@
             <div class="msg-body">
               <div class="msg-head">
                 <strong>{authorName(m)}</strong>
-                <span class="meta">{m.created_at}</span>
+                <span class="meta"><RelTime iso={m.created_at} /></span>
               </div>
               <p class="msg-text">{m.text}</p>
             </div>

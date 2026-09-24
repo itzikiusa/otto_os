@@ -1,5 +1,6 @@
 <script lang="ts">
   // One personal agent: Overview / Schedules / Runs / Chat / Memory tabs.
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -319,7 +320,7 @@
             <div class="rowmain">
               <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
               {#if !s.enabled}<span class="pill">paused</span>{/if}
-              <span class="meta">next {s.next_run_at ?? '—'} · last {s.last_run_at ?? 'never'}</span>
+              <span class="meta">next <RelTime iso={s.next_run_at} /> · last <RelTime iso={s.last_run_at} fallback="never" /></span>
               <p class="directive">{s.directive || '(no directive)'}</p>
             </div>
             <div class="rowactions">
@@ -340,7 +341,7 @@
         {#each runs as r (r.id)}
           <li class="run">
             <span class={statusClass(r.status)}>{r.status}</span>
-            <span class="run-when">{r.started_at}</span>
+            <span class="run-when"><RelTime iso={r.started_at} /></span>
             <span class="pill" title="which schedule fired">{scheduleName(r)}</span>
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
             <span class="run-sum">{r.summary || r.error || '(no summary)'}</span>

@@ -3,6 +3,7 @@
   // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>`
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal rows.
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -146,7 +147,7 @@
                   <span class="pill ok">enabled</span>
                 {/if}
                 {#if a.browser}<span class="pill">browser</span>{/if}
-                <span class="meta">next run {personalAgents.nextRunAt(a.id) ?? '—'}</span>
+                <span class="meta">next run <RelTime iso={personalAgents.nextRunAt(a.id)} /></span>
               </div>
               <div class="card-actions">
                 <button class="btn small" onclick={(e) => { e.stopPropagation(); void runNow(a); }}>Run now</button>
