@@ -30,6 +30,8 @@
     bulb: 'M6 12.5h4M6.6 14h2.8M8 2a4 4 0 0 0-2.5 7.1c.4.4.7.9.7 1.4v.5h3.6v-.5c0-.5.3-1 .7-1.4A4 4 0 0 0 8 2Z',
     // four-point spark — a prompt / generation
     sparkle: 'M7 2l1.2 3.3L11.5 6.5 8.2 7.7 7 11 5.8 7.7 2.5 6.5l3.3-1.2L7 2Zm5 7.5.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z',
+    // voice input (the floating bar's hold-to-talk button)
+    mic: 'M8 2.5a2 2 0 0 1 2 2V8a2 2 0 0 1-4 0V4.5a2 2 0 0 1 2-2ZM4.5 7.5a3.5 3.5 0 0 0 7 0M8 11v2.5M6 13.5h4',
     // three dots — a "More actions" menu (ringed dots so they read at 12–14px)
     more: 'M3.2 8a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0',
     // two side-by-side panes — Compare

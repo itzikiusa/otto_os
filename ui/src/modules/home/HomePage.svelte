@@ -366,7 +366,7 @@
     inset: 0;
     overflow-y: auto;
     /* Box edges line up with the header title (20px inset). */
-    padding: 16px 20px 20px;
+    padding: 16px 20px max(20px, var(--fb-clearance, 0px));
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
     grid-auto-rows: var(--row);
