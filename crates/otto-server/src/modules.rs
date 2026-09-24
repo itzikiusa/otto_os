@@ -7946,6 +7946,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),
         crate::lsp::ws_router(ctx.authenticator.clone(), ctx.clone()),
         crate::routes::api_stream::ws_router(ctx.clone()),
+        // Remote live browser viewer socket (`/ws/browser/{tab_id}/live`).
+        crate::routes::browser_live::ws_router(ctx.clone()),
         browser_proxy_router(ctx.authenticator.clone()),
         // Runtime-plugin iframe assets: /plugins/{slug}/ui/* served as public
         // static files (root-mounted, outside /api/v1; the iframe's API calls are

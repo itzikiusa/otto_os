@@ -15,6 +15,7 @@ pub mod auth_routes;
 pub mod backup;
 pub mod backup_git;
 pub mod browser;
+pub mod browser_live;
 pub mod capabilities;
 pub mod channel_webhook;
 pub mod connection_export;
@@ -649,6 +650,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .merge(snips::snips_routes())
         // --- Browser (reader/annotate tabs + on-demand page fetch) -------
         .merge(browser::routes())
+        // --- Browser remote live view (daemon Chromium) ------------------
+        .merge(browser_live::routes())
 }
 
 // ── The `scratch` workspace is a SESSION home, not a workspace API ──────────

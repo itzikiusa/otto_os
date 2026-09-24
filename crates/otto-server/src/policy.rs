@@ -1123,6 +1123,27 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{wid}/browser/login" {
         return Require(Browser, Edit);
     }
+    // Remote live view (daemon Chromium). Status + listing + reading a tab's
+    // session are reads; opening/closing/driving/screenshotting a session are
+    // Edit; the daemon-wide engine settings and the one-time engine download
+    // (a ~100-180 MB binary into the data dir) are Admin. The handlers add the
+    // workspace role on the tab's workspace and the owner/ws-Admin/root
+    // session axis on top.
+    if p == "/browser/live/status" || p == "/workspaces/{wid}/browser/live" {
+        return Require(Browser, View);
+    }
+    if p == "/browser/live/settings" || p == "/browser/live/install" {
+        return Require(Browser, Admin);
+    }
+    if p == "/browser/tabs/{id}/live" {
+        return Require(Browser, if get { View } else { Edit });
+    }
+    if p == "/browser/tabs/{id}/live/nav"
+        || p == "/browser/tabs/{id}/live/control"
+        || p == "/browser/tabs/{id}/live/screenshot"
+    {
+        return Require(Browser, Edit);
+    }
 
     // ---- AWS console (`/aws/*`) -------------------------------------------
     // Seven sibling keys, mirroring the Connections/Database split: `Aws` owns
@@ -2468,6 +2489,44 @@ mod tests {
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
             Require(Browser, Edit)
         );
+    }
+
+    #[test]
+    fn browser_live_routes_are_classified() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/browser/live/status"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/browser/live/settings"),
+            Require(Browser, Admin)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/live/install"),
+            Require(Browser, Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/browser/live"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/browser/tabs/{id}/live"),
+            Require(Browser, Edit)
+        );
+        for p in ["nav", "control", "screenshot"] {
+            assert_eq!(
+                pol(Method::POST, &format!("/api/v1/browser/tabs/{{id}}/live/{p}")),
+                Require(Browser, Edit)
+            );
+        }
     }
 
     #[test]

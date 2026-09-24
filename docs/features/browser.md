@@ -314,6 +314,64 @@ rarely carries an id or test attribute from the original page).
 4. Click the crosshair button again to disarm picking — hovering/clicking no
    longer outlines or marks anything.
 
+## Remote live view (daemon Chromium)
+
+Native live tabs exist only inside the desktop app, and an iframe can't embed
+most real sites (`frame-ancestors` / `X-Frame-Options`). The **remote** live
+engine closes that gap for the PWA and remote web sessions: the daemon runs a
+Chromium, streams the page to the Browser pane as JPEG frames over
+`WS /ws/browser/{tab_id}/live`, and sends the viewer's mouse, keyboard, IME and
+paste input back. Code: `crates/otto-browser/src/live/` (engine) and
+`crates/otto-server/src/routes/browser_live.rs` (REST + WS). Contract: api.md
+"Browser — remote live view", ws.md §1b.
+
+**Enabling it.** Nothing is bundled or downloaded at boot. The first time,
+the Browser page offers "Enable remote live view", which calls
+`POST /browser/live/install` (Browser Admin): a one-time download of a pinned
+Chrome for Testing build into `<data>/browser/chromium/<version>/`, size- and
+sha256-verified before it is unpacked. Two builds, chosen with
+`PUT /browser/live/settings`:
+
+| Build | Size | Notes |
+|---|---|---|
+| `chrome` (default) | ~180 MB | full Chrome for Testing in new headless mode — best site compatibility |
+| `chrome-headless-shell` | ~98 MB | lighter; no headed mode |
+
+`headed: true` ("Show the window on this Mac") launches the same `chrome`
+build with a visible window on the daemon's Mac, still streamed to the pane.
+A build whose sha256 isn't pinned in this Otto build refuses to install;
+`OTTO_CHROME_BIN` points the runtime at an existing binary instead (dev/test).
+
+**Using it.** `POST /browser/tabs/{id}/live` opens the tab's session (the
+default `profile: "ephemeral"` gets its own throwaway browser context; a named
+profile keeps its cookies across sessions, scoped to workspace + user), then
+the pane attaches the WebSocket. The first input from a viewer makes them the
+driver; **Take over** / **Hand back** move control between a person and an
+agent — an agent's actions pause while a person drives, and a form submit an
+agent triggers is held until someone approves it in the MCP approvals queue
+(with a screenshot of the page taken before the action).
+
+**What protects it.** CDP runs over a pipe (no debugging port); every request
+the page makes is vetted by `otto-netguard` for the session's whole life, and
+every connection is dialled through a netguarded proxy (so WebSockets and DNS
+rebinding are covered too); downloads are refused or quarantined; sessions are
+private to their owner (plus workspace Admins and root); navigations, session
+open/close and control changes are audited.
+
+**Manual checklist** (needs a real Chromium — set `OTTO_CHROME_BIN` or pin the
+sha256 and run the install):
+
+1. `GET /api/v1/browser/live/status` shows the build as installed.
+2. Open a tab, `POST /api/v1/browser/tabs/{id}/live` with `{"url":
+   "https://example.com/"}` → `state: "ready"`.
+3. Attach the WS; frames arrive and keep arriving only while you ack them.
+4. Click a link and type into a field — the page reacts; the audit log gains
+   a `browser.live.navigate` row with the host only.
+5. Navigate to `http://127.0.0.1:7700/` — refused (`400 blocked` on REST, a
+   `blocked` frame when a page redirects there).
+6. `DELETE` the tab — the Chromium context is disposed; with no sessions left
+   the process exits within ~80 s.
+
 ## Troubleshooting
 
 - **A URL 400s immediately** — netguard blocked it (loopback/private/link-local/

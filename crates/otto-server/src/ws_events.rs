@@ -33,7 +33,7 @@ use crate::state::ServerCtx;
 
 /// Fixed first subprotocol the browser offers alongside the token; echoed back
 /// on a successful upgrade so the handshake completes.
-const BEARER_SUBPROTOCOL: &str = "otto-bearer";
+pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
@@ -81,7 +81,7 @@ pub async fn events_ws(
 
 /// Extract the bearer token from a `Sec-WebSocket-Protocol: otto-bearer, <token>`
 /// request header. Returns `None` when the header is absent or not in that form.
-fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?
         .to_str()
@@ -277,6 +277,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // the other canvas-family live-edit events.
         | Event::BrowserTabUpdated { workspace_id, .. }
         | Event::BrowserAnnotationAdded { workspace_id, .. }
+        // A remote live session's lifecycle tick (no URL/title — owner-private
+        // details stay on the per-tab REST/WS surface).
+        | Event::BrowserLiveSessionUpdated { workspace_id, .. }
         // Live mockup-source edits + the mockup-agent-started signal go to the
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
@@ -329,6 +332,8 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::AwsInstallUpdated { .. }
         | Event::K8sClusterUpdated { .. }
         | Event::K8sInstallUpdated { .. }
+        // The Chromium download job is machine-wide, like the k8s installer.
+        | Event::BrowserEngineInstallUpdated { .. }
         | Event::K8sMonitorCycle { .. } => Scope::Everyone,
         // Otto Assistant events are personal: the owner only (no root fan-out).
         Event::AssistantTurn { user_id, .. }

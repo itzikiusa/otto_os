@@ -515,6 +515,26 @@ pub enum Event {
         workspace_id: Id,
         annotation: serde_json::Value,
     },
+    /// A tab's remote live session (daemon Chromium) opened / became ready /
+    /// crashed / closed (`state` ∈ `starting|ready|crashed|closed`). Carries no
+    /// URL or title — the session is private to its owner; the Browser page
+    /// only badges the tab and re-fetches `GET /browser/tabs/{id}/live`.
+    BrowserLiveSessionUpdated {
+        workspace_id: Id,
+        tab_id: Id,
+        owner_id: Id,
+        state: String,
+    },
+    /// The Chromium download job ticked (`state` ∈
+    /// `downloading|verifying|extracting|installed|failed`). Machine-wide.
+    BrowserEngineInstallUpdated {
+        build: String,
+        version: String,
+        state: String,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+        error: Option<String>,
+    },
     /// AWS console: an account row was created/updated/deleted. Accounts are a
     /// global library (no workspace axis) — delivered to everyone; the client
     /// re-lists (RBAC filtering happens on the list call).
