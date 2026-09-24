@@ -26,6 +26,7 @@
   import EmailSenderSetup from './EmailSenderSetup.svelte';
   import PersonalAccessTokens from './PersonalAccessTokens.svelte';
   import BackupRestore from './BackupRestore.svelte';
+  import AssistantSettings from './AssistantSettings.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -46,6 +47,7 @@
     { id: 'git-accounts', label: 'Git Accounts' },
     { id: 'jira', label: 'Jira' },
     { id: 'channels', label: 'Channels' },
+    { id: 'assistant', label: 'Assistant' },
     { id: 'notifications', label: 'Notifications' },
     { id: 'self-improvement', label: 'Self-Improvement' },
     { id: 'mcp-servers', label: 'MCP Servers' },
@@ -112,6 +114,8 @@
       <IssueAccounts />
     {:else if page === 'channels'}
       <Channels />
+    {:else if page === 'assistant'}
+      <AssistantSettings />
     {:else if page === 'notifications'}
       <Notifications />
     {:else if page === 'self-improvement'}
