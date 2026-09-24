@@ -1,6 +1,23 @@
 // Tiny markdown renderer (headings, bold/italic, inline code, fenced code,
 // links, lists, blockquotes, paragraphs). Output is HTML-escaped first, so it
 // is safe to inject with {@html}.
+//
+// `renderMarkdownGfm` is the full-fidelity variant (GFM tables, task lists,
+// nested lists) for document-style previews — agent reports, SKILL.md — run
+// through the allowlist sanitizer so it is equally safe for {@html}.
+
+import { marked } from 'marked';
+import { sanitizeHtml } from './sanitize';
+
+/** GFM markdown → sanitized HTML. Never throws: a parse failure falls back to
+ *  the escaped tiny renderer. */
+export function renderMarkdownGfm(md: string): string {
+  try {
+    return sanitizeHtml(marked.parse(md ?? '', { async: false, gfm: true, breaks: false }) as string);
+  } catch {
+    return renderMarkdown(md);
+  }
+}
 
 function esc(s: string): string {
   return s

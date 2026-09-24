@@ -32,6 +32,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
   import type {
     BrokerCluster,
@@ -178,6 +179,7 @@
       ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
+      ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
@@ -589,6 +591,9 @@
       void (async () => {
         await database.loadConnections();
         await database.restoreWorkbench();
+        // `#/database/<connId>` (a pop-out window, a link) opens that tab.
+        const deep = router.module === 'database' ? router.parts[1] : undefined;
+        if (deep && database.connections.some((c) => c.id === deep)) await database.openConnection(deep);
       })();
       void loadSections();
       void brokers.load(ws.currentId); // clusters render in the same tree

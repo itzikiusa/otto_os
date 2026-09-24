@@ -2,6 +2,7 @@
 // to localStorage.
 
 import { accentFill } from '../accent';
+import { ambientImage, isAmbientMode, type AmbientMode } from '../ambient';
 import {
   autoVerticalFor,
   clampAutoVertical,
@@ -57,6 +58,9 @@ const LS = {
   scheme: 'otto_scheme',
   direction: 'otto_direction',
   accent: 'otto_accent',
+  ambient: 'otto_ambient',
+  ambientPhoto: 'otto_ambient_photo',
+  reduceTransparency: 'otto_reduce_transparency',
   zoom: 'otto_zoom',
   termFont: 'otto_term_font',
   termFontFamily: 'otto_term_font_family',
@@ -302,6 +306,22 @@ class UiStore {
   scheme: SchemePref = $state((lsGet(LS.scheme) as SchemePref) ?? 'auto');
   direction: Direction = $state((lsGet(LS.direction) as Direction) ?? 'ltr');
   accent: string = $state(lsGet(LS.accent) ?? '');
+  /** Ambient backdrop behind the chrome + the Home desktop (lib/ambient.ts).
+   *  Per device; defaults to the subtle accent wash. */
+  ambient: AmbientMode = $state(
+    ((v) => (isAmbientMode(v) ? v : 'subtle'))(lsGet(LS.ambient)),
+  );
+  /** The user's own wallpaper, already blurred + luminance-clamped per scheme
+   *  (lib/wallpaper.ts) — stored on this device only, never uploaded. */
+  ambientPhoto: { light: string; dark: string } | null = $state(
+    ((v) =>
+      v && typeof v === 'object' && typeof (v as { light?: unknown }).light === 'string' && typeof (v as { dark?: unknown }).dark === 'string'
+        ? (v as { light: string; dark: string })
+        : null)(lsGetJson<unknown>(LS.ambientPhoto, null)),
+  );
+  /** Opaque chrome, no ambient backdrop (also follows the system's
+   *  prefers-reduced-transparency in CSS). */
+  reduceTransparency = $state(lsGet(LS.reduceTransparency) === '1');
 
   /** app-level zoom, 1 = 100% */
   zoom = $state(Number(lsGet(LS.zoom) ?? '1') || 1);
@@ -615,6 +635,33 @@ class UiStore {
     this.applyTheme();
   }
 
+  setAmbient(mode: AmbientMode): void {
+    this.ambient = mode;
+    lsSet(LS.ambient, mode);
+    this.applyTheme();
+  }
+
+  /** Store (or clear) the processed wallpaper photo. Returns false when the
+   *  browser refused to store it (quota) — the caller says so. */
+  setAmbientPhoto(photo: { light: string; dark: string } | null): boolean {
+    try {
+      if (photo) localStorage.setItem(LS.ambientPhoto, JSON.stringify(photo));
+      else localStorage.removeItem(LS.ambientPhoto);
+    } catch {
+      return false;
+    }
+    this.ambientPhoto = photo;
+    if (photo) this.setAmbient('wallpaper');
+    else this.applyTheme();
+    return true;
+  }
+
+  setReduceTransparency(on: boolean): void {
+    this.reduceTransparency = on;
+    lsSet(LS.reduceTransparency, on ? '1' : '0');
+    this.applyTheme();
+  }
+
   setDirection(direction: Direction): void {
     this.direction = direction;
     lsSet(LS.direction, direction);
@@ -733,6 +780,15 @@ class UiStore {
       if (v) el.style.setProperty(prop, v);
       else el.style.removeProperty(prop);
     }
+    // Ambient backdrop: generated from the accent actually in effect (a custom
+    // one, else the theme's own) and the resolved scheme. `--ambient-art` feeds
+    // the `--ambient-image` token, which reduced transparency turns off.
+    const accent = this.accent || getComputedStyle(el).getPropertyValue('--accent').trim();
+    const photo = this.ambientPhoto ? this.ambientPhoto[resolved] : null;
+    el.style.setProperty('--ambient-art', ambientImage(this.ambient, accent, resolved, photo));
+    el.setAttribute('data-ambient', this.ambient);
+    if (this.reduceTransparency) el.setAttribute('data-transparency', 'reduced');
+    else el.removeAttribute('data-transparency');
   }
 }
 

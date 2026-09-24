@@ -18,7 +18,7 @@
   );
 </script>
 
-<footer class="statusbar">
+<footer class="statusbar chrome-material">
   <div class="sb-group">
     <span class="sb-item" title="Agents working">
       <span class="working-dot" class:on={ws.workingCount > 0}></span>
@@ -65,9 +65,9 @@
     align-items: center;
     justify-content: space-between;
     padding: 0 12px;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
-    font-size: 11px;
+    /* Chrome: toolbar glass over the ambient (.chrome-material). */
+    border-top: 1px solid var(--separator);
+    font-size: var(--fs-xs);
     color: var(--text);
     flex-shrink: 0;
   }

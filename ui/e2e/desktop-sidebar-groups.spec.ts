@@ -251,11 +251,12 @@ test('⌘K reaches Vault, Workflows and Mission Control (derived from the regist
     ['Workflows', 'workflows', 'Automate'],
     ['Mission Control', 'mission-control', 'Work'],
   ] as const) {
+    // ⌘K focuses the floating bar — the desktop command surface.
     await page.keyboard.press('Meta+k');
     await page.keyboard.type(`go to ${label}`);
-    const item = page.locator('.pal-item', { hasText: `Go to ${label}` }).first();
+    const item = page.getByTestId('floating-bar').getByRole('option').filter({ hasText: `Go to ${label}` }).first();
     await expect(item).toBeVisible();
-    await expect(item.locator('.pal-detail')).toHaveText(section);
+    await expect(item.locator('.opt-detail')).toHaveText(section);
     await item.click();
     await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/${route}`);
     await expect(row(page, label)).toHaveClass(/active/);
@@ -263,5 +264,7 @@ test('⌘K reaches Vault, Workflows and Mission Control (derived from the regist
   // Tools no longer masquerade as session commands.
   await page.keyboard.press('Meta+k');
   await page.keyboard.type('update all clis');
-  await expect(page.locator('.pal-item', { hasText: 'Update all CLIs' }).first().locator('.pal-group')).toHaveText('Tools');
+  await expect(
+    page.getByTestId('floating-bar').getByRole('option').filter({ hasText: 'Update all CLIs' }).first().locator('.opt-meta'),
+  ).toHaveText('Tools');
 });

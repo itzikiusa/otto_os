@@ -111,7 +111,7 @@ html[data-theme='native'][data-scheme='light'] {
   --surface-3: #e6e6ec;
   --border: rgba(0, 0, 0, 0.1);
   --text: #1d1d1f;
-  --text-dim: #69696e;
+  --text-dim: #636368;
   --term-bg: #fbfbfd;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
 }
@@ -180,9 +180,109 @@ html[data-theme='warm'][data-scheme='dark'] {
   --accent-contrast: #0f1a14;
 }
 
-/* Sidebar translucency (vibrancy shows through in the Tauri window). */
+/* ---------- Ambient backdrop + glass materials ----------
+
+   The ambient backdrop (Settings → Appearance: None / Subtle / Wallpaper) is a
+   soft full-bleed image generated in lib/ambient.ts and set inline on <html>
+   as --ambient-art. It is painted by the shell (seen through the sidebar's
+   blur), by the chrome strips (toolbar / status bar, fixed-attached so it
+   lines up with the sidebar), and by Home's desktop. Every ambient pixel stays
+   inside a scheme luminance band, which is what keeps text on glass AA
+   (unit/ambient.test.ts measures it against these values).
+
+   Glass is for CHROME ONLY — sidebar, toolbar strip, status bar, menus,
+   popovers, the palette, the menu-bar popover. Never behind tables, editors,
+   terminals, logs or forms (foundations.md §7).
+
+   --glass-tint          sidebar material (over the ambient backdrop)
+   --glass-tint-native   sidebar / menu-bar popover over the desktop app's
+                         NATIVE vibrancy (the real desktop, not luminance-
+                         banded, so it keeps the stronger 84% tint)
+   --glass-tint-bar      toolbar strip + status bar (over the ambient)
+   --glass-tint-raised   menus, popovers, palette (over app content)
+   --glass-blur(-raised) the backdrop-filter that goes with them
+   --glass-border        the hairline edge of a floating glass surface
+   --glass-shadow        elevation of a floating glass surface
+   --separator           the quiet hairline between chrome and content
+   --shadow-card         elevation 1: content cards resting on the page */
+:root {
+  --ambient-image: var(--ambient-art, none);
+  --glass-tint: color-mix(in srgb, var(--bg-sidebar) 72%, transparent);
+  --glass-tint-native: color-mix(in srgb, var(--bg-sidebar) 84%, transparent);
+  --glass-tint-bar: color-mix(in srgb, var(--bg) 72%, transparent);
+  --glass-tint-raised: color-mix(in srgb, var(--surface) 90%, transparent);
+  --glass-blur: blur(24px) saturate(1.5);
+  --glass-blur-raised: blur(20px) saturate(1.4);
+  --glass-border: color-mix(in srgb, var(--text) 10%, transparent);
+  --glass-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.06),
+    0 10px 36px rgba(0, 0, 0, 0.16);
+  --separator: color-mix(in srgb, var(--text) 8%, transparent);
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 2px 8px rgba(0, 0, 0, 0.03);
+}
+html[data-scheme='dark'],
+html[data-theme='pro-dark'] {
+  --glass-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.5),
+    0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
+/* Reduced transparency (the system setting, or Settings → Appearance): every
+   glass surface is its opaque token and the ambient backdrop is off. */
+html[data-transparency='reduced'] {
+  --ambient-image: none;
+  --glass-tint: var(--bg-sidebar);
+  --glass-tint-native: var(--bg-sidebar);
+  --glass-tint-bar: var(--bg);
+  --glass-tint-raised: var(--surface);
+  --glass-blur: none;
+  --glass-blur-raised: none;
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --ambient-image: none;
+    --glass-tint: var(--bg-sidebar);
+    --glass-tint-native: var(--bg-sidebar);
+    --glass-tint-bar: var(--bg);
+    --glass-tint-raised: var(--surface);
+    --glass-blur: none;
+    --glass-blur-raised: none;
+  }
+}
+
+/* The sidebar material: glass over the ambient backdrop in a browser, over
+   the window's native NSVisualEffect vibrancy in the desktop app. */
 .sidebar-material {
-  background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  background: var(--glass-tint);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+html.otto-vibrant .sidebar-material {
+  background: var(--glass-tint-native);
+}
+
+/* A chrome strip (toolbar row, status bar): the ambient, fixed to the
+   viewport so it lines up with what the sidebar shows, under the bar tint.
+   Opaque paint — no backdrop-filter, so it never becomes the containing
+   block of fixed-position popups inside it. */
+.chrome-material {
+  background-color: var(--bg);
+  background-image: linear-gradient(var(--glass-tint-bar), var(--glass-tint-bar)), var(--ambient-image);
+  background-attachment: fixed;
+  background-size: cover;
+  background-position: center;
+}
+
+/* A floating glass surface over app content: menus, popovers, the palette. */
+.glass-raised {
+  background: var(--glass-tint-raised);
+  backdrop-filter: var(--glass-blur-raised);
+  -webkit-backdrop-filter: var(--glass-blur-raised);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
 }

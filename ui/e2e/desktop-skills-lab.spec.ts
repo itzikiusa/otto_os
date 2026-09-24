@@ -137,6 +137,7 @@ test('API: provider-skills endpoint is live and well-shaped', async () => {
 });
 
 test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ page }) => {
+  test.setTimeout(150_000);
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_rail_expanded', '0');
@@ -150,9 +151,55 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
   await expect(page.locator('[data-testid="tab-review"]')).toBeVisible();
   await expect(page.locator('[data-testid="tab-evaluator"]')).toBeVisible();
 
-  // Skills tab (default) — the browser lists our created library skill.
+  // Skills tab (default) — the browser lists our created library skill, ONE
+  // row per name (copies are badges on the row, not duplicate rows).
   await expect(page.locator('[data-testid="skills-browser"]')).toBeVisible();
-  await expect(page.getByRole('button', { name: SKILL }).first()).toBeVisible({ timeout: 15_000 });
+  const row = page.locator('[data-testid="skill-row"]', { hasText: SKILL });
+  await expect(row).toHaveCount(1, { timeout: 15_000 });
+  const names = await page.locator('[data-testid="skill-row"] .row-name').allTextContents();
+  expect(new Set(names).size, 'no duplicate skill rows').toBe(names.length);
+
+  // It opens on a skill (never an empty "select a skill" pane).
+  await expect(page.locator('[data-testid="skill-detail"]')).toBeVisible();
+
+  // Search narrows the list; the detail shows the rendered SKILL.md with its
+  // frontmatter as a metadata card.
+  await page.getByRole('searchbox', { name: 'Search skills' }).fill(SKILL);
+  await expect(page.locator('[data-testid="skill-row"]')).toHaveCount(1);
+  await row.click();
+  await expect(page.locator('[data-testid="skill-name"]')).toHaveText(SKILL);
+  await expect(page.locator('[data-testid="skill-preview"] h2', { hasText: 'Workflow' })).toBeVisible();
+  await expect(page.getByRole('complementary', { name: 'Skill metadata' })).toContainText('review');
+
+  // Edit: the multi-file editor (library copies are editable).
+  await page.getByRole('tab', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('[data-testid="skill-view"]')).toContainText('## Workflow');
+  await page.locator('[data-testid="edit-skill"]').click();
+  await expect(page.locator('[data-testid="skill-editor"]')).toBeVisible();
+
+  // Evals / Usage: honest states from existing data (no eval runs here).
+  await page.getByRole('tab', { name: 'Evals', exact: true }).click();
+  await expect(page.getByText('Not evaluated yet')).toBeVisible();
+  await page.getByRole('tab', { name: 'Usage', exact: true }).click();
+  await expect(page.getByText('Installed in')).toBeVisible();
+
+  // New skill: the header primary opens a template picker; names are validated.
+  await page.locator('[data-testid="new-skill"]').click();
+  await expect(page.locator('[data-testid="tpl-blank"]')).toBeVisible();
+  await expect(page.locator('[data-testid="tpl-bundled"]')).toBeVisible();
+  await expect(page.locator('[data-testid="tpl-import"]')).toBeVisible();
+  await page.locator('[data-testid="new-skill-name"]').fill(SKILL);
+  await expect(page.getByText(`A skill named "${SKILL}" already exists`)).toBeVisible();
+  await expect(page.locator('[data-testid="create-skill"]')).toBeDisabled();
+  await page.locator('[data-testid="new-skill-name"]').fill(`${SKILL}-two`);
+  await page.locator('[data-testid="create-skill"]').click();
+  await expect(page.locator('[data-testid="skill-name"]')).toHaveText(`${SKILL}-two`, { timeout: 15_000 });
+  await expect(page.getByRole('tab', { name: 'Edit', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('[data-testid="skill-view"]')).toContainText('## When to use');
+  // Clean up the extra library skill so reruns start clean.
+  const { ctx: c2, base: b2 } = await apiCtx();
+  await c2.delete(`${b2}/api/v1/library/skills/${SKILL}-two`);
+  await c2.dispose();
 
   // Review tab — the review panel + new-review entry render.
   await page.locator('[data-testid="tab-review"]').click();

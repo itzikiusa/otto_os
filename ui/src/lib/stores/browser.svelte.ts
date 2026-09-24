@@ -6,6 +6,7 @@
 
 import * as browserApi from '../api/browser';
 import { nativeBrowserAvailable } from '../nativeBrowser';
+import { browserLive } from './browserLive.svelte';
 import type { BrowserAnnotation, BrowserAskReq, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
 
 /** localStorage key for the agent session the Browser page's dock is attached
@@ -30,10 +31,14 @@ function lsSet(key: string, val: string | null): void {
 }
 
 /** A `mode:"live"` tab only skips the reader fetch where something actually
- *  renders it live (a Tauri child webview) — off Tauri (remote/PWA), the view
- *  falls back to reader, so the store must still fetch the page for it. */
+ *  renders it live: the desktop app's child webview, or the daemon's
+ *  streamed Chromium (browserLive). Only a daemon that predates live
+ *  streaming (`supported === false`) off the desktop app falls back to
+ *  reader, so the store must still fetch the page for it there. */
 function isNativeLive(tab: BrowserTab): boolean {
-  return tab.mode === 'live' && nativeBrowserAvailable;
+  if (tab.mode !== 'live') return false;
+  if (browserLive.renderer === 'native') return nativeBrowserAvailable;
+  return browserLive.supported !== false;
 }
 
 class BrowserStore {

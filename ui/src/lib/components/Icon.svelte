@@ -123,6 +123,15 @@
     target: 'M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15M8 4.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4ZM8 7.3a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4Z',
     // Live-tab "click to interact" pointer (browser panel).
     cursor: 'M3.5 2.5 12.5 7.3 8.5 8.5 6.7 12.5 3.5 2.5ZM8.5 8.5l3.6 3.6',
+    // Assistant (module): a speech bubble holding a spark — the one front door
+    // you talk to (distinct from `sparkle`, the in-page "generate" verb).
+    assistant: 'M3 2.8h10a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1H7.2L4.5 13.5v-2.3H3a1 1 0 0 1-1-1V3.8a1 1 0 0 1 1-1Zm5 1.9.6 1.6 1.6.6-1.6.6L8 9.1l-.6-1.6-1.6-.6 1.6-.6L8 4.7Z',
+    // Microphone — push-to-talk / dictation.
+    mic: 'M8 2a2 2 0 0 1 2 2v3.5a2 2 0 0 1-4 0V4a2 2 0 0 1 2-2ZM4.2 7.4a3.8 3.8 0 0 0 7.6 0M8 11.2V14m-2 0h4',
+    // Curved back-arrow — undo a just-made change (a remembered memory).
+    undo: 'M5.2 3.8 2.5 6.5l2.7 2.7M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7',
+    // Raised hand — an approval or a question waiting on you.
+    hand: 'M5.5 8V3.8a1 1 0 0 1 2 0V7.5m0-4.7a1 1 0 0 1 2 0v4.7m0-3.7a1 1 0 0 1 2 0V9a4.5 4.5 0 0 1-4.5 4.5H7a3.5 3.5 0 0 1-2.9-1.6L2.6 9.6a1 1 0 0 1 1.6-1.2L5.5 10',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

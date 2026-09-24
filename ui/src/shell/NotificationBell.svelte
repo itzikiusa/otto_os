@@ -153,7 +153,7 @@
       ></div>
 
       <div
-        class="panel"
+        class="panel glass-raised"
         role="dialog"
         aria-label="Notifications"
         style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxHeight}px"
@@ -260,10 +260,8 @@
     z-index: 9999;
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    /* Raised glass (tokens.css .glass-raised). */
+    border-radius: var(--radius-l);
     overflow: hidden;
     animation: panel-in 140ms ease-out;
   }

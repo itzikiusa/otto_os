@@ -3,7 +3,7 @@ import { apiCtx, seedWorkspace } from './seed';
 import { openPage } from './helpers';
 
 // Postman import in the API client:
-//   • the Import button opens the Postman dialog (account sync + file import)
+//   • the header's Import… opens one Import sheet (curl · File · Postman account)
 //   • a Postman v2.1 COLLECTION file imports into collections/requests
 //   • a Postman ENVIRONMENT export (`{name, values:[…]}`) imports as an API
 //     environment (new) — enabled vars kept, disabled dropped
@@ -31,14 +31,15 @@ const RUN = Math.random().toString(36).slice(2, 7);
 
 test('imports a Postman collection and environment via the import dialog', async ({ page }) => {
   await openPage(page, 'api');
-  await page.getByRole('button', { name: 'Collections' }).first().click();
 
-  // The header Import button opens the Postman dialog with the file fallback.
-  // dispatchEvent, not click(): the dialog opens synchronously and its backdrop
-  // then covers the button, which makes Playwright's click-retry verification
-  // judge the (already landed) click as intercepted and time out.
-  await page.getByRole('button', { name: 'Import collections' }).dispatchEvent('click');
-  await expect(page.getByText('Sync your whole Postman account')).toBeVisible();
+  // The header Import… opens the Import sheet; its File tab takes Postman,
+  // OpenAPI and HAR files. dispatchEvent, not click(): the dialog opens
+  // synchronously and its backdrop then covers the button, which makes
+  // Playwright's click-retry verification judge the (already landed) click as
+  // intercepted and time out.
+  await page.getByRole('button', { name: 'Import…' }).dispatchEvent('click');
+  await page.getByRole('dialog').getByRole('tab', { name: 'File' }).click();
+  await expect(page.getByText('Turn an exported file into a collection')).toBeVisible();
   const fileInput = page.locator('input[type="file"]').first();
 
   // ── Collection file ───────────────────────────────────────────────────────
@@ -68,8 +69,9 @@ test('imports a Postman collection and environment via the import dialog', async
   ).toBeVisible({ timeout: 15_000 });
 
   // ── Environment file ──────────────────────────────────────────────────────
-  await page.getByRole('button', { name: 'Import collections' }).dispatchEvent('click');
-  await expect(page.getByText('Sync your whole Postman account')).toBeVisible();
+  await page.getByRole('button', { name: 'Import…' }).dispatchEvent('click');
+  await page.getByRole('dialog').getByRole('tab', { name: 'File' }).click();
+  await expect(page.getByText('Turn an exported file into a collection')).toBeVisible();
   const environment = {
     name: `PM Env ${RUN}`,
     _postman_variable_scope: 'environment',

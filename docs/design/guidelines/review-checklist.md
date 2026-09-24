@@ -83,8 +83,13 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
       `--accent-contrast` for fills, `--accent-soft` for selection. No literal
       accent.
 - [ ] No `--text-dim` on `--surface-3`. No text on translucent material
-      without a ≥ 78% tint.
-- [ ] Vibrancy only on chrome, never behind data.
+      unless it uses a `--glass-*` tint (measured in `unit/ambient.test.ts`);
+      only `--text` straight on the ambient backdrop.
+- [ ] Glass only on chrome (`.sidebar-material`, `.chrome-material`,
+      `.glass-raised`), never behind data, forms or Modal bodies. Content
+      columns stay opaque; only Home paints the backdrop behind content.
+- [ ] Checked with Settings → Appearance → Backdrop on **Wallpaper** and with
+      *Reduce transparency* on (everything opaque, no backdrop).
 - [ ] Colour is never the only signal.
 
 ### Type, spacing, shape

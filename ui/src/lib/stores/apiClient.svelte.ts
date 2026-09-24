@@ -30,7 +30,7 @@ import type {
   UpsertApiRequestReq,
 } from '../api/types';
 import { isSecretRef } from '../api/types';
-import { stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
+import { forDuplicate, stripSecretsForStorage, unmaskHistory } from '../api/apiSecretShapes';
 import { ws } from './workspace.svelte';
 import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
@@ -101,6 +101,9 @@ export interface ApiDraft {
   graphql_variables?: string;
   /** Free-form Markdown documentation for this request. */
   docs?: string;
+  /** UI-only: the collection a new draft was started in ("New request here"),
+   *  preselected by the save sheet. Never sent to the daemon. */
+  collectionHint?: Id | null;
 }
 
 export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
@@ -123,14 +126,51 @@ function blankDraft(): ApiDraft {
   };
 }
 
+/** What a send would carry, for the new-host confirmation. */
+export interface NewHostContext {
+  method?: string;
+  url?: string;
+  /** Plain-language names of the stored secrets involved. */
+  secrets?: string[];
+}
+
 /** Ask the person whether a stored secret may go to `host` (the daemon's
- *  `409 needs_confirm=new_host`). Only a person can confirm — agents can't. */
-export function confirmNewHost(host: string): Promise<boolean> {
-  const where = host ? `“${host}”` : 'this host';
-  return confirmer.ask(
-    `This request would send a stored secret (Keychain credential or environment secret) to ${where}, which it isn't bound to. Send it anyway?`,
-    { title: 'Send secret to a new host?', confirmLabel: 'Send', danger: true },
-  );
+ *  `409 needs_confirm=new_host`). Only a person can confirm — agents can't.
+ *  Says WHERE (host + method/URL), WHAT (which stored secret) and the risk. */
+export function confirmNewHost(host: string, ctx: NewHostContext = {}): Promise<boolean> {
+  const where = host || 'this host';
+  const lines = [
+    `${where} hasn't received this stored secret before. Secrets are bound to the hosts of the requests they were saved with.`,
+    '',
+  ];
+  if (ctx.method || ctx.url) lines.push(`Request: ${[ctx.method, ctx.url].filter(Boolean).join(' ')}`);
+  lines.push(`Secret sent: ${ctx.secrets?.length ? ctx.secrets.join(', ') : 'a Keychain credential or a secret environment variable'}`);
+  lines.push('', `Only continue if you trust ${where}: it will be able to read and reuse the secret.`);
+  return confirmer.ask(lines.join('\n'), {
+    title: 'Send a secret to a new host?',
+    confirmLabel: 'Send anyway',
+    danger: true,
+  });
+}
+
+/** Stored secrets a draft would send: Keychain-backed auth members plus
+ *  secret environment variables it references (names only, never values). */
+export function draftSecrets(d: ApiDraft, env: ApiEnvironment | null): string[] {
+  const out: string[] = [];
+  const auth = d.auth as unknown as Record<string, unknown>;
+  const LABEL: Record<string, string> = {
+    token: 'bearer token', password: 'password', value: 'API key', client_secret: 'client secret',
+    refresh_token: 'refresh token', access_token: 'access token',
+  };
+  for (const [k, v] of Object.entries(auth)) {
+    if (isSecretRef(v as ApiSecretable)) out.push(`the saved ${LABEL[k] ?? k} (Keychain)`);
+  }
+  if (env?.secret_keys.length) {
+    const text = [d.url, d.body, ...d.headers.map((h) => h.value), ...d.query.map((q) => q.value),
+      ...Object.values(auth).filter((v): v is string => typeof v === 'string')].join('\n');
+    for (const k of env.secret_keys) if (text.includes(`{{${k}}}`)) out.push(`{{${k}}} from “${env.name}”`);
+  }
+  return out;
 }
 
 /** Drop empty/disabled key-vals before sending; keep enabled (default true). */
@@ -292,12 +332,14 @@ class ApiClientStore {
     this.tabs = [...this.tabs, {...d, tabId: crypto.randomUUID()}];
     this.activeTab = this.tabs.length - 1;
     this.lastResponse = null;
+    this.lastError = null;
     this.persistTabs();
   }
   switchTab(i: number): void {
     if (i >= 0 && i < this.tabs.length) {
       this.activeTab = i;
       this.lastResponse = null;
+      this.lastError = null;
       this.persistTabs();
     }
   }
@@ -312,6 +354,7 @@ class ApiClientStore {
       else if (i < this.activeTab) this.activeTab -= 1;
     }
     this.lastResponse = null;
+    this.lastError = null;
     this.persistTabs();
   }
 
@@ -406,9 +449,14 @@ class ApiClientStore {
   }
   /** Last execute() result, shown in the ResponseViewer. */
   lastResponse: ApiResponse | null = $state(null);
+  /** Why the active tab's last send failed (shown inline in the response
+   *  pane instead of the previous response); null after a success. */
+  lastError: string | null = $state(null);
   /** In-flight send. */
   sending = $state(false);
   loading = $state(false);
+  /** Why the last loadAll() failed (shown inline with Retry); null when fine. */
+  loadError: string | null = $state(null);
   /** AbortController for the currently in-flight execute() call; null when idle. */
   private _abortCtrl: AbortController | null = null;
   private _executeTab: string | null = null;
@@ -445,6 +493,7 @@ class ApiClientStore {
     // the fetches below fail — the drafts are device-local, not server data).
     this.restoreTabs(wid);
     this.loading = true;
+    this.loadError = null;
     try {
       const [collections, requests, environments] = await Promise.all([
         api.get<ApiCollection[]>(`${base}/collections`),
@@ -466,7 +515,7 @@ class ApiClientStore {
         this.persistTabs();
       }
     } catch (e) {
-      toasts.error('Could not load API client', errMsg(e));
+      if (this.wsId() === wid) this.loadError = errMsg(e);
     } finally {
       if (this.wsId() === wid) this.loading = false;
     }
@@ -958,7 +1007,7 @@ class ApiClientStore {
     this.cancelExecute();
     const controller = new AbortController();
     this._abortCtrl = controller; this._executeTab = tabId ?? null;
-    this.sending = true; this.testResults = []; this.scriptLogs = [];
+    this.sending = true; this.testResults = []; this.scriptLogs = []; this.lastError = null;
     const { signal } = controller;
     const ownsExecution = () => this._abortCtrl === controller && !signal.aborted
       && this.wsId() === wid && this.tabs.some(tab => tab.tabId === tabId);
@@ -1007,7 +1056,11 @@ class ApiClientStore {
         const host = newHostConfirmHost(e);
         if (host === null) throw e;
         checkCurrent();
-        const ok = await confirmNewHost(host);
+        // Show the URL as it will be sent: plain variables filled in (secret
+        // values are never resolved client-side).
+        const env = this.environments.find((e) => e.id === environmentId) ?? null;
+        const shownUrl = reqCtx.url.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, n: string) => runtimeVars[n] ?? env?.variables[n] ?? m);
+        const ok = await confirmNewHost(host, { method: reqCtx.method, url: shownUrl, secrets: draftSecrets(draft, env) });
         checkCurrent();
         if (!ok) throw new DOMException('Request canceled', 'AbortError');
         resp = await api.post<ApiResponse>(`${base}/execute`, { ...body, confirm_new_host: true }, signal);
@@ -1030,7 +1083,12 @@ class ApiClientStore {
       return resp;
     } catch (e) {
       if (ownsView()) this.scriptLogs = [...logs, `[error] ${errMsg(e)}`];
-      if (!signal.aborted && ownsExecution() && !isAbortError(e)) toasts.error('Request failed', errMsg(e));
+      if (!signal.aborted && ownsExecution() && !isAbortError(e)) {
+        // The response pane shows the failure in place (with the reason); a
+        // send finishing on another tab still reports through a toast.
+        if (ownsView()) { this.lastError = errMsg(e); this.lastResponse = null; }
+        else toasts.error('Request failed', errMsg(e));
+      }
       return null;
     } finally {
       if (this._abortCtrl === controller) {
@@ -1269,9 +1327,25 @@ class ApiClientStore {
 
   // ── Draft helpers ─────────────────────────────────────────────────────────
 
-  /** Open a fresh request in a new tab. */
-  newDraft(): void {
-    this.openTab(blankDraft());
+  /** Open a fresh request in a new tab (optionally "in" a collection, which
+   *  the save sheet then preselects). */
+  newDraft(collectionHint: Id | null = null): void {
+    this.openTab({ ...blankDraft(), collectionHint });
+  }
+
+  /** Open a copy of the active request in a new, unsaved tab. Keychain-backed
+   *  credentials are not copied (they belong to the original's Keychain item). */
+  duplicateDraft(): void {
+    const src = $state.snapshot(this.draft) as ApiDraft;
+    const saved = src.requestId ? this.requests.find((r) => r.id === src.requestId) : undefined;
+    const { blanked, ...copy } = forDuplicate(src);
+    this.openTab({
+      ...copy,
+      requestId: null,
+      name: `${src.name?.trim() || this.tabLabel(src)} copy`,
+      collectionHint: saved?.collection_id ?? src.collectionHint ?? null,
+    });
+    if (blanked) toasts.info('Duplicated without stored credentials', 'Re-enter them in Auth before sending, or use an environment {{variable}}.');
   }
 
   /** Put a loaded draft in front WITHOUT losing anyone's edits: a tab that
@@ -1292,6 +1366,7 @@ class ApiClientStore {
     }
     this.draft = d;
     this.lastResponse = null;
+    this.lastError = null;
   }
 
   /** Load a saved request into the builder (persisted extras included). */
@@ -1332,6 +1407,7 @@ class ApiClientStore {
     const kv = (rows: ApiKeyVal[]): string =>
       JSON.stringify(rows.filter((r) => r.key.trim() !== '' || r.value.trim() !== ''));
     return (
+      (d.name.trim() !== '' && d.name !== saved.name) ||
       d.method !== saved.method ||
       d.url !== saved.url ||
       d.body !== saved.body ||

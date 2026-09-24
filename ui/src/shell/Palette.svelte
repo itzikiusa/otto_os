@@ -6,67 +6,22 @@
   // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
   // second "Results" section below commands.
   import { api, isAbortError } from '../lib/api/client';
-  import type {
-    Action,
-    BroadcastResp,
-    ExecuteResult,
-    OrchestrateResp,
-    SearchHit,
-  } from '../lib/api/types';
+  import type { Action, SearchHit } from '../lib/api/types';
   import { untrack } from 'svelte';
   import { registry, type Command } from '../lib/commands.svelte';
+  import { loadFrecency, rankCommands, recordUsage } from '../lib/commandSearch';
   import {
-    parseCommand,
-    parseClose,
-    startsWithCloseVerb,
-    type CloseRequest,
-  } from '../lib/commandParser';
-  import { allProviders } from '../lib/providers';
-  import { fuzzyMatch } from '../lib/fuzzy';
+    describeAction,
+    executePlan as runPlan,
+    plural,
+    runEnglish,
+    type EnglishOutcome,
+  } from '../lib/orchestrate';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
-  import { applyTileOrder } from '../lib/stores/splitLayout';
-  import { layout } from '../lib/stores/splitLayout.svelte';
+  import { storeContext } from '../lib/ask';
   import { toasts } from '../lib/toast.svelte';
   import Icon, { type IconName } from '../lib/components/Icon.svelte';
-
-  // ---- frecency tracking ----
-  // Persist command-usage counts + last-used timestamps in localStorage so
-  // frequently- and recently-used commands float to the top of the palette.
-  // Shape: { [commandId]: { count: number; lastUsed: number } }
-  const FRECENCY_KEY = 'otto_palette_frecency';
-
-  interface FrecencyEntry { count: number; lastUsed: number; }
-  type FrecencyMap = Record<string, FrecencyEntry>;
-
-  function loadFrecency(): FrecencyMap {
-    try {
-      return JSON.parse(localStorage.getItem(FRECENCY_KEY) ?? '{}') as FrecencyMap;
-    } catch {
-      return {};
-    }
-  }
-
-  function saveFrecency(m: FrecencyMap): void {
-    try { localStorage.setItem(FRECENCY_KEY, JSON.stringify(m)); } catch { /* quota */ }
-  }
-
-  function recordUsage(id: string): void {
-    const m = loadFrecency();
-    const prev = m[id] ?? { count: 0, lastUsed: 0 };
-    m[id] = { count: prev.count + 1, lastUsed: Date.now() };
-    saveFrecency(m);
-  }
-
-  /** Blend frecency into a base fuzzy score. Returns a boost in [0, 20]. */
-  function frecencyBoost(id: string, frecency: FrecencyMap): number {
-    const e = frecency[id];
-    if (!e) return 0;
-    const countBoost = Math.min(e.count * 1.5, 12);          // up to 12
-    const ageMs = Date.now() - e.lastUsed;
-    const recencyBoost = Math.max(0, 8 - ageMs / (1000 * 60 * 60 * 24)); // decay over 8d
-    return countBoost + recencyBoost;
-  }
 
   let mode: 'commands' | 'english' = $state('commands');
   let query = $state('');
@@ -159,27 +114,11 @@
     }
   }
 
-  const filtered: { cmd: Command; score: number }[] = $derived.by(() => {
-    const cmds = registry.all;
-    const frecency = loadFrecency();
-    if (query.trim() === '') {
-      // No query: show top 14 sorted by frecency boost (most-used first).
-      return cmds
-        .map((cmd) => ({ cmd, score: frecencyBoost(cmd.id, frecency) }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 14);
-    }
-    return cmds
-      .map((cmd) => {
-        const m = fuzzyMatch(query, `${cmd.title} ${cmd.keywords ?? ''} ${cmd.group ?? ''}`);
-        if (!m) return null;
-        const score = m.score + frecencyBoost(cmd.id, frecency);
-        return { cmd, score };
-      })
-      .filter((x): x is { cmd: Command; score: number } => x !== null)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 14);
-  });
+  // Frecency-boosted fuzzy ranking, shared with the floating bar
+  // (lib/commandSearch.ts).
+  const filtered: { cmd: Command; score: number }[] = $derived(
+    rankCommands(registry.all, query, loadFrecency()),
+  );
 
   // Fire a debounced cross-module search whenever the query changes in commands
   // mode. Using $effect ensures this tracks `query` and `mode` reactively.
@@ -321,53 +260,21 @@
       toasts.error('No workspace selected', 'Pick a workspace in the navigator first.');
       return;
     }
-
-    // Close / delete commands: "close sessions 1,2" (by position), "close all
-    // claude sessions" (by provider), "close claude session 1" (provider+index),
-    // "close ronaldo" (by name); "delete/kill …" removes instead of archiving.
-    // Anchored on a leading close verb. handleClose returns false when nothing
-    // resolves (e.g. free-form "delete the file foo") so it falls through to AI.
-    const closeReq = parseClose(englishText, allProviders());
-    if (closeReq || startsWithCloseVerb(englishText)) {
-      if (await handleClose(englishText, closeReq)) return;
-    }
-
-    // Addressed send: "send to messi hi", "send to session 1 hi", "tell ronaldo
-    // to stand down", "messi: hi", "messi hi", "all: hi", "broadcast run tests".
-    // Resolves the target (name / position / all) client-side and delivers via
-    // the broadcast endpoint. Returns false (fall through) when nothing resolves.
-    if (await handleAddressedSend(englishText)) return;
-
-    // Deterministic first: common intents ("open 2 claude sessions",
-    // "broadcast run the tests") execute instantly with no LLM and no
-    // confirmation step. Only fall through to the AI planner when this
-    // can't parse the request AND the user enabled AI fallback.
-    const literal = parseCommand(englishText, allProviders());
-    if (literal && literal.length > 0) {
-      plan = literal;
-      await executePlan();
-      return;
-    }
-
-    if (!aiFallback) {
-      toasts.warn(
-        "Couldn't parse that",
-        'Try e.g. "open 2 claude sessions", or enable AI fallback for free-form requests.',
-      );
-      return;
-    }
-
     busy = true;
     plan = null;
+    // Remember which sessions exist now, so we can OPEN whatever gets spawned.
+    const before = new Set(ws.sessions.map((s) => s.id));
     try {
-      const resp = await api.post<OrchestrateResp>(`/workspaces/${ws.currentId}/orchestrate`, {
-        text: englishText,
+      // The shared engine (lib/orchestrate.ts): close → addressed send →
+      // deterministic plan (runs at once) → AI planner (confirm below).
+      // The palette runs deletes directly (the bar asks first).
+      const out = await runEnglish(englishText, {
+        ...storeContext(ws.currentId),
         optimize,
-        ai_fallback: aiFallback,
-        focused_session_id: ws.activeSessionId,
+        aiFallback,
+        confirmDestructive: false,
       });
-      plan = resp.plan;
-      optimizedText = resp.optimized_text;
+      await applyOutcome(out, before);
     } catch (e) {
       toasts.error('Orchestrate failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -375,291 +282,75 @@
     }
   }
 
-  // Words that must never be treated as a session NAME when resolving a
-  // "close <name>" command (verbs, fillers, nouns, providers, numbers).
-  const CLOSE_SKIP = new Set([
-    'please', 'pls', 'kindly', 'close', 'kill', 'end', 'stop', 'terminate',
-    'quit', 'remove', 'exit', 'shut', 'down', 'and', 'the', 'all', 'every',
-    'everything', 'everyone', 'them', 'session', 'sessions', 'pane', 'panes',
-    'tab', 'tabs', 'terminal', 'terminals', 'window', 'windows', 'agent', 'agents',
-    'claude', 'codex', 'agy', 'shell', 'gemini', 'antigravity', 'gpt', 'bash', 'zsh',
-  ]);
-
-  /** On-screen session order (how the user counts positions): the tiled grid
-   *  when tiled, else the side-by-side panes. */
-  function paneOrder(): string[] {
-    return ws.viewMode === 'tiled' && !ws.maximizedId
-      ? applyTileOrder(ws.mainSessions, layout.tileOrder).map((s) => s.id)
-      : ws.panes.filter((id) => ws.sessions.some((s) => s.id === id));
-  }
-
-  /** The folded tokens an open agent session answers to: its handle, title, and
-   *  the individual words of both (so "diego" matches "Diego Ferreira"). */
-  function sessionAnswerTokens(s: { title: string; meta?: unknown }): Set<string> {
-    const meta = s.meta as Record<string, unknown> | undefined;
-    const handle = String(meta?.name_handle ?? s.title).toLowerCase();
-    const full = String(meta?.name_full ?? '').toLowerCase();
-    return new Set(
-      [handle, s.title.toLowerCase(), ...full.split(/\s+/), ...s.title.toLowerCase().split(/\s+/)]
-        .filter(Boolean),
-    );
-  }
-
-  /** Open agent session ids whose answer-tokens include `tok` (lowercased).
-   *  Only VISIBLE foreground sessions answer to a name — hidden background
-   *  ones (workflow steps, review agents, …) share common title words like
-   *  "open"/"tests" and would hijack ordinary commands if they counted. */
-  function matchSessionsByToken(tok: string): string[] {
-    const ids: string[] = [];
-    for (const s of ws.plainAgentSessions) {
-      if (sessionAnswerTokens(s).has(tok)) ids.push(s.id);
-    }
-    return ids;
-  }
-
-  /** Remove the first `n` whitespace-delimited words from `text`. */
-  function stripLeadingWords(text: string, n: number): string {
-    let rest = text;
-    for (let i = 0; i < n; i++) {
-      rest = rest.trimStart();
-      const m = rest.search(/\s/);
-      if (m === -1) return '';
-      rest = rest.slice(m);
-    }
-    return rest.trimStart();
-  }
-
-  /** Resolve the open agent sessions a "close/delete <name>" command names. */
-  function resolveCloseNames(text: string): string[] {
-    const toks = text
-      .toLowerCase()
-      .replace(/[:,]/g, ' ')
-      .split(/\s+/)
-      .filter((t) => t.length >= 2 && !CLOSE_SKIP.has(t) && !/^\d+$/.test(t));
-    if (toks.length === 0) return [];
-    const ids = new Set<string>();
-    for (const t of toks) for (const id of matchSessionsByToken(t)) ids.add(id);
-    return [...ids];
-  }
-
-  /** Handle a close/delete command from the ⌘I box: by name, by provider (+
-   *  optional index), by on-screen position, or all. "close/end" archives
-   *  (recoverable); "delete/kill/destroy" removes permanently. Returns true when
-   *  it handled the command; false when nothing resolved (so the caller can fall
-   *  through to AI for a free-form request like "delete the file foo"). */
-  async function handleClose(text: string, req: CloseRequest | null): Promise<boolean> {
-    const permanent = req?.permanent ?? /\b(kill|delete|destroy)\b/.test(text.toLowerCase());
-    const order = paneOrder();
-
-    let ids: string[] = [];
-    // A structured target (provider / all / position) is a DELIBERATE close — we
-    // warn rather than fall through when it matches nothing.
-    const deliberate = !!req && (!!req.provider || req.all || req.positions.length > 0);
-    if (req?.provider) {
-      const prov = ws.sessions.filter(
-        (s) => !s.archived && s.kind === 'agent' && s.provider === req.provider,
-      );
-      ids =
-        req.positions.length > 0
-          ? req.positions.map((p) => prov[p - 1]?.id).filter((x): x is string => !!x)
-          : prov.map((s) => s.id);
-    } else if (req?.all) {
-      ids = order.slice();
-    } else if (req && req.positions.length > 0) {
-      ids = req.positions.map((p) => order[p - 1]).filter((x): x is string => !!x);
-    } else {
-      // Name-based ("close ronaldo"). If nothing matches, fall through — the text
-      // may be a free-form request ("delete the temp files") for the AI.
-      ids = resolveCloseNames(text);
-      if (ids.length === 0) return false;
-    }
-
-    if (ids.length === 0) {
-      if (!deliberate) return false;
-      toasts.warn('Nothing to close', 'No matching open session.');
+  /** Render an engine outcome: toast + close, or show the plan to confirm. */
+  async function applyOutcome(out: EnglishOutcome, before: Set<string>): Promise<void> {
+    const done = (): void => {
       close();
       englishText = '';
-      return true;
-    }
-
-    busy = true;
-    try {
-      for (const id of ids) {
-        if (permanent) await ws.killSession(id);
-        else await ws.archiveSession(id);
-      }
-      toasts.success(
-        permanent ? 'Sessions deleted' : 'Sessions closed',
-        `${ids.length} session${ids.length === 1 ? '' : 's'} ${permanent ? 'removed' : 'archived'}`,
-      );
-      close();
-      englishText = '';
-    } catch (e) {
-      toasts.error('Close failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      busy = false;
-    }
-    return true;
-  }
-
-  /** Parse an addressed send and resolve its target session(s). Returns null
-   *  when the text isn't an addressed send (caller falls through). */
-  function resolveAddress(
-    text: string,
-  ): { ids: string[]; broadcast: boolean; message: string } | null {
-    let s = text.trim();
-    let forceBroadcast = false;
-    let hadVerb = false;
-    // Optional leading send verb ("send to", "tell", "ask", "broadcast", …).
-    const verb = s.match(/^(?:please\s+)?(send|tell|message|msg|ask|say|broadcast|relay|whisper)\b[:,]?\s*/i);
-    if (verb) {
-      hadVerb = true;
-      forceBroadcast = /^broadcast$/i.test(verb[1]);
-      s = s.slice(verb[0].length).replace(/^(?:a\s+message\s+to\s+|to\s+|the\s+)/i, '');
-    }
-    s = s.trim();
-    const tokens = s.split(/\s+/).filter(Boolean);
-    const order = paneOrder();
-    const first = (tokens[0] ?? '').toLowerCase().replace(/[:,]+$/, '');
-
-    // Broadcast: "all/everyone …" or the "broadcast" verb.
-    if (forceBroadcast || /^(all|everyone|everybody)$/.test(first)) {
-      const consumed = /^(all|everyone|everybody)$/.test(first) ? 1 : 0;
-      const message = stripLeadingWords(s, consumed).replace(/^to\s+/i, '').trim();
-      return { ids: [], broadcast: true, message };
-    }
-
-    // Position: "session 1", "pane 2", "#3".
-    let pos: number | null = null;
-    let consumed = 0;
-    if (/^(session|sessions|pane|panes|tab|tabs|window|windows|number|no)$/.test(first) && /^\d+$/.test(tokens[1] ?? '')) {
-      pos = parseInt(tokens[1], 10);
-      consumed = 2;
-    } else if (/^#\d+$/.test(tokens[0] ?? '')) {
-      pos = parseInt(tokens[0].slice(1), 10);
-      consumed = 1;
-    }
-    if (pos !== null) {
-      const id = order[pos - 1];
-      const message = stripLeadingWords(s, consumed).replace(/^to\s+/i, '').trim();
-      return { ids: id ? [id] : [], broadcast: false, message };
-    }
-
-    // Bare (unverbed, un-colon'd) addressing must never shadow a command the
-    // deterministic parser understands: "open claude session" is a spawn even
-    // when some session's title happens to contain the word "open". Explicit
-    // forms — a send verb ("tell messi …") or a colon ("messi: …") — still win.
-    if (!hadVerb && !(tokens[0] ?? '').endsWith(':') && parseCommand(s, allProviders()) !== null) {
-      return null;
-    }
-
-    // By name, greedily from the start ("ronaldo …", "ronaldo, messi: …").
-    const matched: string[] = [];
-    let consumedN = 0;
-    for (let i = 0; i < tokens.length; i++) {
-      const bare = tokens[i].toLowerCase().replace(/^@/, '').replace(/[:,]+$/, '');
-      if (bare === '') break;
-      if ((bare === 'and' || bare === '&') && matched.length > 0) {
-        consumedN = i + 1;
-        continue;
-      }
-      const hit = matchSessionsByToken(bare);
-      if (hit.length === 0) break;
-      for (const id of hit) if (!matched.includes(id)) matched.push(id);
-      consumedN = i + 1;
-      if (tokens[i].endsWith(':')) break;
-    }
-    if (matched.length === 0) return null; // not addressed → fall through
-    const message = stripLeadingWords(s, consumedN).replace(/^[:,]\s*/, '').replace(/^to\s+/i, '').trim();
-    return { ids: matched, broadcast: false, message };
-  }
-
-  /** Deliver a name/position/all-addressed message to the resolved session(s)
-   *  via the broadcast endpoint. Returns true when handled. */
-  async function handleAddressedSend(text: string): Promise<boolean> {
-    if (!ws.currentId) return false;
-    const r = resolveAddress(text);
-    if (!r) return false;
-    const message = r.message.trim();
-    if (message === '') return false; // nothing to send → let other handlers try
-    if (!r.broadcast && r.ids.length === 0) {
-      toasts.warn('No matching session', 'Couldn’t find that session to send to.');
-      close();
-      englishText = '';
-      return true;
-    }
-    busy = true;
-    try {
-      const resp = await api.post<BroadcastResp>(`/workspaces/${ws.currentId}/broadcast`, {
-        text: message,
-        session_ids: r.broadcast ? [] : r.ids,
-      });
-      const n = resp.session_ids.length;
-      // The daemon only delivers to RUNNING sessions — targets can all be
-      // suspended/exited, in which case "sent" would be a lie.
-      if (n === 0) {
-        toasts.warn('Not delivered', 'No running session accepted the message.');
-      } else {
+    };
+    switch (out.kind) {
+      case 'empty':
+      case 'confirm-close': // only the bar asks for this; the palette deletes directly
+        return;
+      case 'closed':
         toasts.success(
-          r.broadcast
-            ? `Broadcast to ${n} session${n === 1 ? '' : 's'}`
-            : `Sent to ${n} session${n === 1 ? '' : 's'}`,
-          message,
+          out.permanent ? 'Sessions deleted' : 'Sessions closed',
+          `${plural(out.count, 'session')} ${out.permanent ? 'removed' : 'archived'}`,
         );
+        return done();
+      case 'nothing-to-close':
+        toasts.warn('Nothing to close', 'No matching open session.');
+        return done();
+      case 'no-session':
+        toasts.warn('No matching session', 'Couldn’t find that session to send to.');
+        return done();
+      case 'not-delivered':
+        toasts.warn('Not delivered', 'No running session accepted the message.');
+        return done();
+      case 'sent':
+        toasts.success(
+          `${out.broadcast ? 'Broadcast to' : 'Sent to'} ${plural(out.count, 'session')}`,
+          out.message,
+        );
+        return done();
+      case 'unparsed':
+        toasts.warn(
+          "Couldn't parse that",
+          'Try e.g. "open 2 claude sessions", or enable AI fallback for free-form requests.',
+        );
+        return;
+      case 'plan':
+        plan = out.plan;
+        optimizedText = out.optimizedText;
+        return;
+      case 'executed': {
+        if (out.fail === 0) toasts.success('Plan executed', `${plural(out.ok, 'action')} completed`);
+        else toasts.warn('Plan partially executed', `${out.ok} ok, ${out.fail} failed`);
+        await ws.refreshSessions();
+        // Foreground the freshly-spawned sessions so they're immediately workable
+        // (not left running in the background). Multiple → tile them all.
+        const created = ws.sessions.filter((s) => !before.has(s.id) && !s.archived);
+        if (created.length > 1) ws.setViewMode('tiled');
+        // Open all sessions in the store; navigate the route to the last one so
+        // Back/Forward can return to it. Store-only openSession for all but last.
+        for (const s of created.slice(0, -1)) ws.openSession(s.id);
+        if (created.length > 0) ws.navigateToSession(created[created.length - 1].id);
+        plan = null;
+        return done();
       }
-      close();
-      englishText = '';
-    } catch (e) {
-      toasts.error('Send failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      busy = false;
     }
-    return true;
   }
 
   async function executePlan(): Promise<void> {
     if (!ws.currentId || !plan || busy) return;
     busy = true;
-    // Remember which sessions exist now, so we can OPEN whatever gets spawned.
     const before = new Set(ws.sessions.map((s) => s.id));
     try {
-      const resp = await api.post<{ results: ExecuteResult[] }>(
-        `/workspaces/${ws.currentId}/orchestrate/execute`,
-        { plan },
-      );
-      const ok = resp.results.filter((r) => r.ok).length;
-      const fail = resp.results.length - ok;
-      if (fail === 0) toasts.success('Plan executed', `${ok} action${ok === 1 ? '' : 's'} completed`);
-      else toasts.warn('Plan partially executed', `${ok} ok, ${fail} failed`);
-      await ws.refreshSessions();
-      // Foreground the freshly-spawned sessions so they're immediately workable
-      // (not left running in the background). Multiple → tile them all.
-      const created = ws.sessions.filter((s) => !before.has(s.id) && !s.archived);
-      if (created.length > 1) ws.setViewMode('tiled');
-      // Open all sessions in the store; navigate the route to the last one so
-      // Back/Forward can return to it. Store-only openSession for all but last.
-      for (const s of created.slice(0, -1)) ws.openSession(s.id);
-      if (created.length > 0) ws.navigateToSession(created[created.length - 1].id);
-      close();
-      englishText = '';
-      plan = null;
+      await applyOutcome(await runPlan(ws.currentId, plan), before);
     } catch (e) {
       toasts.error('Execution failed', e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
-    }
-  }
-
-  function describeAction(a: Action): string {
-    switch (a.action) {
-      case 'spawn_sessions':
-        return `Spawn ${a.count} ${a.provider} session${a.count === 1 ? '' : 's'}`;
-      case 'broadcast':
-        return `Broadcast to all sessions: "${a.text}"`;
-      case 'open_connection':
-        return `Open connection ${a.connection_id}`;
-      case 'run_command':
-        return `Send to session: "${a.text}"`;
     }
   }
 </script>
@@ -672,7 +363,7 @@
       if (e.target === e.currentTarget) close();
     }}
   >
-    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="palette glass-raised" role="dialog" aria-modal="true" aria-label="Command palette">
       <div class="pal-mode-row">
         <div class="segmented">
           <button class:active={mode === 'commands'} onclick={() => mode !== 'commands' && toggleMode()}>
@@ -831,10 +522,8 @@
     max-height: 60vh;
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    /* Raised glass (tokens.css .glass-raised), like Spotlight. */
     border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
     overflow: hidden;
     align-self: flex-start;
     animation: pal-in 150ms ease-out;

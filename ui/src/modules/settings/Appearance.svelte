@@ -12,6 +12,11 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { AMBIENT_MODES, ambientImage, type AmbientMode } from '../../lib/ambient';
+  import { processWallpaper } from '../../lib/wallpaper';
+  import { barStore } from '../../lib/stores/bar.svelte';
+  import type { BarPref } from '../../lib/floatingBar';
   import { plugins } from '../../lib/stores/plugins.svelte';
   import {
     availableModules,
@@ -20,6 +25,14 @@
     resolveOrder,
     type SidebarPluginEntry,
   } from '../../lib/sidebar';
+
+  // The "Type or speak… ⌘K" bar over the content column (FloatingBar.svelte).
+  const barPrefs: { id: BarPref; label: string; hint: string }[] = [
+    { id: 'auto', label: 'Auto', hint: 'A short pill at rest, full on Home; it docks into the status bar while you scroll or type in a terminal or editor.' },
+    { id: 'pinned', label: 'Always full', hint: 'The whole pill (model, spaces) stays up; it only shrinks while a terminal or editor has the keyboard.' },
+    { id: 'docked', label: 'Docked', hint: 'A small chip in the status bar that never covers content; ⌘K opens the full bar.' },
+    { id: 'hidden', label: 'Hidden', hint: 'No bar; ⌘K opens the command palette sheet instead.' },
+  ];
 
   // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
   // the user may see + permitted plugins, in the saved order, including hidden
@@ -52,6 +65,38 @@
     { id: 'ltr', label: 'Left-to-right' },
     { id: 'rtl', label: 'Right-to-left' },
   ];
+
+  // Backdrop previews: the real generated art for the accent + scheme in
+  // effect (re-derived when either changes), drawn over the window colour.
+  let accentNow = $state('');
+  $effect(() => {
+    void ui.theme;
+    void ui.accent;
+    void ui.resolvedScheme;
+    accentNow = ui.accent || getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  });
+  function previewOf(mode: AmbientMode): string {
+    const photo = ui.ambientPhoto ? ui.ambientPhoto[ui.resolvedScheme] : null;
+    return ambientImage(mode, accentNow, ui.resolvedScheme, photo);
+  }
+
+  let photoBusy = $state(false);
+  async function pickPhoto(e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const input = e.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    photoBusy = true;
+    try {
+      const photo = await processWallpaper(file);
+      if (ui.setAmbientPhoto(photo)) toasts.success('Wallpaper set', 'Stored on this device only.');
+      else toasts.error('Could not store the photo', 'This browser refused the storage — try a smaller image.');
+    } catch (err) {
+      toasts.error('Could not use that image', err instanceof Error ? err.message : String(err));
+    } finally {
+      photoBusy = false;
+    }
+  }
 
   const swatches: Record<ThemeName, { bg: string; fg: string; acc: string }> = {
     native: { bg: '#1e1e23', fg: '#f2f2f5', acc: '#0a84ff' },
@@ -110,6 +155,54 @@
     {/if}
   </div>
 
+  <div class="section-title">Backdrop</div>
+  <div class="theme-grid" role="radiogroup" aria-label="Backdrop">
+    {#each AMBIENT_MODES as m (m.id)}
+      <button
+        class="theme-card"
+        class:selected={ui.ambient === m.id}
+        role="radio"
+        aria-checked={ui.ambient === m.id}
+        data-ambient-option={m.id}
+        onclick={() => ui.setAmbient(m.id)}
+      >
+        <div class="theme-preview ambient-preview" style:background-image={previewOf(m.id)}>
+          <span class="ap-side"></span>
+          <span class="ap-card"></span>
+        </div>
+        <div class="theme-name">{m.label}</div>
+        <div class="theme-desc">{m.id === 'wallpaper' && ui.ambientPhoto ? 'Your photo' : m.desc}</div>
+      </button>
+    {/each}
+  </div>
+  <div class="row photo-row">
+    <label class="btn small" class:busy={photoBusy}>
+      <Icon name="image" size={12} />
+      {ui.ambientPhoto ? 'Change photo…' : 'Use your own photo…'}
+      <input type="file" accept="image/*" class="visually-hidden" onchange={pickPhoto} disabled={photoBusy} />
+    </label>
+    {#if ui.ambientPhoto}
+      <button class="btn small ghost" onclick={() => ui.setAmbientPhoto(null)}>Remove photo</button>
+    {/if}
+  </div>
+  <p class="hint-line">
+    The backdrop shows through the sidebar, toolbar and status bar, and fills the Home desktop.
+    Pages, tables, editors and terminals stay solid. A photo never leaves this device: Otto
+    blurs it and tones it for light and dark so the text over it stays readable.
+  </p>
+  <label class="switch-row reduce-row">
+    <input
+      type="checkbox"
+      checked={ui.reduceTransparency}
+      onchange={(e) => ui.setReduceTransparency(e.currentTarget.checked)}
+    />
+    <span>Reduce transparency</span>
+  </label>
+  <p class="hint-line">
+    Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce
+    transparency” accessibility setting.
+  </p>
+
   <div class="section-title">Terminal font</div>
   <div class="segmented">
     {#each TERM_FONT_OPTIONS as f (f.id)}
@@ -139,6 +232,22 @@
     engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
     monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
     tables or box art. Toggling reloads open terminals.
+  </p>
+
+  <div class="section-title">Floating bar</div>
+  <div class="segmented" role="radiogroup" aria-label="Floating bar">
+    {#each barPrefs as b (b.id)}
+      <button
+        role="radio"
+        aria-checked={barStore.pref === b.id}
+        class:active={barStore.pref === b.id}
+        onclick={() => barStore.setPref(b.id)}
+      >{b.label}</button>
+    {/each}
+  </div>
+  <p class="hint-line">
+    {barPrefs.find((b) => b.id === barStore.pref)?.hint} Desktop window only — phones and tablets
+    keep the ⌘K sheet. Saved per device.
   </p>
 
   <div class="section-title">Sessions on this device</div>
@@ -308,6 +417,54 @@
     flex-direction: column;
     gap: 6px;
     margin-bottom: 8px;
+  }
+  /* Backdrop preview: the window colour under the generated art, with a
+     sketch of the sidebar glass and a content card on top. */
+  .ambient-preview {
+    position: relative;
+    background-color: var(--bg);
+    background-size: cover;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .ap-side {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 30%;
+    background: var(--glass-tint);
+    border-inline-end: 1px solid var(--separator);
+  }
+  .ap-card {
+    position: absolute;
+    inset-block: 14px;
+    inset-inline: 40% 10%;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+  }
+  .photo-row {
+    margin-top: 10px;
+    gap: 6px;
+  }
+  .photo-row label:focus-within {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 1px;
+  }
+  .photo-row .busy {
+    opacity: 0.6;
+    pointer-events: none;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .reduce-row {
+    margin-top: 12px;
   }
   .tp-bar {
     width: 34px;

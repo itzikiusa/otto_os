@@ -40,6 +40,14 @@ const DEFAULT_ENABLED: &[&str] = &[
     // are the ONLY agent-to-agent transport, fully auditable by design).
     "room_post",
     "room_read",
+    "list_agent_rooms",
+    // Discovery — where every id an agent needs comes from (workspaces, issue
+    // accounts, goal loops, …); metadata only.
+    "list_workspaces",
+    "list_goal_loops",
+    "list_issue_accounts",
+    "list_issue_transitions",
+    "get_scheduled_task",
     // ---- Feature reads (metadata/list/get) — safe to expose by default once the
     // outward server itself is turned on. Content-heavy reads (consume/search)
     // stay off by default; see the two opt-in reads excluded from this list.
@@ -73,6 +81,8 @@ const DEFAULT_ENABLED: &[&str] = &[
     "list_swarms",
     "get_swarm",
     "list_swarm_runs",
+    "list_swarm_projects",
+    "list_swarm_tasks",
     "get_swarm_board",
     // Vault v3 — the docs home (file-backed markdown vaults, OKF)
     "vault_list",
@@ -85,6 +95,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "vault_okf_validate",
     // Design Hall — the artifact graph (reads: find + cite earlier work)
     "design_list",
+    "list_design_projects",
     "design_get",
     "design_links",
     "design_search",
@@ -95,6 +106,8 @@ const DEFAULT_ENABLED: &[&str] = &[
     // Code review / product / channels / usage / skills
     "list_findings",
     "get_finding",
+    "list_pr_reviews",
+    "get_pr_checks",
     "list_product_stories",
     "get_product_story",
     "list_integrations",
@@ -145,6 +158,8 @@ const DANGEROUS: &[&str] = &[
     "create_pr",
     "comment_pr",
     "start_pr_review",
+    // Merging is outward-facing and irreversible.
+    "merge_pr",
     "comment_issue",
     "transition_issue",
     // API client writers send real HTTP requests and/or persist saved requests.
@@ -171,6 +186,7 @@ const DANGEROUS: &[&str] = &[
     // Vault v3 doc writes — file mutations (write/rename) and the soft trash
     // move. Approval-gated like every other write.
     "vault_write",
+    "vault_write_file",
     "vault_rename",
     "vault_delete",
     // Design Hall writes — starting an agent turn (spawns a session + commits
@@ -202,6 +218,8 @@ const OPT_IN_READS: &[&str] = &[
     "query_db_readonly",
     "open_pr_draft",
     "consume_broker_messages",
+    // A PR diff streams code, like code search.
+    "get_pr_diff",
     // (search_memory + Vault v2 content reads removed — Vault feature disabled.)
     // Recalled personal memory is content — off until the operator opts in.
     "assistant_recall",
@@ -212,6 +230,10 @@ const MAX_WAIT_SECS: u64 = 30;
 /// (id, name, local path, or remote — across every workspace the caller can
 /// read; omitted → the calling session's repo). See [`fill_repo_ref`].
 pub(crate) const REPO_REF_TOOLS: &[&str] = &[
+    "list_pr_reviews",
+    "get_pr_checks",
+    "get_pr_diff",
+    "merge_pr",
     "git_status",
     "list_prs",
     "get_pr",
@@ -223,6 +245,28 @@ pub(crate) const REPO_REF_TOOLS: &[&str] = &[
 
 /// Shared schema text for [`REPO_REF_TOOLS`]' `repo_id`.
 const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just the current one. Omit it inside an Otto session to use the repo the session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+
+/// Shared schema text for the friendly-reference id arguments resolved by
+/// [`fill_refs`] (see `agent_refs`): the id OR a human field, across every
+/// workspace the caller can read, with candidates listed on a miss.
+const WS_DIR_DESC: &str = "Optional: only this workspace (id or name). Omit to list every workspace you can read (your current one first).";
+const WORKFLOW_REF_DESC: &str = "Workflow id or name — names resolve across every workspace you can read (otto.list_workflows); an ambiguous or unknown one returns the candidates.";
+const BROKER_REF_DESC: &str = "Broker cluster id or name (otto.list_broker_clusters).";
+const CONNECTION_REF_DESC: &str =
+    "Connection id or name (otto.list_connections) — resolved across every workspace you can read.";
+const API_REQUEST_REF_DESC: &str =
+    "Saved request id or name (otto.api_list), within `workspace_id`.";
+const ISSUE_ACCOUNT_REF_DESC: &str = "Your Jira/Confluence account: id, label, email or base URL (otto.list_issue_accounts). Omit it when you have exactly one account.";
+const PAGE_REF_DESC: &str = "Confluence page id, or the page URL (…/pages/<id>/… or ?pageId=<id>).";
+const SWARM_REF_DESC: &str = "Swarm id or name (otto.list_swarms).";
+const VAULT_REF_DESC: &str = "Vault id (integer) or vault name (otto.vault_list).";
+const DESIGN_REF_DESC: &str =
+    "Design artifact id or its exact title (otto.design_list / otto.design_search).";
+const ROOM_REF_DESC: &str = "Agent room id or name (otto.list_agent_rooms).";
+const TASK_REF_DESC: &str = "Scheduled task id or name (otto.list_scheduled_tasks).";
+const AWS_ACCOUNT_REF_DESC: &str = "AWS account id or name (otto.aws_list_accounts).";
+const K8S_CLUSTER_REF_DESC: &str = "Kubernetes cluster id or name (otto.k8s_list_clusters).";
+const PR_NUMBER_DESC: &str = "Pull request number (otto.list_prs).";
 
 /// Static catalog of the outward `otto.*` tools. Each entry carries a `category`
 /// so the control-plane UI can group the (now large) checklist. Adding a tool here
@@ -240,7 +284,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"},"query":{"type":"string"},"story_id":{"type":"string"}}}}),
         json!({"name":"otto.run_goal_loop","mutating":true,"category":"Agents",
-            "description":"Create and start a bounded goal loop (Plan→Execute→Evaluate→Digest). Pass a goal-loop spec. DANGEROUS: spawns autonomous agents — approval-gated.",
+            "description":"Create and start a bounded goal loop (Plan→Execute→Evaluate→Digest). `definition` = {title, acceptance_criteria:[{id, text, verify:\"command\"|\"agent\"|…, verify_cmd (command kind)}] (non-empty)}; `limits` = {max_iterations, max_runtime_secs, per_phase_timeout_secs}; `config` = {executors:[{provider, prompt}] (non-empty), planner, evaluator, digester, definer — each {provider, prompt}}. DANGEROUS: spawns autonomous agents — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","name","repo_path","definition","limits","config"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"repo_path":{"type":"string"},
                 "definition":{"type":"object"},"limits":{"type":"object"},"config":{"type":"object"}}}}),
@@ -252,7 +296,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.query_db_readonly","mutating":false,"category":"Database",
             "description":"Run a READ-ONLY query against an Otto DB connection. Writes/DDL and multi-statement input are rejected server-side regardless of the connection's guard, and the query executes in the engine's read-only mode with sensitive cells masked. Optional `node` scopes it (e.g. `db:<name>` / `kdb:<n>`).",
             "inputSchema":{"type":"object","required":["connection_id","statement"],"properties":{
-                "connection_id":{"type":"string"},"statement":{"type":"string"},"max_rows":{"type":"integer"},
+                "connection_id":{"type":"string","description":CONNECTION_REF_DESC},"statement":{"type":"string"},"max_rows":{"type":"integer"},
                 "node":{"type":"string"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
@@ -261,8 +305,14 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.get_proof_pack","mutating":false,"category":"Code & Context",
             "description":"Assemble an evidence bundle for a target: git status/recent-commits/diffstat for a repo and a goal loop's machine-checked acceptance criteria.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"},"repo_id":{"type":"string"},
-                "branch":{"type":"string"},"goal_loop_id":{"type":"string"}}}}),
+                "workspace_id":{"type":"string"},"repo_id":{"type":"string","description":"Otto repo id (otto.list_repos) — must live in `workspace_id`."},
+                "branch":{"type":"string"},"goal_loop_id":{"type":"string","description":"Goal loop id or name (otto.list_goal_loops) — must live in `workspace_id`."}}}}),
+        json!({"name":"otto.list_workspaces","mutating":false,"category":"Code & Context",
+            "description":"List the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_goal_loops","mutating":false,"category":"Agents",
+            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. The ids feed otto.get_proof_pack `goal_loop_id`. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
             "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
             "inputSchema":{"type":"object","required":["title"],"properties":{
@@ -270,53 +320,54 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
         // ================= Workflows =================
         json!({"name":"otto.list_workflows","mutating":false,"category":"Workflows",
-            "description":"List a workspace's workflows (visual node-graph automations). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List workflows (visual node-graph automations) across EVERY workspace you can read — `{items, current_workspace_id, workspace_count}`, each item id, name, description, version, workspace_id + workspace_name (graph omitted: use otto.get_workflow). Pass a workflow's id OR its name as `workflow_id` to the other workflow tools. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.get_workflow","mutating":false,"category":"Workflows",
-            "description":"Get one workflow's full definition (graph nodes + edges + metadata) by id. Read-only.",
-            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string"}}}}),
+            "description":"Get one workflow's full definition (graph nodes + edges + metadata). Read-only.",
+            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string","description":WORKFLOW_REF_DESC}}}}),
         json!({"name":"otto.list_workflow_runs","mutating":false,"category":"Workflows",
-            "description":"List the recent runs of a workflow (status + timing). Read-only.",
-            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string"}}}}),
+            "description":"List the most recent runs (newest first, at most 50) of a workflow. `summary` (default true) returns the lightweight run rows (id, status, timing, waiting_approval); pass false for full rows with node states and outputs. Use a run id with otto.get_workflow_run. Read-only.",
+            "inputSchema":{"type":"object","required":["workflow_id"],"properties":{"workflow_id":{"type":"string","description":WORKFLOW_REF_DESC},
+                "summary":{"type":"boolean","description":"Default true."}}}}),
         json!({"name":"otto.get_workflow_run","mutating":false,"category":"Workflows",
             "description":"Get one workflow run's status, per-node step states and outputs by run id. Read-only.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
         json!({"name":"otto.run_workflow","mutating":true,"category":"Workflows",
-            "description":"Execute a workflow now; returns the new run. Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). Optional `review_mode` (\"fan_out\" | \"orchestrator\") overrides every review step's execution mode for this run. DANGEROUS: spawns agents / external effects — approval-gated.",
+            "description":"Execute a workflow now; returns the new run (poll otto.get_workflow_run). Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). Optional `review_mode` (\"fan_out\" | \"orchestrator\") overrides every review step's execution mode for this run. DANGEROUS: spawns agents / external effects — approval-gated.",
             "inputSchema":{"type":"object","required":["workflow_id"],"properties":{
-                "workflow_id":{"type":"string"},"input":{"type":"object"},"start_node":{"type":"string"},
+                "workflow_id":{"type":"string","description":WORKFLOW_REF_DESC},"input":{"type":"object"},"start_node":{"type":"string"},
                 "review_mode":{"type":"string","enum":["fan_out","orchestrator"]}}}}),
         json!({"name":"otto.cancel_workflow_run","mutating":true,"category":"Workflows",
             "description":"Cancel a running workflow run by id. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
         // ================= Message Brokers =================
         json!({"name":"otto.list_broker_clusters","mutating":false,"category":"Message Brokers",
-            "description":"List a workspace's broker clusters (Kafka). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List message-broker (Kafka) clusters across EVERY workspace you can read (global profiles included once) — `{items, …}` with id, name, bootstrap_servers, workspace_id + workspace_name. Pass a cluster's id OR name as `cluster_id` to the other broker tools. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.list_broker_topics","mutating":false,"category":"Message Brokers",
             "description":"List the topics of a broker cluster (name + partition/replication summary). Read-only.",
-            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string","description":BROKER_REF_DESC}}}}),
         json!({"name":"otto.get_broker_topic","mutating":false,"category":"Message Brokers",
             "description":"Get one topic's detail (partitions, offsets, config) on a cluster. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id","topic"],"properties":{
-                "cluster_id":{"type":"string"},"topic":{"type":"string"}}}}),
+                "cluster_id":{"type":"string","description":BROKER_REF_DESC},"topic":{"type":"string"}}}}),
         json!({"name":"otto.list_consumer_groups","mutating":false,"category":"Message Brokers",
-            "description":"List a cluster's consumer groups (state + lag summary). Read-only.",
-            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string"}}}}),
+            "description":"List a cluster's consumer groups (group_id, state, protocol_type, members — no lag; lag is per group in the Brokers module). Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{"cluster_id":{"type":"string","description":BROKER_REF_DESC}}}}),
         json!({"name":"otto.consume_broker_messages","mutating":false,"category":"Message Brokers",
             "description":"Read recent messages from a topic (the latest `limit`, no offset commits — purely a read). Off by default (streams payloads); enable to inspect message content.",
             "inputSchema":{"type":"object","required":["cluster_id","topic"],"properties":{
-                "cluster_id":{"type":"string"},"topic":{"type":"string"},"partition":{"type":"integer"},
+                "cluster_id":{"type":"string","description":BROKER_REF_DESC},"topic":{"type":"string"},"partition":{"type":"integer"},
                 "limit":{"type":"integer"},"value_filter":{"type":"string","description":"substring filter on the decoded value"}}}}),
         json!({"name":"otto.produce_broker_message","mutating":true,"category":"Message Brokers",
             "description":"Produce a message to a topic. `value` required; optional `key`/`partition`. Guarded clusters need `confirm=true`. DANGEROUS: writes to a broker — approval-gated.",
             "inputSchema":{"type":"object","required":["cluster_id","topic","value"],"properties":{
-                "cluster_id":{"type":"string"},"topic":{"type":"string"},"value":{"type":"string"},
+                "cluster_id":{"type":"string","description":BROKER_REF_DESC},"topic":{"type":"string"},"value":{"type":"string"},
                 "key":{"type":"string"},"partition":{"type":"integer"},"confirm":{"type":"boolean"}}}}),
         // ================= Connections =================
         json!({"name":"otto.list_connections","mutating":false,"category":"Database",
-            "description":"List a workspace's connections (DB/SSH) — id, name, kind, environment. Secrets are never included. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List connections (DB/SSH/…) across EVERY workspace you can read (global profiles included once) — `{items, …}` with id, name, kind, environment, read_only, workspace_id + workspace_name; connection parameters and secrets are never included. Pass a connection's id OR name as `connection_id`. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         // ================= API Client =================
         json!({"name":"otto.api_list","mutating":false,"category":"API Client",
             "description":"READ-ONLY: discover a workspace's API client collections, saved requests, environments and automations. Request URLs remain templates; environment secret values and tokens are never returned.",
@@ -326,7 +377,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.api_get_request","mutating":false,"category":"API Client",
             "description":"READ-ONLY: get one saved API request by id, including its agent-facing body and extras. Auth and sensitive header/query values are masked; a body over 64 KiB is capped and ends with `…[truncated]`.",
             "inputSchema":{"type":"object","required":["workspace_id","request_id"],"properties":{
-                "workspace_id":{"type":"string"},"request_id":{"type":"string"}}}}),
+                "workspace_id":{"type":"string"},"request_id":{"type":"string","description":API_REQUEST_REF_DESC}}}}),
         json!({"name":"otto.api_history","mutating":false,"category":"API Client",
             "description":"READ-ONLY: search past API executions, or pass `id` for one history entry and its response. Stored auth and sensitive response values are masked.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
@@ -336,20 +387,21 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.api_execute","mutating":true,"category":"API Client",
             "description":"Execute one SAVED API request against an environment. Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a new host requires `confirm_new_host:true`. Secrets are resolved server-side and scrubbed from every result; JWTs are returned only as decoded claims. DANGEROUS: sends a real HTTP request — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","request_id"],"properties":{
-                "workspace_id":{"type":"string"},"request_id":{"type":"string"},"environment_id":{"type":"string"},
+                "workspace_id":{"type":"string"},"request_id":{"type":"string","description":API_REQUEST_REF_DESC},"environment_id":{"type":"string","description":"Environment id or name (default: the active one)."},
                 "vars":{"type":"object","additionalProperties":{"type":"string"}},"timeout_ms":{"type":"integer"},
-                "confirm":{"type":"boolean"},"confirm_new_host":{"type":"boolean"}}}}),
+                "confirm":{"type":"boolean"},"confirm_new_host":{"type":"boolean"},
+                "decode_jwt":{"type":"boolean","description":"Return safe JWT claims (default true), never tokens."}}}}),
         json!({"name":"otto.api_upsert_request","mutating":true,"category":"API Client",
-            "description":"Create or update a saved API request. Pass `request_id` to update; `name`, `method`, and `url` are required for both create and update. Omitted optional fields stay omitted, and the daemon preserves stored auth/extras on PATCH. DANGEROUS: persists a saved request — approval-gated.",
+            "description":"Create or update a saved API request. Pass `request_id` (id or name) to update; `name`, `method`, and `url` are required for both. On update every omitted field (headers, query, body_mode, body, collection_id, auth, extras) KEEPS its stored value — only what you pass changes. Returns the saved request in the masked agent shape. DANGEROUS: persists a saved request — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","name","method","url"],"properties":{
-                "workspace_id":{"type":"string"},"request_id":{"type":"string"},"collection_id":{"type":["string","null"]},
+                "workspace_id":{"type":"string"},"request_id":{"type":"string","description":API_REQUEST_REF_DESC},"collection_id":{"type":["string","null"]},
                 "name":{"type":"string"},"method":{"type":"string"},"url":{"type":"string"},
                 "headers":{"type":"array"},"query":{"type":"array"},"body_mode":{"type":"string"},
                 "body":{"type":"string"},"auth":{"type":"object"},"extras":{"type":"object"}}}}),
         json!({"name":"otto.api_run_automation","mutating":true,"category":"API Client",
             "description":"Run a saved API automation and return its per-step report. DANGEROUS: sends the automation's real HTTP requests — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","automation_id"],"properties":{
-                "workspace_id":{"type":"string"},"automation_id":{"type":"string"}}}}),
+                "workspace_id":{"type":"string"},"automation_id":{"type":"string","description":"Automation id or name (see otto.api_list)."}}}}),
         // ================= Git =================
         json!({"name":"otto.list_repos","mutating":false,"category":"Git",
             "description":"List the git repositories in EVERY workspace you can read — `{repos, current_workspace_id, workspace_count}`, each row carrying id, name, path, remote_url, workspace_id + workspace_name (your current workspace first). A repo is registered in exactly one workspace, so look here before concluding a repo is missing. Optional `workspace_id` narrows to one workspace. Read-only.",
@@ -358,84 +410,128 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Get a repo's git status (current branch, staged/unstaged/untracked files). Read-only.",
             "inputSchema":{"type":"object","properties":{"repo_id":{"type":"string","description":REPO_REF_DESC}}}}),
         json!({"name":"otto.list_prs","mutating":false,"category":"Git",
-            "description":"List a repo's pull requests as `{items, has_more, page, per_page}`. Optional `state` filter (open|merged|declined|all). Read-only.",
+            "description":"List a repo's pull requests as `{items, has_more, page, per_page}`. Optional `state` filter (open|merged|declined|all); page with `page` (1-based) while `has_more`, `per_page` ≤ 100 (default 50). Read-only.",
             "inputSchema":{"type":"object","properties":{
-                "repo_id":{"type":"string","description":REPO_REF_DESC},"state":{"type":"string"}}}}),
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"state":{"type":"string"},
+                "page":{"type":"integer"},"per_page":{"type":"integer"}}}}),
         json!({"name":"otto.get_pr","mutating":false,"category":"Git",
-            "description":"Get one pull request's detail (title, description, state, branches) by number. Read-only.",
-            "inputSchema":{"type":"object","required":["number"],"properties":{
-                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer"}}}}),
+            "description":"Get one pull request's detail by number: title, description, state, branches, reviewers, approvals, mergeability and its comments (id, body, path, line, thread_id — reply in-thread with otto.comment_pr `in_reply_to`). Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
+                "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
         json!({"name":"otto.create_pr","mutating":true,"category":"Git",
-            "description":"Open a pull request on a repo's provider. `repo_id` may be a repo name, path or remote — the repo is found across all your workspaces. DANGEROUS: outward-facing publish — approval-gated.",
+            "description":"Open a pull request on a repo's provider. `repo_id` may be a repo name, path or remote — the repo is found across all your workspaces. Optional `draft`, `reviewers` (provider usernames/ids) and `proof_pack_id` (ties the PR to a proof pack so the repo's proof gate can pass). DANGEROUS: outward-facing publish — approval-gated.",
             "inputSchema":{"type":"object","required":["title","description","source_branch","target_branch"],"properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"title":{"type":"string"},"description":{"type":"string"},
-                "source_branch":{"type":"string"},"target_branch":{"type":"string"}}}}),
+                "source_branch":{"type":"string"},"target_branch":{"type":"string"},
+                "draft":{"type":"boolean"},"reviewers":{"type":"array","items":{"type":"string"}},
+                "proof_pack_id":{"type":"string"}}}}),
         json!({"name":"otto.comment_pr","mutating":true,"category":"Git",
             "description":"Post a comment on a pull request — general, inline when `path` (and optionally `line`) anchor it to a file in the diff, or a threaded reply when `in_reply_to` names an existing comment id. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["number","body"],"properties":{
-                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer"},"body":{"type":"string"},
+            "inputSchema":{"type":"object","required":["body"],"properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
+                "pr_number":{"type":"integer","description":"Alias of `number`."},"body":{"type":"string"},
                 "path":{"type":"string"},"line":{"type":"integer"},"in_reply_to":{"type":"string"}}}}),
         json!({"name":"otto.start_pr_review","mutating":true,"category":"Code Review",
-            "description":"Start Otto's multi-agent review of a pull request (fan-out). DANGEROUS: spawns agents — approval-gated.",
-            "inputSchema":{"type":"object","required":["pr_number"],"properties":{
-                "repo_id":{"type":"string","description":REPO_REF_DESC},"pr_number":{"type":"integer"}}}}),
+            "description":"Start Otto's multi-agent review of a pull request (fan-out); returns the review (its `id` feeds otto.list_findings). Optional `context` (extra reviewer instructions) and a linked Jira story (`issue_key` + `issue_account_id`). DANGEROUS: spawns agents — approval-gated.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"pr_number":{"type":"integer","description":PR_NUMBER_DESC},
+                "number":{"type":"integer","description":"Alias of `pr_number`."},
+                "context":{"type":"string"},"issue_key":{"type":"string"},"issue_account_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_pr_reviews","mutating":false,"category":"Code Review",
+            "description":"List Otto's multi-agent review runs of a pull request (id, status, verdict, blocker_count, summary) — the `review_id` otto.list_findings takes. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"pr_number":{"type":"integer","description":PR_NUMBER_DESC},
+                "number":{"type":"integer","description":"Alias of `pr_number`."}}}}),
+        json!({"name":"otto.get_pr_checks","mutating":false,"category":"Git",
+            "description":"A pull request's CI / build checks `{ci, checks[]}` (name, state, url) from the provider. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
+                "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
+        json!({"name":"otto.get_pr_diff","mutating":false,"category":"Git",
+            "description":"A pull request's diff (files + hunks). Off by default (streams code); enable to let agents read PR diffs. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
+                "pr_number":{"type":"integer","description":"Alias of `number`."}}}}),
+        json!({"name":"otto.merge_pr","mutating":true,"category":"Git",
+            "description":"Merge a pull request on the provider. `strategy` = merge | squash | rebase (provider default when omitted); `delete_source_branch` optional. Check otto.get_pr (mergeable) and otto.get_pr_checks first. DANGEROUS: outward-facing and irreversible — approval-gated.",
+            "inputSchema":{"type":"object","properties":{
+                "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
+                "pr_number":{"type":"integer","description":"Alias of `number`."},
+                "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Search Jira issues for an issue account. `query` is JQL (empty → recent). Optional `project`. Read-only.",
-            "inputSchema":{"type":"object","required":["account_id"],"properties":{
-                "account_id":{"type":"string"},"query":{"type":"string"},"project":{"type":"string"}}}}),
+            "description":"Search Jira issues. `query` is FREE TEXT (matched against summary + description), or an issue key (`GS-123`) for that issue — it is NOT JQL. Empty `query` → issues assigned to you. Optional `project` key. Returns up to 25 `{key, summary, status, issue_type, url}`; page with `start_at`. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
+                "start_at":{"type":"integer","description":"Offset of the first result (default 0)."}}}}),
         json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
-            "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Read-only.",
-            "inputSchema":{"type":"object","required":["account_id","key"],"properties":{
-                "account_id":{"type":"string"},"key":{"type":"string"}}}}),
+            "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
+            "inputSchema":{"type":"object","required":["key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
-            "description":"Search Confluence pages for an issue account. `query` is the search text; optional `space`. Read-only.",
-            "inputSchema":{"type":"object","required":["account_id","query"],"properties":{
-                "account_id":{"type":"string"},"query":{"type":"string"},"space":{"type":"string"}}}}),
+            "description":"Search Confluence pages by title (`query`; a numeric query matches a page id); optional `space` key. Returns up to 25 `{id, title, space_key, url}`. Read-only.",
+            "inputSchema":{"type":"object","required":["query"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"}}}}),
         json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
-            "description":"Read one Confluence page by id. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Find the id first with otto.search_confluence. Read-only.",
-            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
-                "account_id":{"type":"string"},"page_id":{"type":"string"}}}}),
+            "description":"Read one Confluence page. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Read-only.",
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
         json!({"name":"otto.list_confluence_page_comments","mutating":false,"category":"Issues",
             "description":"List the footer comments on a Confluence page (author, body as markdown, created). Use it to collect answers people left on a page. Read-only.",
-            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
-                "account_id":{"type":"string"},"page_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC}}}}),
         json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
             "description":"Create a Confluence page. Supply `body_md` (MARKDOWN, converted server-side) OR `body_html` (Confluence storage XHTML, passed through — use it for panel/expand/status macros, layouts and anything Markdown cannot express). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","space_key","title"],"properties":{
-                "account_id":{"type":"string"},"space_key":{"type":"string"},"title":{"type":"string"},
-                "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["space_key","title"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"space_key":{"type":"string"},"title":{"type":"string"},
+                "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string","description":"Parent page id or URL."}}}}),
         json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
             "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). Pass `base_version` (the page version you read with otto.get_confluence_page) so a newer human edit is never overwritten — the call then fails with a conflict instead; without it the latest version is overwritten. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
-                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"},"title":{"type":"string"},"base_version":{"type":"integer"}}}}),
         json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
             "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (storage XHTML). DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
-                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
+            "inputSchema":{"type":"object","required":["page_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
             "description":"Add a comment to a Jira issue. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","key","body"],"properties":{
-                "account_id":{"type":"string"},"key":{"type":"string"},"body":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["key","body"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"body":{"type":"string"}}}}),
         json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
-            "description":"Transition a Jira issue to a new status. `transition_id` from the issue's available transitions. DANGEROUS — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","key","transition_id"],"properties":{
-                "account_id":{"type":"string"},"key":{"type":"string"},"transition_id":{"type":"string"}}}}),
+            "description":"Transition a Jira issue to a new status. `transition_id` is a transition id from otto.list_issue_transitions, or its name / target status name (e.g. \"In Progress\") — resolved against the issue's available transitions. DANGEROUS — approval-gated.",
+            "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
+        json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
+            "description":"List YOUR Jira/Confluence accounts — `{items}` with id, label, email, base_url, provider (never the token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
+            "description":"List a Jira issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
+            "inputSchema":{"type":"object","required":["key"],"properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         // ================= Swarm =================
         json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
-            "description":"List a workspace's agent swarms. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List agent swarms across EVERY workspace you can read — `{items, …}` with id, name, status, workspace_id + workspace_name. Pass a swarm's id OR name as `swarm_id`. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.get_swarm","mutating":false,"category":"Swarm",
             "description":"Get a swarm's detail (agents, projects, counts) by id. Read-only.",
-            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
         json!({"name":"otto.list_swarm_runs","mutating":false,"category":"Swarm",
-            "description":"List a workspace's swarm runs. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List a workspace's swarm runs (newest first, up to 500). Optional `swarm_id` narrows to one swarm. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"},
+                "swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
+        json!({"name":"otto.list_swarm_projects","mutating":false,"category":"Swarm",
+            "description":"List a swarm's projects (id, name, repo_path, goal) — the `project_id`s otto.list_swarm_tasks / otto.create_work_item take. Read-only.",
+            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC}}}}),
+        json!({"name":"otto.list_swarm_tasks","mutating":false,"category":"Swarm",
+            "description":"List a swarm project's board tasks (id, title, status, assignee, priority, depends_on). Read-only.",
+            "inputSchema":{"type":"object","required":["project_id"],"properties":{"project_id":{"type":"string","description":"Swarm project id (otto.list_swarm_projects)."}}}}),
         json!({"name":"otto.get_swarm_board","mutating":false,"category":"Swarm",
-            "description":"Read a swarm's shared message board. Read-only.",
-            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string"}}}}),
+            "description":"Read a swarm's shared message board (newest 300). Optional `project_id` / `task_id` narrow it. Read-only.",
+            "inputSchema":{"type":"object","required":["swarm_id"],"properties":{"swarm_id":{"type":"string","description":SWARM_REF_DESC},
+                "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
         json!({"name":"otto.post_swarm_board","mutating":true,"category":"Swarm",
             "description":"Post a message to a swarm's shared board. Optional `project_id`/`task_id` context. DANGEROUS: drives swarm agents — approval-gated.",
             "inputSchema":{"type":"object","required":["swarm_id","body"],"properties":{
@@ -448,44 +544,49 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.vault_dir","mutating":false,"category":"Vault",
             "description":"One level of a vault's folder tree (folders, notes, attachments). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_read","mutating":false,"category":"Vault",
             "description":"A note's raw markdown + metadata + outgoing links. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_search","mutating":false,"category":"Vault",
             "description":"Full-text (FTS5) search over a vault's notes with snippets; tag:/path:/type: operators. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","query"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.vault_backlinks","mutating":false,"category":"Vault",
             "description":"Notes linking TO a given note, with context snippets. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_tags","mutating":false,"category":"Vault",
             "description":"Every tag in a vault with note counts. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
         json!({"name":"otto.vault_graph","mutating":false,"category":"Vault",
             "description":"The vault link graph (compact arrays; local neighborhood when `path` given). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
         json!({"name":"otto.vault_okf_validate","mutating":false,"category":"Vault",
             "description":"Deterministic OKF v0.1 conformance report (E1-E3 errors, W1-W5 warnings). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC}}}}),
         json!({"name":"otto.vault_write","mutating":true,"category":"Vault",
             "description":"Create/update a markdown note in a doc vault (OKF preferred). DANGEROUS: writes files — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
+                "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
+        json!({"name":"otto.vault_write_file","mutating":true,"category":"Vault",
+            "description":"Create/update a guarded UTF-8 documentation artifact in a vault — OpenAPI YAML, JSON, D2, Mermaid, text or CSV (`path` ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv; markdown notes use otto.vault_write). Pass `if_hash` for optimistic concurrency. DANGEROUS: writes files — approval-gated.",
+            "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_rename","mutating":true,"category":"Vault",
             "description":"Rename/move a note or folder; rewrites every referencing link across the vault. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","from","to"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"from":{"type":"string"},"to":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"from":{"type":"string"},"to":{"type":"string"}}}}),
         json!({"name":"otto.vault_delete","mutating":true,"category":"Vault",
             "description":"Soft-delete a note into the vault's .trash/ (never destroys files). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
         // ================= Design Hall (artifact graph) =================
         // Read-only: find and cite earlier design work (the References drawer's
         // library). The design library is global; `workspace_id` only narrows.
@@ -500,16 +601,21 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "story_id":{"type":"string"},
                 "limit":{"type":"integer"},
                 "cursor":{"type":"string","description":"Next page: `<updated_at>|<id>` of the previous page's last row."}}}}),
+        json!({"name":"otto.list_design_projects","mutating":false,"category":"Design",
+            "description":"List Design Hall projects (id, name, workspace_id) — the `project_id` filter of otto.design_list / otto.design_search. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "workspace_id":{"type":"string","description":"Optional — narrows the global library to one workspace."},
+                "include_archived":{"type":"boolean"}}}}),
         json!({"name":"otto.design_get","mutating":false,"category":"Design",
             "description":"One design artifact: metadata, head + approved versions, link counts, the working-copy and thumbnail file paths, and (text formats) its source — the head's, or `version` (`v3` or a version id). Cite it as otto://design/<id>@v<seq>. Read-only.",
             "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
-                "artifact_id":{"type":"string"},
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
                 "version":{"type":"string","description":"Optional `v<seq>` or version id; default the head."},
                 "include_content":{"type":"boolean","description":"Default true — inline the (≤ 256 KiB) text source."}}}}),
         json!({"name":"otto.design_links","mutating":false,"category":"Design",
             "description":"A design artifact's links: what it uses (embeds, components, brand tokens, stories it implements, what it was derived from) and where it is used, with the linked artifacts' titles. Broken references are flagged. Read-only.",
             "inputSchema":{"type":"object","required":["artifact_id"],"properties":{
-                "artifact_id":{"type":"string"},
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
                 "dir":{"type":"string","description":"out | in | both (default)"}}}}),
         json!({"name":"otto.design_search","mutating":false,"category":"Design",
             "description":"Full-text search over the design library (titles, tags, extracted copy/layer/token names, linked story keys, project names) — shipped work first. Use it to find references to build on and cite. Read-only.",
@@ -525,7 +631,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.design_assist","mutating":true,"category":"Design",
             "description":"Start a Design Hall agent turn on an artifact: the agent edits the artifact's working copy, the result is validated and committed as a new version (author agent) whose provenance records the references it was offered and the ones it cited. Returns the turn (turn_id, status, session_id); completion arrives as the design_assist_updated event. mode: generate | refine (default) | critique | a11y. DANGEROUS: spawns an agent session and writes a version — approval-gated.",
             "inputSchema":{"type":"object","required":["artifact_id","prompt"],"properties":{
-                "artifact_id":{"type":"string"},
+                "artifact_id":{"type":"string","description":DESIGN_REF_DESC},
                 "prompt":{"type":"string","description":"What to design or change."},
                 "mode":{"type":"string","description":"generate | refine (default) | critique | a11y"},
                 "references":{"type":"array","items":{"type":"string"},"description":"Optional artifacts to build on (`<id>` or `<id>@v12`, ≤ 8) — offered to the agent as [R1] …"},
@@ -573,11 +679,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string"}}}}),
         // ================= Product =================
         json!({"name":"otto.list_product_stories","mutating":false,"category":"Product",
-            "description":"List a workspace's product stories (Jira/Confluence-backed). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List product stories — a GLOBAL library shared by every workspace (Jira/Confluence-backed) — `{items}` with id, source_key (the Jira key), title, stage, url, workspace_id. Pass a story's id OR its Jira key as `story_id`. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":"Optional: the workspace whose role check to use (default: the first you can read)."}}}}),
         json!({"name":"otto.get_product_story","mutating":false,"category":"Product",
-            "description":"Get one product story's detail by id. Read-only.",
-            "inputSchema":{"type":"object","required":["story_id"],"properties":{"story_id":{"type":"string"}}}}),
+            "description":"Get one product story's detail (story, source, counts, swarm link). Read-only.",
+            "inputSchema":{"type":"object","required":["story_id"],"properties":{"story_id":{"type":"string","description":"Product story id, or its Jira key (e.g. GS-123) or exact title."}}}}),
         // ================= Channels =================
         json!({"name":"otto.list_integrations","mutating":false,"category":"Channels",
             "description":"List a workspace's channel integrations (Slack/Telegram/webhook). Read-only.",
@@ -605,8 +711,9 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Get one self-improvement run's detail by id. Read-only.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
         json!({"name":"otto.list_improvement_edits","mutating":false,"category":"Self-Improvement",
-            "description":"List a workspace's self-improvement edit suggestions (pending/applied) with their status. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List a workspace's self-improvement edit suggestions. `status` defaults to pending; pass applied (to find ids for otto.rollback_improvement_edit), rejected, rolled_back or conflict. Read-only.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"},
+                "status":{"type":"string","description":"pending (default) | applied | rejected | rolled_back | conflict"}}}}),
         json!({"name":"otto.run_self_improvement","mutating":true,"category":"Self-Improvement",
             "description":"Trigger a self-improvement pass for a workspace now. DANGEROUS: spawns an analysis agent — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
@@ -630,12 +737,12 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.room_post","mutating":false,"category":"Personal Agents",
             "description":"Post a message into an agent room you are a member of. The calling personal-agent session is resolved via its session identity; the message (max 16KB) is persisted and shown to the user live. Rooms are the only agent-to-agent channel.",
             "inputSchema":{"type":"object","required":["room_id","text"],"properties":{
-                "room_id":{"type":"string"},"text":{"type":"string"},
+                "room_id":{"type":"string","description":ROOM_REF_DESC},"text":{"type":"string"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge; used to resolve which personal agent is speaking)"}}}}),
         json!({"name":"otto.room_read","mutating":false,"category":"Personal Agents",
             "description":"Read messages from an agent room you are a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
             "inputSchema":{"type":"object","required":["room_id"],"properties":{
-                "room_id":{"type":"string"},"after":{"type":"string"},"limit":{"type":"integer"},
+                "room_id":{"type":"string","description":ROOM_REF_DESC},"after":{"type":"string"},"limit":{"type":"integer"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
         // ---- Otto Assistant (the user's personal memory) ----
         json!({"name":"otto.assistant_remember","mutating":true,"category":"Assistant",
@@ -654,18 +761,24 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","properties":{
                 "query":{"type":"string"},"k":{"type":"integer","description":"max memories (1..20, default 10)"},
                 "session_id":{"type":"string","description":"the calling assistant session (injected automatically by Otto's MCP bridge)"}}}}),
+        json!({"name":"otto.list_agent_rooms","mutating":false,"category":"Personal Agents",
+            "description":"List agent rooms across EVERY workspace you can read — `{items, …}` with id, name, workspace_id + workspace_name. Pass a room's id OR name as `room_id` to otto.room_read / otto.room_post. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         // ---- Scheduled Tasks ----
         json!({"name":"otto.list_scheduled_tasks","mutating":false,"category":"Scheduled Tasks",
-            "description":"List a workspace's scheduled tasks (recurring agent jobs). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
-                "workspace_id":{"type":"string"}}}}),
+            "description":"List scheduled tasks (recurring agent jobs) across EVERY workspace you can read — `{items, …}` with each task's full config + workspace_id / workspace_name. Pass a task's id OR name as `task_id` to the other scheduled-task tools. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
+        json!({"name":"otto.get_scheduled_task","mutating":false,"category":"Scheduled Tasks",
+            "description":"Get one scheduled task's full config (schedule, destination, last/next run). Read-only.",
+            "inputSchema":{"type":"object","required":["task_id"],"properties":{
+                "task_id":{"type":"string","description":TASK_REF_DESC}}}}),
         json!({"name":"otto.list_scheduled_task_runs","mutating":false,"category":"Scheduled Tasks",
             "description":"List the recent run history (status + summary) of a scheduled task. Read-only.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
-                "task_id":{"type":"string"}}}}),
+                "task_id":{"type":"string","description":TASK_REF_DESC}}}}),
         json!({"name":"otto.create_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Create a scheduled task: a recurring job that runs an agent (or hands off to a workflow) on a cadence, writes a Markdown report, and delivers it to a destination. DANGEROUS: an autonomous recurring capability — approval-gated. `schedule` = {cadence:'interval'|'daily'|'weekly'|'cron', every_min, at:'HH:MM', weekday, expr:'<5-field cron>'} interpreted in `timezone` (IANA). `provider` = claude|codex|agy|shell|<custom>. `kind` = 'agent_prompt'|'workflow' (workflow requires workflow_id). `sandbox` = 'none'|'worktree'. `max_retries` 0..5. `notify_on_change` only delivers when the report changes. `attach_proof` builds a proof pack. `destination` = {type:'none'|'slack'|'telegram'|'email'|'webhook', ...}.",
-            "inputSchema":{"type":"object","required":["workspace_id","name","prompt"],"properties":{
+            "inputSchema":{"type":"object","required":["workspace_id","name"],"properties":{
                 "workspace_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
                 "kind":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},
                 "schedule":{"type":"object"},"destination":{"type":"object"},"timezone":{"type":"string"},
@@ -673,25 +786,26 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "notify_on_change":{"type":"boolean"},"attach_proof":{"type":"boolean"},
                 "cwd":{"type":"string"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.update_scheduled_task","mutating":true,"category":"Scheduled Tasks",
-            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/timezone/sandbox/max_retries/notify_on_change/attach_proof/workflow_id/skill/enabled). DANGEROUS — approval-gated.",
+            "description":"Update a scheduled task's fields (name/prompt/schedule/destination/provider/model/cwd/timezone/sandbox/max_retries/notify_on_change/attach_proof/workflow_id/skill/enabled); omitted fields keep their value, `null` clears `workflow_id` / `skill`. `kind` is fixed at creation. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
-                "task_id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},
-                "provider":{"type":"string"},"schedule":{"type":"object"},"destination":{"type":"object"},
-                "timezone":{"type":"string"},"workflow_id":{"type":"string"},"sandbox":{"type":"string"},
+                "task_id":{"type":"string","description":TASK_REF_DESC},"name":{"type":"string"},"prompt":{"type":"string"},
+                "provider":{"type":"string"},"model":{"type":"string"},"cwd":{"type":"string"},
+                "schedule":{"type":"object"},"destination":{"type":"object"},
+                "timezone":{"type":"string"},"workflow_id":{"type":["string","null"],"description":"Workflow id or name; null clears it."},"sandbox":{"type":"string"},
                 "max_retries":{"type":"integer"},"notify_on_change":{"type":"boolean"},
-                "attach_proof":{"type":"boolean"},"skill":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+                "attach_proof":{"type":"boolean"},"skill":{"type":["string","null"]},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.set_scheduled_task_enabled","mutating":true,"category":"Scheduled Tasks",
             "description":"Enable or disable a scheduled task. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id","enabled"],"properties":{
-                "task_id":{"type":"string"},"enabled":{"type":"boolean"}}}}),
+                "task_id":{"type":"string","description":TASK_REF_DESC},"enabled":{"type":"boolean"}}}}),
         json!({"name":"otto.run_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Run a scheduled task once now (does not change its schedule). Starts the run in the background and returns it immediately with status `running` — poll otto.list_scheduled_task_runs for the result. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
-                "task_id":{"type":"string"}}}}),
+                "task_id":{"type":"string","description":TASK_REF_DESC}}}}),
         json!({"name":"otto.delete_scheduled_task","mutating":true,"category":"Scheduled Tasks",
             "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
-                "task_id":{"type":"string"}}}}),
+                "task_id":{"type":"string","description":TASK_REF_DESC}}}}),
         // ================= AWS console =================
         // docs/design/aws-k8s-consoles.md §6. Accounts are global rows (no
         // workspace_id); the self-call reuses the per-service feature grants
@@ -703,53 +817,53 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.aws_s3_list_buckets","mutating":false,"category":"AWS",
             "description":"List the S3 buckets of an AWS account (name, creation_date, region). S3 is read-only in Otto. Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
-                "account_id":{"type":"string"},"region":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_s3_list_objects","mutating":false,"category":"AWS",
             "description":"List one folder level of an S3 bucket — `prefixes` + `objects` (key, size, last_modified, storage_class) under `prefix`; page with `token` = previous `next_token`, `max` per page. Read-only.",
             "inputSchema":{"type":"object","required":["account_id","bucket"],"properties":{
-                "account_id":{"type":"string"},"bucket":{"type":"string"},"prefix":{"type":"string"},
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"bucket":{"type":"string"},"prefix":{"type":"string"},
                 "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_s3_preview","mutating":false,"category":"AWS",
             "description":"Preview the first `max_bytes` (default 64 KiB, cap 1 MiB) of a text-like S3 object as `{text, truncated, content_type}`; binary objects return `{binary:true}`. Read-only.",
             "inputSchema":{"type":"object","required":["account_id","bucket","key"],"properties":{
-                "account_id":{"type":"string"},"bucket":{"type":"string"},"key":{"type":"string"},
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"bucket":{"type":"string"},"key":{"type":"string"},
                 "max_bytes":{"type":"integer"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_sqs_list_queues","mutating":false,"category":"AWS",
             "description":"List an account's SQS queues (`url`, `name`, `fifo`); optional queue-name `prefix`. The `url` is the id the other SQS tools take. Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
-                "account_id":{"type":"string"},"prefix":{"type":"string"},"region":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"prefix":{"type":"string"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_sqs_peek","mutating":false,"category":"AWS",
             "description":"Peek up to `max` (1..10) messages on an SQS queue WITHOUT consuming them (receive with visibility timeout 0). Read-only.",
             "inputSchema":{"type":"object","required":["account_id","url"],"properties":{
-                "account_id":{"type":"string"},"url":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"url":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_sqs_send","mutating":true,"category":"AWS",
             "description":"Send ONE message (`body`) to an SQS queue `url`; FIFO queues need `group_id` (+ `dedup_id` unless content-based dedup). Optional `delay_seconds`, `message_attributes`. Returns `{message_id}`. DANGEROUS: produces into a live queue — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","url","body"],"properties":{
-                "account_id":{"type":"string"},"url":{"type":"string"},"body":{"type":"string"},
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"url":{"type":"string"},"body":{"type":"string"},
                 "delay_seconds":{"type":"integer"},"group_id":{"type":"string"},"dedup_id":{"type":"string"},
                 "message_attributes":{"type":"object"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_ec2_list_instances","mutating":false,"category":"AWS",
             "description":"List EC2 instances (instance_id, name, state, type, az, ips, launch_time, tags); optional `region`, `state` filter and `q` free text. Start/stop/reboot are not exposed. Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
-                "account_id":{"type":"string"},"region":{"type":"string"},"state":{"type":"string"},"q":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"region":{"type":"string"},"state":{"type":"string"},"q":{"type":"string"}}}}),
         json!({"name":"otto.aws_athena_list_tables","mutating":false,"category":"AWS",
             "description":"List the tables (with columns) of an Athena/Glue `database`; optional `catalog` (default AwsDataCatalog). Read-only.",
             "inputSchema":{"type":"object","required":["account_id","database"],"properties":{
-                "account_id":{"type":"string"},"database":{"type":"string"},"catalog":{"type":"string"},"region":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"database":{"type":"string"},"catalog":{"type":"string"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_athena_query","mutating":true,"category":"AWS",
             "description":"START an Athena SQL query and return `{query_execution_id}` — does not wait; poll otto.aws_athena_get_query. Optional `database`, `workgroup`, `output_location`. DANGEROUS: Athena bills per byte scanned — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","sql"],"properties":{
-                "account_id":{"type":"string"},"sql":{"type":"string"},"database":{"type":"string"},
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"sql":{"type":"string"},"database":{"type":"string"},
                 "workgroup":{"type":"string"},"output_location":{"type":"string"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_athena_get_query","mutating":false,"category":"AWS",
             "description":"Status + results of an Athena query execution: `state` (QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED), `reason`, `stats`, and once SUCCEEDED `result` {columns, rows}; page with `token`/`max`. Read-only.",
             "inputSchema":{"type":"object","required":["account_id","query_execution_id"],"properties":{
-                "account_id":{"type":"string"},"query_execution_id":{"type":"string"},
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"query_execution_id":{"type":"string"},
                 "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_eks_list_clusters","mutating":false,"category":"AWS",
             "description":"List the EKS clusters of an account/region (name, status, version, endpoint, arn, created_at). Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
-                "account_id":{"type":"string"},"region":{"type":"string"}}}}),
+                "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"region":{"type":"string"}}}}),
         // ================= Kubernetes console =================
         // §3 routes; everything is `kubectl` with the cluster's own kubeconfig
         // server-side. `kubernetes` feature: View for reads, Edit for k8s_action.
@@ -759,30 +873,30 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.k8s_get_resources","mutating":false,"category":"Kubernetes",
             "description":"List resources of one `kind` (pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, configmaps, secrets, pvcs, hpas, rollouts, applications, events) as normalized rows with `health` and kind-specific `extra`. Omit `namespace` for all namespaces; optional `label` selector and `q` filter. Secret values are never returned. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id","kind"],"properties":{
-                "cluster_id":{"type":"string"},"kind":{"type":"string"},"namespace":{"type":"string"},
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"kind":{"type":"string"},"namespace":{"type":"string"},
                 "label":{"type":"string"},"q":{"type":"string"}}}}),
         json!({"name":"otto.k8s_describe","mutating":false,"category":"Kubernetes",
-            "description":"One resource's `manifest` (managedFields stripped, Secret data redacted), `describe` text and recent `events`. Read-only.",
-            "inputSchema":{"type":"object","required":["cluster_id","kind","namespace","name"],"properties":{
-                "cluster_id":{"type":"string"},"kind":{"type":"string"},"namespace":{"type":"string"},"name":{"type":"string"}}}}),
+            "description":"One resource's `manifest` (managedFields stripped, Secret data redacted), `describe` text and recent `events`. `namespace` is required for namespaced kinds and omitted for cluster-scoped ones (nodes, namespaces). Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id","kind","name"],"properties":{
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"kind":{"type":"string"},"namespace":{"type":"string"},"name":{"type":"string"}}}}),
         json!({"name":"otto.k8s_logs","mutating":false,"category":"Kubernetes",
             "description":"A pod's log tail as `{text}` (no follow). Optional `container`, `tail` (lines, default 500), `since` (e.g. 10m), `previous` (crashed instance), `timestamps`. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id","namespace","pod"],"properties":{
-                "cluster_id":{"type":"string"},"namespace":{"type":"string"},"pod":{"type":"string"},
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"},"pod":{"type":"string"},
                 "container":{"type":"string"},"tail":{"type":"integer"},"since":{"type":"string"},
                 "previous":{"type":"boolean"},"timestamps":{"type":"boolean"}}}}),
         json!({"name":"otto.k8s_top","mutating":false,"category":"Kubernetes",
             "description":"Live per-pod CPU (millicores) / memory (bytes) from metrics-server, optionally for one `namespace`; `available:false` when the cluster has none. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
-                "cluster_id":{"type":"string"},"namespace":{"type":"string"}}}}),
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"namespace":{"type":"string"}}}}),
         json!({"name":"otto.k8s_health","mutating":false,"category":"Kubernetes",
             "description":"Compact health digest for a MONITORED cluster (Kubernetes → Monitor must be enabled): classified restarts (oom / crash / probe / unknown) with pod + memory-limit detail, planned churn (rollouts, scales, drains, Otto actions), memory outliers vs limits, error-rate and p95 spikes vs the 24h baseline, version drift, and the collector + metrics-server status (a `forbidden: …` message is the exact RBAC grant to ask for). `window` = 1h|6h|24h|7d (default 1h). Use this instead of k8s_get_resources for periodic health checks; every list is capped at 20 entries. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
-                "cluster_id":{"type":"string"},"window":{"type":"string","description":"1h|6h|24h|7d"}}}}),
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"window":{"type":"string","description":"1h|6h|24h|7d"}}}}),
         json!({"name":"otto.k8s_action","mutating":true,"category":"Kubernetes",
             "description":"Run ONE operational action on a resource via kubectl: restart, scale (params.replicas), delete_pod, rollout_status/undo/pause/resume, rollout_promote/abort/retry (Argo Rollouts), argocd_sync/refresh/terminate_op/app_restart, cronjob_trigger/suspend/resume. Destructive actions (delete_pod, scale to 0, rollout_undo, argocd_sync with prune) require `params.confirm_name == name`. DANGEROUS: mutates a live cluster — approval-gated.",
             "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
-                "cluster_id":{"type":"string"},"action":{"type":"string"},"kind":{"type":"string"},
+                "cluster_id":{"type":"string","description":K8S_CLUSTER_REF_DESC},"action":{"type":"string"},"kind":{"type":"string"},
                 "namespace":{"type":"string"},"name":{"type":"string"},"params":{"type":"object"}}}}),
     ]
 }
@@ -897,7 +1011,11 @@ fn approval_gated(dangerous: bool, exempt: bool, token_write_grant: bool) -> boo
 fn normalize_exempt_tools(requested: &[String]) -> Result<Vec<String>, Error> {
     let mut out: Vec<String> = Vec::with_capacity(requested.len());
     for t in requested {
-        let bare = t.trim().strip_prefix("otto.").unwrap_or(t.trim()).to_string();
+        let bare = t
+            .trim()
+            .strip_prefix("otto.")
+            .unwrap_or(t.trim())
+            .to_string();
         if !DANGEROUS.contains(&bare.as_str()) {
             let known = otto_tool_specs()
                 .iter()
@@ -939,7 +1057,7 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
                 .and_then(|s| s.get("cadence"))
                 .and_then(Value::as_str)
                 .unwrap_or("interval");
-            let cad = match sched.and_then(|s| s.get("every_min")).and_then(Value::as_i64) {
+            let cad = match sched.and_then(|s| s.get("every_min")).and_then(i64_lenient) {
                 Some(m) => format!("{cadence} (every {m} min)"),
                 None => cadence.to_string(),
             };
@@ -983,12 +1101,29 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
         ),
         "comment_pr" => format!(
             "Comment on PR #{} of repo '{}'",
-            args.get("number").and_then(Value::as_i64).unwrap_or(0),
+            args.get("number").and_then(i64_lenient).unwrap_or(0),
             args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "merge_pr" => format!(
+            "MERGE PR #{} of repo '{}' (strategy: {}{})",
+            args.get("number").and_then(i64_lenient).unwrap_or(0),
+            args.get("repo_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("strategy")
+                .and_then(Value::as_str)
+                .unwrap_or("provider default"),
+            if args
+                .get("delete_source_branch")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                ", deleting the source branch"
+            } else {
+                ""
+            }
         ),
         "start_pr_review" => format!(
             "Start a multi-agent review of PR #{} on repo '{}'",
-            args.get("pr_number").and_then(Value::as_i64).unwrap_or(0),
+            args.get("pr_number").and_then(i64_lenient).unwrap_or(0),
             args.get("repo_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "comment_issue" => format!(
@@ -1209,11 +1344,10 @@ pub(crate) async fn governed_invoke(
         .await
         .map_err(ApiError)?;
     let arguments = filled.as_ref().unwrap_or(arguments);
-    // Design writes carry the ARTIFACT's workspace (never a caller-supplied
-    // one), so a workspace-pinned token, the audit row and the approval scope
-    // all see where the write really lands.
-    let design_filled = fill_design_workspace(ctx, &short, arguments).await;
-    let arguments = design_filled.as_ref().unwrap_or(arguments);
+    // `pr_number` / `number` aliases and stringified integers settle into the
+    // one canonical spelling each route reads, before anything hashes them.
+    let normalized = normalize_args(&short, arguments);
+    let arguments = normalized.as_ref().unwrap_or(arguments);
     let mut audit = NewCallLog {
         tool: tool.to_string(),
         direction: "inbound".into(),
@@ -1232,7 +1366,12 @@ pub(crate) async fn governed_invoke(
     // it is identical for the HTTP transport and the legacy stdio path.
     if let Some(scope) = &auth.mcp_scope {
         let mutating = tool_is_mutating(&short);
-        let ws_arg = arguments.get("workspace_id").and_then(Value::as_str);
+        // A workspace NAME is resolved below and the pin re-checked on the
+        // resolved id (`pin_verdict`); only a literal id is comparable here.
+        let ws_arg = arguments
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .filter(|w| crate::agent_refs::looks_like_id(w));
         if let Some(reason) = scope.deny_reason(&short, mutating, ws_arg) {
             return Ok(deny_audit(ctx, &mut audit, &format!("token scope: {reason}")).await);
         }
@@ -1266,16 +1405,38 @@ pub(crate) async fn governed_invoke(
     };
     let repo_label = repo_fill.as_ref().and_then(|f| f.label.clone());
     let arguments = repo_fill.as_ref().map_or(arguments, |f| &f.args);
-    if repo_fill.is_some() {
+
+    // Every OTHER friendly reference — a workspace / workflow / connection /
+    // swarm / scheduled-task / cluster / account / vault / artifact NAME, a
+    // Jira key for a story, a Confluence page URL, a Jira transition name —
+    // resolved the same way (`agent_refs`: across every workspace the caller
+    // can read, as the caller, candidates listed on a miss), plus the owning
+    // workspace of an id-only object for a workspace-pinned token. Same
+    // placement and contract as the repo fill: after the scope + enable gates,
+    // and the resolved arguments replace the caller's for everything below.
+    let ref_fill = match fill_refs(ctx, auth, &short, arguments).await {
+        Ok(fill) => fill,
+        Err(Error::Forbidden(reason)) => {
+            return Ok(deny_audit(ctx, &mut audit, &reason).await);
+        }
+        Err(e) => return Ok(unresolved_audit(ctx, &mut audit, &e).await),
+    };
+    let arguments = ref_fill.as_ref().unwrap_or(arguments);
+    // Design calls carry the ARTIFACT's workspace (never a caller-supplied
+    // one), so a workspace-pinned token, the audit row and the approval scope
+    // all see where the call really lands.
+    let design_filled = fill_design_workspace(ctx, &short, arguments).await;
+    let arguments = design_filled.as_ref().unwrap_or(arguments);
+    if repo_fill.is_some() || ref_fill.is_some() || design_filled.is_some() {
         audit.args_redacted_json = otto_core::redact::redact_json(arguments).value.to_string();
-        // The workspace pin, re-checked against the RESOLVED repo's workspace.
-        // Resolution already only sees the pinned workspace; this keeps the
-        // pin's one source of truth (`McpScope::deny_reason`) in the path.
-        if let Some(scope) = &auth.mcp_scope {
-            let ws_arg = arguments.get("workspace_id").and_then(Value::as_str);
-            if let Some(reason) = scope.deny_reason(&short, tool_is_mutating(&short), ws_arg) {
-                return Ok(deny_audit(ctx, &mut audit, &format!("token scope: {reason}")).await);
-            }
+    }
+    // The workspace pin, re-checked against the RESOLVED arguments — the
+    // workspace a named object, a repo or an artifact actually lives in. A
+    // pinned token calling a tool whose workspace Otto cannot establish is
+    // denied (fail closed) rather than let through unchecked.
+    if let Some(scope) = &auth.mcp_scope {
+        if let Some(reason) = pin_verdict(scope, &short, arguments) {
+            return Ok(deny_audit(ctx, &mut audit, &reason).await);
         }
     }
 
@@ -1429,7 +1590,19 @@ pub(crate) async fn governed_invoke(
         }
         _ => arguments,
     };
-    let result = execute_otto_tool(ctx, user, &short, arguments).await;
+    let result = match directory_kind(&short) {
+        // Cross-workspace list tools: the `agent_refs` directory (as the
+        // caller, pin applied), not a single-workspace route.
+        Some(kind) => {
+            let ws = arguments
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let current = crate::agent_refs::caller_session_ws(ctx, auth).await;
+            crate::agent_refs::directory_json(ctx, auth, kind, ws, current.as_deref().or(ws)).await
+        }
+        None => execute_otto_tool(ctx, user, &short, arguments).await,
+    };
     let latency = started.elapsed().as_millis() as i64;
     match result {
         Ok(value) => {
@@ -1462,14 +1635,14 @@ async fn deny_audit(ctx: &ServerCtx, audit: &mut NewCallLog, reason: &str) -> Va
     json!({"decision":"denied","executed":false,"reason":reason})
 }
 
-/// Audit + envelope for a repo reference that did not resolve (unknown or
+/// Audit + envelope for a reference (repo, workflow, account, …) that did not resolve (unknown or
 /// ambiguous). Nothing executed, so it is an `error` row, not a denial; the
 /// message lists the candidates / what IS available so the agent can retry
 /// with a concrete id in one step.
 async fn unresolved_audit(ctx: &ServerCtx, audit: &mut NewCallLog, err: &Error) -> Value {
     let msg = otto_core::redact::redact_text(&err.to_string()).value;
     audit.decision = "error".into();
-    audit.decision_reason = Some("repo reference did not resolve".into());
+    audit.decision_reason = Some("reference did not resolve".into());
     audit.error = Some(msg.clone());
     let _ = ctx.mcp.call_log().insert(audit.clone()).await;
     json!({"decision":"error","executed":false,"is_error":true,"content":{"error":msg}})
@@ -1527,12 +1700,12 @@ fn is_read_only_sql(stmt: &str) -> bool {
 /// write in when the tool mutates). Returns `None` when the args need no
 /// filling. Runs BEFORE the scope check so a pinned token's filled call still
 /// faces `McpScope::deny_reason` with the pin satisfied — never bypassed.
-/// `design_assist` / `design_link` arguments with `workspace_id` set to the
-/// target artifact's own workspace (overriding any caller value). `None` when
-/// the tool isn't a design write or the artifact doesn't resolve (the self-call
-/// then answers 404 under the caller's own RBAC).
+/// [`DESIGN_WS_TOOLS`] arguments with `workspace_id` set to the target
+/// artifact's own workspace (overriding any caller value). `None` when the
+/// tool doesn't address one artifact or it doesn't resolve (the self-call then
+/// answers 404 under the caller's own RBAC).
 async fn fill_design_workspace(ctx: &ServerCtx, tool: &str, args: &Value) -> Option<Value> {
-    if !matches!(tool, "design_assist" | "design_link") || !args.is_object() {
+    if !DESIGN_WS_TOOLS.contains(&tool) || !args.is_object() {
         return None;
     }
     let id = args
@@ -1595,6 +1768,552 @@ async fn fill_vault_workspace(
     let mut filled = args.clone();
     filled["workspace_id"] = json!(ws);
     Ok(Some(filled))
+}
+
+// ===========================================================================
+// Friendly references + the workspace pin for every non-git tool
+// ===========================================================================
+
+/// `(tool, argument, agent_refs kind)` — a governed argument that takes a
+/// friendly reference (the id, or a name / title / Jira key / label) resolved
+/// by [`fill_refs`] through `agent_refs`. A `Workspace`-scoped kind resolves
+/// within the call's `workspace_id` when it carries one, else across every
+/// workspace the caller can read (and then fills in the object's own
+/// `workspace_id` for the pin, the audit and the approval scope).
+pub(crate) const REF_ARGS: &[(&str, &str, &str)] = &[
+    ("query_db_readonly", "connection_id", "connection"),
+    ("get_workflow", "workflow_id", "workflow"),
+    ("list_workflow_runs", "workflow_id", "workflow"),
+    ("run_workflow", "workflow_id", "workflow"),
+    ("list_broker_topics", "cluster_id", "broker_cluster"),
+    ("get_broker_topic", "cluster_id", "broker_cluster"),
+    ("list_consumer_groups", "cluster_id", "broker_cluster"),
+    ("consume_broker_messages", "cluster_id", "broker_cluster"),
+    ("produce_broker_message", "cluster_id", "broker_cluster"),
+    ("api_get_request", "request_id", "api_request"),
+    ("api_history", "request_id", "api_request"),
+    ("api_execute", "request_id", "api_request"),
+    ("api_execute", "environment_id", "api_environment"),
+    ("api_upsert_request", "request_id", "api_request"),
+    ("api_run_automation", "automation_id", "api_automation"),
+    ("search_issues", "account_id", "issue_account"),
+    ("get_issue", "account_id", "issue_account"),
+    ("list_issue_transitions", "account_id", "issue_account"),
+    ("comment_issue", "account_id", "issue_account"),
+    ("transition_issue", "account_id", "issue_account"),
+    ("search_confluence", "account_id", "issue_account"),
+    ("get_confluence_page", "account_id", "issue_account"),
+    (
+        "list_confluence_page_comments",
+        "account_id",
+        "issue_account",
+    ),
+    ("create_confluence_page", "account_id", "issue_account"),
+    ("update_confluence_page", "account_id", "issue_account"),
+    ("comment_confluence_page", "account_id", "issue_account"),
+    ("start_pr_review", "issue_account_id", "issue_account"),
+    ("get_swarm", "swarm_id", "swarm"),
+    ("list_swarm_runs", "swarm_id", "swarm"),
+    ("list_swarm_projects", "swarm_id", "swarm"),
+    ("get_swarm_board", "swarm_id", "swarm"),
+    ("post_swarm_board", "swarm_id", "swarm"),
+    ("vault_dir", "vault_id", "vault"),
+    ("vault_read", "vault_id", "vault"),
+    ("vault_search", "vault_id", "vault"),
+    ("vault_backlinks", "vault_id", "vault"),
+    ("vault_tags", "vault_id", "vault"),
+    ("vault_graph", "vault_id", "vault"),
+    ("vault_okf_validate", "vault_id", "vault"),
+    ("vault_write", "vault_id", "vault"),
+    ("vault_write_file", "vault_id", "vault"),
+    ("vault_rename", "vault_id", "vault"),
+    ("vault_delete", "vault_id", "vault"),
+    ("design_get", "artifact_id", "design_artifact"),
+    ("design_links", "artifact_id", "design_artifact"),
+    ("design_assist", "artifact_id", "design_artifact"),
+    ("design_link", "artifact_id", "design_artifact"),
+    ("get_product_story", "story_id", "product_story"),
+    ("get_context_packet", "story_id", "product_story"),
+    ("get_scheduled_task", "task_id", "scheduled_task"),
+    ("list_scheduled_task_runs", "task_id", "scheduled_task"),
+    ("update_scheduled_task", "task_id", "scheduled_task"),
+    ("set_scheduled_task_enabled", "task_id", "scheduled_task"),
+    ("run_scheduled_task", "task_id", "scheduled_task"),
+    ("delete_scheduled_task", "task_id", "scheduled_task"),
+    ("create_scheduled_task", "workflow_id", "workflow"),
+    ("update_scheduled_task", "workflow_id", "workflow"),
+    ("get_proof_pack", "goal_loop_id", "goal_loop"),
+    ("room_post", "room_id", "agent_room"),
+    ("room_read", "room_id", "agent_room"),
+    ("aws_s3_list_buckets", "account_id", "aws_account"),
+    ("aws_s3_list_objects", "account_id", "aws_account"),
+    ("aws_s3_preview", "account_id", "aws_account"),
+    ("aws_sqs_list_queues", "account_id", "aws_account"),
+    ("aws_sqs_peek", "account_id", "aws_account"),
+    ("aws_sqs_send", "account_id", "aws_account"),
+    ("aws_ec2_list_instances", "account_id", "aws_account"),
+    ("aws_athena_list_tables", "account_id", "aws_account"),
+    ("aws_athena_query", "account_id", "aws_account"),
+    ("aws_athena_get_query", "account_id", "aws_account"),
+    ("aws_eks_list_clusters", "account_id", "aws_account"),
+    ("k8s_get_resources", "cluster_id", "k8s_cluster"),
+    ("k8s_describe", "cluster_id", "k8s_cluster"),
+    ("k8s_logs", "cluster_id", "k8s_cluster"),
+    ("k8s_top", "cluster_id", "k8s_cluster"),
+    ("k8s_health", "cluster_id", "k8s_cluster"),
+    ("k8s_action", "cluster_id", "k8s_cluster"),
+];
+
+/// Governed list tools served by the cross-workspace `agent_refs` directory:
+/// omit `workspace_id` to list every workspace the caller can read (a pinned
+/// token: its pin), each row annotated with its workspace.
+pub(crate) const DIRECTORY_TOOLS: &[(&str, &str)] = &[
+    ("list_workspaces", "workspace"),
+    ("list_workflows", "workflow"),
+    ("list_connections", "connection"),
+    ("list_broker_clusters", "broker_cluster"),
+    ("list_swarms", "swarm"),
+    ("list_scheduled_tasks", "scheduled_task"),
+    ("list_goal_loops", "goal_loop"),
+    ("list_agent_rooms", "agent_room"),
+    ("list_issue_accounts", "issue_account"),
+    ("list_product_stories", "product_story"),
+];
+
+/// The directory kind a governed list tool is served by, if any.
+fn directory_kind(tool: &str) -> Option<&'static crate::agent_refs::RefKind> {
+    DIRECTORY_TOOLS
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .and_then(|(_, k)| crate::agent_refs::kind_of(k))
+}
+
+/// Tools that address ONE design artifact: the artifact's own workspace is
+/// filled in ([`fill_design_workspace`]).
+const DESIGN_WS_TOOLS: &[&str] = &["design_get", "design_links", "design_assist", "design_link"];
+
+/// Pin probes for id-only objects: `(tool, arg, route prefix, JSON pointer of
+/// the object's workspace)`. Run only for a workspace-pinned token, whose pin
+/// must be checked against the object's REAL workspace.
+const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
+    (
+        "get_workflow_run",
+        "run_id",
+        "/api/v1/workflow-runs/",
+        "/workspace_id",
+    ),
+    (
+        "cancel_workflow_run",
+        "run_id",
+        "/api/v1/workflow-runs/",
+        "/workspace_id",
+    ),
+    (
+        "get_session",
+        "session_id",
+        "/api/v1/sessions/",
+        "/workspace_id",
+    ),
+    (
+        "wait_session",
+        "session_id",
+        "/api/v1/sessions/",
+        "/workspace_id",
+    ),
+    (
+        "send_message",
+        "session_id",
+        "/api/v1/sessions/",
+        "/workspace_id",
+    ),
+    (
+        "get_improvement_run",
+        "run_id",
+        "/api/v1/improvement/runs/",
+        "/run/workspace_id",
+    ),
+];
+
+/// Tools that may run under a workspace pin WITHOUT a workspace — they
+/// address no workspace-owned object: global rows (AWS accounts, K8s
+/// clusters, the product-story and design libraries), the caller's own issue
+/// accounts, root-only usage, the skill catalogue, and the directory tools
+/// (which the pin itself narrows).
+fn pin_global(tool: &str) -> bool {
+    tool.starts_with("aws_")
+        || tool.starts_with("k8s_")
+        || DIRECTORY_TOOLS.iter().any(|(t, _)| *t == tool)
+        || matches!(
+            tool,
+            "search_issues"
+                | "get_issue"
+                | "list_issue_transitions"
+                | "comment_issue"
+                | "transition_issue"
+                | "search_confluence"
+                | "get_confluence_page"
+                | "list_confluence_page_comments"
+                | "create_confluence_page"
+                | "update_confluence_page"
+                | "comment_confluence_page"
+                | "get_product_story"
+                | "get_usage_summary"
+                | "list_bundled_skills"
+        )
+}
+
+/// Tools that narrow to a workspace when given one: a pinned token that omits
+/// it is narrowed to its pin (never widened to the whole library).
+const PIN_NARROW_TOOLS: &[&str] = &[
+    "design_list",
+    "design_search",
+    "list_design_projects",
+    "ask_human_approval",
+];
+
+/// Tools whose target's workspace Otto cannot establish from the arguments
+/// (no workspace argument, no name to resolve, no probe route) — a
+/// workspace-pinned token is DENIED them. Listed so the classification test
+/// forces a conscious choice for every new tool.
+#[cfg(test)]
+const PIN_UNVERIFIABLE: &[&str] = &[
+    "create_work_item",
+    "list_swarm_tasks",
+    "list_findings",
+    "get_finding",
+    "approve_improvement_edit",
+    "reject_improvement_edit",
+    "rollback_improvement_edit",
+];
+
+/// The workspace-pin verdict on fully resolved arguments: `McpScope`'s own
+/// check first; then, for a pinned token, a call that names no workspace is
+/// allowed only for a [`pin_global`] tool. Pure — unit-tested.
+fn pin_verdict(scope: &McpScope, tool: &str, args: &Value) -> Option<String> {
+    let ws = args
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let Some(reason) = scope.deny_reason(tool, tool_is_mutating(tool), ws) {
+        return Some(format!("token scope: {reason}"));
+    }
+    let pin = scope.workspace_id.as_deref().filter(|s| !s.is_empty())?;
+    if ws.is_none() && !pin_global(tool) {
+        return Some(format!(
+            "token scope: this token is scoped to workspace '{pin}', and Otto cannot \
+             establish which workspace this '{tool}' call touches — use a token without a \
+             workspace pin for it"
+        ));
+    }
+    None
+}
+
+/// Canonical argument spellings, before anything hashes them: the PR tools'
+/// `number` / `pr_number` aliases collapse to the one each route reads, and a
+/// stringified PR number becomes an integer. `None` when nothing changed.
+/// Pure — unit-tested.
+fn normalize_args(tool: &str, args: &Value) -> Option<Value> {
+    let (want, alias) = match tool {
+        "get_pr" | "comment_pr" | "get_pr_checks" | "get_pr_diff" | "merge_pr" => {
+            ("number", "pr_number")
+        }
+        "start_pr_review" | "list_pr_reviews" => ("pr_number", "number"),
+        _ => return None,
+    };
+    let obj = args.as_object()?;
+    let value = obj.get(want).or_else(|| obj.get(alias))?;
+    let n = i64_lenient(value)?;
+    if obj.get(want) == Some(&json!(n)) && !obj.contains_key(alias) {
+        return None;
+    }
+    let mut out = obj.clone();
+    out.remove(alias);
+    out.insert(want.to_string(), json!(n));
+    Some(Value::Object(out))
+}
+
+/// A Confluence page id from a page id or URL: `…/pages/12345/Title`,
+/// `…/pages/12345`, `…?pageId=12345`. `None` when nothing id-like is found.
+/// Pure — unit-tested.
+fn confluence_page_id(reference: &str) -> Option<String> {
+    let r = reference.trim();
+    if !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(r.to_string());
+    }
+    if let Some(i) = r.find("pageId=") {
+        let digits: String = r[i + 7..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    if let Some(i) = r.find("/pages/") {
+        let digits: String = r[i + 7..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
+}
+
+/// Whether [`fill_refs`] needs directory lookups for this call (so a plain-id
+/// call from an unpinned caller costs nothing extra). Pure — unit-tested.
+fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
+    let s = |k: &str| -> Option<String> {
+        match args.get(k)? {
+            Value::String(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    if s("workspace_id").is_some_and(|w| !crate::agent_refs::looks_like_id(&w)) {
+        return true;
+    }
+    for (t, arg, kind) in REF_ARGS {
+        if *t != tool {
+            continue;
+        }
+        let Some(k) = crate::agent_refs::kind_of(kind) else {
+            continue;
+        };
+        match s(arg) {
+            None => {
+                if k.sole_default {
+                    return true;
+                }
+            }
+            Some(v) => {
+                if !crate::agent_refs::looks_like_id(&v)
+                    || (pinned && k.scope == crate::agent_refs::Scope::Workspace)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if tool == "transition_issue"
+        && s("transition_id").is_some_and(|t| !t.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return true;
+    }
+    pinned
+        && s("workspace_id").is_none()
+        && PIN_PROBES
+            .iter()
+            .any(|(t, arg, _, _)| *t == tool && s(arg).is_some())
+}
+
+/// Resolve every friendly reference in a governed call (see [`REF_ARGS`]), a
+/// workspace NAME in `workspace_id`, a Confluence page URL, a Jira transition
+/// name, and — for a pinned token — an id-only object's workspace
+/// ([`PIN_PROBES`]) and the pin narrowing of [`PIN_NARROW_TOOLS`]. `None` when
+/// the arguments are already canonical. Errors: `Forbidden` (pin / RBAC),
+/// `NotFound` / `Conflict` listing the candidates.
+async fn fill_refs(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<Value>, Error> {
+    let Some(obj) = args.as_object() else {
+        return Ok(None);
+    };
+    let pin = crate::agent_refs::pin_of(auth);
+    let mut out = obj.clone();
+    let mut changed = false;
+
+    // Pure normalizations first (no lookups).
+    for key in ["page_id", "parent_id"] {
+        if let Some(raw) = out.get(key).and_then(Value::as_str) {
+            if let Some(id) = confluence_page_id(raw).filter(|id| id != raw) {
+                out.insert(key.to_string(), json!(id));
+                changed = true;
+            }
+        }
+    }
+    let has_ws = out
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if let (Some(p), false) = (pin, has_ws) {
+        if PIN_NARROW_TOOLS.contains(&tool) {
+            out.insert("workspace_id".into(), json!(p));
+            changed = true;
+        }
+    }
+
+    let current = Value::Object(out.clone());
+    if !refs_need_lookup(tool, &current, pin.is_some()) {
+        return Ok(changed.then_some(current));
+    }
+    let prefer = crate::agent_refs::caller_session_ws(ctx, auth).await;
+    let caller = crate::agent_refs::SelfCaller::open(ctx, &auth.effective_user).await?;
+    let r = fill_refs_with(&caller, auth, tool, out, prefer.as_deref()).await;
+    caller.close().await;
+    r.map(Some)
+}
+
+/// The lookup half of [`fill_refs`], over an open caller.
+async fn fill_refs_with(
+    caller: &crate::agent_refs::SelfCaller,
+    auth: &AuthContext,
+    tool: &str,
+    mut out: serde_json::Map<String, Value>,
+    prefer: Option<&str>,
+) -> Result<Value, Error> {
+    use crate::agent_refs::{kind_of, looks_like_id, resolve_with, Scope};
+    let pinned = crate::agent_refs::pin_of(auth).is_some();
+    let text = |m: &serde_json::Map<String, Value>, k: &str| -> Option<String> {
+        match m.get(k)? {
+            Value::String(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+
+    // 1. A workspace given by NAME.
+    if let Some(ws) = text(&out, "workspace_id").filter(|w| !looks_like_id(w)) {
+        let kind = kind_of("workspace").ok_or_else(|| Error::Internal("kind workspace".into()))?;
+        let (c, _) = resolve_with(
+            caller,
+            auth,
+            kind,
+            "workspace_id",
+            Some(ws.as_str()),
+            None,
+            prefer,
+        )
+        .await?;
+        out.insert("workspace_id".into(), json!(c.id));
+    }
+
+    // 2. Friendly id arguments.
+    for (t, arg, kind_key) in REF_ARGS {
+        if *t != tool {
+            continue;
+        }
+        let Some(kind) = kind_of(kind_key) else {
+            continue;
+        };
+        let value = text(&out, arg);
+        let needs = match &value {
+            None => kind.sole_default,
+            Some(v) => !looks_like_id(v) || (pinned && kind.scope == Scope::Workspace),
+        };
+        if !needs {
+            continue;
+        }
+        let ws_filter = match kind.scope {
+            Scope::Workspace => text(&out, "workspace_id"),
+            _ => None,
+        };
+        let (c, _) = resolve_with(
+            caller,
+            auth,
+            kind,
+            arg,
+            value.as_deref(),
+            ws_filter.as_deref(),
+            prefer,
+        )
+        .await?;
+        let id = if kind.key == "vault" {
+            c.id.parse::<i64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| json!(c.id))
+        } else {
+            json!(c.id)
+        };
+        out.insert((*arg).to_string(), id);
+        if kind.scope == Scope::Workspace && ws_filter.is_none() {
+            if let Some(ws) = &c.workspace_id {
+                out.insert("workspace_id".into(), json!(ws));
+            }
+        }
+    }
+
+    // 3. A Jira transition given by name / target status.
+    if tool == "transition_issue" {
+        if let (Some(acc), Some(key), Some(tr)) = (
+            text(&out, "account_id"),
+            text(&out, "key"),
+            text(&out, "transition_id"),
+        ) {
+            if !tr.bytes().all(|b| b.is_ascii_digit()) {
+                let list = caller
+                    .get(&format!(
+                        "/api/v1/issue/{}/{}/transitions",
+                        seg(&acc),
+                        seg(&key)
+                    ))
+                    .await?;
+                out.insert("transition_id".into(), json!(match_transition(&list, &tr)?));
+            }
+        }
+    }
+
+    // 4. Pinned token, id-only object: learn its real workspace.
+    if pinned && text(&out, "workspace_id").is_none() {
+        if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
+            if let Some(id) = text(&out, arg) {
+                let v = caller.get(&format!("{prefix}{}", seg(&id))).await?;
+                if let Some(ws) = v.pointer(ptr).and_then(Value::as_str) {
+                    out.insert("workspace_id".into(), json!(ws));
+                }
+            }
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Pick a Jira transition by id, name, or target status name
+/// (case-insensitive) from `GET …/transitions` (`[{id, name, to_status}]`).
+/// Unknown / ambiguous → an error listing the issue's transitions. Pure.
+fn match_transition(list: &Value, wanted: &str) -> Result<String, Error> {
+    let rows = list.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let field = |r: &Value, k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let id_of = |r: &Value| match r.get("id") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    let listing = || {
+        rows.iter()
+            .map(|r| {
+                format!(
+                    "- {}  {} → {}",
+                    id_of(r),
+                    field(r, "name"),
+                    field(r, "to_status")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for key in ["name", "to_status"] {
+        let hits: Vec<&Value> = rows
+            .iter()
+            .filter(|r| field(r, key).eq_ignore_ascii_case(wanted.trim()))
+            .collect();
+        match hits.len() {
+            0 => continue,
+            1 => return Ok(id_of(hits[0])),
+            _ => return Err(Error::Conflict(format!(
+                "transition '{wanted}' matches {} transitions — pass one id as transition_id:\n{}",
+                hits.len(),
+                listing()
+            ))),
+        }
+    }
+    Err(Error::NotFound(format!(
+        "no transition named '{wanted}' is available for this issue. Available:\n{}",
+        listing()
+    )))
 }
 
 /// Resolved arguments for a git tool (see [`fill_repo_ref`]).
@@ -1692,13 +2411,115 @@ async fn execute_otto_tool(
         .issue_api_token(&user.id, Some("mcp-otto-exec"))
         .await?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(call_timeout(tool, args))
         .build()
         .map_err(|e| Error::Internal(format!("http client: {e}")))?;
     let base = ctx.base_url.trim_end_matches('/').to_string();
-    let result = run_tool(&client, &base, &token, tool, args).await;
+    let result = if tool == "api_upsert_request" {
+        upsert_request_preserving(&client, &base, &token, args).await
+    } else {
+        run_tool(&client, &base, &token, tool, args).await
+    };
     let _ = AuthRepo::new(ctx.pool.clone()).revoke(&token).await;
     result
+}
+
+/// Wall-clock budget of one governed self-call. The flat 30 s cut off calls
+/// whose route legitimately runs longer: a saved API request may itself wait
+/// up to its `timeout_ms` (≤ 60 s), an automation runs several, pod logs shell
+/// out to kubectl with a 60 s budget. Pure — unit-tested.
+fn call_timeout(tool: &str, args: &Value) -> Duration {
+    let secs = match tool {
+        "api_execute" => {
+            let ms = args
+                .get("timeout_ms")
+                .and_then(u64_lenient)
+                .unwrap_or(30_000)
+                .min(60_000);
+            ms / 1000 + 15
+        }
+        "api_run_automation" => 180,
+        "k8s_logs" | "k8s_action" | "aws_athena_query" | "aws_athena_get_query" => 75,
+        "consume_broker_messages" | "run_workflow" | "start_pr_review" | "open_session" => 60,
+        _ => 30,
+    };
+    Duration::from_secs(secs)
+}
+
+/// Fields of a saved API request that the PATCH route REPLACES wholesale when
+/// omitted (only `auth` / `extras` are preserved server-side). An agent update
+/// that sends just the field it means to change must not wipe the rest.
+const UPSERT_PRESERVED: &[&str] = &[
+    "collection_id",
+    "headers",
+    "query",
+    "body_mode",
+    "body",
+    "ssh_connection_id",
+];
+
+/// Fill the fields an update omitted from the STORED request (read raw, as
+/// the caller — never returned to the agent). Pure — unit-tested.
+fn merge_stored_request(args: &Value, stored: &Value) -> Value {
+    let mut out = args.clone();
+    if let Some(o) = out.as_object_mut() {
+        for k in UPSERT_PRESERVED {
+            if !o.contains_key(*k) {
+                if let Some(v) = stored.get(*k).filter(|v| !v.is_null()) {
+                    o.insert((*k).to_string(), v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `api_upsert_request`: on update, merge the stored request under the
+/// agent's fields first (see [`UPSERT_PRESERVED`]); either way, return the
+/// saved request in the masked agent shape — the route answers the raw row.
+async fn upsert_request_preserving(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    args: &Value,
+) -> Result<Value, Error> {
+    let ws = arg_str(args, "workspace_id")?;
+    let merged = match args
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => {
+            let stored = self_get(
+                client,
+                token,
+                &format!(
+                    "{base}/api/v1/workspaces/{}/api-client/requests/{}",
+                    seg(&ws),
+                    seg(id)
+                ),
+            )
+            .await?;
+            merge_stored_request(args, &stored)
+        }
+        None => args.clone(),
+    };
+    let saved = run_tool(client, base, token, "api_upsert_request", &merged).await?;
+    match saved.get("id").and_then(Value::as_str) {
+        Some(id) => {
+            self_get(
+                client,
+                token,
+                &format!(
+                    "{base}/api/v1/workspaces/{}/api-client/requests/{}?shape=agent",
+                    seg(&ws),
+                    seg(id)
+                ),
+            )
+            .await
+        }
+        None => Ok(saved),
+    }
 }
 
 fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
@@ -1709,7 +2530,7 @@ fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Invalid(format!("missing required string argument '{key}'")))
 }
 
-fn seg(s: &str) -> String {
+pub(crate) fn seg(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
@@ -1722,11 +2543,25 @@ fn seg(s: &str) -> String {
     out
 }
 
-/// Optional required-integer argument extractor (PR numbers etc.).
+/// Required-integer argument extractor (PR numbers etc.). Accepts a numeric
+/// string too — some MCP clients stringify every argument, and `"52"` must not
+/// read as "missing".
 fn arg_i64(args: &Value, key: &str) -> Result<i64, Error> {
     args.get(key)
-        .and_then(Value::as_i64)
+        .and_then(i64_lenient)
         .ok_or_else(|| Error::Invalid(format!("missing required integer argument '{key}'")))
+}
+
+/// A JSON number, or a string holding one (see [`arg_i64`]).
+fn i64_lenient(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Unsigned counterpart of [`i64_lenient`] (limits, sizes, delays).
+fn u64_lenient(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 /// Render the optional query filters of the AWS/K8s console reads: for every
@@ -1822,7 +2657,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(p) = args.get("path").and_then(Value::as_str) {
                 path.push_str(&format!("&path={}", seg(p)));
             }
-            if let Some(m) = args.get("max_results").and_then(Value::as_u64) {
+            if let Some(m) = args.get("max_results").and_then(u64_lenient) {
                 path.push_str(&format!("&max={m}"));
             }
             SelfCall::get(path)
@@ -1862,7 +2697,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             // if a statement slips past the classifier above.
             let body = json!({
                 "statement": stmt,
-                "max_rows": args.get("max_rows").and_then(Value::as_u64).unwrap_or(200),
+                "max_rows": args.get("max_rows").and_then(u64_lenient).unwrap_or(200),
                 "node": args.get("node").and_then(Value::as_str),
             });
             SelfCall::post(
@@ -1951,6 +2786,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "timeout_ms",
                 "confirm",
                 "confirm_new_host",
+                "decode_jwt",
             ] {
                 if let Some(value) = args.get(key) {
                     body[key] = value.clone();
@@ -1979,6 +2815,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "body",
                 "auth",
                 "extras",
+                "ssh_connection_id",
             ] {
                 if let Some(value) = args.get(key) {
                     body[key] = value.clone();
@@ -2045,15 +2882,53 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "list_prs" => {
             let repo = arg_str(args, "repo_id")?;
-            let mut path = format!("/api/v1/repos/{}/prs", seg(&repo));
-            if let Some(s) = args
-                .get("state")
+            let q = opt_query(
+                args,
+                &[
+                    ("state", "state"),
+                    ("page", "page"),
+                    ("per_page", "per_page"),
+                ],
+            );
+            SelfCall::get(if q.is_empty() {
+                format!("/api/v1/repos/{}/prs", seg(&repo))
+            } else {
+                format!("/api/v1/repos/{}/prs?{q}", seg(&repo))
+            })
+        }
+        "list_pr_reviews" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "pr_number")?;
+            SelfCall::get(format!("/api/v1/repos/{}/prs/{}/reviews", seg(&repo), n))
+        }
+        "get_pr_checks" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "number")?;
+            SelfCall::get(format!("/api/v1/repos/{}/prs/{}/checks", seg(&repo), n))
+        }
+        "get_pr_diff" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "number")?;
+            SelfCall::get(format!("/api/v1/repos/{}/prs/{}/diff", seg(&repo), n))
+        }
+        "merge_pr" => {
+            let repo = arg_str(args, "repo_id")?;
+            let n = arg_i64(args, "number")?;
+            let mut body = json!({});
+            if let Some(st) = args
+                .get("strategy")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
-                path.push_str(&format!("?state={}", seg(s)));
+                body["strategy"] = json!(st);
             }
-            SelfCall::get(path)
+            if let Some(d) = args.get("delete_source_branch").and_then(Value::as_bool) {
+                body["delete_source_branch"] = json!(d);
+            }
+            SelfCall::post(
+                format!("/api/v1/repos/{}/prs/{}/merge", seg(&repo), n),
+                body,
+            )
         }
         "get_pr" => {
             let repo = arg_str(args, "repo_id")?;
@@ -2062,12 +2937,25 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "create_pr" => {
             let repo = arg_str(args, "repo_id")?;
-            let body = json!({
+            let mut body = json!({
                 "title": arg_str(args, "title")?,
                 "description": arg_str(args, "description")?,
                 "source_branch": arg_str(args, "source_branch")?,
                 "target_branch": arg_str(args, "target_branch")?,
             });
+            if let Some(d) = args.get("draft").and_then(Value::as_bool) {
+                body["draft"] = json!(d);
+            }
+            if let Some(r) = args.get("reviewers").filter(|v| v.is_array()) {
+                body["reviewers"] = r.clone();
+            }
+            if let Some(p) = args
+                .get("proof_pack_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                body["proof_pack_id"] = json!(p);
+            }
             SelfCall::post(format!("/api/v1/repos/{}/prs", seg(&repo)), body)
         }
         "comment_pr" => {
@@ -2076,7 +2964,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let body = json!({
                 "body": arg_str(args, "body")?,
                 "path": args.get("path").and_then(Value::as_str),
-                "line": args.get("line").and_then(Value::as_u64),
+                "line": args.get("line").and_then(u64_lenient),
                 "in_reply_to": args.get("in_reply_to").and_then(Value::as_str),
             });
             SelfCall::post(
@@ -2087,9 +2975,19 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "start_pr_review" => {
             let repo = arg_str(args, "repo_id")?;
             let n = arg_i64(args, "pr_number")?;
+            let mut body = json!({});
+            for k in ["context", "issue_key", "issue_account_id"] {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    body[k] = json!(v);
+                }
+            }
             SelfCall::post(
                 format!("/api/v1/repos/{}/prs/{}/review", seg(&repo), n),
-                json!({}),
+                body,
             )
         }
         // ---- Workflows ----
@@ -2103,7 +3001,13 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "list_workflow_runs" => {
             let id = arg_str(args, "workflow_id")?;
-            SelfCall::get(format!("/api/v1/workflows/{}/runs", seg(&id)))
+            // Lightweight rows by default: the full rows (node states, inputs,
+            // outputs × 50) blow the result cap for a busy workflow.
+            let summary = args.get("summary").and_then(Value::as_bool).unwrap_or(true);
+            SelfCall::get(format!(
+                "/api/v1/workflows/{}/runs?summary={summary}",
+                seg(&id)
+            ))
         }
         "get_workflow_run" => {
             let id = arg_str(args, "run_id")?;
@@ -2158,10 +3062,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let id = arg_str(args, "cluster_id")?;
             let topic = arg_str(args, "topic")?;
             let mut body = json!({});
-            if let Some(p) = args.get("partition").and_then(Value::as_i64) {
+            if let Some(p) = args.get("partition").and_then(i64_lenient) {
                 body["partition"] = json!(p);
             }
-            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
+            if let Some(l) = args.get("limit").and_then(u64_lenient) {
                 body["limit"] = json!(l);
             }
             if let Some(f) = args.get("value_filter").and_then(Value::as_str) {
@@ -2183,7 +3087,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(k) = args.get("key").and_then(Value::as_str) {
                 body["key"] = json!(k);
             }
-            if let Some(p) = args.get("partition").and_then(Value::as_i64) {
+            if let Some(p) = args.get("partition").and_then(i64_lenient) {
                 body["partition"] = json!(p);
             }
             if let Some(c) = args.get("confirm").and_then(Value::as_bool) {
@@ -2212,7 +3116,19 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             {
                 path.push_str(&format!("&project={}", seg(p)));
             }
+            if let Some(n) = args.get("start_at").and_then(u64_lenient) {
+                path.push_str(&format!("&start_at={n}"));
+            }
             SelfCall::get(path)
+        }
+        "list_issue_transitions" => {
+            let acc = arg_str(args, "account_id")?;
+            let key = arg_str(args, "key")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/{}/{}/transitions",
+                seg(&acc),
+                seg(&key)
+            ))
         }
         "get_issue" => {
             let acc = arg_str(args, "account_id")?;
@@ -2301,7 +3217,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             {
                 body["title"] = json!(t);
             }
-            if let Some(v) = args.get("base_version").and_then(Value::as_i64) {
+            if let Some(v) = args.get("base_version").and_then(i64_lenient) {
                 body["base_version"] = json!(v);
             }
             SelfCall::put(
@@ -2364,11 +3280,32 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "list_swarm_runs" => {
             let ws = arg_str(args, "workspace_id")?;
-            SelfCall::get(format!("/api/v1/workspaces/{}/swarm/runs", seg(&ws)))
+            let q = opt_query(args, &[("swarm_id", "swarm_id")]);
+            SelfCall::get(if q.is_empty() {
+                format!("/api/v1/workspaces/{}/swarm/runs", seg(&ws))
+            } else {
+                format!("/api/v1/workspaces/{}/swarm/runs?{q}", seg(&ws))
+            })
+        }
+        "list_swarm_projects" => {
+            let id = arg_str(args, "swarm_id")?;
+            SelfCall::get(format!("/api/v1/swarm/swarms/{}/projects", seg(&id)))
+        }
+        "list_swarm_tasks" => {
+            let id = arg_str(args, "project_id")?;
+            SelfCall::get(format!("/api/v1/swarm/projects/{}/tasks", seg(&id)))
         }
         "get_swarm_board" => {
             let id = arg_str(args, "swarm_id")?;
-            SelfCall::get(format!("/api/v1/swarm/swarms/{}/board", seg(&id)))
+            let q = opt_query(
+                args,
+                &[("project_id", "project_id"), ("task_id", "task_id")],
+            );
+            SelfCall::get(if q.is_empty() {
+                format!("/api/v1/swarm/swarms/{}/board", seg(&id))
+            } else {
+                format!("/api/v1/swarm/swarms/{}/board?{q}", seg(&id))
+            })
         }
         "post_swarm_board" => {
             let id = arg_str(args, "swarm_id")?;
@@ -2410,7 +3347,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             // `k` defaults to 0 server-side (MemoryQuery), which would return nothing —
             // supply a useful default so a caller that omits it still gets hits.
-            let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
+            let k = args.get("k").and_then(u64_lenient).unwrap_or(20);
             let body = json!({ "text": arg_str(args, "query")?, "k": k });
             SelfCall::post(
                 format!("/api/v1/workspaces/{}/memory/search", seg(&ws)),
@@ -2444,7 +3381,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "vault_search" => {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
-            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20);
+            let limit = args.get("limit").and_then(u64_lenient).unwrap_or(20);
             let body = json!({ "query": arg_str(args, "query")?, "limit": limit });
             SelfCall::post(
                 format!("/api/v1/workspaces/{}/vault/vaults/{v}/search", seg(&ws)),
@@ -2485,7 +3422,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(f) = focus {
                 path.push_str(&format!("&path={}", seg(f)));
             }
-            if let Some(d) = args.get("depth").and_then(Value::as_u64) {
+            if let Some(d) = args.get("depth").and_then(u64_lenient) {
                 path.push_str(&format!("&depth={d}"));
             }
             SelfCall::get(path)
@@ -2520,6 +3457,20 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "/api/v1/design/artifacts".to_string()
             } else {
                 format!("/api/v1/design/artifacts?{q}")
+            })
+        }
+        "list_design_projects" => {
+            let q = opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("include_archived", "include_archived"),
+                ],
+            );
+            SelfCall::get(if q.is_empty() {
+                "/api/v1/design/projects".to_string()
+            } else {
+                format!("/api/v1/design/projects?{q}")
             })
         }
         "design_get" => {
@@ -2601,10 +3552,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                     body[k] = json!(v);
                 }
             }
-            SelfCall::post(
-                format!("/api/v1/design/artifacts/{}/links", seg(&id)),
-                body,
-            )
+            SelfCall::post(format!("/api/v1/design/artifacts/{}/links", seg(&id)), body)
         }
         "vault_write" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -2618,6 +3566,21 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             SelfCall::put(
                 format!("/api/v1/workspaces/{}/vault/vaults/{v}/note", seg(&ws)),
+                body,
+            )
+        }
+        "vault_write_file" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let v = arg_i64(args, "vault_id")?;
+            let mut body = json!({
+                "path": arg_str(args, "path")?,
+                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+            });
+            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+                body["if_hash"] = json!(h);
+            }
+            SelfCall::put(
+                format!("/api/v1/workspaces/{}/vault/vaults/{v}/file", seg(&ws)),
                 body,
             )
         }
@@ -2723,7 +3686,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         // ---- Usage ----
         "get_usage_summary" => {
             let mut q: Vec<String> = Vec::new();
-            if let Some(d) = args.get("days").and_then(Value::as_u64) {
+            if let Some(d) = args.get("days").and_then(u64_lenient) {
                 q.push(format!("days={d}"));
             }
             if let Some(o) = args.get("otto_only").and_then(Value::as_bool) {
@@ -2753,7 +3716,12 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "list_improvement_edits" => {
             let ws = arg_str(args, "workspace_id")?;
-            SelfCall::get(format!("/api/v1/workspaces/{}/improvement/edits", seg(&ws)))
+            let q = opt_query(args, &[("status", "status")]);
+            SelfCall::get(if q.is_empty() {
+                format!("/api/v1/workspaces/{}/improvement/edits", seg(&ws))
+            } else {
+                format!("/api/v1/workspaces/{}/improvement/edits?{q}", seg(&ws))
+            })
         }
         "run_self_improvement" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -2828,7 +3796,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             {
                 q.push_str(&format!("&after={}", seg(after)));
             }
-            if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
+            if let Some(limit) = args.get("limit").and_then(i64_lenient) {
                 q.push_str(&format!("&limit={limit}"));
             }
             if let Some(sid) = args
@@ -2869,6 +3837,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             SelfCall::get(format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)))
         }
+        "get_scheduled_task" => {
+            let id = arg_str(args, "task_id")?;
+            SelfCall::get(format!("/api/v1/scheduled-tasks/{}", seg(&id)))
+        }
         "list_scheduled_task_runs" => {
             let id = arg_str(args, "task_id")?;
             SelfCall::get(format!("/api/v1/scheduled-tasks/{}/runs", seg(&id)))
@@ -2889,6 +3861,9 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let mut body = args.clone();
             if let Some(o) = body.as_object_mut() {
                 o.remove("task_id");
+                // Filled by the choke point (the task's own workspace, for the
+                // pin + approval scope) — not an updatable field.
+                o.remove("workspace_id");
             }
             SelfCall::patch(format!("/api/v1/scheduled-tasks/{}", seg(&id)), body)
         }
@@ -2955,7 +3930,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             // Read-only POST: receive-message with visibility timeout pinned to
             // 0 (nothing consumed); `max` clamped to SQS's 1..10 window.
             let mut body = json!({"url": arg_str(args, "url")?, "visibility_timeout": 0});
-            if let Some(max) = args.get("max").and_then(Value::as_u64) {
+            if let Some(max) = args.get("max").and_then(u64_lenient) {
                 body["max"] = json!(max.clamp(1, 10));
             }
             SelfCall::post(
@@ -2969,7 +3944,7 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "aws_sqs_send" => {
             let mut body = json!({"url": arg_str(args, "url")?, "body": arg_str(args, "body")?});
-            if let Some(d) = args.get("delay_seconds").and_then(Value::as_u64) {
+            if let Some(d) = args.get("delay_seconds").and_then(u64_lenient) {
                 body["delay_seconds"] = json!(d);
             }
             for k in ["group_id", "dedup_id"] {
@@ -3063,13 +4038,24 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             SelfCall::get(path)
         }
-        "k8s_describe" => SelfCall::get(format!(
-            "/api/v1/k8s/clusters/{}/resource?kind={}&ns={}&name={}",
-            seg(&arg_str(args, "cluster_id")?),
-            seg(&arg_str(args, "kind")?),
-            seg(&arg_str(args, "namespace")?),
-            seg(&arg_str(args, "name")?)
-        )),
+        // `ns` is omitted for cluster-scoped kinds (nodes, namespaces); the
+        // route requires it for namespaced ones and says so.
+        "k8s_describe" => {
+            let mut path = format!(
+                "/api/v1/k8s/clusters/{}/resource?kind={}&name={}",
+                seg(&arg_str(args, "cluster_id")?),
+                seg(&arg_str(args, "kind")?),
+                seg(&arg_str(args, "name")?)
+            );
+            if let Some(ns) = args
+                .get("namespace")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                path.push_str(&format!("&ns={}", seg(ns)));
+            }
+            SelfCall::get(path)
+        }
         // text/plain route — `run_tool` wraps the body as `{text}`; `follow` is
         // deliberately never forwarded (a stream would hang the call).
         "k8s_logs" => SelfCall::get(format!(
@@ -3219,10 +4205,45 @@ async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let snippet: String = text.chars().take(400).collect();
-        return Err(Error::Upstream(format!("{status}: {snippet}")));
+        return Err(Error::Upstream(self_call_error(status, &text)));
     }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    Ok(parse_self_ok(&text))
+}
+
+/// Cap on a self-call error MESSAGE handed back to the agent. The message is
+/// often the actionable part (a reference that did not resolve lists the
+/// candidates, a validation error names the bad field), so it is kept whole up
+/// to this bound — the old 400-char raw snippet cut candidate lists mid-row.
+const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+
+/// The agent-facing text of a non-2xx self-call: `"<status>: <message>"`, the
+/// `message` (or a module's `error`) of a JSON problem body when there is one
+/// (≤ [`MAX_ERROR_MESSAGE_CHARS`]), else a short raw snippet so an HTML/huge
+/// body never floods the transcript. Pure, so it is unit-tested.
+pub(crate) fn self_call_error(status: reqwest::StatusCode, body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        v.get("message")
+            .or_else(|| v.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    match message {
+        Some(m) => format!(
+            "{status}: {}",
+            m.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>()
+        ),
+        None => format!("{status}: {}", body.chars().take(400).collect::<String>()),
+    }
+}
+
+/// A 2xx self-call body as JSON. An empty body (`204 No Content` — a Jira
+/// transition, a delete) is `{"ok": true}`, not `null`, so the agent reads a
+/// success as one.
+pub(crate) fn parse_self_ok(body: &str) -> Value {
+    if body.trim().is_empty() {
+        return json!({ "ok": true });
+    }
+    serde_json::from_str(body).unwrap_or(Value::Null)
 }
 /// GET a `text/plain` route (pod logs) and wrap it as `{text, truncated}`,
 /// keeping the newest [`MAX_TEXT_CHARS`] — `parse_self` would turn a non-JSON
@@ -3238,8 +4259,7 @@ async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Resu
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let snippet: String = text.chars().take(400).collect();
-        return Err(Error::Upstream(format!("{status}: {snippet}")));
+        return Err(Error::Upstream(self_call_error(status, &text)));
     }
     let n = text.chars().count();
     let (text, truncated) = if n > MAX_TEXT_CHARS {
@@ -3288,7 +4308,7 @@ async fn ask_human_approval(
             expires_at: Some((chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339()),
         })
         .await?;
-    let wait = args.get("wait_seconds").and_then(Value::as_u64);
+    let wait = args.get("wait_seconds").and_then(u64_lenient);
     let decided = wait_for_decision(ctx, &appr.id, wait).await;
     Ok(json!({
         "approval_id": appr.id,
@@ -3728,6 +4748,23 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str().map(String::from))
             .collect()
+    }
+
+    #[test]
+    fn self_call_errors_keep_the_whole_actionable_message() {
+        let status = reqwest::StatusCode::NOT_FOUND;
+        // A candidate listing (the resolver's 404) survives past 400 chars.
+        let long = format!("not found: {}", "- r1  repo  (workspace: w)\n".repeat(40));
+        let body = json!({"code":"not_found","message": long}).to_string();
+        let msg = self_call_error(status, &body);
+        assert!(msg.starts_with("404 Not Found: not found: - r1"), "{msg}");
+        assert!(msg.len() > 1000, "{}", msg.len());
+        // `{error}` bodies too; a raw non-JSON body stays a short snippet.
+        assert!(self_call_error(status, r#"{"error":"nope"}"#).ends_with("nope"));
+        assert!(self_call_error(status, &"y".repeat(5000)).len() < 450);
+        // 204 No Content is a success the agent can read, not `null`.
+        assert_eq!(parse_self_ok(""), json!({"ok": true}));
+        assert_eq!(parse_self_ok("[1]"), json!([1]));
     }
 
     #[test]
@@ -4233,11 +5270,20 @@ mod tests {
             // the cross-workspace resolution to the session's own workspace.
             let required = schema["required"].as_array().cloned().unwrap_or_default();
             assert!(!required.contains(&json!("repo_id")), "{short}");
-            assert!(schema["properties"].get("workspace_id").is_none(), "{short}");
+            assert!(
+                schema["properties"].get("workspace_id").is_none(),
+                "{short}"
+            );
         }
         let lr = spec("list_repos");
-        assert!(lr["inputSchema"]["required"].is_null(), "workspace_id is optional");
-        assert!(lr["description"].as_str().unwrap().contains("EVERY workspace"));
+        assert!(
+            lr["inputSchema"]["required"].is_null(),
+            "workspace_id is optional"
+        );
+        assert!(lr["description"]
+            .as_str()
+            .unwrap()
+            .contains("EVERY workspace"));
         assert_eq!(
             route_for("list_repos", &json!({})).unwrap().path,
             "/api/v1/git/repos/directory"
@@ -4600,7 +5646,17 @@ mod tests {
             )
             .unwrap()
             .path,
-            "/api/v1/k8s/clusters/c1/resource?kind=deployments&ns=prod&name=web"
+            "/api/v1/k8s/clusters/c1/resource?kind=deployments&name=web&ns=prod"
+        );
+        // Cluster-scoped kinds (nodes, namespaces) have no namespace.
+        assert_eq!(
+            route_for(
+                "k8s_describe",
+                &json!({"cluster_id":"c1","kind":"nodes","name":"ip-10-0-0-1"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/k8s/clusters/c1/resource?kind=nodes&name=ip-10-0-0-1"
         );
         let c = route_for("k8s_logs", &json!({"cluster_id":"c1","namespace":"prod","pod":"web-1","container":"app","tail":200,"since":"10m","previous":true,"follow":true})).unwrap();
         assert_eq!(c.method, Method::Get);
@@ -4636,11 +5692,7 @@ mod tests {
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart","kind":"deployments","namespace":"prod","name":"web"})).unwrap();
         assert_eq!(c.body.unwrap()["params"], json!({}));
         assert!(route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart"})).is_err());
-        assert!(route_for(
-            "k8s_describe",
-            &json!({"cluster_id":"c1","kind":"pods","name":"p"})
-        )
-        .is_err());
+        assert!(route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"pods"})).is_err());
     }
 
     #[test]
@@ -4812,6 +5864,394 @@ mod tests {
         );
     }
 
+    // ----- Friendly references + the workspace pin (every non-git tool) ----
+
+    #[test]
+    fn every_ref_arg_names_a_real_tool_argument_and_kind() {
+        let specs = otto_tool_specs();
+        for (tool, arg, kind) in REF_ARGS {
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{tool}"))
+                .unwrap_or_else(|| panic!("REF_ARGS names unknown tool {tool}"));
+            assert!(
+                spec["inputSchema"]["properties"].get(*arg).is_some(),
+                "{tool}: REF_ARGS arg '{arg}' is not in its schema"
+            );
+            assert!(
+                crate::agent_refs::kind_of(kind).is_some(),
+                "{tool}: unknown kind {kind}"
+            );
+        }
+        for (tool, kind) in DIRECTORY_TOOLS {
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{tool}"))
+                .unwrap_or_else(|| panic!("DIRECTORY_TOOLS names unknown tool {tool}"));
+            assert!(crate::agent_refs::kind_of(kind).is_some(), "{tool}");
+            // Cross-workspace by default: never REQUIRES a workspace.
+            let reqd = spec["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !reqd.contains(&json!("workspace_id")),
+                "{tool} must not require workspace_id"
+            );
+            assert_eq!(spec["mutating"], json!(false), "{tool}");
+        }
+        // An issue account may be omitted (sole account), so no Issues tool
+        // requires it any more.
+        for s in &specs {
+            if s["category"] == json!("Issues") {
+                let reqd = s["inputSchema"]["required"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(!reqd.contains(&json!("account_id")), "{}", s["name"]);
+            }
+        }
+    }
+
+    /// The workspace pin must be verifiable for EVERY tool: it either carries
+    /// a workspace, resolves one (a named object / repo / artifact / probe),
+    /// addresses no workspace-owned object, or is consciously denied to
+    /// pinned tokens. A new tool that fits none of these fails here.
+    #[test]
+    fn every_tool_has_a_workspace_pin_story() {
+        for spec in otto_tool_specs() {
+            let name = spec["name"].as_str().unwrap();
+            let short = name.strip_prefix("otto.").unwrap();
+            let has_ws = spec["inputSchema"]["properties"]
+                .get("workspace_id")
+                .is_some();
+            let ws_kind_ref = REF_ARGS.iter().any(|(t, _, k)| {
+                *t == short
+                    && crate::agent_refs::kind_of(k)
+                        .is_some_and(|k| k.scope == crate::agent_refs::Scope::Workspace)
+            });
+            let covered = has_ws
+                || ws_kind_ref
+                || REPO_REF_TOOLS.contains(&short)
+                || short == "list_repos"
+                || DESIGN_WS_TOOLS.contains(&short)
+                || PIN_PROBES.iter().any(|(t, ..)| *t == short)
+                || pin_global(short)
+                || PIN_UNVERIFIABLE.contains(&short);
+            assert!(covered, "{short}: no workspace-pin classification");
+        }
+    }
+
+    #[test]
+    fn pin_verdict_denies_what_it_cannot_verify() {
+        let pinned = McpScope {
+            tools: None,
+            allow_writes: true,
+            workspace_id: Some("ws-a".into()),
+        };
+        // Resolved into the pin → allowed; into another workspace → denied.
+        assert!(pin_verdict(
+            &pinned,
+            "run_workflow",
+            &json!({"workflow_id":"W","workspace_id":"ws-a"})
+        )
+        .is_none());
+        let d = pin_verdict(
+            &pinned,
+            "run_workflow",
+            &json!({"workflow_id":"W","workspace_id":"ws-b"}),
+        )
+        .unwrap();
+        assert!(d.contains("scoped to workspace 'ws-a'"), "{d}");
+        // No workspace established (e.g. a finding) → fail closed.
+        let d = pin_verdict(&pinned, "get_finding", &json!({"finding_id":"F"})).unwrap();
+        assert!(d.contains("cannot"), "{d}");
+        // Global rows are fine without a workspace.
+        assert!(pin_verdict(&pinned, "k8s_top", &json!({"cluster_id":"C"})).is_none());
+        assert!(pin_verdict(&pinned, "list_workflows", &json!({})).is_none());
+        // An unpinned scope never needs a workspace.
+        let open = McpScope::unrestricted();
+        assert!(pin_verdict(&open, "get_finding", &json!({"finding_id":"F"})).is_none());
+    }
+
+    #[test]
+    fn pr_number_aliases_and_strings_normalize_before_hashing() {
+        assert_eq!(
+            normalize_args("get_pr", &json!({"repo_id":"r","pr_number":"52"})).unwrap(),
+            json!({"repo_id":"r","number":52})
+        );
+        assert_eq!(
+            normalize_args("start_pr_review", &json!({"number":7})).unwrap(),
+            json!({"pr_number":7})
+        );
+        // Already canonical → untouched (no churn in the audit/hash).
+        assert!(normalize_args("comment_pr", &json!({"number":3,"body":"x"})).is_none());
+        assert!(normalize_args("list_workflows", &json!({"number":3})).is_none());
+    }
+
+    #[test]
+    fn confluence_page_urls_and_transition_names_resolve() {
+        assert_eq!(confluence_page_id("12345").as_deref(), Some("12345"));
+        assert_eq!(
+            confluence_page_id("https://x.atlassian.net/wiki/spaces/ST/pages/98765/My+Page")
+                .as_deref(),
+            Some("98765")
+        );
+        assert_eq!(
+            confluence_page_id("https://x/wiki/pages/viewpage.action?pageId=4242").as_deref(),
+            Some("4242")
+        );
+        assert!(confluence_page_id("My Page").is_none());
+        let list = json!([
+            {"id":"11","name":"Start progress","to_status":"In Progress"},
+            {"id":"21","name":"Done","to_status":"Done"}
+        ]);
+        assert_eq!(match_transition(&list, "in progress").unwrap(), "11");
+        assert_eq!(match_transition(&list, "Start Progress").unwrap(), "11");
+        let e = match_transition(&list, "Reopen").unwrap_err().to_string();
+        assert!(e.contains("21") && e.contains("Done"), "{e}");
+    }
+
+    #[test]
+    fn plain_ids_from_an_unpinned_caller_need_no_lookup() {
+        let id = "01KZTKNK3Z8N6VD9Q0MTDQSJ3V";
+        assert!(!refs_need_lookup(
+            "get_workflow",
+            &json!({"workflow_id": id}),
+            false
+        ));
+        assert!(refs_need_lookup(
+            "get_workflow",
+            &json!({"workflow_id": "Nightly"}),
+            false
+        ));
+        // A pinned token must learn a workspace-owned object's workspace.
+        assert!(refs_need_lookup(
+            "get_workflow",
+            &json!({"workflow_id": id}),
+            true
+        ));
+        // …but not a global row's.
+        assert!(!refs_need_lookup(
+            "k8s_top",
+            &json!({"cluster_id": id}),
+            true
+        ));
+        // Omitted issue account → the sole account is looked up.
+        assert!(refs_need_lookup(
+            "search_issues",
+            &json!({"query":"x"}),
+            false
+        ));
+        // A workspace NAME, a transition NAME, a pinned probe.
+        assert!(refs_need_lookup(
+            "list_sessions",
+            &json!({"workspace_id":"Casino"}),
+            false
+        ));
+        assert!(refs_need_lookup(
+            "transition_issue",
+            &json!({"account_id": id, "key":"K-1", "transition_id":"Done"}),
+            false
+        ));
+        assert!(refs_need_lookup(
+            "get_session",
+            &json!({"session_id": id}),
+            true
+        ));
+        assert!(!refs_need_lookup(
+            "get_session",
+            &json!({"session_id": id}),
+            false
+        ));
+    }
+
+    #[test]
+    fn an_update_keeps_every_field_it_did_not_send() {
+        let stored = json!({"id":"q","name":"Login","method":"POST","url":"u",
+            "headers":[{"key":"X-Tenant","value":"7","enabled":true}],"query":[],
+            "body_mode":"json","body":"{\"a\":1}","collection_id":"c1","ssh_connection_id":null});
+        let merged = merge_stored_request(
+            &json!({"workspace_id":"w","request_id":"q","name":"Login","method":"POST","url":"u2"}),
+            &stored,
+        );
+        assert_eq!(merged["url"], "u2", "sent fields win");
+        assert_eq!(merged["headers"][0]["key"], "X-Tenant");
+        assert_eq!(
+            (merged["body_mode"].as_str(), merged["body"].as_str()),
+            (Some("json"), Some("{\"a\":1}"))
+        );
+        assert_eq!(merged["collection_id"], "c1");
+        assert!(
+            merged.get("ssh_connection_id").is_none(),
+            "a null stays absent"
+        );
+        // An explicit value (even empty) is the agent's choice.
+        let merged = merge_stored_request(&json!({"headers":[]}), &stored);
+        assert_eq!(merged["headers"], json!([]));
+    }
+
+    #[test]
+    fn long_running_tools_get_a_longer_self_call_budget() {
+        assert_eq!(call_timeout("list_workflows", &json!({})).as_secs(), 30);
+        assert_eq!(
+            call_timeout("api_execute", &json!({"timeout_ms": 60000})).as_secs(),
+            75
+        );
+        assert_eq!(
+            call_timeout("api_execute", &json!({"timeout_ms": 999999})).as_secs(),
+            75
+        );
+        assert!(call_timeout("api_run_automation", &json!({})).as_secs() >= 120);
+        assert!(call_timeout("k8s_logs", &json!({})).as_secs() > 60);
+    }
+
+    #[test]
+    fn new_discovery_and_git_tools_route_and_classify() {
+        for r in [
+            "list_workspaces",
+            "list_goal_loops",
+            "list_agent_rooms",
+            "list_issue_accounts",
+            "list_issue_transitions",
+            "get_scheduled_task",
+            "list_swarm_projects",
+            "list_swarm_tasks",
+            "list_design_projects",
+            "list_pr_reviews",
+            "get_pr_checks",
+        ] {
+            assert!(
+                DEFAULT_ENABLED.contains(&r),
+                "{r} should be a default-on read"
+            );
+        }
+        assert!(OPT_IN_READS.contains(&"get_pr_diff"));
+        assert!(DANGEROUS.contains(&"merge_pr"));
+        let c = route_for(
+            "merge_pr",
+            &json!({"repo_id":"r","number":4,"strategy":"squash"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (c.method, c.path.as_str()),
+            (Method::Post, "/api/v1/repos/r/prs/4/merge")
+        );
+        assert_eq!(c.body.unwrap(), json!({"strategy":"squash"}));
+        assert!(
+            dangerous_detail("otto.merge_pr", &json!({"repo_id":"r","number":4})).contains("#4")
+        );
+        assert_eq!(
+            route_for(
+                "list_prs",
+                &json!({"repo_id":"r","state":"all","page":2,"per_page":100})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/repos/r/prs?state=all&page=2&per_page=100"
+        );
+        assert_eq!(
+            route_for("list_prs", &json!({"repo_id":"r"})).unwrap().path,
+            "/api/v1/repos/r/prs"
+        );
+        assert_eq!(
+            route_for("list_pr_reviews", &json!({"repo_id":"r","pr_number":9}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r/prs/9/reviews"
+        );
+        assert_eq!(
+            route_for("get_pr_checks", &json!({"repo_id":"r","number":9}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r/prs/9/checks"
+        );
+        assert_eq!(
+            route_for(
+                "list_issue_transitions",
+                &json!({"account_id":"a","key":"K-1"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/issue/a/K-1/transitions"
+        );
+        assert_eq!(
+            route_for(
+                "search_issues",
+                &json!({"account_id":"a","query":"x","start_at":25})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/issue/search?account_id=a&q=x&start_at=25"
+        );
+        assert_eq!(
+            route_for("get_scheduled_task", &json!({"task_id":"t"}))
+                .unwrap()
+                .path,
+            "/api/v1/scheduled-tasks/t"
+        );
+        assert_eq!(
+            route_for("list_workflow_runs", &json!({"workflow_id":"w"}))
+                .unwrap()
+                .path,
+            "/api/v1/workflows/w/runs?summary=true"
+        );
+        assert_eq!(
+            route_for(
+                "list_improvement_edits",
+                &json!({"workspace_id":"ws","status":"applied"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/workspaces/ws/improvement/edits?status=applied"
+        );
+        assert_eq!(
+            route_for("list_swarm_projects", &json!({"swarm_id":"s"}))
+                .unwrap()
+                .path,
+            "/api/v1/swarm/swarms/s/projects"
+        );
+        assert_eq!(
+            route_for("get_swarm_board", &json!({"swarm_id":"s","task_id":"t"}))
+                .unwrap()
+                .path,
+            "/api/v1/swarm/swarms/s/board?task_id=t"
+        );
+        let c = route_for(
+            "create_pr",
+            &json!({"repo_id":"r","title":"T","description":"D",
+            "source_branch":"f","target_branch":"main","draft":true,"reviewers":["ann"]}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap()["reviewers"], json!(["ann"]));
+        let c = route_for(
+            "start_pr_review",
+            &json!({"repo_id":"r","pr_number":3,"context":"focus auth"}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap(), json!({"context":"focus auth"}));
+        // update_scheduled_task never PATCHes the filled-in workspace_id.
+        let c = route_for(
+            "update_scheduled_task",
+            &json!({"task_id":"t","workspace_id":"ws","name":"n"}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap(), json!({"name":"n"}));
+        // Stringified numbers from clients that stringify every argument.
+        assert_eq!(
+            route_for("get_pr", &json!({"repo_id":"r","number":"12"}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r/prs/12"
+        );
+        let c = route_for(
+            "aws_sqs_peek",
+            &json!({"account_id":"a","url":"u","max":"3"}),
+        )
+        .unwrap();
+        assert_eq!(c.body.unwrap()["max"], json!(3));
+    }
+
     // ----- Vault: optional workspace_id ------------------------------------
 
     #[test]
@@ -4954,7 +6394,11 @@ mod tests {
                 .path,
             "/api/v1/design/artifacts/A1/links?dir=both"
         );
-        let c = route_for("design_search", &json!({"query": "hero card", "studio": "site"})).unwrap();
+        let c = route_for(
+            "design_search",
+            &json!({"query": "hero card", "studio": "site"}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Get);
         assert_eq!(c.path, "/api/v1/design/search?q=hero%20card&studio=site");
         assert!(route_for("design_get", &json!({})).is_err());
@@ -5020,7 +6464,11 @@ mod tests {
         assert_eq!(b["dst_id"], "S1");
         assert!(b.get("policy").is_none(), "empty optional args are dropped");
         assert!(route_for("design_assist", &json!({"artifact_id": "A1"})).is_err());
-        assert!(route_for("design_link", &json!({"artifact_id": "A1", "rel": "embeds"})).is_err());
+        assert!(route_for(
+            "design_link",
+            &json!({"artifact_id": "A1", "rel": "embeds"})
+        )
+        .is_err());
     }
 
     #[test]
