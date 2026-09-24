@@ -136,7 +136,7 @@ test('expanded step survives live step transitions — same DOM node, no reset',
   // Let the run finish (several node start/finish events + polls flow through).
   // The run's status label lives in the run BAR above the timeline (`.insp-bar`).
   const label = page.locator('.insp-bar .tl-label');
-  await expect(label).toContainText('success', { timeout: 30_000 });
+  await expect(label).toContainText('Succeeded', { timeout: 30_000 });
 
   // The user's view was never reset: still expanded, same DOM element, same
   // timeline selection.
@@ -179,20 +179,20 @@ test('viewing another run is not stomped by an in-flight run started from the pa
   await page.locator('.ri-text').fill('{ "fail": true }');
   await page.locator('.ri-actions').getByRole('button', { name: 'Run' }).click();
   const label = page.locator('.insp-bar .tl-label');
-  await expect(label).toContainText('running', { timeout: 10_000 });
+  await expect(label).toContainText('Running', { timeout: 10_000 });
 
   // Now open the OLD, completed run from the Runs dropdown — the user wants to
   // inspect it while the new one keeps running in the background.
   await page.getByRole('button', { name: 'Runs' }).click();
-  await page.locator('.runs-pop .run-item', { hasText: 'success' }).first().click();
-  await expect(label).toContainText('success');
+  await page.locator('.runs-pop .run-item', { hasText: 'Succeeded' }).first().click();
+  await expect(label).toContainText('Succeeded');
 
   // The in-flight run's updates must NOT replace the viewed (completed) run —
   // across its mid-run ticks AND its (failing) completion.
   await page.waitForTimeout(3000);
-  await expect(label).toContainText('success');
+  await expect(label).toContainText('Succeeded');
   await page.waitForTimeout(3500);
-  await expect(label).toContainText('success');
+  await expect(label).toContainText('Succeeded');
   await expect(page.locator('.timeline .tl-step[data-status="error"]')).toHaveCount(0);
 });
 
@@ -254,7 +254,7 @@ test('human-approval pause is announced promptly; approve resumes to success', a
 
   // The run resumes and completes IN PLACE (no re-navigation), the banner drops.
   const label = page.locator('.insp-bar .tl-label');
-  await expect(label).toContainText('success', { timeout: 20_000 });
+  await expect(label).toContainText('Succeeded', { timeout: 20_000 });
   await expect(banner).toHaveCount(0);
   const run = await getRun(runId);
   expect(run.status).toBe('success');
@@ -293,6 +293,6 @@ test('error step auto-expands once; a user collapse is never fought by updates',
   await badStep.locator('summary').click();
   await expect(badStep).not.toHaveAttribute('open', '');
   const label = page.locator('.insp-bar .tl-label');
-  await expect(label).toContainText('error', { timeout: 25_000 }); // run terminal (bad branch failed)
+  await expect(label).toContainText('Failed', { timeout: 25_000 }); // run terminal (bad branch failed)
   await expect(badStep).not.toHaveAttribute('open', '');
 });

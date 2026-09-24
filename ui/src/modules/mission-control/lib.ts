@@ -2,6 +2,7 @@
 
 import type { IconName } from '../../lib/components/Icon.svelte';
 import type { WorkKind, WorkStatus, RiskLevel, WorkActor, ArtifactKind } from '../../lib/api/types';
+import { runStatus, type StatusInfo, type Tone } from '../../lib/status';
 
 export const KIND_LABEL: Record<WorkKind, string> = {
   session: 'Session',
@@ -25,15 +26,23 @@ export const KIND_ICON: Record<WorkKind, IconName> = {
   external_trigger: 'bell',
 };
 
+/** A work status in the shared run vocabulary (lib/status.ts): pending →
+ *  Queued, done → Succeeded, running is info (never the succeeded green).
+ *  `blocked` is Mission Control's own: stuck on a dependency/policy — danger. */
+export function workStatus(s: WorkStatus): StatusInfo {
+  if (s === 'blocked') return { key: 'blocked', label: 'Blocked', tone: 'danger' };
+  return runStatus(s);
+}
+
 export const STATUS_LABEL: Record<WorkStatus, string> = {
-  pending: 'Pending',
-  running: 'Running',
-  waiting: 'Waiting',
-  blocked: 'Blocked',
-  succeeded: 'Succeeded',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-  done: 'Done',
+  pending: workStatus('pending').label,
+  running: workStatus('running').label,
+  waiting: workStatus('waiting').label,
+  blocked: workStatus('blocked').label,
+  succeeded: workStatus('succeeded').label,
+  failed: workStatus('failed').label,
+  cancelled: workStatus('cancelled').label,
+  done: workStatus('done').label,
 };
 
 export const RISK_LABEL: Record<RiskLevel, string> = {
@@ -84,23 +93,19 @@ export const WORK_STATUSES: WorkStatus[] = [
 ];
 export const RISK_LEVELS: RiskLevel[] = ['low', 'medium', 'high', 'critical'];
 
+const TONE_COLOR: Record<Tone, string> = {
+  neutral: 'var(--text-dim)',
+  info: 'var(--info)',
+  success: 'var(--success)',
+  warning: 'var(--warning)',
+  danger: 'var(--danger)',
+};
+
 /** A colour (CSS value) for a normalized status — drives chips, labels and
- *  graph nodes. Tone tokens (text-safe in every theme), never raw hex. */
+ *  graph nodes. Tone tokens (text-safe in every theme), never raw hex; the
+ *  tone comes from the shared vocabulary via {@link workStatus}. */
 export function statusColor(s: WorkStatus): string {
-  switch (s) {
-    case 'running':
-    case 'succeeded':
-    case 'done':
-      return 'var(--success)';
-    case 'waiting':
-    case 'pending':
-      return 'var(--warning)';
-    case 'blocked':
-    case 'failed':
-      return 'var(--danger)';
-    default:
-      return 'var(--text-dim)';
-  }
+  return TONE_COLOR[workStatus(s).tone];
 }
 
 /** A colour for a risk level (the "policy" axis). */
