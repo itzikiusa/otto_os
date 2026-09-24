@@ -1984,6 +1984,11 @@ const PIN_UNVERIFIABLE: &[&str] = &[
     "approve_improvement_edit",
     "reject_improvement_edit",
     "rollback_improvement_edit",
+    // The Assistant's memory is the owner's, across every workspace — a
+    // token pinned to one workspace must not read or rewrite it.
+    "assistant_remember",
+    "assistant_forget",
+    "assistant_recall",
 ];
 
 /// The workspace-pin verdict on fully resolved arguments: `McpScope`'s own
@@ -5966,6 +5971,10 @@ mod tests {
         // No workspace established (e.g. a finding) → fail closed.
         let d = pin_verdict(&pinned, "get_finding", &json!({"finding_id":"F"})).unwrap();
         assert!(d.contains("cannot"), "{d}");
+        // Every tool classified unverifiable really is denied to a pin.
+        for t in PIN_UNVERIFIABLE {
+            assert!(pin_verdict(&pinned, t, &json!({})).is_some(), "{t}");
+        }
         // Global rows are fine without a workspace.
         assert!(pin_verdict(&pinned, "k8s_top", &json!({"cluster_id":"C"})).is_none());
         assert!(pin_verdict(&pinned, "list_workflows", &json!({})).is_none());
