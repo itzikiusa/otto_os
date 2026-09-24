@@ -438,6 +438,9 @@ pub struct NewMessage {
 /// Filters for the runs list/kanban feed.
 #[derive(Default)]
 pub struct RunFilter {
+    /// The workspace the runs belong to. The per-workspace list route MUST
+    /// set it — without it the query spans every workspace's runs.
+    pub workspace_id: Option<Id>,
     pub swarm_id: Option<Id>,
     pub project_id: Option<Id>,
     pub agent_id: Option<Id>,
@@ -1593,6 +1596,9 @@ impl SwarmRepo {
 
     pub async fn list_runs(&self, f: &RunFilter) -> Result<Vec<SwarmRun>> {
         let mut sql = String::from("SELECT * FROM swarm_runs WHERE 1=1");
+        if f.workspace_id.is_some() {
+            sql.push_str(" AND workspace_id = ?");
+        }
         if f.swarm_id.is_some() {
             sql.push_str(" AND swarm_id = ?");
         }
@@ -1607,6 +1613,9 @@ impl SwarmRepo {
         }
         sql.push_str(" ORDER BY enqueued_at DESC LIMIT 500");
         let mut q = sqlx::query(&sql);
+        if let Some(v) = &f.workspace_id {
+            q = q.bind(v);
+        }
         if let Some(v) = &f.swarm_id {
             q = q.bind(v);
         }

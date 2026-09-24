@@ -387,6 +387,9 @@ async fn list_runs<S: SwarmCtx>(
 ) -> ApiResult<Json<Vec<SwarmRun>>> {
     check(&s, &user, &ws, WorkspaceRole::Viewer).await?;
     let f = RunFilter {
+        // The role check above is for THIS workspace — the list must not
+        // span every workspace's runs (session ids, summaries, cost).
+        workspace_id: Some(ws),
         swarm_id: q.swarm_id,
         project_id: q.project_id,
         agent_id: q.agent_id,

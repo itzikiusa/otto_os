@@ -70,6 +70,7 @@ const BACKGROUND_SOURCES = new Set([
   'discovery_chat',
   'scheduled_task',
   'finding',
+  'assistant',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */

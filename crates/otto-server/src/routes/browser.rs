@@ -86,6 +86,9 @@ pub struct BrowserEngineHandle {
     configured_bin: Option<String>,
     data_dir: std::path::PathBuf,
     cell: tokio::sync::OnceCell<otto_browser::BrowserService>,
+    /// The remote live runtime (daemon Chromium) — created on first use by
+    /// `routes::browser_live::runtime`, never at boot.
+    live: tokio::sync::OnceCell<std::sync::Arc<otto_browser::live::LiveRuntime>>,
 }
 
 impl BrowserEngineHandle {
@@ -94,6 +97,40 @@ impl BrowserEngineHandle {
             configured_bin,
             data_dir,
             cell: tokio::sync::OnceCell::new(),
+            live: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The live runtime, created on first call from `init`'s settings + hooks.
+    pub async fn live<F, Fut>(&self, init: F) -> std::sync::Arc<otto_browser::live::LiveRuntime>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<
+            Output = (
+                otto_browser::live::LiveSettings,
+                std::sync::Arc<dyn otto_browser::live::LiveHooks>,
+            ),
+        >,
+    {
+        self.live
+            .get_or_init(|| async {
+                let (settings, hooks) = init().await;
+                otto_browser::live::LiveRuntime::new(self.data_dir.clone(), hooks, settings)
+            })
+            .await
+            .clone()
+    }
+
+    /// The live runtime only if something already started it (no session can
+    /// exist otherwise).
+    pub fn live_if_started(&self) -> Option<std::sync::Arc<otto_browser::live::LiveRuntime>> {
+        self.live.get().cloned()
+    }
+
+    /// Daemon shutdown: close every live session and stop every Chromium.
+    pub async fn shutdown_live(&self) {
+        if let Some(rt) = self.live.get() {
+            rt.shutdown().await;
         }
     }
 
@@ -133,6 +170,7 @@ impl BrowserEngineHandle {
             configured_bin: None,
             data_dir: std::path::PathBuf::new(),
             cell: tokio::sync::OnceCell::new_with(Some(service)),
+            live: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -392,7 +430,7 @@ fn fence_untrusted(content: &str, nonce: &str) -> String {
 // WS event publishing
 // ---------------------------------------------------------------------------
 
-fn publish_tab_updated(ctx: &ServerCtx, tab: &BrowserTab) {
+pub(crate) fn publish_tab_updated(ctx: &ServerCtx, tab: &BrowserTab) {
     let _ = ctx.events.send(Event::BrowserTabUpdated {
         workspace_id: tab.workspace_id.clone(),
         tab: serde_json::to_value(tab).unwrap_or(serde_json::Value::Null),
@@ -520,6 +558,11 @@ async fn delete_tab(
         .ok_or_else(|| ApiError(Error::NotFound(format!("browser tab {id}"))))?;
     require_ws_role(&ctx, &user, &tab.workspace_id, WorkspaceRole::Editor).await?;
     ctx.browser_tabs.delete(&id).await.map_err(ApiError)?;
+    // A closed tab takes its remote live session (and an ephemeral context's
+    // cookies) with it.
+    if let Some(rt) = ctx.browser.live_if_started() {
+        rt.close(&id, "closed").await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2189,6 +2232,219 @@ mod tests {
         let (status, body) = get(&app, "/workspaces/ws2/browser/tabs").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json(&body).as_array().map(|a| a.len()), Some(1));
+    }
+
+    // -----------------------------------------------------------------
+    // Remote live view routes (no Chromium needed: every case below is
+    // decided before an engine would launch)
+    // -----------------------------------------------------------------
+
+    fn live_router(ctx: ServerCtx) -> Router {
+        Router::new()
+            .merge(routes())
+            .merge(super::super::browser_live::routes())
+            .with_state(ctx)
+    }
+
+    /// A developer machine pointing the runtime at a real Chrome (or
+    /// supplying a sha pin) would turn these into real launches/downloads.
+    fn live_env_overridden() -> bool {
+        std::env::var("OTTO_CHROME_BIN").is_ok()
+            || std::env::var("OTTO_CHROME_SHA256_CHROME").is_ok()
+            || std::env::var("OTTO_CHROME_SHA256_HEADLESS_SHELL").is_ok()
+    }
+
+    #[tokio::test]
+    async fn live_status_and_engine_gating() {
+        if live_env_overridden() {
+            return;
+        }
+        let tmp = TempDir::new().expect("tempdir");
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let app = live_router(ctx);
+
+        let (status, body) = get(&app, "/browser/live/status").await;
+        assert_eq!(status, StatusCode::OK);
+        let st = json(&body);
+        assert_eq!(st["builds"].as_array().map(|b| b.len()), Some(2));
+        assert_eq!(st["settings"]["build"], "chrome");
+        assert_eq!(st["settings"]["headed"], false);
+        assert_eq!(st["sessions"], 0);
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/tabs",
+            serde_json::json!({"url": "https://example.com/"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tab_id = json(&body)["id"].as_str().unwrap().to_string();
+
+        // No Chromium installed → 409 engine_not_installed (or 400 off mac-arm64).
+        let (status, body) = post_json(
+            &app,
+            &format!("/browser/tabs/{tab_id}/live"),
+            serde_json::json!({"engine": "remote"}),
+        )
+        .await;
+        assert!(
+            status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST,
+            "{status}"
+        );
+        let code = json(&body)["code"].as_str().unwrap_or("").to_string();
+        assert!(code == "engine_not_installed" || code == "unsupported_platform", "{code}");
+
+        // A native tab needs no daemon session.
+        let (status, _) = post_json(
+            &app,
+            &format!("/browser/tabs/{tab_id}/live"),
+            serde_json::json!({"engine": "native"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // An explicit internal URL is refused before any engine work.
+        let (status, body) = post_json(
+            &app,
+            &format!("/browser/tabs/{tab_id}/live"),
+            serde_json::json!({"url": "http://127.0.0.1:7700/api/v1/sessions"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json(&body)["code"], "blocked");
+
+        // Nothing is open → GET is a 404, DELETE an idempotent 204.
+        let (status, _) = get(&app, &format!("/browser/tabs/{tab_id}/live")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            &app,
+            Method::DELETE,
+            &format!("/browser/tabs/{tab_id}/live"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = get(&app, "/workspaces/ws1/browser/live").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json(&body).as_array().map(|a| a.len()), Some(0));
+
+        // The download is refused while this build ships no sha256 pin (or
+        // the platform is unsupported) — never silently unverified.
+        let (status, _) = post_json(&app, "/browser/live/install", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn live_settings_are_validated_and_persisted() {
+        let tmp = TempDir::new().expect("tempdir");
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let app = live_router(ctx);
+
+        let (status, _) = send(
+            &app,
+            Method::PUT,
+            "/browser/live/settings",
+            Some(serde_json::json!({"build": "chrome-headless-shell", "headed": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "headed needs the full build");
+
+        let (status, body) = send(
+            &app,
+            Method::PUT,
+            "/browser/live/settings",
+            Some(serde_json::json!({"headed": true, "max_sessions": 3})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json(&body)["headed"], true);
+        assert_eq!(json(&body)["max_sessions"], 3);
+        let stored = otto_state::SettingsRepo::new(pool.clone())
+            .get(otto_browser::live::SETTINGS_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored["headed"], true);
+    }
+
+    #[tokio::test]
+    async fn live_routes_check_the_role_on_the_tabs_workspace() {
+        let tmp = TempDir::new().expect("tempdir");
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let app = live_router(ctx);
+        seed_user(&pool, "viewer1").await;
+        seed_user(&pool, "outsider").await;
+        seed_workspace(&pool, "ws2").await;
+        set_member(&pool, "ws2", "viewer1", "viewer").await;
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws2/browser/tabs",
+            serde_json::json!({"url": "https://b.io"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tab_id = json(&body)["id"].as_str().unwrap().to_string();
+
+        // Not a member of the tab's workspace: every by-tab route is 403.
+        let outsider = non_root_user("outsider");
+        for (m, suffix) in [
+            (Method::GET, ""),
+            (Method::POST, ""),
+            (Method::DELETE, ""),
+            (Method::POST, "/nav"),
+            (Method::POST, "/control"),
+            (Method::POST, "/screenshot"),
+        ] {
+            let body = match (m.clone(), suffix) {
+                (Method::POST, "/nav") => Some(serde_json::json!({"action": "reload"})),
+                (Method::POST, "/control") => Some(serde_json::json!({"action": "take_over"})),
+                (Method::POST, _) => Some(serde_json::json!({})),
+                _ => None,
+            };
+            let (status, _) = send_as(
+                &app,
+                m.clone(),
+                &format!("/browser/tabs/{tab_id}/live{suffix}"),
+                body,
+                &outsider,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{m} {suffix}");
+        }
+
+        // A viewer may read (404: nothing open) but not open a session.
+        let viewer = non_root_user("viewer1");
+        let (status, _) = send_as(
+            &app,
+            Method::GET,
+            &format!("/browser/tabs/{tab_id}/live"),
+            None,
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send_as(
+            &app,
+            Method::POST,
+            &format!("/browser/tabs/{tab_id}/live"),
+            Some(serde_json::json!({})),
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = send_as(
+            &app,
+            Method::GET,
+            "/workspaces/ws2/browser/live",
+            None,
+            &outsider,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     // -----------------------------------------------------------------
