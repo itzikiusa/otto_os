@@ -7,10 +7,10 @@
 import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { copyFileSync, chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { extname, join, resolve, sep } from 'node:path';
+import { extname, join } from 'node:path';
 
 export const PORT = process.env.OTTO_E2E_PORT ?? '7811';
 export const UI_PORT = process.env.OTTO_E2E_PW_PORT ?? '5211';
@@ -37,16 +37,27 @@ const MIME = {
 };
 
 /** Serve `dist` (the `vite build` output) with an index.html fallback. */
+/** Every file under `dir`, keyed by its URL path (`/assets/x.js`). */
+function listFiles(dir, prefix = '') {
+  const out = new Map();
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, e.name);
+    const key = `${prefix}/${e.name}`;
+    if (e.isDirectory()) for (const [k, v] of listFiles(abs, key)) out.set(k, v);
+    else if (e.isFile()) out.set(key, abs);
+  }
+  return out;
+}
+
 function serveStatic(dist) {
+  // The build is listed once up front and requests only ever pick from that
+  // list, so a request path never becomes a filesystem path. Unknown paths
+  // fall back to index.html (SPA routing).
+  const files = listFiles(dist);
+  const index = join(dist, 'index.html');
   const server = createServer((req, res) => {
     const url = decodeURIComponent((req.url ?? '/').split('?')[0]);
-    // Resolve against the dist root and refuse anything that escapes it (the
-    // separator keeps `dist2/` from passing as `dist/`).
-    const root = resolve(dist);
-    let file = resolve(root, `.${url}`);
-    if (!file.startsWith(root + sep) || !existsSync(file) || statSync(file).isDirectory()) {
-      file = join(dist, 'index.html');
-    }
+    const file = files.get(url) ?? index;
     res.writeHead(200, {
       'Content-Type': MIME[extname(file)] ?? 'application/octet-stream',
       'Cache-Control': 'no-store',
