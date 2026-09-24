@@ -7262,8 +7262,8 @@ export interface BrowserLoginResp {
 export type BrowserLiveEngine = 'native' | 'remote';
 
 /** The pluggable Chromium binary. `chrome` (default) = full Chrome for
- *  Testing in new headless mode (~150 MB download); `chrome-headless-shell` =
- *  the lighter headless-only shell (~78 MB). */
+ *  Testing in new headless mode (~180 MB download); `chrome-headless-shell` =
+ *  the lighter headless-only shell (~98 MB). */
 export type BrowserChromeBuild = 'chrome' | 'chrome-headless-shell';
 
 export type BrowserEngineInstallState =
@@ -7306,7 +7306,7 @@ export interface BrowserEngineBuildStatus {
   installed: boolean;
   /** Approximate download size in bytes (for the enable/download copy). */
   download_bytes: number;
-  /** Human copy, e.g. `"Chrome for Testing — full browser (~150 MB)"`. */
+  /** Human copy, e.g. `"Chrome for Testing — full browser (~180 MB)"`. */
   label: string;
   /** `false` when this daemon build ships no sha256 pin for it — install is
    *  refused (fail closed). */

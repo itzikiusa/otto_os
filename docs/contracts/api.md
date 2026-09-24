@@ -4015,8 +4015,8 @@ version, URL and sha256 per build, matching Playwright's pinned CfT version):
 
 | `build` | What | Download |
 |---|---|---|
-| `chrome` (**default**) | full Chrome for Testing, run in Chrome's new headless mode (`--headless=new`) — full fidelity (codecs, fewer headless-detection breakages) | ~150 MB |
-| `chrome-headless-shell` | the lighter headless-only shell | ~78 MB |
+| `chrome` (**default**) | full Chrome for Testing, run in Chrome's new headless mode (`--headless=new`) — full fidelity (codecs, fewer headless-detection breakages) | ~180 MB (179 277 110 bytes for 149.0.7827.55) |
+| `chrome-headless-shell` | the lighter headless-only shell | ~98 MB (98 043 456 bytes) |
 
 Nothing is downloaded until a user explicitly calls `POST /browser/live/install`
 (the Browser page's "Enable remote live view" flow). The archive is streamed to
