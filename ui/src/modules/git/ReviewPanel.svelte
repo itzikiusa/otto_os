@@ -501,6 +501,13 @@
         review = patchCommentInReview(review, updated);
         if (history.length > 0) history = [review, ...history.slice(1)];
       }
+      // The daemon answers 200 even when the forge refused the comment (auth,
+      // network, 5xx — never retried, a 5xx may have created it): the comment
+      // is approved in Otto but `posted` stays false. Never report that as sent.
+      if (!updated.posted) {
+        toasts.error("Couldn't post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        return false;
+      }
       if (!confirmed) toasts.success('Comment posted', prWhere);
       return true;
     } catch (e) {
@@ -894,7 +901,7 @@
 
   const approvedCount = $derived.by(() => {
     const cs = review?.comments ?? [];
-    return cs.filter((c: ReviewComment) => c.state === 'approved').length;
+    return cs.filter((c: ReviewComment) => c.state === 'approved' && c.posted).length;
   });
   const draftCount = $derived.by(() => {
     const cs = review?.comments ?? [];
@@ -1202,10 +1209,12 @@
                 >
                   {actionBusy[c.id] === 'decline' ? 'Declining…' : 'Decline'}
                 </button>
-              {:else if c.state === 'approved'}
+              {:else if c.state === 'approved' && c.posted}
                 <span class="chip ok rp-badge">
                   <Icon name="check" size={10} /> posted
                 </span>
+              {:else if c.state === 'approved'}
+                <span class="chip rp-badge dim" title="Approved in Otto, but the provider refused the post">not posted</span>
               {:else}
                 <span class="chip rp-badge dim">declined</span>
               {/if}
@@ -1289,8 +1298,10 @@
                             <span class="mono rp-loc">{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
                           {/if}
                           <span class="grow"></span>
-                          {#if c.state === 'approved'}
+                          {#if c.state === 'approved' && c.posted}
                             <span class="chip ok rp-badge"><Icon name="check" size={10} /> posted</span>
+                          {:else if c.state === 'approved'}
+                            <span class="chip rp-badge dim">not posted</span>
                           {:else if c.state === 'declined'}
                             <span class="chip rp-badge dim">declined</span>
                           {:else}

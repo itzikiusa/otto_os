@@ -51,11 +51,18 @@
   // board collapses the scene list there, which is the first screen. Also
   // re-picks after the open scene is deleted. A failed open stops the loop
   // (it shows inline with Retry).
+  //
+  // `picking` (plain, untracked) is true while ANY open this page started is in
+  // flight — the auto-pick's own, or a deep link's — so the auto-pick never
+  // races a deep link to the remembered scene. It is checked LAST: returning
+  // before the reactive reads would drop this effect's dependencies, and it
+  // would then never re-run (e.g. never re-pick after the open scene is deleted).
   let picking = false;
   $effect(() => {
-    if (viewport.isPhone || picking) return;
+    if (viewport.isPhone) return;
     if (canvas.currentId || canvas.pendingOpenId || canvas.loadError) return;
     if (canvas.listLoading || canvas.scenes.length === 0) return;
+    if (picking) return;
     const id = initialSelection('canvas', canvas.scenes, (s) => s.id);
     if (!id) return;
     picking = true;
@@ -81,7 +88,11 @@
     const id = canvas.pendingOpenId;
     if (id) {
       canvas.pendingOpenId = null;
-      void canvas.open(id).catch(() => {});
+      picking = true;
+      void canvas
+        .open(id)
+        .catch(() => {})
+        .finally(() => (picking = false));
     }
   });
 

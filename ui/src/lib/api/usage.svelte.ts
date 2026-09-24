@@ -254,11 +254,14 @@ class UsageStore {
         this.summary = null;
         this.metrics = [];
       }
-      // Budgets are config (not engine) data — load them whether or not the
-      // engine is available so the caps are still editable.
-      await this.loadBudgets();
     } catch (e) {
       this.summaryError = loadErrorText(e);
+    }
+    try {
+      // Budgets are config (not engine) data — load them whether or not the
+      // engine is available (or the summary failed) so the caps are still
+      // editable, and a skipped load never reads as "No budgets set".
+      await this.loadBudgets();
     } finally {
       this.loading = false;
     }

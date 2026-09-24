@@ -506,6 +506,9 @@
       await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
         transition_id: t.id,
       });
+      // Available transitions depend on the status — refetch on next open, or
+      // the menu (and its confirm's "from → to") offers the old status's moves.
+      transitionsLoaded = false;
       toasts.info('Status updated');
       await loadIssueFull();
       await product.refresh();
