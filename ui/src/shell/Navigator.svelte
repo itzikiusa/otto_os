@@ -989,7 +989,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="nested-row"
-    class:needs-you={needsYou}
+    class:needs-you={st.key === 'needs-you'}
     class:selected={agentSelMode && agentSel.has(s.id)}
     class:drag-over={rowDragOverId === s.id}
     draggable={dnd}
@@ -1055,7 +1055,7 @@
           <StatusDot state={st} />
         {/if}
         <span class="grow ellipsis">{s.title}</span>
-        {#if needsYou && !st.inactive}
+        {#if st.key === 'needs-you'}
           <span class="needs-you-dot" role="img" title="Waiting on you" aria-label="Needs you">
             <Icon name="bell" size={10} />
           </span>

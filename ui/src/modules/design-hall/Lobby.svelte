@@ -15,7 +15,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { designBus } from '../../lib/events.svelte';
+  import { designBus, events } from '../../lib/events.svelte';
+  import { sessionState } from '../../lib/status';
   import { search as searchApi } from '../../lib/api/design';
   import { isAbortError } from '../../lib/api/client';
   import type { DesignSearchHit, DesignStudio } from '../../lib/api/types';
@@ -485,7 +486,9 @@
             {#each agentWork as w (w.a.id)}
               <li>
                 <div class="act-line">
-                  {#if w.session}<StatusDot status={w.session.status} />{/if}
+                  {#if w.session}<StatusDot
+                      state={sessionState(w.session, ws.statusMap[w.session.id], ws.needsYou[w.session.id] === true, { stale: events.state !== 'connected' })}
+                    />{/if}
                   <span><span class="who">{w.session?.title ?? w.a.created_session_title ?? 'An agent'}</span> drafted
                     <a href={`#/design/a/${encodeURIComponent(w.a.id)}`}>{w.a.title}</a></span>
                 </div>
