@@ -164,7 +164,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     cursor: pointer;
   }
@@ -178,7 +178,7 @@
     gap: 4px;
     align-self: flex-start;
     padding: 1px 7px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-warn);
     background: var(--status-warn-soft);
     border-radius: 999px;
@@ -231,7 +231,7 @@
     color: var(--text-dim);
   }
   .health {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     border-radius: 999px;
     background: var(--surface-2);
@@ -262,7 +262,7 @@
   }
   .m em {
     font-style: normal;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0 5px;
     border-radius: 999px;
   }

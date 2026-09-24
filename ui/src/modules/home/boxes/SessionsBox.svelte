@@ -33,8 +33,8 @@
 
 <div class="sessions">
   <div class="stats">
-    <div class="stat"><span class="n working">{working}</span><span class="l">working</span></div>
-    <div class="stat"><span class="n needs">{needsYou}</span><span class="l">need you</span></div>
+    <div class="stat"><span class="n" class:working={working > 0}>{working}</span><span class="l">working</span></div>
+    <div class="stat"><span class="n" class:needs={needsYou > 0}>{needsYou}</span><span class="l">need you</span></div>
     <div class="stat"><span class="n">{idle}</span><span class="l">idle</span></div>
     <div class="stat"><span class="n">{sessions.length}</span><span class="l">open</span></div>
   </div>
@@ -80,19 +80,20 @@
     border-radius: var(--radius-s);
   }
   .n {
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
+  /* Tone only when there is something to see: a green "0 working" was noise. */
   .n.working {
-    color: var(--status-working);
+    color: var(--success);
   }
   .n.needs {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .rows {
@@ -128,7 +129,7 @@
   .pill {
     padding: 0 6px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .pill.needs {
     color: var(--status-warn);
