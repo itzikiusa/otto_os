@@ -5,6 +5,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { envTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
@@ -814,13 +815,12 @@
   type EnvGuarded = Pick<Connection, 'environment' | 'read_only'>;
   const isProdConn = (c: EnvGuarded): boolean => c.environment === 'prod';
   const isGuardedConn = (c: EnvGuarded): boolean => c.environment === 'prod' || c.read_only;
-  // Short badge label, or '' when neither (dev, not read-only) — also the guard
-  // for rendering the shared <EnvBadge>, which draws prod/staging/RO itself.
-  function envBadge(c: EnvGuarded): string {
-    if (c.environment === 'prod') return 'PROD';
-    if (c.read_only) return 'RO';
-    if (c.environment === 'staging') return 'STG';
-    return '';
+  // Whether a row gets the shared <EnvBadge> — the same rule as Brokers /
+  // Kubernetes / AWS: prod and staging are badged, and so is read-only (RO);
+  // dev (the default) stays unbadged. Uses `envTone` so env aliases agree with
+  // the badge itself.
+  function envBadge(c: EnvGuarded): boolean {
+    return envTone(c.environment).key !== 'dev' || c.read_only;
   }
 </script>
 
