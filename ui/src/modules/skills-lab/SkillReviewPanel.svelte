@@ -13,6 +13,8 @@
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
@@ -247,7 +249,7 @@
               <span class="lr-item-name">{r.skill_name}</span>
               <span class="lr-item-meta">
                 <span class="chip lr-src">{r.skill_source}</span>
-                <span class="rp-status-pill rp-status-{r.status}">{r.status}</span>
+                <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} /></span>
               </span>
             </button>
             <button class="btn small ghost lr-del" title="Delete" onclick={() => deleteReview(r)}>✕</button>
@@ -312,7 +314,7 @@
           <div>
             <h3>{selected.skill_name}</h3>
             <span class="chip lr-src">{selected.skill_source}</span>
-            <span class="rp-status-pill rp-status-{selected.status}">{selected.status}</span>
+            <span class="rp-status-pill" data-status={selected.status}><StatusBadge status={runStatus(selected.status)} /></span>
           </div>
           <div class="grow"></div>
           {#if selected.status === 'running'}
@@ -413,7 +415,7 @@
                     {fixTermOpen ? 'Hide' : 'Open'}
                   </button>
                 {/if}
-                <span class="rp-status-pill rp-status-{fx.status}">{fx.status}</span>
+                <span class="rp-status-pill" data-status={fx.status}><StatusBadge status={runStatus(fx.status)} /></span>
               </div>
               {#if fx.note}
                 <p class="lr-fix-note">{fx.note}</p>
@@ -497,7 +499,7 @@
   .lr-fix-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .lr-fix-name { font-size: 12.5px; font-weight: 600; }
   .lr-fix-note { margin: 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
-  .lr-fix-waiting { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--status-warn); }
+  .lr-fix-waiting { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--warning); }
   .lr-fix-term {
     height: min(360px, 65vh); border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
@@ -515,15 +517,15 @@
   .lr-detail { display: flex; flex-direction: column; gap: 12px; }
   .lr-detail-head { display: flex; align-items: center; gap: 8px; }
   .lr-detail-head h3 { margin: 0 8px 0 0; display: inline; }
-  .lr-error { color: var(--status-exited); font-size: 12px; }
+  .lr-error { color: var(--danger); font-size: 12px; }
   .grow { flex: 1; }
 
   .lr-static, .lr-summary { padding: 12px 14px; }
   .lr-verdict { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
   .lr-verdict-badge { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 3px 8px; border-radius: var(--radius-s); }
-  .verdict-ready .lr-verdict-badge { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .verdict-fixes .lr-verdict-badge { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .verdict-block .lr-verdict-badge { background: color-mix(in srgb, var(--status-exited) 18%, transparent); color: var(--status-exited); }
+  .verdict-ready .lr-verdict-badge { background: var(--success-soft); color: var(--success); }
+  .verdict-fixes .lr-verdict-badge { background: var(--warning-soft); color: var(--warning); }
+  .verdict-block .lr-verdict-badge { background: var(--danger-soft); color: var(--danger); }
   .lr-avg { font-size: 11.5px; color: var(--text-dim); }
   .lr-score { width: 100%; border-collapse: collapse; font-size: 11.5px; }
   .lr-score td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -534,18 +536,14 @@
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
   .lr-plan { margin: 4px 0 8px 18px; font-size: 12.5px; line-height: 1.5; }
 
-  .rp-status-pill { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: var(--radius-s, 4px); display: inline-flex; align-items: center; gap: 3px; }
-  .rp-status-pending { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
-  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
-  .rp-status-done { background: color-mix(in srgb, var(--status-working) 15%, transparent); color: var(--status-working); }
-  .rp-status-error, .rp-status-cancelled { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
+  .rp-status-pill { display: inline-flex; align-items: center; }
   .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
   .rp-loc { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
   .severity-chip { display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px); font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-  .sev-critical { background: color-mix(in srgb, var(--status-exited) 22%, transparent); color: var(--status-exited); }
-  .sev-high { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
-  .sev-medium { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
+  .sev-critical { background: var(--danger-soft); color: var(--danger); }
+  .sev-high { background: var(--danger-soft); color: var(--danger); }
+  .sev-medium { background: var(--warning-soft); color: var(--warning); }
   .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
   .mono { font-family: var(--font-mono, monospace); }
 

@@ -162,16 +162,16 @@
     font-weight: 700;
   }
   .score.good {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 20%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .score.ok {
     background: color-mix(in srgb, var(--warning) 22%, transparent);
     color: var(--warning);
   }
   .score.bad {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .score.winner {
     outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);

@@ -6,6 +6,7 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEval, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import { runStatus } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
@@ -232,7 +233,7 @@
                 </span>
               {/if}
               <span class="se-item-name">{r.source_skill}</span>
-              <span class="se-dot st-{r.status}"></span>
+              <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
             </div>
             <div class="se-item-sub">
               <span class="se-task">{r.task}</span>
@@ -450,16 +451,25 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
+  /* Run dot, same tones as runStatus: running = info (pulsing), done =
+     success, error = danger, cancelled = neutral. */
+  .se-dot {
+    background: var(--status-idle);
+  }
   .se-dot.st-running {
-    background: var(--status-working, var(--accent));
+    background: var(--info);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .se-dot.st-done {
-    background: var(--status-idle, #6bbf6b);
+    background: var(--success);
   }
-  .se-dot.st-error,
-  .se-dot.st-cancelled {
-    background: var(--status-exited, #d66);
+  .se-dot.st-error {
+    background: var(--status-exited);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .se-dot.st-running {
+      animation: none;
+    }
   }
   @keyframes pulse {
     50% {

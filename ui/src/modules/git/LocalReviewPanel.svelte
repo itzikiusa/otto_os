@@ -2,6 +2,8 @@
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import { api, ApiError } from '../../lib/api/client';
   import type { Review, ReviewComment, RefsResp, Session } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -459,7 +461,7 @@
                 aria-expanded={isOpen}
               >
                 <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
-                <span class="chip lrp-status-{run.status}" style="font-size:10px;padding:1px 5px">{run.status}</span>
+                <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
@@ -507,7 +509,7 @@
   .lrp-fallback-note {
     margin: 8px 0 0;
     font-size: 12px;
-    color: var(--status-warn);
+    color: var(--warning);
   }
 
   /* Findings workflow board section */
@@ -628,33 +630,6 @@
     color: var(--text-dim);
     line-height: 1.4;
   }
-  .lrp-status-pill {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .lrp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .lrp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .lrp-status-done {
-    background: color-mix(in srgb, var(--status-working) 15%, transparent);
-    color: var(--status-working);
-  }
-  .lrp-status-error {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
 
   /* Error */
   .lrp-error {
@@ -662,7 +637,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
-    color: var(--status-exited);
+    color: var(--danger);
     margin-top: 8px;
   }
   .lrp-error-msg {
@@ -763,12 +738,12 @@
     color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .sev-bug {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .grow { flex: 1; }
