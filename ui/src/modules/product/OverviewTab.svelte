@@ -5,6 +5,8 @@
   // assignee, details, linked issues, comments, history, and attachments.
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { storyStage, STORY_STAGES } from '../../lib/status';
   import { product } from '../../lib/stores/product.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -993,19 +995,21 @@
     }
   }
 
-  function stageColor(stage: string): string {
-    switch (stage) {
-      case 'draft': return 'stage-draft';
-      case 'review': return 'stage-review';
-      case 'approved': return 'stage-approved';
-      case 'done': return 'stage-done';
-      default: return 'stage-other';
-    }
-  }
-
   // Lifecycle gate: the operator advances the story through the stages. Approval
-  // is the gate before "Send to Swarm" (PlanTab warns when not approved).
-  const STAGES = ['draft', 'review', 'approved', 'done'];
+  // is the gate before "Send to Swarm" (PlanTab warns when not approved). The
+  // stage reads through the shared `storyStage` mapping (lib/status.ts); the
+  // picker is a ctxMenu of checkable rows. An agent-written stage (analyzed,
+  // planned…) stays listed while it is current.
+  function openStageMenu(e: MouseEvent): void {
+    if (!story) return;
+    const cur = story.stage;
+    const keys: string[] = [...STORY_STAGES];
+    if (!keys.includes(cur)) keys.unshift(cur);
+    ctxMenu.showAt(
+      e.currentTarget as HTMLElement,
+      keys.map((k) => ({ label: storyStage(k).label, checked: k === cur, action: () => void setStage(k) })),
+    );
+  }
   async function setStage(stage: string): Promise<void> {
     if (!story || stage === story.stage) return;
     try {
@@ -1123,14 +1127,16 @@
     <!-- ── Story header (full width) ────────────────────────────── -->
     <div class="story-header">
       <div class="story-meta-row">
-        <select
-          class="stage-badge stage-select {stageColor(story.stage)}"
-          value={story.stage}
-          onchange={(e) => setStage((e.currentTarget as HTMLSelectElement).value)}
+        <button
+          class="ov-stage-btn"
+          onclick={openStageMenu}
+          aria-haspopup="menu"
+          aria-label="Lifecycle stage: {storyStage(story.stage).label}. Change stage"
           title="Lifecycle stage — advance to Approved before sending to a swarm"
         >
-          {#each STAGES as st (st)}<option value={st}>{st}</option>{/each}
-        </select>
+          <StatusBadge status={storyStage(story.stage)} title="" />
+          <Icon name="chevronDown" size={10} />
+        </button>
         {#if story.issue_type}
           <span class="chip">{story.issue_type}</span>
         {/if}
@@ -1240,8 +1246,8 @@
 
       <!-- Watch toggle -->
       <button
-        class="toolbar-btn"
-        class:active={story.watch_enabled}
+        class="btn small"
+        aria-pressed={story.watch_enabled}
         onclick={toggleWatch}
         disabled={watchWorking}
         title={story.watch_enabled ? 'Watching — click to disable' : 'Click to watch this story'}
@@ -1253,7 +1259,7 @@
 
       <!-- Refresh -->
       <button
-        class="toolbar-btn"
+        class="btn small"
         onclick={refresh}
         disabled={refreshing}
         title="Pull latest content from source"
@@ -1275,13 +1281,13 @@
         </select>
       {/if}
       <button
-        class="toolbar-btn"
+        class="btn small"
         onclick={runDiscovery}
         disabled={runningDiscovery}
         title="Launch a discovery swarm run — agents analyse the story and report findings"
         aria-label="Run Discovery"
       >
-        {runningDiscovery ? 'Starting…' : '⚡ Run Discovery'}
+        <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run Discovery'}
       </button>
     </div>
 
@@ -1322,7 +1328,7 @@
 
             <div class="draft-save-row">
               <button
-                class="toolbar-btn save-btn"
+                class="btn"
                 onclick={saveDraft}
                 disabled={draftSaving}
               >
@@ -1332,17 +1338,11 @@
 
             <!-- ── Publish bar ─────────────────────────────────────── -->
             <div class="publish-bar">
-              <button
-                class="publish-btn"
-                onclick={() => (publishDialogMode = 'story')}
-              >
-                Publish as Jira Story
+              <button class="btn" onclick={() => (publishDialogMode = 'rfc')}>
+                Publish as Confluence RFC…
               </button>
-              <button
-                class="publish-btn secondary"
-                onclick={() => (publishDialogMode = 'rfc')}
-              >
-                Publish as Confluence RFC
+              <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
+                Publish as Jira Story…
               </button>
             </div>
           </div>
@@ -1404,7 +1404,7 @@
                 spellcheck="false"
               ></textarea>
               <button
-                class="toolbar-btn"
+                class="btn small"
                 onclick={doAddTranscript}
                 disabled={addingTranscript || !newTranscriptBody.trim()}
               >
@@ -1519,7 +1519,7 @@
                     ></textarea>
                     <div class="add-comment-row">
                       <button
-                        class="toolbar-btn comment-submit-btn"
+                        class="btn small primary"
                         onclick={addComment}
                         disabled={postingComment || !newCommentBody.trim()}
                       >
@@ -1996,11 +1996,8 @@
 
       {#if isConfluence}
         <div class="publish-bar">
-          <button
-            class="publish-btn"
-            onclick={() => (publishDialogMode = 'story')}
-          >
-            Convert to Jira Story
+          <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
+            Convert to Jira Story…
           </button>
         </div>
       {/if}
@@ -2212,6 +2209,22 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 12px;
   }
+  /* Stage picker: the shared StatusBadge + a caret, opening a ctxMenu. */
+  .ov-stage-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 4px 0 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ov-stage-btn:hover :global(.sbadge) {
+    border-color: var(--border-strong);
+  }
   .story-meta-row {
     display: flex;
     align-items: center;
@@ -2283,42 +2296,6 @@
   .title-input:focus {
     outline: none;
     border-color: var(--accent);
-  }
-  .stage-badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: capitalize;
-    padding: 2px 8px;
-    border-radius: 999px;
-    flex-shrink: 0;
-  }
-  .stage-select {
-    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-    cursor: pointer;
-    appearance: none;
-    padding-inline: 8px 8px;
-    /* Hug the current stage, not the longest option (where supported). */
-    field-sizing: content;
-  }
-  .stage-draft {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .stage-review {
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
-    color: var(--warning);
-  }
-  .stage-approved {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .stage-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
-  }
-  .stage-other {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
   }
   .chip {
     font-size: var(--fs-xs);
@@ -2396,34 +2373,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 110ms, border-color 110ms, color 110ms;
-    white-space: nowrap;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .toolbar-btn.active {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
   .disc-swarm-pick {
@@ -3064,17 +3013,6 @@
     display: flex;
     justify-content: flex-end;
   }
-  .comment-submit-btn {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .comment-submit-btn:hover:not(:disabled) {
-    opacity: 0.88;
-    background: var(--accent);
-    color: #fff;
-  }
-
   /* ── Estimate chip ─────────────────────────────────────────── */
   .estimate-chip {
     display: inline-block;
@@ -3392,29 +3330,5 @@
     padding-top: 14px;
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
-  }
-  .publish-btn {
-    height: 28px;
-    padding: 0 14px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid transparent;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    transition: background 130ms ease-out;
-    white-space: nowrap;
-  }
-  .publish-btn:hover {
-    background: color-mix(in srgb, var(--accent-solid) 88%, black);
-  }
-  .publish-btn.secondary {
-    background: var(--surface);
-    border-color: var(--border);
-    color: var(--text);
-  }
-  .publish-btn.secondary:hover {
-    background: var(--surface-2);
   }
 </style>
