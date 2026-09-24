@@ -624,7 +624,7 @@
       onclick={() => router.go('walkthroughs')}
     >
       <Icon name="info" size={14} />
-      <span class="grow">Walkthroughs</span>
+      <span class="grow">Help</span>
     </button>
     <button
       class="nav-item"
