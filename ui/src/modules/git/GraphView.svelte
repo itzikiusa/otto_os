@@ -3484,16 +3484,16 @@
   }
   /* Worktree pip: violet folder so it never reads as "checked out here". */
   .cur-pip.wt-pip {
-    background: color-mix(in srgb, #a78bfa 55%, transparent);
-    color: #c4b5fd;
-    border: 1px solid color-mix(in srgb, #a78bfa 50%, transparent);
+    background: color-mix(in srgb, var(--worktree) 55%, transparent);
+    color: var(--worktree-text);
+    border: 1px solid color-mix(in srgb, var(--worktree) 50%, transparent);
   }
   /* Branch held by another worktree — distinct from a regular local branch. */
   .ref-row.is-worktree {
-    color: #c4b5fd;
+    color: var(--worktree-text);
   }
   .ref-row.is-worktree:hover:not(:disabled) {
-    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    background: color-mix(in srgb, var(--worktree) 12%, transparent);
   }
   /* Inline "open worktree" affordance next to the branch / worktree name. */
   .wt-open-hint {
@@ -3501,7 +3501,7 @@
     font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.02em;
-    color: #a78bfa;
+    color: var(--worktree-text);
     opacity: 0.85;
     white-space: nowrap;
   }
@@ -3828,9 +3828,9 @@
   }
   /* Branch checked out in another worktree — violet, not local-branch blue. */
   .ref-chip.is-worktree {
-    background: color-mix(in srgb, #a78bfa 18%, transparent);
-    color: #c4b5fd;
-    border-color: color-mix(in srgb, #a78bfa 35%, transparent);
+    background: color-mix(in srgb, var(--worktree) 18%, transparent);
+    color: var(--worktree-text);
+    border-color: color-mix(in srgb, var(--worktree) 35%, transparent);
   }
   .chip-ab {
     display: inline-flex;
@@ -3993,16 +3993,17 @@
     color: var(--accent-text);
   }
   .ref-pop-row.is-worktree {
-    color: #c4b5fd;
+    color: var(--worktree-text);
   }
   .ref-pop-row.is-worktree .ref-pop-tag {
-    color: #a78bfa;
-    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: var(--worktree-text);
+    border-color: color-mix(in srgb, var(--worktree) 40%, transparent);
   }
   .ref-pop-row:hover .ref-pop-tag,
   .ref-pop-row:focus-visible .ref-pop-tag {
-    background: rgba(0, 0, 0, 0.18);
-    color: #000;
+    background: var(--surface);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────
