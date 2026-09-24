@@ -1775,6 +1775,7 @@
   }
   /* --- Section hierarchy rows --- */
   .sec-head {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1823,20 +1824,33 @@
     width: 16px;
     flex-shrink: 0;
   }
+  /* The folder count sits in the same end column as the connection rows'
+     type/env badges: the section's hover actions float over the row end (like
+     .conn-actions) instead of reserving their width, and the count is sized
+     like a badge so the numbers line up with the pills below them. */
   .count {
-    font-size: 9.5px;
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    min-width: 14px;
-    text-align: center;
+    min-width: 16px;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
   .sec-actions {
+    position: absolute;
+    inset-inline-end: 2px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     gap: 0;
-    flex-shrink: 0;
+    padding: 1px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
     opacity: 0;
   }
-  .sec-head:hover .sec-actions {
+  .sec-head:hover .sec-actions,
+  .sec-head:focus-within .sec-actions {
     opacity: 1;
   }
   .conn-row.dragging {

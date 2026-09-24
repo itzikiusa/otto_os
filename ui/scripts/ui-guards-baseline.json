@@ -148,7 +148,7 @@
     "src/modules/aws/RdsView.svelte": 1,
     "src/modules/aws/SqsView.svelte": 1,
     "src/modules/connections/ConnectionImportDialog.svelte": 1,
-    "src/modules/database/DatabasePage.svelte": 3,
+    "src/modules/database/DatabasePage.svelte": 2,
     "src/modules/database/DiagramView.svelte": 5,
     "src/modules/database/QueryEditor.svelte": 1,
     "src/modules/database/ResultsGrid.svelte": 5,
