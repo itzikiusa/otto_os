@@ -1,6 +1,6 @@
 # Otto WebSocket Contract (FROZEN)
 
-Two WS endpoints. Auth for both: a bearer token validated BEFORE the upgrade
+Three WS endpoints. Auth for all: a bearer token validated BEFORE the upgrade
 completes; invalid token → HTTP 401, no upgrade.
 
 - The event stream (`/ws/events`) accepts the token via the
@@ -135,6 +135,99 @@ Multiple clients may attach to one session simultaneously; all receive the same
 output broadcast. Input is interleaved in arrival order. On attach the server
 sends current `status` immediately.
 
+## 1b. Remote live browser — `WS /ws/browser/{tab_id}/live`
+
+The screencast + input channel of a tab's **remote** live session (a
+daemon-owned Chromium — see api.md "Browser — remote live view"). The session
+must already exist (`POST /api/v1/browser/tabs/{id}/live`); otherwise the
+upgrade is refused with 404.
+
+**Auth** (validated BEFORE the upgrade): `Sec-WebSocket-Protocol: otto-bearer,
+<token>` (server echoes `otto-bearer`), `?token=` accepted as a fallback.
+Share-scoped and MCP-only tokens → 403. The caller must hold `Feature::Browser`
+≥ View **and** be the session's owner, a workspace Admin of the tab's workspace,
+or root (anyone else → 404, so a session's existence doesn't leak). Driving
+(every input/nav/resize/control/dialog frame) additionally needs workspace
+**editor** + `Feature::Browser` ≥ Edit; a watch-only viewer's input frames are
+dropped and one `{"type":"error","code":"forbidden"}` is sent. The grant is
+re-validated every 5 s off the socket loop (token revoked / role lost → the
+socket closes with `{"type":"closed","reason":"revoked"}`; a lost Edit only
+narrows to watch-only).
+
+Frames are capped at 256 KiB client → server. At most 8 viewers per session.
+
+### Server → client
+
+**Binary frames — screencast frames.** One frame per message, self-describing:
+
+```
+byte 0        : format version = 1
+bytes 1..5    : u32 big-endian N = length of the JSON header
+bytes 5..5+N  : UTF-8 JSON header
+bytes 5+N..   : the image (JPEG)
+```
+
+Header:
+
+```json
+{"seq":42,"mime":"image/jpeg","width":1280,"height":800,
+ "device_width":1280,"device_height":800,"page_scale_factor":1,
+ "offset_top":0,"scroll_x":0,"scroll_y":320,"timestamp":1727170000.123}
+```
+
+`width`/`height` are the image's pixel size; `device_width`/`device_height`
+the viewport in CSS px (map a pointer position `(px, py)` on the drawn image to
+viewport CSS px as `x = px * device_width / drawn_width`,
+`y = py * device_height / drawn_height`). **Backpressure:** the client acks
+every frame it has DRAWN with `{"type":"ack","seq":42}`; the daemon keeps at
+most 2 un-acked frames in flight per viewer and otherwise holds only the
+**newest** frame (older ones are dropped, never queued). JPEG quality and frame
+rate adapt to each viewer's ack latency (quality 35–80, every 1st–3rd frame);
+a client that never acks gets one frame and then nothing.
+
+**JSON text frames:**
+
+```json
+{"type":"state","session":{…BrowserLiveSession…}}           // on attach, and on every change (url/title/loading/history/controller/viewers/state)
+{"type":"cursor","cursor":"pointer"}                          // CSS cursor under the pointer (default|pointer|text|move|grab|grabbing|not-allowed|wait|progress|crosshair|help|col-resize|row-resize|ew-resize|ns-resize|…)
+{"type":"dialog","dialog_type":"alert|confirm|prompt|beforeunload","message":"…","default_prompt":"…","url":"…"}   // a JS dialog is blocking the page; answer with a `dialog` frame (auto-dismissed after 60 s)
+{"type":"blocked","host":"10.0.0.1","reason":"ssrf"}          // a navigation/redirect was refused by the SSRF guard (host only)
+{"type":"popup","url":"https://…"}                            // the page tried to open a new window; the popup is closed — the client may open `url` in a new tab
+{"type":"download","status":"blocked|quarantined","filename":"report.pdf","bytes":1234}
+{"type":"approval","approval_id":"…","status":"pending|approved|denied","title":"Submit form on example.com"}   // an agent's outward action is waiting on / was decided by a human
+{"type":"error","code":"forbidden|not_driver|bad_frame|nav_failed|input_failed|engine_unavailable","message":"…"}
+{"type":"closed","reason":"closed|idle|crashed|revoked|replaced"}   // the session ended; the socket closes right after
+```
+
+### Client → server (JSON text frames)
+
+```json
+{"type":"ack","seq":42}
+{"type":"mouse","action":"move|down|up|wheel","x":412.5,"y":88,"button":"left|middle|right|back|forward|none","buttons":1,"click_count":1,"delta_x":0,"delta_y":120,"modifiers":0}
+{"type":"key","action":"down|up","key":"a","code":"KeyA","text":"a","key_code":65,"location":0,"repeat":false,"modifiers":0}
+{"type":"text","text":"日本"}                                    // committed IME / insertText
+{"type":"ime","text":"にほ","selection_start":2,"selection_end":2}   // in-progress IME composition (Input.imeSetComposition)
+{"type":"paste","text":"clipboard contents"}                     // ≤ 100 000 chars, inserted as text (the daemon never reads the host clipboard)
+{"type":"nav","action":"goto|back|forward|reload|stop","url":"https://…"}   // goto is netguard-checked
+{"type":"resize","width":1280,"height":800,"device_scale_factor":2}         // CSS px; clamped to 200..3840 × 200..2160, dsf 1..3
+{"type":"control","action":"take_over|hand_back"}
+{"type":"dialog","accept":true,"prompt_text":"…"}
+```
+
+- `x`/`y` are viewport CSS px (see the frame header). `modifiers` is the CDP
+  bitmask: Alt=1, Ctrl=2, Meta/Command=4, Shift=8. `buttons` is the DOM
+  `MouseEvent.buttons` bitmask. `wheel` uses `delta_x`/`delta_y` in CSS px.
+- `key` frames carry DOM `KeyboardEvent.key`/`code`; `text` is the character
+  a keydown produces (omit for non-printing keys). The daemon maps them onto
+  `Input.dispatchKeyEvent` (`keyDown` with `text` → a `char`-producing
+  keydown, `rawKeyDown` otherwise; `windowsVirtualKeyCode` derived from `code`
+  when `key_code` is absent). macOS editing shortcuts (⌘A/⌘C/⌘V/⌘X/⌘Z) are sent
+  as the matching editing `commands`.
+- Mouse moves are coalesced server-side (latest wins, ≥ 8 ms apart).
+- Input from a viewer while `controller == "agent"` → `not_driver` (send
+  `take_over` first). The first input while `controller == "none"` makes this
+  viewer's user the driver.
+
 ## 2. Event stream — `WS /ws/events`
 
 Server → client only. Each message is one JSON-serialized `otto_core::event::Event`
@@ -159,7 +252,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `workspace_id`; other **workspace-scoped events** (improvement, swarm,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 49
+**broadcast events** (`Notice`) reach every authenticated client. There are 51
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -968,6 +1061,28 @@ like `canvas_updated`'s `doc`).
   the other canvas-family live-edit events.
 - TypeScript types: `{ type: 'browser_tab_updated'; workspace_id: Id; tab: unknown }`
   and `{ type: 'browser_annotation_added'; workspace_id: Id; annotation: unknown }`.
+
+### `browser_live_session_updated` / `browser_engine_install_updated`
+
+Remote live browser (api.md "Browser — remote live view").
+
+```json
+{ "type": "browser_live_session_updated", "workspace_id": "<Id>", "tab_id": "<Id>", "owner_id": "<Id>", "state": "ready" }
+{ "type": "browser_engine_install_updated", "build": "chrome", "version": "149.0.7827.55", "state": "downloading", "received_bytes": 52428800, "total_bytes": 157286400, "error": null }
+```
+
+- `browser_live_session_updated` — a tab's remote live session was opened,
+  became ready, crashed or closed (`state` ∈ `starting|ready|crashed|closed`).
+  Deliberately carries **no URL/title** (the session is private to its owner —
+  fetch `GET /browser/tabs/{id}/live`, or attach the live WS, for details).
+  Scope: `Workspace` (viewer+ on `workspace_id`) so every open Browser page can
+  badge the tab.
+- `browser_engine_install_updated` — the Chromium download job changed state
+  (`state` ∈ `downloading|verifying|extracting|installed|failed`; progress ticks
+  at most 4/s while downloading; `error` is set on `failed`). Machine-wide like
+  `k8s_install_updated`: scope `Everyone`.
+- TypeScript: `{ type: 'browser_live_session_updated'; workspace_id: Id; tab_id: Id; owner_id: Id; state: BrowserLiveSessionState }`
+  and `{ type: 'browser_engine_install_updated'; build: BrowserChromeBuild; version: string; state: BrowserEngineInstallState; received_bytes: number; total_bytes: number | null; error: string | null }`.
 
 ### `aws_account_updated` / `aws_install_updated`
 
