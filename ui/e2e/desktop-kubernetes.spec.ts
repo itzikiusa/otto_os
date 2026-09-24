@@ -138,7 +138,7 @@ test('a seeded cluster renders as a card and opens into a workspace that survive
   }
   const card = page.getByTestId('k8s-cluster-card').filter({ hasText: CLUSTER_NAME });
   await expect(card).toBeVisible({ timeout: 15_000 });
-  await expect(card.locator('.env-badge')).toHaveText('STG');
+  await expect(card.locator('.env-badge')).toHaveText('staging');
 
   await card.click();
   await expect(page).toHaveURL(new RegExp(`#/kubernetes/${clusterId}`));

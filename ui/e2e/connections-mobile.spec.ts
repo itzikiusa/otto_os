@@ -126,7 +126,7 @@ test.describe('connections hub — responsive', () => {
     await gotoPage(page);
     const bastion = page.locator('.conn-row', { hasText: 'prod-web-bastion' }).first();
     await expect(bastion.locator('.kind-tag')).toHaveText('ssh');
-    await expect(bastion.locator('.env-badge')).toHaveText('PROD');
+    await expect(bastion.locator('.env-badge')).toHaveText('prod');
     const custom = page.locator('.conn-row', { hasText: 'my-custom-cli' }).first();
     await expect(custom.locator('.kind-tag')).toHaveText('custom');
     await assertFitsWidth(page);

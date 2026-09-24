@@ -7,6 +7,7 @@
   // + warm-tunnel state and does the Test call itself; Edit/Remove are delegated
   // to the host via callbacks so each page can wire them to its own flow.
   import Icon from '../../lib/components/Icon.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { BrokerCluster, TestClusterResp } from '../../lib/api/types';
@@ -73,7 +74,7 @@
     <div class="cv-title">
       <span class="dot" style="background: {cluster.color || 'var(--accent)'}"></span>
       <span class="name ellipsis">{cluster.name}</span>
-      <span class="env {cluster.environment}">{cluster.environment}</span>
+      <EnvBadge env={cluster.environment} />
       {#if cluster.read_only}<span class="ro">read-only</span>{/if}
       {#if cluster.ssh}
         <span
@@ -155,19 +156,6 @@
     height: 9px;
     border-radius: 50%;
     flex: 0 0 auto;
-  }
-  .env {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-  }
-  .env.prod {
-    color: #ff9800;
-    border-color: #ff980055;
   }
   .ro {
     font-size: var(--fs-xs);

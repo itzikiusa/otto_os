@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -114,9 +115,6 @@
   // page-level empty state owns the page and its "Add a cluster" CTA.
   const isEmpty = $derived(!brokers.loading && brokers.clusters.length === 0 && brokers.sections.length === 0);
 
-  function envBadge(c: BrokerCluster): string {
-    return c.environment === 'prod' ? 'prod' : c.environment === 'staging' ? 'stg' : 'dev';
-  }
 
   async function testConn(c: BrokerCluster) {
     testing = true;
@@ -346,7 +344,7 @@
   {/snippet}
   {#snippet badge()}
     {#if selected}
-      <span class="env {selected.environment}">{selected.environment}</span>
+      <EnvBadge env={selected.environment} />
       {#if selected.read_only}<span class="ro">read-only</span>{/if}
       {#if selected.ssh}
         <span class="tunnel-pill" class:ready={tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}>
@@ -588,7 +586,7 @@
   >
     <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
     <span class="cn">{c.name}</span>
-    <span class="env {c.environment}">{envBadge(c)}</span>
+    <EnvBadge env={c.environment} />
   </div>
 {/snippet}
 
@@ -748,19 +746,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .env {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    color: var(--text-dim);
-  }
-  .env.prod {
-    background: color-mix(in srgb, var(--status-exited, #ff5f57) 22%, transparent);
-    color: var(--status-exited, #ff5f57);
-  }
   .cluster-main {
     flex: 1;
     display: flex;
@@ -874,9 +859,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .mono {
-    font-family: var(--font-mono);
   }
   .muted {
     color: var(--text-dim);
@@ -993,10 +975,6 @@
     }
     .cn {
       font-size: 15px;
-    }
-    .env {
-      font-size: var(--fs-xs);
-      padding: 2px 6px;
     }
     .sec-name {
       font-size: 14px;

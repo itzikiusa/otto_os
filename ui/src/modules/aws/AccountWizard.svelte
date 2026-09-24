@@ -13,7 +13,7 @@
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi } from '../../lib/api/aws';
   import { toasts } from '../../lib/toast.svelte';
-  import EnvPill from './EnvPill.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type {
     AwsAccount,
     AwsAuthMode,
@@ -337,7 +337,7 @@
       <div class="summary">
         <span class="dot" style="background:{color}"></span>
         <strong>{name || 'Unnamed'}</strong>
-        <EnvPill env={environment} />
+        <EnvBadge env={environment} />
         <span class="mono dim">{mode === 'profile' ? `profile ${profile}` : `keys ${accessKeyId}`} · {region}</span>
         {#if endpointUrl.trim()}<span class="mono dim">→ {endpointUrl.trim()}</span>{/if}
       </div>

@@ -8,7 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import EnvPill from './EnvPill.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -77,7 +77,7 @@
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
         <span class="name" title={a.identity?.arn ?? a.profile ?? ''}>{a.name}</span>
-        <EnvPill env={a.environment} />
+        <EnvBadge env={a.environment} />
         <button
           class="more"
           onclick={(e) => {
