@@ -277,6 +277,17 @@
       </div>
     {/each}
   </div>
+  <!-- History entry point (⌘K "Go to History" and the sidebar row are the
+       others). It used to own a whole 26px strip under the tabs. -->
+  <button
+    class="icon-btn history-btn"
+    onclick={() => router.go('history')}
+    title="History — every past Claude/Codex conversation, resumable"
+    aria-label="History"
+    data-testid="agents-history-btn"
+  >
+    <Icon name="clock" size={14} />
+  </button>
   <div class="view-toggle" role="group" aria-label="View mode">
     <button
       class:active={ws.viewMode === 'tabs'}
@@ -468,7 +479,7 @@
     flex-shrink: 0;
   }
   .tab-rename {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
@@ -497,6 +508,9 @@
   .view-toggle button.active {
     background: var(--surface);
     color: var(--accent);
+  }
+  .history-btn {
+    flex-shrink: 0;
   }
 </style>
 
