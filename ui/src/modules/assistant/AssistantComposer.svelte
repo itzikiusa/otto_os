@@ -189,7 +189,7 @@
     font-size: var(--fs-m);
     line-height: 1.45;
     padding: 5px 4px;
-    outline: none;
+    outline: none; /* the ring is drawn on .box:focus-within */
   }
   .ta::placeholder {
     color: var(--text-dim);

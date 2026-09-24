@@ -391,7 +391,7 @@
     color: var(--text);
     font: inherit;
     font-size: var(--fs-m);
-    outline: none;
+    outline: none; /* the ring is drawn on .search:focus-within */
   }
   .list {
     list-style: none;

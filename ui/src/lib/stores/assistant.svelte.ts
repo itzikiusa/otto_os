@@ -7,6 +7,11 @@
 // result if a newer load for the same key started meanwhile; live rows only
 // replace what they are newer than (`upsertNewer`, `reduceNeedsYou`); and the
 // needs-you `open_count` on each frame re-syncs the queue when we drifted.
+//
+// Loaders are called from components' $effects, so every synchronous READ of
+// store state inside them is untracked — otherwise the effect would depend on
+// the very state the loader writes and loop.
+import { untrack } from 'svelte';
 import { api, ApiError } from '../api/client';
 import type { ProviderUsage, UsageSummary } from '../api/usage.svelte';
 import { assistantApi } from '../api/assistant';
@@ -117,7 +122,7 @@ class AssistantStore {
 
   async loadTurns(threadId: string): Promise<void> {
     const current = this.ticket(`turns:${threadId}`);
-    const have = this.turns[threadId];
+    const have = untrack(() => this.turns[threadId]);
     this.turns[threadId] = { state: have?.state === 'ready' ? 'ready' : 'loading', data: have?.data ?? [], error: '' };
     try {
       const data = await assistantApi.turns(threadId);
@@ -136,7 +141,7 @@ class AssistantStore {
   async loadNeedsYou(): Promise<void> {
     const current = this.ticket('needs');
     const startedAt = new Date().toISOString();
-    if (this.needsState !== 'ready') this.needsState = 'loading';
+    if (untrack(() => this.needsState) !== 'ready') this.needsState = 'loading';
     try {
       const items = await assistantApi.needsYou();
       if (!current()) return;
@@ -161,7 +166,8 @@ class AssistantStore {
   }
   async loadUsageWeek(): Promise<void> {
     const current = this.ticket('usage');
-    this.usageWeek = { ...this.usageWeek, state: this.usageWeek.state === 'ready' ? 'ready' : 'loading' };
+    const was = untrack(() => this.usageWeek);
+    this.usageWeek = { ...was, state: was.state === 'ready' ? 'ready' : 'loading' };
     try {
       const s = await api.get<UsageSummary>('/usage/summary?days=7&otto_only=false');
       if (current()) this.usageWeek = { state: 'ready', data: s.providers ?? [], error: '' };
@@ -173,7 +179,8 @@ class AssistantStore {
 
   async loadAccounts(): Promise<void> {
     const current = this.ticket('accounts');
-    this.accounts = { ...this.accounts, state: this.accounts.state === 'ready' ? 'ready' : 'loading' };
+    const was = untrack(() => this.accounts);
+    this.accounts = { ...was, state: was.state === 'ready' ? 'ready' : 'loading' };
     try {
       const list = await api.get<ProviderAccount[]>('/auth/provider-accounts');
       if (!current()) return;
@@ -199,7 +206,7 @@ class AssistantStore {
 
   /** A task a card references but no list has yet (e.g. an old, finished one). */
   async ensureTask(id: string): Promise<void> {
-    if (this.task(id) || this.tickets[`task:${id}`]) return;
+    if (untrack(() => this.task(id)) || this.tickets[`task:${id}`]) return;
     this.ticket(`task:${id}`);
     try {
       this.mergeTask(await assistantApi.task(id));
@@ -210,7 +217,7 @@ class AssistantStore {
 
   private async load<T>(key: string, fetcher: () => Promise<T>, set: (v: Loadable<T>) => void, get: () => Loadable<T>): Promise<void> {
     const current = this.ticket(key);
-    const was = get();
+    const was = untrack(get);
     // Keep showing the last data while refreshing (no skeleton flash).
     set({ ...was, state: was.state === 'ready' ? 'ready' : 'loading', error: '' });
     try {
