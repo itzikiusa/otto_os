@@ -1118,7 +1118,7 @@
     flex-shrink: 0;
   }
   .pane-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1138,13 +1138,13 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .ss.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .list-actions {
     display: flex;
@@ -1200,7 +1200,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1237,7 +1237,7 @@
   }
   .mockup-row.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .refine-btn,
   .row-more {
@@ -1263,7 +1263,7 @@
   .refine-btn:hover,
   .row-more:hover {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mockup-type {
     flex-shrink: 0;
@@ -1278,7 +1278,7 @@
   }
   .mockup-row.active .mockup-type {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mockup-name {
     flex: 1;
@@ -1338,7 +1338,7 @@
     max-width: 40%;
   }
   .st-type {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1368,7 +1368,7 @@
   }
   .seg.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn {
     display: inline-flex;
@@ -1390,11 +1390,11 @@
   }
   .tb-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn.on {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 36%, transparent);
   }
   .stage-body {
@@ -1493,7 +1493,7 @@
   .stage-status .link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0;
@@ -1536,7 +1536,7 @@
   }
   .insp-head {
     padding: 8px 12px 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1583,7 +1583,7 @@
   }
   .insp-row small {
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .insp-check {
     display: flex;

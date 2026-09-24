@@ -970,7 +970,7 @@
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
   }
   .task-chip.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .task-chip.done {
@@ -982,7 +982,7 @@
   .now-task {
     min-width: 0;
     flex: 0 1 auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -997,7 +997,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     cursor: pointer;
@@ -1008,8 +1008,8 @@
   }
   .handover-pending {
     flex-shrink: 0;
-    font-size: 10.5px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 1px 7px;
     border-radius: 99px;
@@ -1020,7 +1020,7 @@
   .idle-hint {
     flex-shrink: 1;
     min-width: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -1028,7 +1028,7 @@
     opacity: 0.75;
   }
   .pane-cwd {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -1072,7 +1072,7 @@
   }
   .view-seg > button {
     height: 18px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 0 8px;
   }
   /* Tier-5 stand-in for the segmented control: one icon, menu on click. */
@@ -1113,17 +1113,17 @@
     gap: 2px;
   }
   .term-ctl-size {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     color: var(--text-dim);
     min-width: 30px;
     text-align: center;
   }
   .term-ctl-copy {
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .term-ctl-copy.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1159,7 +1159,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border-radius: 3px;
     line-height: 1;
@@ -1226,7 +1226,7 @@
   }
   .pane-head.t4 .view-seg > button {
     padding: 0 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .pane-head.t4 .pane-title {
     max-width: 96px;

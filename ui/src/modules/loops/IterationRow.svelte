@@ -206,7 +206,7 @@
     background: var(--status-working);
   }
   .dot.ok {
-    background: #2ea043;
+    background: var(--status-working);
   }
   .dot.warn {
     background: var(--status-warn);
@@ -225,8 +225,8 @@
     border-radius: 999px;
   }
   .chip.met {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
   }
   .chip.unmet {
     background: var(--surface-2);

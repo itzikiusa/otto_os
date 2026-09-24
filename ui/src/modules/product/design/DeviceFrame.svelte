@@ -133,7 +133,7 @@
     min-height: 0;
   }
   .frame-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono, monospace);
   }

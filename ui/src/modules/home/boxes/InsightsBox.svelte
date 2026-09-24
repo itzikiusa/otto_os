@@ -136,10 +136,10 @@
   }
   .kind {
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .per {
     flex: 1;

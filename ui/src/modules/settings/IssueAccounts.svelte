@@ -317,7 +317,7 @@
     height: 30px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
   }
@@ -340,7 +340,7 @@
     font-weight: 600;
   }
   .expiry-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 999px;

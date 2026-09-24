@@ -92,7 +92,7 @@
     border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
   }
   .err-engine {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -109,7 +109,7 @@
     gap: 5px;
     border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: var(--radius-s);
     font-size: 11.5px;
     padding: 3px 9px;
@@ -133,7 +133,7 @@
     padding-top: 6px;
   }
   .err-excerpt-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);

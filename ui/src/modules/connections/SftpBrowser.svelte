@@ -421,7 +421,7 @@
     font: inherit;
   }
   .crumb:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--surface);
   }
   .sep {
@@ -451,7 +451,7 @@
     position: sticky;
     top: 0;
     background: var(--surface);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -480,7 +480,7 @@
     font: inherit;
   }
   .cell.name.nav:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .link-to {
     font-size: 11px;

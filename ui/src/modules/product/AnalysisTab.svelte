@@ -873,7 +873,7 @@
   .chip-on {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip:disabled {
     cursor: not-allowed;
@@ -890,7 +890,7 @@
   }
   .focus-optional {
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
@@ -960,7 +960,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
@@ -1071,7 +1071,7 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     white-space: nowrap;
   }
@@ -1118,7 +1118,7 @@
     color: var(--text-dim);
   }
   .btn.ghost:hover:not(:disabled) {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .btn:disabled {
@@ -1139,7 +1139,7 @@
   /* ── Status pills — mirror PR review's .rp-status-* ───────────── */
   .rp-status-pill {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -1155,7 +1155,7 @@
   }
   .rp-status-running {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rp-status-waiting {
     background: color-mix(in srgb, var(--warning) 20%, transparent);
@@ -1275,7 +1275,7 @@
     line-height: 1.4;
   }
   .q-cat {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -1300,14 +1300,14 @@
     margin-bottom: 4px;
   }
   .sl-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sl-title {
     font-size: 12.5px;
@@ -1372,7 +1372,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;

@@ -183,7 +183,7 @@
   .bc-link {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
     padding: 2px 4px;
@@ -225,7 +225,7 @@
   }
   .bc-provider {
     margin-inline-start: auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: lowercase;
   }

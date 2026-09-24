@@ -334,7 +334,7 @@
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .select,
   .input {

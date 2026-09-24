@@ -250,7 +250,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
   }
@@ -258,7 +258,7 @@
     justify-content: flex-end;
   }
   .model {
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .sys-chip {
     display: inline-flex;
@@ -268,7 +268,7 @@
     border: 1px solid var(--border);
     border-radius: 99px;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     height: 16px;
     cursor: pointer;
@@ -304,7 +304,7 @@
     white-space: nowrap;
   }
   .sys-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     opacity: 0.8;
   }
   .sys-note pre {

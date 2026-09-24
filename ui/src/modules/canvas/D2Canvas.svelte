@@ -595,7 +595,7 @@
   .code-toggle:hover,
   .code-toggle.on {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .zoombar {
     position: absolute;

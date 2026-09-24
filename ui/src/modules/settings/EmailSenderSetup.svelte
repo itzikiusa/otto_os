@@ -301,7 +301,7 @@
 
   /* Verified / unverified / not-configured badge */
   .badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -330,7 +330,7 @@
     margin: 0 0 14px;
   }
   .card-intro a {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
   }
 
@@ -369,7 +369,7 @@
   .inline-link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     padding: 0 0 0 6px;

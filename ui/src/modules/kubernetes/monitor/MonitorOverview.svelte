@@ -284,7 +284,7 @@
   }
   .health {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -323,7 +323,7 @@
     min-width: 0;
   }
   .k {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -399,7 +399,7 @@
   }
   .rbac code {
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-word;
     user-select: all;

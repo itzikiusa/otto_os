@@ -502,10 +502,10 @@
   }
   .tri {
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .okf-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.4px;
     color: var(--accent, #9ab4ff);

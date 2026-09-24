@@ -553,7 +553,7 @@
   }
 
   .chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 1px 6px;
@@ -608,7 +608,7 @@
   .diff summary {
     font-size: 12px;
     cursor: pointer;
-    color: var(--accent);
+    color: var(--accent-text);
     width: fit-content;
     margin-bottom: 6px;
   }

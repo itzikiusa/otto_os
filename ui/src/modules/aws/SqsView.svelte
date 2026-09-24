@@ -499,7 +499,7 @@
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     letter-spacing: 0.04em;
   }
   .tag.dim {
@@ -530,7 +530,7 @@
   .back {
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 2px;
   }

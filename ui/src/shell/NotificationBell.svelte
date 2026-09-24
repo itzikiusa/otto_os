@@ -295,7 +295,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     padding: 2px 5px;
     border-radius: 4px;
@@ -391,7 +391,7 @@
     white-space: nowrap;
   }
   .notice-time {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }

@@ -119,15 +119,15 @@
   .rp-agent { padding: 8px 12px; }
   .rp-agent-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .rp-agent-name { font-size: 12.5px; font-weight: 600; }
-  .rp-agent-chip { font-size: 10.5px; }
+  .rp-agent-chip { font-size: var(--fs-xs); }
   .rp-agent-note { margin: 4px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
 
   .rp-status-pill {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
     padding: 2px 6px; border-radius: var(--radius-s, 4px); display: inline-flex; align-items: center; gap: 3px;
   }
   .rp-status-pending { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
-  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
   .rp-status-done { background: color-mix(in srgb, var(--status-working) 15%, transparent); color: var(--status-working); }
   .rp-status-error { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
   .rp-status-waiting { background: var(--status-warn-soft); color: var(--status-warn); }
@@ -144,12 +144,12 @@
 
   .severity-chip {
     display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px);
-    font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   }
   .sev-critical { background: color-mix(in srgb, var(--status-exited) 22%, transparent); color: var(--status-exited); }
   .sev-high { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
   .sev-medium { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
-  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
 
   .spinner-xs {
     display: inline-block; width: 9px; height: 9px; border: 1.5px solid currentColor;

@@ -460,7 +460,7 @@
   }
   .chip.filter.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
@@ -512,7 +512,7 @@
     text-transform: none;
   }
   .chip.kind.daily {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: currentColor;
   }
   .chip.kind.weekly {

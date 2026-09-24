@@ -215,7 +215,7 @@
   .filter-chip.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .pr-search {
     height: 22px;

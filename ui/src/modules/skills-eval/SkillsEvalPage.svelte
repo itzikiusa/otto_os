@@ -327,8 +327,8 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .se-tab.active {
-    color: #0b0b0b;
-    background: #7ee787;
+    color: var(--accent-text);
+    background: var(--accent-soft);
     border-color: var(--success);
   }
   .se-content {
@@ -437,7 +437,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .se-score {
@@ -492,7 +492,7 @@
   }
   .btn.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .grow {
     flex: 1;
