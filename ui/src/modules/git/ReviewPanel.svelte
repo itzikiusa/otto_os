@@ -28,6 +28,9 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
   import FindingsBoard from './FindingsBoard.svelte';
   // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
@@ -466,7 +469,29 @@
     return { ...r, comments: r.comments.map((x) => (x.id === updated.id ? updated : x)) };
   }
 
-  async function approveComment(c: ReviewComment): Promise<void> {
+  // "Approving" a draft comment POSTS it to the PR on the provider under the
+  // user's git account — outward-facing, so it confirms where / what / who.
+  // The bulk "Post N drafts" path confirms ONCE for the batch.
+  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+  const prWhere = $derived(`${repoLabel} · PR #${prNumber}`);
+  const PR_WHO = "The PR author and reviewers see it, posted under your git account.";
+
+  function commentPreview(c: ReviewComment): string {
+    const loc = c.path !== null ? `${c.path}${c.line !== null ? `:${c.line}` : ''} — ` : '';
+    return `${loc}${c.body}`;
+  }
+
+  async function postComment(c: ReviewComment, confirmed = false): Promise<boolean> {
+    if (!confirmed) {
+      const ok = await confirmOutward({
+        verb: 'Post to PR',
+        title: `Post comment to PR #${prNumber}?`,
+        where: prWhere,
+        what: commentPreview(c),
+        who: PR_WHO,
+      });
+      if (!ok) return false;
+    }
     actionBusy = { ...actionBusy, [c.id]: 'approve' };
     try {
       const updated = await api.post<ReviewComment>(`/pr-review-comments/${c.id}/approve`);
@@ -474,14 +499,38 @@
         review = patchCommentInReview(review, updated);
         if (history.length > 0) history = [review, ...history.slice(1)];
       }
-      toasts.success('Comment posted');
+      if (!confirmed) toasts.success('Comment posted', prWhere);
+      return true;
     } catch (e) {
-      toasts.error('Could not approve comment', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't post the comment", e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       const next = { ...actionBusy };
       delete next[c.id];
       actionBusy = next;
     }
+  }
+
+  let postingAll = $state(false);
+  async function postAllDrafts(): Promise<void> {
+    const drafts = (review?.comments ?? []).filter((c) => c.state === 'draft');
+    if (drafts.length === 0) return;
+    const ok = await confirmOutward({
+      verb: `Post ${drafts.length} comments`,
+      title: `Post ${drafts.length} comments to PR #${prNumber}?`,
+      where: prWhere,
+      what: drafts.map((c) => `• ${commentPreview(c).split('\n')[0]}`).join('\n'),
+      who: PR_WHO,
+    });
+    if (!ok) return;
+    postingAll = true;
+    let posted = 0;
+    try {
+      for (const c of drafts) if (await postComment(c, true)) posted++;
+    } finally {
+      postingAll = false;
+    }
+    if (posted > 0) toasts.success(`${posted} comment${posted === 1 ? '' : 's'} posted`, prWhere);
   }
 
   async function declineComment(c: ReviewComment): Promise<void> {
@@ -850,6 +899,16 @@
     return cs.filter((c: ReviewComment) => c.state === 'draft').length;
   });
   const totalCount = $derived.by(() => review?.comments?.length ?? 0);
+  /** Who drafted the comments: the summarizer (last agent row) plus the lenses
+   *  it merged. Null for reviews without agent rows. */
+  const draftedBy = $derived.by(() => {
+    const ag = review?.agents ?? [];
+    if (ag.length === 0) return null;
+    const summ = ag[ag.length - 1];
+    const reviewers = ag.length > 1 ? ag.slice(0, -1) : ag;
+    const lenses = [...new Set(reviewers.map((a) => a.lens ?? a.name).filter((n) => n.trim() !== ''))];
+    return { provider: summ.provider, model: summ.model, lenses };
+  });
   const blockerCount = $derived.by(() => review?.blocker_count ?? 0);
   const mergeReady = $derived.by(() => {
     const r = review;
@@ -986,12 +1045,17 @@
           </span>
         {/if}
         {#if approvedCount > 0}
-          <span class="chip ok">{approvedCount} approved</span>
+          <span class="chip ok">{approvedCount} posted</span>
         {/if}
         {#if draftCount > 0}
           <span class="chip">{draftCount} draft</span>
         {/if}
       </span>
+      {#if draftCount > 1}
+        <button class="btn small" disabled={postingAll} data-testid="rp-post-all" onclick={() => void postAllDrafts()}>
+          {postingAll ? 'Posting…' : `Post ${draftCount} drafts to PR…`}
+        </button>
+      {/if}
       <button class="btn small ghost" onclick={openConfig}>
         &#9881; Configure
         {#if repoCfgBadge !== ''}
@@ -1096,6 +1160,17 @@
     {#if review.comments.length === 0}
       <p class="dim" style="font-size: 12.5px; padding: 16px 0">No comments generated.</p>
     {:else}
+      {#if draftedBy}
+        <!-- Attribution: the comments are the summarizer's merge of every
+             lens (per-comment origin isn't recorded), and stay drafts here
+             until a person posts them. -->
+        <p class="rp-attrib" data-testid="rp-attrib">
+          <ProviderIcon provider={draftedBy.provider} size={12} />
+          <span>
+            Drafted by Otto's review ({draftedBy.provider}{draftedBy.model ? ` · ${draftedBy.model}` : ''}){draftedBy.lenses.length > 0 ? ` from ${draftedBy.lenses.join(', ')}` : ''}. Nothing reaches the PR until you post it.
+          </span>
+        </p>
+      {/if}
       <div class="rp-list">
         {#each review.comments as c (c.id)}
           {@const snippetLines = getSnippetLines(c)}
@@ -1110,11 +1185,13 @@
               <span class="grow"></span>
               {#if c.state === 'draft'}
                 <button
-                  class="btn small primary"
-                  disabled={!!actionBusy[c.id]}
-                  onclick={() => approveComment(c)}
+                  class="btn small"
+                  disabled={!!actionBusy[c.id] || postingAll}
+                  data-testid="rp-post-comment"
+                  title="Post this comment to {prWhere}"
+                  onclick={() => void postComment(c)}
                 >
-                  {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Approve'}
+                  {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Post to PR…'}
                 </button>
                 <button
                   class="btn small ghost"
@@ -1731,6 +1808,14 @@
   }
 
   /* Comment list */
+  .rp-attrib {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 8px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
   .rp-list {
     display: flex;
     flex-direction: column;
