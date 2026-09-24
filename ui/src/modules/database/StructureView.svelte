@@ -17,6 +17,12 @@
   const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,scope);});
   const detail = $derived(database.objectDetail);
+  /** The object being opened, named from its path while its detail loads. */
+  const loadingName = $derived.by(() => {
+    const last = (database.selectedObjectPath ?? '').split('/').pop() ?? '';
+    const sep = last.indexOf(':');
+    return sep > 0 ? last.slice(sep + 1) : last;
+  });
 
   /** Re-issue the failed openObject for the still-selected path. openObject only
    *  needs the node's id (path) for the fetch — label/kind are rebuilt from the
@@ -636,7 +642,25 @@
 
 <div class="structure">
   {#if database.objectLoading}
-    <div class="loading"><Icon name="refresh" size={16} /><span>Loading structure…</span></div>
+    <!-- The loaded layout's own header + a skeleton of the Columns table, so
+         the structure fills in place instead of a centred spinner snapping to
+         a top-aligned page when the detail lands. -->
+    <div class="st-head" role="status" aria-live="polite" aria-label="Loading structure">
+      <div class="st-title">
+        <Icon name="grid" size={15} />
+        <h2 class="mono">{loadingName}</h2>
+        <span class="kind-chip skel-chip">loading</span>
+      </div>
+      <div class="st-head-actions"></div>
+    </div>
+    <div class="block">
+      <div class="block-title">Columns</div>
+      <div class="tbl-wrap skel-tbl" aria-hidden="true">
+        {#each { length: 7 } as _, i (i)}
+          <div class="skel-line"><span style="width:{30 + ((i * 23) % 45)}%"></span></div>
+        {/each}
+      </div>
+    </div>
   {:else if !detail && database.objectError}
     <!-- A failed open stays visible here (the toast fades) instead of decaying
          into the neutral "no object" empty state. -->
@@ -1114,15 +1138,28 @@
   .structure {
     height: 100%;
     overflow-y: auto;
+    /* A table long enough to scroll must not narrow the page by a scrollbar
+       width once its columns render. */
+    scrollbar-gutter: stable;
     padding: 4px 2px 24px;
   }
-  .loading {
+  .skel-chip {
+    opacity: 0.6;
+  }
+  .skel-tbl {
+    padding: 6px 0;
+  }
+  .skel-line {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 24px;
-    color: var(--text-dim);
-    font-size: 12.5px;
+    height: 27px;
+    padding: 0 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .skel-line span {
+    height: 8px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
   }
   .st-head-actions {
     display: flex;

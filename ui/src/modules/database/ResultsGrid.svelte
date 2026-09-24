@@ -41,6 +41,9 @@
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
   import { newExpansionState } from './expansion-plan';
+  import { cellMatchesFilter } from './grid-format';
+  import RowDetail from './RowDetail.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
 
   // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
   let sendToAgentOpen = $state(false);
@@ -191,6 +194,8 @@
       search = '';
       sortCol = null;
       sortDir = null;
+      colFilters = {};
+      detailIdx = null;
       // A different result shape invalidates every per-path toggle.
       expansion = newExpansionState();
       prevColKey = colKey;
@@ -235,7 +240,7 @@
       tabPick: null,
       connPick: database.connView,
       columnCount: result?.columns.length ?? 0,
-      autoVerticalCols: ui.dbAutoVerticalCols,
+      autoVerticalCols: ui.dbAutoVerticalFor(database.capabilities?.engine),
       engine: database.capabilities?.engine ?? null,
     };
     return `Back to automatic: ${VIEW_LABEL[effectiveViewMode(a)]} (${viewModeReason(a)})`;
@@ -320,20 +325,85 @@
     return true;
   }
 
+  // ── Header filter row (per column, client-side) ──────────────────────────────
+  // Toggled from the toolbar; each column gets a "contains" box (plus =exact,
+  // >n / <n, NULL, !NULL). Keyed by ORIGINAL column index; cleared when the
+  // result's shape changes.
+  let filterRow = $state(false);
+  let colFilters = $state<Record<number, string>>({});
+  const activeColFilters = $derived(
+    Object.entries(colFilters)
+      .filter(([, t]) => t.trim() !== '')
+      .map(([ci, t]) => [Number(ci), t] as const),
+  );
+  function colFilterMatches(row: unknown[]): boolean {
+    for (const [ci, text] of activeColFilters) {
+      const v = row[ci];
+      const isNull = v === null || v === undefined;
+      if (!cellMatchesFilter(isNull ? '' : cellStr(v), isNull, text)) return false;
+    }
+    return true;
+  }
+  function toggleFilterRow(): void {
+    filterRow = !filterRow;
+    if (!filterRow) colFilters = {};
+  }
+
   // Rows passing the filter, carrying their original index so edits target the
   // right entry in `liveRows`. Purely client-side over the fetched rows.
   const filteredRows = $derived.by<{ row: unknown[]; idx: number }[]>(() => {
     const hasChips = activeChips.length > 0;
-    if (!filtering && !hasChips) return liveRows.map((row, idx) => ({ row, idx }));
+    const hasCols = activeColFilters.length > 0;
+    if (!filtering && !hasChips && !hasCols) return liveRows.map((row, idx) => ({ row, idx }));
     const out: { row: unknown[]; idx: number }[] = [];
     for (let idx = 0; idx < liveRows.length; idx++) {
       const row = liveRows[idx];
       if (hasChips && !chipMatches(row)) continue;
+      if (hasCols && !colFilterMatches(row)) continue;
       if (filtering && !rowMatches(idx)) continue;
       out.push({ row, idx });
     }
     return out;
   });
+
+  // ── Row detail side panel (grid view) ────────────────────────────────────────
+  // The record under the grid's cursor, one field per line — TablePlus's
+  // "row detail". Remembered per device; the panel is user-toggled, so it never
+  // appears on its own and shifts the grid.
+  const DETAIL_KEY = 'db.rowDetail';
+  let showDetail = $state(
+    ((): boolean => {
+      try {
+        return localStorage.getItem(DETAIL_KEY) === '1';
+      } catch {
+        return false;
+      }
+    })(),
+  );
+  function toggleDetail(): void {
+    showDetail = !showDetail;
+    try {
+      localStorage.setItem(DETAIL_KEY, showDetail ? '1' : '0');
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  /** liveRows index shown in the panel: the cursor row, else the first
+   *  selected row, else the first row in view. */
+  let detailIdx = $state<number | null>(null);
+  const detailRow = $derived.by<number | null>(() => {
+    if (detailIdx !== null && detailIdx < liveRows.length) return detailIdx;
+    const sel = flow.selected.size > 0 ? [...flow.selected][0] : null;
+    if (sel !== null && sel !== undefined) return sel;
+    return viewRows[0]?.idx ?? null;
+  });
+  function stepDetail(delta: number): void {
+    const cur = detailRow;
+    if (cur === null) return;
+    const pos = viewRows.findIndex((r) => r.idx === cur);
+    const next = viewRows[Math.max(0, Math.min(viewRows.length - 1, pos + delta))];
+    if (next) detailIdx = next.idx;
+  }
 
   // ── Sort (client-side, over the filtered view) ───────────────────────────────
   // One active sort column at a time, cycling none → asc → desc → none. Type-
@@ -650,7 +720,8 @@
   }
   // Quick-filter chips narrow the grid too — exports must honor them (viewRows
   // already carries chip + search filtering and the sort).
-  const chipFiltering = $derived(activeChips.length > 0);
+  // (Header filter-row boxes count as chips here: they narrow the view too.)
+  const chipFiltering = $derived(activeChips.length > 0 || activeColFilters.length > 0);
   function exportRows(): unknown[][] {
     return filtering || sorting || chipFiltering ? viewRows.map((r) => r.row) : liveRows;
   }
@@ -716,6 +787,96 @@
   function exportJson(): void {
     if (!canExport) return;
     download(toJson(), 'result.json', 'application/json');
+  }
+  async function copyAs(kind: 'csv' | 'json' | 'columns'): Promise<void> {
+    const text = kind === 'csv' ? toCsv() : kind === 'json' ? toJson() : (result?.columns ?? []).map((c) => c.name).join(', ');
+    try {
+      await navigator.clipboard.writeText(text);
+      const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
+      toasts.success('Copied', what);
+    } catch {
+      toasts.error('Copy failed');
+    }
+  }
+
+  // ── Toolbar menus ────────────────────────────────────────────────────────────
+  // One row, fixed height: the rarely-used verbs live in three menus instead of
+  // a wrapping strip of a dozen buttons (which also re-flowed — and pushed the
+  // grid down — when the editability probe added its items after first paint).
+  function copyMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'Copy as TSV', icon: 'copy', action: () => void copyTsv() },
+      { label: 'Copy as CSV', icon: 'copy', action: () => void copyAs('csv') },
+      { label: 'Copy as JSON', icon: 'copy', action: () => void copyAs('json') },
+      { label: 'Copy column names', icon: 'file', action: () => void copyAs('columns') },
+    ];
+    if (flow.copyTarget) {
+      const rows = flow.selected.size > 0 ? flow.selectedIndices() : viewRows.map((r) => r.idx);
+      items.push(
+        { separator: true },
+        {
+          label: engine === 'mongodb'
+            ? `Open ${flow.selected.size > 0 ? 'selected' : 'all'} as insertMany(…)`
+            : `Open ${flow.selected.size > 0 ? 'selected' : 'all'} as INSERT statements`,
+          icon: 'external',
+          action: () => flow.copyRowsAsInsert(rows),
+        },
+      );
+    }
+    ctxMenu.show(e, items);
+  }
+  function exportMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: `Download CSV${exportScope}`, icon: 'download', disabled: !canExport, action: exportCsv },
+      { label: `Download JSON${exportScope}`, icon: 'download', disabled: !canExport, action: exportJson },
+    ];
+    if (connectionId && statement) {
+      items.push(
+        { separator: true },
+        {
+          label: result?.truncated ? 'Export all rows… (result is capped)' : 'Export all rows…',
+          icon: 'arrowDown',
+          disabled: !canExport,
+          action: openExportDialog,
+        },
+      );
+    }
+    if (connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')) {
+      items.push({ separator: true }, { label: 'Import file…', icon: 'arrowUp', action: () => database.openImportDialog() });
+    }
+    ctxMenu.show(e, items);
+  }
+  function moreMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [];
+    if (engine === 'mongodb' && connectionId) {
+      items.push({ label: 'Aggregate pipeline…', icon: 'layers', action: () => (pipelineOpen = true) });
+    }
+    if (mode !== 'grid') {
+      items.push({
+        label: 'Compare two records…',
+        icon: 'columns',
+        disabled: flow.selected.size !== 2,
+        action: () => (compare = [...flow.selected] as [number, number]),
+      });
+    }
+    if (flow.editable) {
+      items.push({
+        label: `Insert ${engine === 'mongodb' ? 'document' : 'row'} from JSON…`,
+        icon: 'plus',
+        action: () => flow.openDocEditor(-1),
+      });
+    }
+    if (mode === 'grid') {
+      items.push({
+        label: expandJson ? 'Collapse JSON cells' : 'Expand JSON cells',
+        icon: expandJson ? 'minimize' : 'maximize',
+        action: () => (expandJson = !expandJson),
+      });
+    }
+    if (items.length) items.push({ separator: true });
+    items.push({ label: 'Send to running agent…', icon: 'send', action: sendToRunningAgent });
+    if (connectionId) items.push({ label: 'Examine with AI', icon: 'sparkle', action: examineWithAi });
+    ctxMenu.show(e, items);
   }
 
   // ── Large-batch streaming export to a local file ─────────────────────────────
@@ -789,8 +950,7 @@
 </script>
 
 {#snippet runningCard()}
-  <!-- Inline running card for the no-result branches (a fresh tab's first query
-       has no stale grid to dim — same selectors as the absolute overlay). -->
+  <!-- Inline running card (mini grids only — the main grid keeps its frame). -->
   <div class="rg-overlay rg-inline" role="status" aria-live="polite">
     <div class="rg-overlay-card">
       <span class="rg-spin"><Icon name="refresh" size={16} /></span>
@@ -798,6 +958,31 @@
       <button class="rg-cancel" onclick={() => database.abortQuery()} title="Cancel the running query">
         <Icon name="x" size={11} />Cancel
       </button>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet loadingFrame()}
+  <!-- First run on a tab (nothing to dim yet): draw the FINAL frame — toolbar,
+       grid box with its header band and row skeletons, status bar — at the
+       dimensions the loaded grid will have, so the rows land in place instead
+       of the whole results area re-laying out when the data arrives. -->
+  <div class="grid-wrap" data-state="loading">
+    <div class="grid-toolbar" aria-hidden="true">
+      <div class="gt-search skel-box"><Icon name="search" size={11} /></div>
+    </div>
+    <div class="grid-body">
+      <div class="grid-skeleton" data-grid-frame role="status" aria-live="polite" aria-label="Running query">
+        <div class="skel-head"></div>
+        {#each { length: 8 } as _, i (i)}
+          <div class="skel-row"><span class="skel-bar" style="width:{38 + ((i * 17) % 40)}%"></span></div>
+        {/each}
+      </div>
+    </div>
+    <div class="grid-foot">
+      <span class="rg-spin sm"><Icon name="refresh" size={11} /></span>
+      <span class="rg-overlay-text">Running… {elapsed}s</span>
+      <button class="pg-btn" onclick={() => database.abortQuery()} title="Cancel the running query">Cancel</button>
     </div>
   </div>
 {/snippet}
@@ -835,25 +1020,31 @@
 {:else if !resultProp}
   {#if !mini}
     {#if running}
-      <div class="grid-empty">{@render runningCard()}</div>
+      {@render loadingFrame()}
     {:else}
-      <div class="grid-empty">
-        <Icon name="grid" size={mini ? 16 : 22} />
-        <span>Run a query to see results.</span>
+      <div class="grid-empty idle">
+        <Icon name="grid" size={22} />
+        <span class="ge-title">No results yet</span>
+        <span class="ge-body">Run a query with <kbd>⌘↵</kbd> — the statement under the cursor, or your selection.</span>
       </div>
     {/if}
   {/if}
 {:else if !result || result.columns.length === 0}
   {#if running && !mini}
+    {@render loadingFrame()}
+  {:else if running}
     <div class="grid-empty">{@render runningCard()}</div>
   {:else}
     <div class="grid-empty">
       <Icon name="check" size={mini ? 16 : 22} />
       <span>{emptyResultLabel}</span>
+      {#if !mini && result}
+        <span class="ge-meta">{result.stats.duration_ms} ms{#if result.rows_affected != null} · {result.rows_affected} affected{/if}</span>
+      {/if}
     </div>
   {/if}
 {:else}
-  <div class="grid-wrap" class:mini>
+  <div class="grid-wrap" class:mini data-state="ready">
     {#if result.message && !mini}
       <div class="grid-notice mono" title={result.message}>{result.message}</div>
     {/if}
@@ -865,6 +1056,7 @@
             class="gt-search-input mono"
             type="text"
             placeholder="Search rows…"
+            aria-label="Search rows"
             bind:value={search}
             spellcheck="false"
             autocomplete="off"
@@ -875,24 +1067,6 @@
             </button>
           {/if}
         </div>
-        <span class="grow"></span>
-        {#if engine === 'mongodb' && connectionId}
-          <button class="tb-btn" onclick={() => (pipelineOpen = true)} title="Build an aggregate pipeline stage by stage — insert into the editor or run it"><Icon name="layers" size={11} />Pipeline…</button>
-        {/if}
-        {#if mode !== 'grid'}
-          <button class="tb-btn" disabled={flow.selected.size !== 2} onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare…</button>
-        {/if}
-        {#if flow.editable}
-          <button class="tb-btn" onclick={() => flow.openDocEditor(-1)} title="Insert a new {engine === 'mongodb' ? 'document' : 'row'} from JSON — reviewed before it runs"><Icon name="plus" size={11} />Insert from JSON…</button>
-        {/if}
-        {#if flow.editable}
-          <span
-            class="gt-edit-hint"
-            title="Double-click a cell to edit (you review the SQL before it runs). Primary key {flow.editPkCols.length > 1 ? 'columns' : 'column'} ({flow.editPkCols.join(', ')}) {flow.editPkCols.length > 1 ? 'are' : 'is'} read-only."
-          >
-            <Icon name="edit" size={10} />double-click to edit
-          </span>
-        {/if}
         <div class="view-seg" title={viewReason}>
           <div class="view-tabs" role="tablist" aria-label="Result view">
             <button class="vs" class:on={mode === 'grid'} role="tab" aria-selected={mode === 'grid'} onclick={() => pickView('grid')} title="Columnar grid">Grid</button>
@@ -906,39 +1080,32 @@
         </div>
         {#if mode === 'grid'}
           <button
-            class="tb-btn"
-            class:on={expandJson}
-            onclick={() => (expandJson = !expandJson)}
-            title="Expand all nested JSON cells inline (instead of clicking each)"
-          ><Icon name={expandJson ? 'minimize' : 'maximize'} size={11} />{expandJson ? 'Collapse' : 'Expand'} JSON</button>
-        {/if}
-        {#if result?.masked}
-          <span class="tb-masked" title="Server-side PII masking was applied — sensitive values were redacted before leaving the server">
-            <Icon name="lock" size={11} />Masked
-          </span>
-        {/if}
-        <button class="tb-btn" onclick={sendToRunningAgent} title="Paste this query + result into your running agent (so it sees the real DB state)"><Icon name="comment" size={11} />→ Agent</button>
-        {#if connectionId}
-          <button class="tb-btn" onclick={examineWithAi} title="Investigate this result with the DB Assistant agent (read-only, side-by-side)"><Icon name="zap" size={11} />Examine with AI</button>
-        {/if}
-        <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
-        <button class="tb-btn" disabled={!canExport} onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
-        <button class="tb-btn" disabled={!canExport} onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
-        {#if connectionId && statement}
+            class="icon-btn tb-toggle"
+            class:on={filterRow}
+            aria-pressed={filterRow}
+            onclick={toggleFilterRow}
+            aria-label="Filter row"
+            title="Filter row — a filter box under every column header"
+          ><Icon name="filter" size={13} /></button>
           <button
-            class="tb-btn"
-            class:accent={result?.truncated}
-            disabled={!canExport} onclick={openExportDialog}
-            title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
-          ><Icon name="arrowDown" size={11} />Export all rows…</button>
+            class="icon-btn tb-toggle"
+            class:on={showDetail}
+            aria-pressed={showDetail}
+            onclick={toggleDetail}
+            aria-label="Row detail"
+            title="Row detail — the selected record, one field per line"
+          ><Icon name="panel" size={13} /></button>
         {/if}
-        {#if connectionId && (database.capabilities?.sql || database.capabilities?.engine === 'mongodb')}
-          <button
-            class="tb-btn"
-            onclick={() => database.openImportDialog()}
-            title="Import a local file (CSV/TSV/NDJSON/JSON) into a table or collection — batched writes through the same write guard"
-          ><Icon name="arrowDown" size={11} />Import file…</button>
-        {/if}
+        <span class="grow"></span>
+        <button class="tb-btn" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
+          <Icon name="copy" size={11} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={10} />
+        </button>
+        <button class="tb-btn" class:accent={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
+          <Icon name="download" size={11} /><span class="tb-label">Export</span><Icon name="chevronDown" size={10} />
+        </button>
+        <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
+          <Icon name="more" size={14} />
+        </button>
       </div>
     {/if}
 
@@ -1002,6 +1169,7 @@
               <input
                 class="chip-add mono"
                 placeholder="+ value"
+                aria-label="Add a value to the {cond.column} filter"
                 bind:value={addValText[ci]}
                 onkeydown={(e) => { if (e.key === 'Enter') submitFilterValue(ci); }}
               />
@@ -1055,22 +1223,40 @@
         oncompare={(l, r) => (compare = [l, r])}
       />
     {:else}
-      <GridView
-        {result}
-        {liveRows}
-        {viewRows}
-        {mini}
-        {expandJson}
-        {flow}
-        {filtering}
-        {searchLc}
-        {sortCol}
-        {sortDir}
-        resetToken={colKey}
-        oncellmenu={cellMenu}
-        onheadermenu={headerMenu}
-        oncyclesort={cycleSort}
-      />
+      <div class="grid-body" class:mini>
+        <GridView
+          {result}
+          {liveRows}
+          {viewRows}
+          {mini}
+          {expandJson}
+          {flow}
+          {filtering}
+          {searchLc}
+          {sortCol}
+          {sortDir}
+          resetToken={colKey}
+          filterRow={filterRow && !mini}
+          {colFilters}
+          oncolfilter={(ci, t) => (colFilters = { ...colFilters, [ci]: t })}
+          onfocusrow={(i) => { if (i !== null) detailIdx = i; }}
+          oncellmenu={cellMenu}
+          onheadermenu={headerMenu}
+          oncyclesort={cycleSort}
+        />
+        {#if showDetail && !mini}
+          <RowDetail
+            {result}
+            row={detailRow === null ? null : (liveRows[detailRow] ?? null)}
+            rowIdx={detailRow}
+            position={detailRow === null ? -1 : viewRows.findIndex((r) => r.idx === detailRow)}
+            total={viewRows.length}
+            onstep={stepDetail}
+            onopen={(ci) => { if (detailRow !== null) flow.openCell(liveRows[detailRow]?.[ci], detailRow, ci); }}
+            onclose={toggleDetail}
+          />
+        {/if}
+      </div>
     {/if}
     {#if flow.pendingCells > 0}
       <div class="pending-bar" data-testid="pending-edits-bar">
@@ -1086,11 +1272,13 @@
       </div>
     {/if}
     {#if !mini}
+      <!-- Status bar: one fixed-height line. Late-arriving facts (the edit
+           probe's verdict) land in its trailing slot without moving anything. -->
       <div class="grid-foot">
         {#if filtering || chipFiltering}
-          <span><strong>{viewRows.length}</strong> of {liveRows.length} row{liveRows.length === 1 ? '' : 's'}</span>
+          <span><strong>{viewRows.length.toLocaleString()}</strong> of {liveRows.length.toLocaleString()} row{liveRows.length === 1 ? '' : 's'}</span>
         {:else}
-          <span><strong>{result.stats.row_count}</strong> row{result.stats.row_count === 1 ? '' : 's'}</span>
+          <span><strong>{result.stats.row_count.toLocaleString()}</strong> row{result.stats.row_count === 1 ? '' : 's'}</span>
         {/if}
         {#if sorting && sortCol !== null}
           <button class="sort-chip" title="Clear sort" onclick={() => { sortCol = null; sortDir = null; }}>
@@ -1099,14 +1287,14 @@
           </button>
         {/if}
         <span class="dot">·</span>
-        <span>{result.stats.duration_ms} ms</span>
+        <span>{result.stats.duration_ms.toLocaleString()} ms</span>
         {#if result.stats.bytes_read != null}
           <span class="dot">·</span>
           <span>{fmtBytes(result.stats.bytes_read)} read</span>
         {/if}
         {#if result.rows_affected != null}
           <span class="dot">·</span>
-          <span>{result.rows_affected} affected</span>
+          <span>{result.rows_affected.toLocaleString()} affected</span>
         {/if}
         {#if result.truncated}
           <span
@@ -1124,14 +1312,23 @@
             {#if !hasOrderBy}<span class="pg-unordered" title="Without an ORDER BY, row order can shift between pages">unordered</span>{/if}
           </span>
         {/if}
-        {#if !flow.editable && statement}
-          <span class="grow"></span>
-          <span class="edit-note" title={flow.editReason ?? undefined}
-            >{flow.editReason ?? 'Editing needs a single-table result with a primary key'}</span
+        <span class="grow"></span>
+        {#if result?.masked}
+          <span class="tb-masked" title="Server-side PII masking was applied — sensitive values were redacted before leaving the server">
+            <Icon name="lock" size={10} />Masked
+          </span>
+        {/if}
+        {#if flow.editable}
+          <span
+            class="gt-edit-hint"
+            title="Double-click a cell to edit (you review the SQL before it runs). Primary key {flow.editPkCols.length > 1 ? 'columns' : 'column'} ({flow.editPkCols.join(', ')}) {flow.editPkCols.length > 1 ? 'are' : 'is'} read-only."
           >
+            <Icon name="edit" size={10} />Editable · double-click a cell
+          </span>
+        {:else if statement && flow.editReason}
+          <span class="edit-note" title={flow.editReason}>{flow.editReason}</span>
         {:else if result.message}
-          <span class="grow"></span>
-          <span class="msg">{result.message}</span>
+          <span class="msg" title={result.message}>{result.message}</span>
         {/if}
       </div>
     {/if}
@@ -1215,6 +1412,9 @@
     height: 100%;
     /* Anchors the running overlay. */
     position: relative;
+    /* The toolbar collapses its labels against the RESULTS width (a docked
+       pane is narrower than the viewport). */
+    container-type: inline-size;
   }
   /* ── Multi-result switcher ── */
   .rg-switch {
@@ -1361,7 +1561,31 @@
     gap: 8px;
     padding: 28px 16px;
     color: var(--text-dim);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
+  }
+  .grid-empty.idle {
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 12vh;
+    text-align: center;
+  }
+  .ge-title {
+    color: var(--text);
+    font-size: var(--fs-m);
+    font-weight: 500;
+  }
+  .ge-body,
+  .ge-meta {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .ge-body kbd {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    padding: 0 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
   }
   .grid-error {
     color: var(--status-exited);
@@ -1371,13 +1595,88 @@
     word-break: break-word;
     user-select: text;
   }
+  /* One row, fixed height — see the toolbar-menus note in the script. */
   .grid-toolbar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 6px;
-    row-gap: 6px;
-    padding: 4px 2px 8px;
+    height: 32px;
+    padding: 0 0 6px;
+    box-sizing: content-box;
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  /* Grid + (optional) row-detail panel, side by side. */
+  .grid-body {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    gap: 8px;
+  }
+  .grid-body.mini {
+    display: contents;
+  }
+  .tb-toggle.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .tb-label {
+    white-space: nowrap;
+  }
+  /* ── Loading frame (first run on a tab) ── */
+  .grid-skeleton {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+  }
+  .skel-head {
+    height: 40px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .skel-row {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    padding: 0 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .skel-bar {
+    height: 8px;
+    border-radius: var(--radius-s);
+    background: linear-gradient(
+      90deg,
+      var(--surface-2) 0%,
+      color-mix(in srgb, var(--text-dim) 14%, var(--surface-2)) 50%,
+      var(--surface-2) 100%
+    );
+    background-size: 200% 100%;
+    animation: skel-shimmer 1.5s ease-in-out infinite;
+  }
+  @keyframes skel-shimmer {
+    from {
+      background-position: 100% 0;
+    }
+    to {
+      background-position: -100% 0;
+    }
+  }
+  .skel-box {
+    opacity: 0.6;
+  }
+  .rg-spin.sm {
+    color: var(--text-dim);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skel-bar,
+    .rg-spin {
+      animation: none;
+    }
   }
   /* Notice shown above results (e.g. the Mongo command a SQL query translated to). */
   .grid-notice {
@@ -1530,13 +1829,15 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 22px;
-    padding: 0 7px;
+    height: 26px;
+    box-sizing: border-box;
+    padding: 0 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    min-width: 180px;
+    flex: 0 1 240px;
+    min-width: 96px;
   }
   .gt-search:focus-within {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
@@ -1578,19 +1879,23 @@
     height: 18px;
     padding: 0 7px;
     border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
+    font-size: var(--fs-xs);
+    font-weight: 500;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     cursor: help;
   }
+  /* Segmented control: selection is a surface lift, never accent/green. */
   .view-seg {
     display: inline-flex;
-    border: 1px solid var(--border);
+    align-items: center;
+    gap: 2px;
+    height: 26px;
+    box-sizing: border-box;
+    padding: 2px;
     border-radius: var(--radius-s);
-    overflow: hidden;
+    background: var(--surface-2);
+    flex-shrink: 0;
   }
   /* The tablist wraps only the three real views (a11y: the Auto chip is a
      button, not a tab); `contents` keeps the chips in one flex row. */
@@ -1601,23 +1906,25 @@
     height: 22px;
     padding: 0 9px;
     border: none;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface-2);
+    border-radius: 4px;
+    background: transparent;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
+    transition: background 120ms ease-out, color 120ms ease-out;
   }
-  .vs:last-child {
-    border-inline-end: none;
+  .vs:hover {
+    color: var(--text);
   }
   .vs.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 500;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08);
   }
   /* "Auto" is an escape hatch, not a fourth view — dimmed and italic so it
      reads as "clear my pick" next to the three real modes. */
   .vs.auto {
-    border-inline-start: 1px solid var(--border);
     font-style: italic;
     opacity: 0.7;
   }
@@ -1629,19 +1936,17 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 22px;
+    height: 26px;
+    box-sizing: border-box;
     padding: 0 9px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
-    background: var(--surface-2);
+    background: var(--surface);
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     cursor: pointer;
-  }
-  .tb-btn.on {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
@@ -1745,14 +2050,31 @@
   .pending-spacer {
     flex: 1;
   }
+  /* Status bar: ONE fixed-height line (24px + top gap), never wraps. */
   .grid-foot {
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 7px 2px 0;
-    font-size: 11px;
+    height: 24px;
+    margin-top: 4px;
+    padding: 0 2px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .grid-foot > * {
+    flex-shrink: 0;
+  }
+  .grid-foot .edit-note,
+  .grid-foot .msg {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .grid-foot strong {
     color: var(--text);
@@ -1783,10 +2105,10 @@
     height: 16px;
     line-height: 16px;
     border-radius: 999px;
-    font-size: 9.5px;
-    font-weight: 700;
-    color: #d2691e;
-    background: color-mix(in srgb, #d2691e 16%, transparent);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--warning);
+    background: var(--warning-soft);
   }
   .msg {
     color: var(--text-dim);
@@ -1814,16 +2136,11 @@
      clipped by the (overflow:hidden) ancestor. Wrap it and let the search take
      the first row — same as the phone layout, but WITHOUT the phone-only grid
      height overrides. */
-  @media (min-width: 641px) and (max-width: 1024px) {
-    .grid-toolbar {
-      flex-wrap: wrap;
-      row-gap: 6px;
-    }
-    .grid-toolbar .grow {
+  /* A narrow results column (tablet, or a DB pane docked beside an agent)
+     drops the Copy/Export words — the icons stay, with their titles. */
+  @container (max-width: 560px) {
+    .tb-label {
       display: none;
-    }
-    .gt-search {
-      flex: 1 1 100%;
     }
   }
 
@@ -1831,6 +2148,7 @@
     .grid-toolbar {
       flex-wrap: wrap;
       row-gap: 6px;
+      height: auto;
     }
     .grid-toolbar .grow {
       display: none;

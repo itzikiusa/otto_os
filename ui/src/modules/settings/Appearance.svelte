@@ -372,11 +372,6 @@
     margin-inline-start: 6px;
     vertical-align: middle;
   }
-  .num-row {
-    font-size: 12.5px;
-    color: var(--text);
-    margin-top: 8px;
-  }
   .num-input {
     width: 64px;
     text-align: end;

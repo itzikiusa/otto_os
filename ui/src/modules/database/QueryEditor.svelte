@@ -413,17 +413,25 @@
     const max = maxEditorH();
     if (!hasResult) return max;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 1000;
-    return Math.max(180, Math.min(max, Math.round(vh * 0.42)));
+    // Fit the statement: a one-line `SELECT * FROM t` (a table opened from the
+    // tree) gets a compact editor and the grid gets the room; a long query
+    // gets up to ~42% of the window.
+    const lines = (tab?.statement ?? '').split('\n').length;
+    const fit = 56 + Math.min(lines, 30) * 19;
+    return Math.max(132, Math.min(max, Math.round(vh * 0.42), fit));
   }
 
   // Adopt this tab's remembered height whenever the active tab changes, and
   // shrink the editor off its "nothing to show yet" size the first time the tab
-  // produces a result.
+  // RUNS — not when its result lands. Shrinking on arrival moved the whole
+  // results area up by a third of the window at the exact moment the rows
+  // appeared (the "table jumps when I open it" bug); shrinking at Run time
+  // lets the results frame (loading skeleton → rows) sit still.
   let lastTabId = -1;
   let lastHadResult = false;
   $effect(() => {
     const id = tab?.id ?? -1;
-    const hasResult = !!tab?.result;
+    const hasResult = !!(tab?.result || tab?.running || tab?.error);
     if (id !== lastTabId) {
       lastTabId = id;
       lastHadResult = hasResult;
@@ -773,6 +781,7 @@
   </div>
 
   <div class="qe-toolbar">
+    <div class="qe-actions">
     {#if tab.running}
       <button class="btn small stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
         <Icon name="x" size={12} />
@@ -803,9 +812,10 @@
         </button>
       {/if}
     {/if}
+    <span class="qe-sep" aria-hidden="true"></span>
     {#if canEdit}
       <button
-        class="btn small"
+        class="btn small ghost"
         onclick={openSave}
         disabled={!tab.statement.trim()}
         title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
@@ -831,7 +841,7 @@
       disabled={!canQuery || !auth.can('agents','edit')}
       title="Requires host agent access and query permission — opens the DB Assistant beside the editor"
     >
-      <Icon name="comment" size={11} /><span class="btn-label">Ask AI</span>
+      <Icon name="sparkle" size={11} /><span class="btn-label">Ask AI</span>
     </button>
     <button
       class="btn small ghost"
@@ -854,18 +864,18 @@
           ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
           : 'Format / beautify the SQL'}
       >
-        <Icon name="command" size={11} /><span class="btn-label">Format</span>
+        <Icon name="format" size={11} /><span class="btn-label">Format</span>
       </button>
     {/if}
     <div class="qe-kbd" bind:this={kbdWrapEl}>
       <button
-        class="btn small ghost"
+        class="icon-btn"
         class:on={shortcutsOpen}
         onclick={() => (shortcutsOpen = !shortcutsOpen)}
         title="Keyboard shortcuts"
         aria-label="Keyboard shortcuts"
         aria-expanded={shortcutsOpen}
-      >⌨</button>
+      ><Icon name="command" size={13} /></button>
       {#if shortcutsOpen}
         <div class="qe-kbd-pop" role="menu" bind:this={kbdPopEl}>
           <div class="qe-kbd-title">Keyboard shortcuts</div>
@@ -878,7 +888,8 @@
         </div>
       {/if}
     </div>
-    <span class="grow"></span>
+    </div>
+    <div class="qe-settings">
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
         <Icon name="db" size={11} />
@@ -948,7 +959,8 @@
       <Icon name="lock" size={11} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
     </label>
-    <span class="qe-lang mono">{database.queryLanguage}</span>
+    <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
+    </div>
   </div>
 
   {#if queryVars.length > 0}
@@ -1142,6 +1154,9 @@
     /* Shrink with the (narrow tablet) main pane rather than forcing intrinsic
        width, so the wrapping toolbar/tab strips stay inside the viewport. */
     min-width: 0;
+    /* The toolbar adapts to the PANE width (a docked explorer is narrower
+       than the window). */
+    container: qe / inline-size;
   }
   .qe-tabs {
     display: flex;
@@ -1268,18 +1283,38 @@
     border-color: var(--border);
     color: var(--accent-text);
   }
-  /* Secondary actions shed their labels when the pane is tight, so the row never
-     wraps into a second bar; `title` still names each one. */
-  @media (max-width: 1500px) {
-    .btn-label {
-      display: none;
-    }
-  }
+  /* Two groups: the verbs (left) keep their LABELS at every desktop width —
+     icon-only buttons were unreadable guesses — and the run settings (right)
+     drop to a second row as one unit when the pane is too narrow for both.
+     Only a phone-width pane sheds the labels. */
   .qe-toolbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding: 0 0 8px;
+  }
+  .qe-actions,
+  .qe-settings {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .qe-settings {
+    margin-inline-start: auto;
     gap: 8px;
-    padding: 0 0 6px;
+  }
+  .qe-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin: 0 2px;
+  }
+  @container qe (max-width: 560px) {
+    .btn-label {
+      display: none;
+    }
   }
   /* Query-level variables bar — shown only when the statement references
      :name / {name}. One labelled input per variable, values remembered per tab. */
@@ -1598,18 +1633,6 @@
      onto multiple rows instead of letting it overflow and get clipped — the same
      wrap the phone layout uses, but WITHOUT forcing the compact editor height.
      Upper bound covers iPad landscape (1194px); desktop (≥1280) keeps one row. */
-  @media (min-width: 641px) and (max-width: 1200px) {
-    .qe-toolbar {
-      flex-wrap: wrap;
-      gap: 6px;
-      row-gap: 6px;
-    }
-    .qe-toolbar .grow {
-      flex-basis: 100%;
-      height: 0;
-      flex: 0 0 100%;
-    }
-  }
 
   @media (max-width: 640px) {
     .query-editor {
@@ -1627,12 +1650,12 @@
       gap: 6px;
       row-gap: 6px;
     }
-    /* The flexible spacer would force the controls onto a wider line — collapse
-       it on mobile so the controls pack tightly and wrap naturally. */
-    .qe-toolbar .grow {
-      flex-basis: 100%;
-      height: 0;
-      flex: 0 0 100%;
+    .qe-actions,
+    .qe-settings {
+      flex-wrap: wrap;
+    }
+    .qe-settings {
+      margin-inline-start: 0;
     }
     /* Bigger tap targets / readable controls. */
     .qe-limit select,

@@ -175,7 +175,8 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   // Run any query so the grid toolbar (with "Import file…") is present.
   await runStatement(page, 'SELECT * FROM customers ORDER BY id');
 
-  await page.locator('.grid-toolbar .tb-btn', { hasText: 'Import file' }).click();
+  await page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' }).click();
+  await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MYSQL_TABLE);
@@ -197,9 +198,10 @@ test('MongoDB: import a CSV into a collection via the dialog', async ({ page }) 
   await openConn(page, 'e2e-mongodb');
   // Mongo find to surface the results toolbar (if an import entry existed).
   await runStatement(page, 'db.orders.find({})');
-  const importBtn = page.locator('.grid-toolbar .tb-btn', { hasText: 'Import file' });
-  await expect(importBtn).toBeVisible({ timeout: 10_000 });
-  await importBtn.click();
+  const exportBtn = page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' });
+  await expect(exportBtn).toBeVisible({ timeout: 10_000 });
+  await exportBtn.click();
+  await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MONGO_COLL);
