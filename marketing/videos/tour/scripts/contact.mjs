@@ -1,16 +1,16 @@
 // Dev helper: tile captures (or extracted frames) 4-up into labelled contact
-// sheets for quick review.   node scripts/contact.mjs [dir] [filter-regex]
+// sheets for quick review.   node scripts/contact.mjs [dir] [name-filter]
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 const FF = process.env.FFMPEG ?? '/opt/homebrew/bin/ffmpeg';
 const dir = process.argv[2] ?? 'public/capture';
-const re = new RegExp(process.argv[3] ?? '.');
+const needle = process.argv[3] ?? ''; // plain substring match on file names
 const out = '.cache/cs';
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
-const files = readdirSync(dir).filter((f) => /\.(jpg|png)$/.test(f) && re.test(f)).sort().map((f) => join(dir, f));
+const files = readdirSync(dir).filter((f) => /\.(jpg|png)$/.test(f) && f.includes(needle)).sort().map((f) => join(dir, f));
 for (let i = 0; i < files.length; i += 4) {
   const group = files.slice(i, i + 4);
   const args = [];

@@ -10,7 +10,7 @@ import { dirname } from 'node:path';
 import { copyFileSync, chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 
 export const PORT = process.env.OTTO_E2E_PORT ?? '7811';
 export const UI_PORT = process.env.OTTO_E2E_PW_PORT ?? '5211';
@@ -40,8 +40,11 @@ const MIME = {
 function serveStatic(dist) {
   const server = createServer((req, res) => {
     const url = decodeURIComponent((req.url ?? '/').split('?')[0]);
-    let file = normalize(join(dist, url));
-    if (!file.startsWith(dist) || !existsSync(file) || statSync(file).isDirectory()) {
+    // Resolve against the dist root and refuse anything that escapes it (the
+    // separator keeps `dist2/` from passing as `dist/`).
+    const root = resolve(dist);
+    let file = resolve(root, `.${url}`);
+    if (!file.startsWith(root + sep) || !existsSync(file) || statSync(file).isDirectory()) {
       file = join(dist, 'index.html');
     }
     res.writeHead(200, {

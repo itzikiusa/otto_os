@@ -48,9 +48,7 @@ const spoken = (s) =>
     .replace(/\bGROUP BY\b/gi, 'group by')
     .replace(/\bORDER BY\b/gi, 'order by')
     .replace(/\bHAVING\b/g, 'having')
-    .replace(/\bCI\b/g, 'C I')
-    .replace(/\bKubernetes\b/g, 'Kubernetes')
-    .replace(/\bOtto\b/g, 'Otto');
+    .replace(/\bCI\b/g, 'C I');
 
 const chapters = [];
 let cursor = 0;
