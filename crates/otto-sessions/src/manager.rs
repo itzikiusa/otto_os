@@ -3384,6 +3384,12 @@ impl SessionManager {
     pub async fn activity_artifact(&self, id: &Id) -> Option<std::path::PathBuf> {
         let session = self.repo.get(id).await.ok()?;
         let psid = session.provider_session_id.clone()?;
+        // The provider session id is joined into file names below; a real one
+        // is a UUID-like token, so anything that could name another path
+        // (separators, `..`, NUL) is not a session we can locate.
+        if psid.is_empty() || psid.contains(['/', '\\', '\0']) || psid.contains("..") {
+            return None;
+        }
         let path = match session.provider.as_str() {
             // `~/.claude/projects/<enc(cwd)>/<psid>.jsonl`. claude symlink-
             // resolves the spawn cwd for its transcript dir, so canonicalize
