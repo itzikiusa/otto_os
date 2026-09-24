@@ -68,6 +68,10 @@
 
   // Arrow-key navigation across the tablist (ArrowLeft/Right, Home, End).
   function onTabKeydown(e: KeyboardEvent, id: string): void {
+    // Only keys aimed at the tab itself: the rename field (Space, ←/→, Home/
+    // End are text editing) and the × button (Enter/Space must click it)
+    // bubble through here too.
+    if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       activate(id);
