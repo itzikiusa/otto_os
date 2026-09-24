@@ -116,15 +116,21 @@ type MockNotice = {
   action: { type: 'open_session'; session_id: string } | null;
 };
 
-/** Serve exactly `notices`; every mutation succeeds. Returns the read-all hit log. */
-async function mockList(page: Page, notices: MockNotice[]): Promise<{ readAll: number }> {
-  const hits = { readAll: 0 };
+/** Serve exactly `notices`; every mutation succeeds. Returns the read hit log. */
+async function mockList(
+  page: Page,
+  notices: MockNotice[],
+): Promise<{ readAll: number; readIds: string[] }> {
+  const hits = { readAll: 0, readIds: [] as string[] };
   await page.route(/\/api\/v1\/notifications(\?.*)?$/, async (route) => {
     if (route.request().method() === 'GET') await route.fulfill({ json: notices });
     else await route.fulfill({ status: 204, body: '' });
   });
   await page.route(/\/api\/v1\/notifications\/(?!settings).+$/, async (route) => {
-    if (route.request().url().endsWith('/read-all')) hits.readAll++;
+    const url = route.request().url();
+    if (url.endsWith('/read-all')) hits.readAll++;
+    const m = /\/notifications\/([^/]+)\/read$/.exec(url);
+    if (m) hits.readIds.push(m[1]);
     await route.fulfill({ status: 204, body: '' });
   });
   return hits;
@@ -171,13 +177,16 @@ test('panel is anchored to the bell with a caret, and unread survives opening', 
   await expect(panel.getByRole('button', { name: 'Mark all read' })).toBeEnabled();
   await expect(panel.locator('.nb-row').first()).toBeFocused();
   expect(hits.readAll).toBe(0);
+  expect(hits.readIds).toEqual([]);
 
-  // Closing marks what you saw as read, and focus returns to the bell.
+  // Closing marks what you saw as read (per notice — never the server-wide
+  // read-all), and focus returns to the bell.
   await page.keyboard.press('Escape');
   await expect(panel).toHaveCount(0);
   await expect(bell.locator('.badge')).toHaveCount(0);
   await expect(bell).toBeFocused();
-  await expect.poll(() => hits.readAll).toBe(1);
+  await expect.poll(() => hits.readIds).toEqual(['a']);
+  expect(hits.readAll).toBe(0);
 });
 
 test('session notices group per session; long failures clamp; Clear asks first', async ({ page }) => {

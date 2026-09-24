@@ -190,12 +190,14 @@
     }
   }
 
-  /** Close the panel; what was on screen is now seen → mark it read. Focus
+  /** Close the panel; what was on screen is now seen → mark it read. Only
+   *  the notices this client holds are marked (not the server-wide read-all),
+   *  so one the daemon created but hasn't pushed yet stays unread. Focus
    *  returns to the bell unless the close was a row action that moved on. */
   function close(restoreFocus = true): void {
     if (!open) return;
     open = false;
-    void notifications.markAllRead();
+    void notifications.markSeenRead();
     if (restoreFocus) btnEl?.focus();
   }
 

@@ -295,6 +295,15 @@ class NotificationStore {
     }
   }
 
+  /** Mark every notice this client currently holds as read — what the open
+   *  panel showed. A large backlog falls back to one read-all call. */
+  async markSeenRead(): Promise<void> {
+    const ids = this.notices.filter((n) => !n.read).map((n) => n.id);
+    if (ids.length === 0) return;
+    if (ids.length > 25) return this.markAllRead();
+    await this.markManyRead(ids);
+  }
+
   /** Mark a group of notices read (a grouped session row). */
   async markManyRead(ids: string[]): Promise<void> {
     await Promise.all(ids.map((id) => this.markRead(id)));
