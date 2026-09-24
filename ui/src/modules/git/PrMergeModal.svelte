@@ -343,7 +343,7 @@
     background: none;
     border: none;
     padding: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11.5px;
     text-decoration: underline;

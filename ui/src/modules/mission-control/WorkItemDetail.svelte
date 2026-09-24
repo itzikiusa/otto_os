@@ -328,7 +328,7 @@
     min-width: 0;
   }
   .d-kicon {
-    color: var(--accent);
+    color: var(--accent-text);
     margin-top: 2px;
   }
   .d-titletext {
@@ -378,7 +378,7 @@
     min-width: 0;
   }
   .flabel {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -444,7 +444,7 @@
   }
   .chip-status,
   .chip-risk {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -458,7 +458,7 @@
     padding: 1px 6px;
   }
   .badge-approve {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 999px;
@@ -496,7 +496,7 @@
     min-width: 0;
   }
   .ap-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
   }
@@ -560,10 +560,10 @@
     font-size: 12.5px;
   }
   .art-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--accent-text);
     flex: 0 0 auto;
   }
   .art-title {

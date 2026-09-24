@@ -90,7 +90,7 @@
     color: var(--text-dim);
   }
   .wi-row.active .wi-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .wi-main {
     display: flex;

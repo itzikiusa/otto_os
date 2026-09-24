@@ -232,14 +232,14 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     cursor: pointer;
   }
   .gsb-chip.on {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .gsb-x {
@@ -260,7 +260,7 @@
   .gsb-link {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     padding: 0;

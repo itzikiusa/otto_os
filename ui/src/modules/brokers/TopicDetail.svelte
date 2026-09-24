@@ -794,11 +794,11 @@
     cursor: pointer;
   }
   .auto.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Server-side PII masking active badge — shown below the message list. */
   .masked-badge {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .grow {
@@ -887,7 +887,7 @@
   .tail-note {
     padding-top: 4px;
     padding-bottom: 6px;
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0.75;
   }
   .grid.grid,
@@ -909,13 +909,13 @@
     margin-bottom: 8px;
   }
   .badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 2px 6px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   h5 {
     margin: 12px 0 4px;

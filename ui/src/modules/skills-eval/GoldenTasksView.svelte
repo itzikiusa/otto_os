@@ -442,7 +442,7 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: 999px;
     padding: 0 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .gt-card {
     border: 1px solid var(--border);
@@ -545,7 +545,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

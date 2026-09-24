@@ -536,7 +536,7 @@
     height: 32px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
     flex-shrink: 0;

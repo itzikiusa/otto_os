@@ -217,7 +217,7 @@
     border-radius: 999px;
     background: var(--danger-solid);
     color: white;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 14px;
     text-align: center;
   }

@@ -425,7 +425,7 @@
   }
   .att-pick-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .att-empty,
@@ -471,7 +471,7 @@
     color: var(--text);
   }
   .att-size {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -480,7 +480,7 @@
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
     flex-shrink: 0;
   }
@@ -527,7 +527,7 @@
   }
   .att-load-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .att-load-btn:disabled {
     opacity: 0.5;
@@ -554,7 +554,7 @@
   }
   .att-dl-link {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;
     flex-shrink: 0;
@@ -568,7 +568,7 @@
     margin-top: 4px;
   }
   .att-action-btn {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
@@ -579,7 +579,7 @@
   }
   .att-action-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .att-delete-btn:hover {
     border-color: var(--danger);

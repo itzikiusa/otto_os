@@ -708,11 +708,11 @@
     text-align: center;
   }
   .chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row {
     display: flex;

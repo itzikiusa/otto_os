@@ -1200,7 +1200,7 @@
   }
   .qe-tab-pin {
     display: inline-flex;
-    color: var(--accent);
+    color: var(--accent-text);
     flex: 0 0 auto;
     margin-inline-end: -2px;
   }
@@ -1264,7 +1264,7 @@
   .qe-tab-new:hover {
     background: var(--surface-2);
     border-color: var(--border);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Secondary actions shed their labels when the pane is tight, so the row never
      wraps into a second bar; `title` still names each one. */
@@ -1335,7 +1335,7 @@
   }
   .qe-script-retry:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .qe-vars-label {
     font-size: 11px;
@@ -1352,7 +1352,7 @@
   }
   .qe-var-name {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .qe-var-name::before {
     content: ':';
@@ -1372,7 +1372,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -1381,7 +1381,7 @@
   /* Toggle highlight for a toolbar button (Ask AI / Ask in English) when its DB
      Assistant panel is open in that mode. */
   .btn.small.ghost.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
@@ -1411,7 +1411,7 @@
     gap: 3px;
   }
   .qe-kbd-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1452,7 +1452,7 @@
     font-variant-numeric: tabular-nums;
   }
   .qe-lang {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1507,7 +1507,7 @@
   .qe-mask.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .qe-masked-badge {
     font-weight: 600;

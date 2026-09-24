@@ -642,7 +642,7 @@
     height: 28px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 25%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     font-weight: 600;
     display: grid;
@@ -666,7 +666,7 @@
     display: flex;
     justify-content: space-between;
     padding: 8px 14px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -710,7 +710,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 8px 14px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;

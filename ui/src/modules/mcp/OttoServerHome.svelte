@@ -614,7 +614,7 @@
     flex-wrap: wrap;
   }
   .gateway-list code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 5px;
     border: 1px solid var(--border);
     border-radius: 4px;

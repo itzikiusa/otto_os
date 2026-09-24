@@ -1330,7 +1330,7 @@
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     font-size: 12px;
     padding: 0 6px;
@@ -1346,7 +1346,7 @@
     color: var(--text-dim);
   }
   .stream-status.open { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .stream-status.connecting { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .stream-status.connecting { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .stream-status.error { background: color-mix(in srgb, var(--status-exited) 18%, transparent); color: var(--status-exited); }
   .send.danger {
     background: var(--status-exited);
@@ -1397,7 +1397,7 @@
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     font-size: 12px;
     padding: 0 6px;
@@ -1440,7 +1440,7 @@
     pointer-events: none;
   }
   .url-highlight .var {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-radius: 3px;
   }
@@ -1500,7 +1500,7 @@
     color: var(--text);
   }
   .tab.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
   }
   .dot-badge {
@@ -1562,7 +1562,7 @@
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     overflow: hidden;
@@ -1614,7 +1614,7 @@
     margin: 0;
   }
   .radio:has(input:checked) {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .radio.disabled {
@@ -1629,7 +1629,7 @@
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     font-weight: 600;
     padding: 0 4px;
@@ -1638,7 +1638,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -1661,7 +1661,7 @@
   .seg.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .body-area {
     width: 100%;
@@ -1699,9 +1699,9 @@
   }
   .cookie-count {
     margin-inline-start: 4px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: 999px;
     padding: 0 5px;
   }
@@ -1778,7 +1778,7 @@
     padding: 3px 4px;
   }
   .gql-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
   }
@@ -1827,7 +1827,7 @@
     color: var(--text);
   }
   .script-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;

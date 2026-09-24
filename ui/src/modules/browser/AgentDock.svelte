@@ -228,7 +228,7 @@
   }
   .working {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .spacer {
@@ -277,7 +277,7 @@
   }
   .act.primary {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .act:disabled {
     opacity: 0.6;

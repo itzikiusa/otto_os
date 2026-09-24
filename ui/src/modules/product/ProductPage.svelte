@@ -954,7 +954,7 @@
   }
   .row-menu-btn:hover {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tree-toggle {
     display: grid;
@@ -992,7 +992,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.03em;
     cursor: pointer;
@@ -1050,7 +1050,7 @@
     gap: 4px;
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     padding: 0;
     cursor: pointer;
@@ -1080,7 +1080,7 @@
     margin-top: 2px;
   }
   .story-row-wrap.active .story-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .story-info {
     flex: 1;
@@ -1130,7 +1130,7 @@
   }
   .stage-done {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .stage-other {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -1152,19 +1152,19 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms, color 100ms, border-color 100ms;
     white-space: nowrap;
   }
   .tag-filter-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tag-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -1244,7 +1244,7 @@
   }
   .tab-strip .st.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1275,7 +1275,7 @@
     border-color: var(--border);
   }
   .sub-tab-strip .st.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
@@ -1320,7 +1320,7 @@
   }
   .learn-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -1357,7 +1357,7 @@
   }
   .m-view-toggle .vt.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   @media (max-width: 640px) {

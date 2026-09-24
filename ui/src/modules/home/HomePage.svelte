@@ -316,14 +316,14 @@
     color: var(--text-dim);
   }
   .dot.add:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .rot {
     gap: 4px;
   }
   .rot.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .progress {
     height: 2px;
@@ -415,7 +415,7 @@
     flex: none;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .kt {
     display: flex;

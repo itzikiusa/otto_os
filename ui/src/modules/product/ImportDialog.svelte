@@ -304,7 +304,7 @@
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .select,
   .input {
@@ -344,7 +344,7 @@
   }
   .kind-opt.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .kind-opt:hover:not(.active) {
@@ -375,7 +375,7 @@
   .change-btn {
     flex-shrink: 0;
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     background: transparent;
     border: none;
     cursor: pointer;

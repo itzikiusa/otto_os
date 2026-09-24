@@ -1584,7 +1584,7 @@
     width: 100%;
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11.5px;
     padding: 8px 6px;
@@ -1600,7 +1600,7 @@
   .link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11.5px;
     padding: 0;
@@ -1635,7 +1635,7 @@
     padding: 6px 8px 2px;
   }
   .conn-head-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1671,7 +1671,7 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .sec-name {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1742,7 +1742,7 @@
   }
   .conn-glyph.mysql,
   .conn-glyph.clickhouse {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-glyph.postgres {
     color: #336791;
@@ -1754,7 +1754,7 @@
     color: var(--status-working);
   }
   .conn-row.active .conn-item .conn-glyph {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-name {
     flex: 1;
@@ -1803,7 +1803,7 @@
   }
   .ss.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .side-body {
     flex: 1;
@@ -1873,7 +1873,7 @@
     font-size: 11px;
   }
   .hist-meta {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
@@ -1942,7 +1942,7 @@
     border-bottom: 1px solid var(--border);
   }
   .type-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -1954,7 +1954,7 @@
     background: var(--surface-2);
   }
   .type-chip.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
@@ -1992,7 +1992,7 @@
     font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-radius: 999px;
     padding: 1px 6px;
@@ -2043,7 +2043,7 @@
   }
   .conn-tab-glyph.mysql,
   .conn-tab-glyph.clickhouse {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-tab-glyph.postgres {
     color: #336791;
@@ -2055,7 +2055,7 @@
     color: var(--status-working);
   }
   .conn-tab.active .conn-tab-glyph {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-tab-name {
     min-width: 0;
@@ -2107,7 +2107,7 @@
     color: var(--text);
   }
   .mt.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
   }
   .conn-status {
@@ -2117,7 +2117,7 @@
     padding-bottom: 4px;
   }
   .cap-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);

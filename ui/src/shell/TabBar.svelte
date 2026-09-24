@@ -507,7 +507,7 @@
   }
   .view-toggle button.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .history-btn {
     flex-shrink: 0;

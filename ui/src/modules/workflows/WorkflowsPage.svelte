@@ -3025,7 +3025,7 @@
     height: 28px;
     border-radius: 7px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .tpl-body {
@@ -3039,7 +3039,7 @@
     color: var(--text);
   }
   .tpl-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .list {
@@ -3100,7 +3100,7 @@
     color: var(--status-exited);
   }
   .row-edit:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row-rename {
     flex: 1;
@@ -3139,7 +3139,7 @@
     height: 16px;
     padding: 0 4px;
     border-radius: 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--accent) 22%, transparent);
     color: var(--text);
   }
@@ -3172,9 +3172,9 @@
   }
   /* Disambiguators for concurrent runs of the same workflow (item 8). */
   .run-ord {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0 5px;
     border-radius: 99px;
@@ -3187,12 +3187,12 @@
     flex-shrink: 0;
   }
   .run-prog {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .run-when {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-inline-start: 6px;
   }
@@ -3288,7 +3288,7 @@
     align-items: center;
   }
   .title-edit:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .wf-title-edit {
     font: inherit;
@@ -3301,8 +3301,8 @@
     min-width: 220px;
   }
   .badge {
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
     border-radius: 99px;
@@ -3366,7 +3366,7 @@
     font-weight: 600;
   }
   .pal-cat {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
   }
@@ -3597,7 +3597,7 @@
     min-width: 0;
   }
   .ctx-files > summary code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 400;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3679,7 +3679,7 @@
     white-space: nowrap;
   }
   .tl-ms {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono);
   }
@@ -3768,7 +3768,7 @@
   .ctx-path {
     display: block;
     min-width: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3856,7 +3856,7 @@
     text-transform: capitalize;
   }
   .run-when {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .btn.danger {
@@ -4164,7 +4164,7 @@
     margin-top: 2px;
   }
   .retry-h {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -4221,7 +4221,7 @@
   }
   .ver-num {
     font-family: var(--font-mono);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     flex-shrink: 0;
   }
@@ -4233,7 +4233,7 @@
     white-space: nowrap;
   }
   .ver-when {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }

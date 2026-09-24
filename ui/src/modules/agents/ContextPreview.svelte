@@ -238,7 +238,7 @@
   }
   .badge.enforced {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   }
 
@@ -316,7 +316,7 @@
     background: color-mix(in srgb, var(--surface) 50%, var(--surface-2));
   }
   .file-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -333,7 +333,7 @@
     white-space: nowrap;
   }
   .file-size {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
   }
   .chevron {

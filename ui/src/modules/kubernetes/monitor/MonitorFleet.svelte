@@ -847,7 +847,7 @@
     border-radius: var(--radius-m);
   }
   .kpi .k {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -887,7 +887,7 @@
   }
   .wl th {
     text-align: left;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);

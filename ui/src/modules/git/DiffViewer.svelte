@@ -1195,7 +1195,7 @@
     inset-inline-end: 14px;
     top: 50%;
     transform: translateY(-50%);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     pointer-events: none;
   }
@@ -1293,12 +1293,12 @@
     display: flex;
     gap: 4px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .nav-comment-badge {
     flex-shrink: 0;
     font-size: 9.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
   }
 
@@ -1317,7 +1317,7 @@
   .toolbar-match-count {
     position: absolute;
     inset-inline-end: 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     pointer-events: none;
     white-space: nowrap;
@@ -1401,8 +1401,8 @@
     font-size: 12px;
   }
   .file-comment-badge {
-    font-size: 10.5px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -1414,7 +1414,7 @@
     border-bottom: 1px solid var(--border);
   }
   .file-comments-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     margin-bottom: 4px;
@@ -1439,7 +1439,7 @@
     line-height: 1;
   }
   .dfile-tools:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .hunk-header {
     display: flex;
@@ -1451,8 +1451,8 @@
        the sticky header (the accent-mixed background is opaque). */
     z-index: 2;
     padding: 3px 12px;
-    font-size: 10.5px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
@@ -1470,7 +1470,7 @@
     padding: 0 8px 0 4px;
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     user-select: none;
     vertical-align: top;
     border-inline-end: 1px solid var(--border);
@@ -1482,7 +1482,7 @@
   .gut.commentable:hover,
   .gut.selectable:hover {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Small ghost actions in the sticky hunk header — accent, never louder than
      the code they sit above. */
@@ -1492,8 +1492,8 @@
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
     background: none;
-    color: var(--accent);
-    font-size: 10px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     cursor: pointer;
     white-space: nowrap;
   }

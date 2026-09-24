@@ -285,7 +285,7 @@
     text-overflow: ellipsis;
   }
   .theme-cap {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .custom-list {
     list-style: none;

@@ -107,7 +107,7 @@
     background: var(--surface-2);
   }
   .md :global(a) {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .md :global(img) {
     max-width: 100%;

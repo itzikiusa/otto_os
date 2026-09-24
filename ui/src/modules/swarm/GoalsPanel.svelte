@@ -157,7 +157,7 @@
     align-items: center;
     gap: 6px;
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .spinner-xs {
     width: 11px;
@@ -193,7 +193,7 @@
     font-weight: 600;
   }
   .kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -202,7 +202,7 @@
     padding: 0 6px;
   }
   .blocking {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
     border-radius: 999px;
@@ -253,7 +253,7 @@
   /* Status chips — colours per the goal lifecycle. `passed` is the high-contrast
      light-green + black selection colour; verifying pulses. */
   .status {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 8px;
     border-radius: 999px;

@@ -176,7 +176,7 @@
   .composite .lbl, .done, .rlabel, .pmsg { font-size: 11px; color: var(--text-dim); }
   .composite .lbl { text-transform: uppercase; letter-spacing: 0.04em; }
   .meta { display: flex; align-items: center; gap: 8px; }
-  .proof { padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
+  .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
   .done { font-variant-numeric: tabular-nums; }
   .signals { display: flex; flex-direction: column; gap: 5px; }
   .row { display: grid; grid-template-columns: 54px 1fr 28px; align-items: center; gap: 8px; }
@@ -186,7 +186,7 @@
   .notrun { position: absolute; left: 6px; top: -4px; font-size: 9px; color: var(--text-dim); }
   .rscore { font-size: 11px; font-weight: 600; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
-  .rdetail { grid-column: 2 / -1; font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proofpack-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; font-size: 11px; color: var(--text-dim); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-m); cursor: pointer; }
   .proofpack-btn:hover { color: var(--text); border-color: var(--accent); }
   .pack { display: flex; flex-direction: column; gap: 8px; }
@@ -196,5 +196,5 @@
   .akind { font-weight: 600; }
   .sep, .atitle, .astatus { color: var(--text-dim); }
   .astatus { text-transform: uppercase; letter-spacing: 0.02em; }
-  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: 10px; line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
+  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
 </style>

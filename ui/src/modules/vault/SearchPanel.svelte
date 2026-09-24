@@ -95,7 +95,7 @@
     font-weight: 600;
   }
   .p {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .s {

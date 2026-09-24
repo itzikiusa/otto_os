@@ -170,7 +170,7 @@
   }
   .seg button.on {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .note {
     display: inline-flex;

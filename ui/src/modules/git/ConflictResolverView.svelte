@@ -347,7 +347,7 @@
     padding: 1px 6px;
     border-radius: 3px;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .head-count {
     font-size: 11px;
@@ -358,7 +358,7 @@
     background: var(--surface-2);
   }
   .head-count.done {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .grow {
@@ -379,7 +379,7 @@
   }
   .files-head {
     padding: 5px 12px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -416,7 +416,7 @@
     box-shadow: inset -2px 0 0 0 var(--accent);
   }
   .file-row.is-resolved .file-status {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .file-status {
     flex-shrink: 0;
@@ -499,7 +499,7 @@
   }
   .mob-detail-title {
     font-size: 13px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     overflow: hidden;
     text-overflow: ellipsis;

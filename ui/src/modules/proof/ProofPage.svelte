@@ -1044,7 +1044,7 @@
   .chip-btn.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rail-list {
     overflow-y: auto;
@@ -1088,7 +1088,7 @@
     flex-wrap: wrap;
   }
   .kind-tag {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
@@ -1097,7 +1097,7 @@
     text-transform: capitalize;
   }
   .kind-tag.pr {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     text-transform: none;
   }
@@ -1230,7 +1230,7 @@
     background: var(--accent);
   }
   .art-status-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -1247,7 +1247,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0 2px;
@@ -1300,7 +1300,7 @@
     min-width: 0;
   }
   .done-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
@@ -1319,7 +1319,7 @@
   }
   .sha-chip {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
     border-radius: var(--radius-s);
@@ -1348,7 +1348,7 @@
   .char-hint {
     display: block;
     margin-top: 4px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .char-hint.short {

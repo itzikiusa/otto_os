@@ -1521,7 +1521,7 @@
     color: var(--text);
   }
   .provider {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .provider-ico {
@@ -1594,7 +1594,7 @@
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;
@@ -1611,7 +1611,7 @@
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;

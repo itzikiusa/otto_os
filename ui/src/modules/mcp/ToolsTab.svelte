@@ -393,7 +393,7 @@
   }
   .code {
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .desc {
@@ -465,7 +465,7 @@
     padding: 4px 0;
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
   }
@@ -536,7 +536,7 @@
     color: var(--text-dim);
   }
   .tag {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);

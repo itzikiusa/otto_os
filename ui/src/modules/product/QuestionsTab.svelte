@@ -578,13 +578,13 @@
   }
   .accent-btn {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     font-weight: 600;
   }
   .accent-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Select-all row ──────────────────────────────────────────────── */
@@ -699,7 +699,7 @@
   }
   .answer-label {
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     margin-inline-end: 4px;
   }
   .q-ref {
@@ -707,13 +707,13 @@
     color: var(--text-dim);
   }
   .q-meta {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
   /* ── Category chips ──────────────────────────────────────────────── */
   .cat-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -729,7 +729,7 @@
 
   /* ── Status pills ────────────────────────────────────────────────── */
   .status-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -737,7 +737,7 @@
     border-radius: 999px;
   }
   .pill-open      { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .pill-answered  { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
   .pill-discarded { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
@@ -952,6 +952,6 @@
 
   .mono {
     font-family: var(--font-mono, monospace);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

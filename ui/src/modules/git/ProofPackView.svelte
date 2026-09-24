@@ -188,7 +188,7 @@
     gap: 5px;
     margin-bottom: 12px;
   }
-  .pp-chip { font-size: 10.5px; }
+  .pp-chip { font-size: var(--fs-xs); }
   .pp-list {
     display: flex;
     flex-direction: column;
@@ -219,7 +219,7 @@
   .pp-reason { margin: 4px 0; font-size: 12px; line-height: 1.5; }
   .pp-artifacts { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
   .pp-artifact {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--success) 16%, transparent);
     color: var(--text);
   }
@@ -247,7 +247,7 @@
 
   /* Status chips (shared vocabulary; high-contrast for verified). */
   .status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
   .status-verified { background: var(--success-soft); color: var(--success); }
   .status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
@@ -257,6 +257,6 @@
   .sev2-critical { background: var(--status-exited); color: #fff; }
   .sev2-high { background: color-mix(in srgb, var(--status-exited) 18%, transparent); color: var(--status-exited); }
   .sev2-medium { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 </style>

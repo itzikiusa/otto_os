@@ -316,9 +316,9 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .grow {
     flex: 1;
@@ -343,7 +343,7 @@
     color: var(--text);
   }
   .edit-done {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
 
@@ -361,7 +361,7 @@
     align-items: center;
     gap: 6px;
     padding: 4px 10px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -396,7 +396,7 @@
   }
   .tag-b {
     background: color-mix(in srgb, var(--accent) 26%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .side-name {
     overflow: hidden;
@@ -407,7 +407,7 @@
   .side-partial {
     font-weight: 600;
     letter-spacing: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-radius: 999px;
     padding: 0 6px;
@@ -464,7 +464,7 @@
     border: 1px solid var(--border);
     border-radius: 3px;
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .pick-line.picked .pick-box {

@@ -256,7 +256,7 @@
     max-width: 50%;
   }
   .vt-mime {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono, monospace);
   }

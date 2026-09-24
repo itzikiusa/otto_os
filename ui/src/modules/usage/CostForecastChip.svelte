@@ -111,7 +111,7 @@
   }
   .forecast-chip.ready {
     background: var(--surface-3);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid var(--accent-soft);
     cursor: pointer;
     position: relative;
@@ -140,7 +140,7 @@
   }
   .forecast-label {
     display: block;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);

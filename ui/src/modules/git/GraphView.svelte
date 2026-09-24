@@ -3309,7 +3309,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     cursor: pointer;
@@ -3351,7 +3351,7 @@
   }
   /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
   .ref-folder :global(svg:nth-of-type(2)) {
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0.8;
   }
   .folder-name {
@@ -3421,14 +3421,14 @@
   /* The checked-out branch: accent text + a leading accent rail and faint wash so
      the row itself is unmistakable, not just the check pip. */
   .ref-row.current {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     background: color-mix(in srgb, var(--accent) 11%, transparent);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   .ref-row.current:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   :global([dir='rtl']) .ref-row.current {
     box-shadow: inset -2px 0 0 0 var(--accent);
@@ -3512,7 +3512,7 @@
     display: inline-flex;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
@@ -3634,7 +3634,7 @@
     box-shadow: inset -2px 0 0 0 var(--accent);
   }
   .graph-row-selected .ci-subject {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   /* Jump-to-ref landing flash: after scrolling hundreds of rows the selection
@@ -3697,7 +3697,7 @@
     background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
   .wip-row .wip-subject {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     font-style: italic;
   }
@@ -3710,14 +3710,14 @@
     padding: 1px 5px;
     border-radius: 3px;
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   /* Conflicted-files chip on the WIP row — conflicts must be visible from the
      graph itself, not only after opening the WIP panel. */
   .wip-conflicts {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 3px;
@@ -3802,12 +3802,12 @@
   /* Local branch — subtle, neutral. */
   .ref-chip.kind-local {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
   .ref-chip.kind-remote {
     background: color-mix(in srgb, #56b6c2 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Tag — amber. */
   .ref-chip.kind-tag {
@@ -3856,11 +3856,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .ci-sha {
-    color: var(--accent);
-    font-size: 10px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
   }
   .ci-author {
     max-width: 140px;
@@ -3869,7 +3869,7 @@
     white-space: nowrap;
   }
   .ci-date {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
 
@@ -3990,7 +3990,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ref-pop-row.is-worktree {
     color: #c4b5fd;
@@ -4028,7 +4028,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 1px 7px;
@@ -4111,7 +4111,7 @@
     gap: 6px;
   }
   .detail-empty-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.1em;
     color: var(--text-dim);
@@ -4141,7 +4141,7 @@
   }
   .detail-sha {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     letter-spacing: 0.04em;
   }
@@ -4167,7 +4167,7 @@
     min-width: 0;
   }
   .detail-dot {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
   }
   .detail-date {
@@ -4311,8 +4311,8 @@
   /* Hunk header */
   .hunk-header {
     padding: 2px 10px;
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
@@ -4425,7 +4425,7 @@
   }
   .mob-diff-title {
     font-size: 13px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
   }
   .mob-close {

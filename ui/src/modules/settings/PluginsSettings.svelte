@@ -187,7 +187,7 @@
   }
   .btn.primary {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .btn.danger {

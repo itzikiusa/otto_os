@@ -319,7 +319,7 @@
     background: var(--hover);
   }
   .method {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.4px;
     border-radius: 5px;

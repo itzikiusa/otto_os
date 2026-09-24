@@ -89,7 +89,7 @@
     display: inline-block;
     transition: transform 120ms ease;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .tw.open {
     transform: rotate(90deg);
@@ -104,7 +104,7 @@
     padding-left: 14px;
   }
   .key {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sum {
     color: var(--text-dim);
@@ -113,7 +113,7 @@
     color: var(--status-working);
   }
   .num {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .bool {
     color: var(--status-warn);

@@ -369,7 +369,7 @@
     gap: 4px;
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12.5px;
     cursor: pointer;
     padding: 0;

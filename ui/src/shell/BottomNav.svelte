@@ -138,7 +138,7 @@
     min-width: 0;
   }
   .bn-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .bn-icon {
     position: relative;
@@ -147,7 +147,7 @@
     height: 22px;
   }
   .bn-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     line-height: 1;
     overflow: hidden;
@@ -224,7 +224,7 @@
     cursor: pointer;
   }
   .sheet-item.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   }
   .sheet-item span {

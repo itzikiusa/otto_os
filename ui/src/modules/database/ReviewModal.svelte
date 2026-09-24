@@ -133,7 +133,7 @@
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .cell-viewer-backdrop {
     position: fixed;
@@ -210,7 +210,7 @@
     display: inline-block;
     padding: 0 6px;
     border-radius: 9px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--accent-contrast);
     background: var(--accent);
   }
@@ -221,7 +221,7 @@
   }
   .rd-path {
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
   }
   .rd-val {
@@ -281,7 +281,7 @@
     border-top: 1px solid var(--border);
   }
   .review-kbd {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tb-btn.primary {

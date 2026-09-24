@@ -140,7 +140,7 @@
     height: 28px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -228,7 +228,7 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   .health-progressing .status-pill {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   @keyframes pulse {
     50% {

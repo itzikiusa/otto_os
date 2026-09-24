@@ -307,7 +307,7 @@
     color: var(--text);
   }
   .thread-item.active .thread-title {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .thread-meta {
@@ -323,14 +323,14 @@
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .thread-status.status-archived {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
   }
   .thread-date {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -342,7 +342,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
     transition: opacity 100ms, background 100ms;

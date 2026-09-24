@@ -89,7 +89,7 @@
   }
 
   .fp-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.04em;
   }

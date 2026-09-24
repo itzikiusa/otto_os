@@ -422,7 +422,7 @@
     border-color: var(--border);
   }
   .rv-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 8px;
@@ -458,14 +458,14 @@
     font-weight: 500;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     min-width: 16px;
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
   }
