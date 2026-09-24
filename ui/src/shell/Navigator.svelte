@@ -244,15 +244,13 @@
 
   /** Delete = PTY killed, row + full history gone — confirm first (mirrors
    *  the workspace-delete confirm; one mis-click must not destroy a session's
-   *  history) unless the user chose "Always delete" for closing tabs, in
-   *  which case Delete is the answer they already gave. */
+   *  history). Always asked — even under "Always delete" for closing tabs:
+   *  a remembered preference never skips an irreversible delete. */
   async function deleteSession(id: string): Promise<void> {
-    const ok =
-      ui.closeTabPref === 'delete' ||
-      (await confirmer.ask(
-        'Delete this session and its entire history? This cannot be undone.',
-        { title: 'Delete session', confirmLabel: 'Delete' },
-      ));
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
     if (!ok) return;
     try {
       await ws.killSession(id);

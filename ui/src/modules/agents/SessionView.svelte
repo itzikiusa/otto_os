@@ -451,15 +451,13 @@
     }
   }
 
-  // "Always delete" (Settings → Appearance) is the answer to this confirm
-  // already, so it skips the dialog — same as the tab ×.
+  // Always asked — even under "Always delete" (Settings → Appearance), same as
+  // the tab ×: a remembered preference never skips an irreversible delete.
   async function del(): Promise<void> {
-    const ok =
-      ui.closeTabPref === 'delete' ||
-      (await confirmer.ask(
-        'Delete this session and its entire history? This cannot be undone.',
-        { title: 'Delete session', confirmLabel: 'Delete' },
-      ));
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
     if (!ok) return;
     try {
       await ws.killSession(sessionId);

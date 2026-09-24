@@ -888,16 +888,41 @@ class WorkspaceStore {
 
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
-   *  null for cancel. Applies (and records) the remembered preference. */
+   *  null for cancel. Applies (and records) the remembered preference, with
+   *  two guards so a remembered choice can't destroy work silently:
+   *   - a remembered **Delete** only picks the action — the delete itself is
+   *     always confirmed (it can't be undone);
+   *   - a close that ends **more than one** session (Close others / to the
+   *     right / all) always confirms once, naming the count, whatever the
+   *     preference. A single remembered Archive stays silent (resumable). */
   private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
-    if (ui.closeTabPref === 'archive' || ui.closeTabPref === 'delete') return ui.closeTabPref;
-    const many = ending.length > 1;
     const n = ending.length;
+    const many = n > 1;
+    const pref = ui.closeTabPref;
+    if (pref === 'archive' && !many) return 'archive';
+    const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
+    if (pref === 'archive' || pref === 'delete') {
+      const del = pref === 'delete';
+      const what = many
+        ? del
+          ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can't be undone.`
+          : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`
+        : `Closing this tab deletes “${name}”: it stops and its history is removed for good. This can't be undone.`;
+      const ok = await confirmer.ask(
+        `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
+        {
+          title: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions?` : 'Delete session?',
+          confirmLabel: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions` : 'Delete session',
+          danger: del,
+        },
+      );
+      return ok ? pref : null;
+    }
     const message = many
       ? `Closing these tabs ends ${n} sessions. Archive stops them and keeps their history (resumable from the Archived list); Delete stops them and removes their history for good.`
-      : `Closing this tab ends the session. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
+      : `Closing this tab ends “${name}”. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
     const picked = await confirmer.choose(message, {
       title: many ? `Close ${n} sessions?` : 'Close session?',
       options: [
@@ -909,6 +934,16 @@ class WorkspaceStore {
     if (picked.value !== 'archive' && picked.value !== 'delete') return null;
     if (picked.remember) ui.setCloseTabPref(picked.value);
     return picked.value;
+  }
+
+  /** Tooltip for a session tab's × (and the split pane ×): says what closing
+   *  it will actually do under the current remembered preference. */
+  closeTabTitle(id: Id, noun: 'tab' | 'session' = 'tab'): string {
+    const base = `Close ${noun} (⌘W)`;
+    if (!this.isEndable(id)) return base;
+    if (ui.closeTabPref === 'archive') return `${base} — archives the session (resumable)`;
+    if (ui.closeTabPref === 'delete') return `${base} — deletes the session (asks first)`;
+    return `${base} — asks to archive or delete the session`;
   }
 
   /** Reopen the most recently closed tab (⌘⇧T). Skips ids whose session no

@@ -8,8 +8,10 @@ import { expectFullyInViewport } from './helpers';
 // Regression: the tab × used to offer "Close tab (keeps running)" and, worse,
 // skipped the dialog entirely when the client's cached `live` flag was stale —
 // so a session silently stayed alive behind a closed tab. Now every close
-// gesture (tab ×, sidebar ×) asks Archive / Delete (Cancel keeps the tab),
-// and a remembered choice applies without asking.
+// gesture (tab ×, sidebar ×) asks Archive / Delete (Cancel keeps the tab).
+// A remembered Archive applies without asking for ONE tab; a remembered
+// Delete still confirms (irreversible), and a bulk close that ends more than
+// one session always confirms once, naming the count.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let ctx: APIRequestContext;
@@ -69,7 +71,7 @@ test('tab ×: Cancel keeps the session; Archive ends it and closes the tab', asy
   const tab = await openTab(page, 'Kaka');
   await tab.locator('.tab-close').click();
   const dialog = page.locator('.cf-msg');
-  await expect(dialog).toContainText('ends the session');
+  await expect(dialog).toContainText('ends “Kaka”');
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
   await expect(tab).toBeVisible();
@@ -129,7 +131,7 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   expect(await exists(idByTitle.Maldini)).toBe(true);
 });
 
-test('"Always delete" pref: split-pane header × ends the session without a dialog', async ({ page }) => {
+test('"Always delete" pref: split-pane header × still confirms the delete', async ({ page }) => {
   // Remember "Delete" through the tab × dialog (the beforeEach init script
   // clears the pref on every load, so it must be set in-page).
   const tab = await openTab(page, 'Kaka');
@@ -143,14 +145,40 @@ test('"Always delete" pref: split-pane header × ends the session without a dial
   await openTab(page, 'Gattuso');
   // ⌘D splits the focused session into a second pane → header × shows.
   await page.keyboard.press('Meta+d');
-  const hdrClose = page.locator('button[aria-label="Close session (⌘W)"]').first();
+  const hdrClose = page.locator('button[aria-label="Close session (⌘W) — deletes the session (asks first)"]').first();
   await expect(hdrClose).toBeVisible({ timeout: 10_000 });
   await hdrClose.click();
-  await expect(page.locator('.cf-msg')).toHaveCount(0);
+  // The remembered Delete picks the action but never skips the confirm.
+  await expect(page.locator('.cf-msg')).toContainText('Always delete');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  expect(await exists(idByTitle.Gattuso)).toBe(true);
+  expect(await exists(idByTitle.Maldini)).toBe(true);
+  await hdrClose.click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete session' }).click();
   // Exactly one of the two panes' sessions is gone; the other survives.
   await expect
     .poll(async () => (await exists(idByTitle.Gattuso)) !== (await exists(idByTitle.Maldini)), { timeout: 15_000 })
     .toBe(true);
+});
+
+test('"Always archive" pref: Close others still confirms once, naming the count', async ({ page }) => {
+  for (const t of ['Kaka', 'Nesta', 'Maldini']) await openTab(page, t);
+  // Remember "Archive" in-page (the init script clears it on every load).
+  const first = page.locator('.tab', { hasText: 'Kaka' });
+  await first.locator('.tab-close').click();
+  await page.locator('.cf-remember input[type=checkbox]').check();
+  await page.getByRole('button', { name: 'Archive session' }).click();
+  await expect(first).toBeHidden({ timeout: 10_000 });
+
+  await openTab(page, 'Gattuso');
+  const tab = page.locator('.tab', { hasText: 'Maldini' });
+  await tab.click({ button: 'right' });
+  await page.locator('.ctx-item', { hasText: 'Close others' }).click();
+  await expect(page.locator('.cf-msg')).toContainText('archives 2 sessions');
+  await page.getByRole('dialog').getByRole('button', { name: 'Archive 2 sessions' }).click();
+  await expect.poll(() => isArchived(idByTitle.Nesta), { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => isArchived(idByTitle.Gattuso), { timeout: 15_000 }).toBe(true);
+  expect(await isArchived(idByTitle.Maldini)).toBe(false);
 });
 
 test('agents list: select mode archives / deletes the checked sessions in bulk', async ({ page }) => {
