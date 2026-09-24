@@ -195,7 +195,9 @@ must not break:
     scroll on phone or tablet.
   - Check light and dark before review.
 - **Verify.**
-  - `npm run check` passes.
+  - `npm run check` passes (its `scripts/ui-guards.mjs` ratchets style debt per
+    file against `scripts/ui-guards-baseline.json` — fix new hits; after paying
+    debt down run `node scripts/ui-guards.mjs --update-baseline`).
   - Run the [review checklist](./docs/design/guidelines/review-checklist.md).
   - Attach light and dark screenshots to UI PRs.
 
