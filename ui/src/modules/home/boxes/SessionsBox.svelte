@@ -7,6 +7,9 @@
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
+  import { events } from '../../../lib/events.svelte';
+  import { sessionState, type SessionStateInfo } from '../../../lib/status';
+  import type { Session } from '../../../lib/api/types';
   import { now } from '../../../lib/stores/now.svelte';
   import { relTime } from '../../mission-control/lib';
   import type { HomeBox } from '../home.svelte';
@@ -18,12 +21,18 @@
   }
   let { box: _box, zoomed: _zoomed, tick: _tick }: Props = $props();
 
+  // The one session state (lib/status.ts) — the same dot/label the sidebar,
+  // tabs and tiles show, incl. suspended (resumable) and stale (socket down).
+  const stateOf = (s: Session): SessionStateInfo =>
+    sessionState(s, ws.statusMap[s.id], ws.needsYou[s.id] === true, { stale: events.state !== 'connected' });
   const sessions = $derived(
     [...ws.plainAgentSessions].sort((a, b) => {
-      // Working first, then needs-you, then most recently active.
-      const rank = (id: string): number =>
-        ws.statusMap[id] === 'working' ? 0 : ws.needsYou[id] ? 1 : 2;
-      return rank(a.id) - rank(b.id) || Date.parse(b.last_active_at) - Date.parse(a.last_active_at);
+      // Needs-you first (blocked on you), then working, then most recently active.
+      const rank = (s: Session): number => {
+        const k = stateOf(s).key;
+        return k === 'needs-you' ? 0 : k === 'working' ? 1 : 2;
+      };
+      return rank(a) - rank(b) || Date.parse(b.last_active_at) - Date.parse(a.last_active_at);
     }),
   );
   const idle = $derived(sessions.filter((s) => (ws.statusMap[s.id] ?? s.status) === 'idle').length);
@@ -33,8 +42,8 @@
 
 <div class="sessions">
   <div class="stats">
-    <div class="stat"><span class="n working">{working}</span><span class="l">working</span></div>
-    <div class="stat"><span class="n needs">{needsYou}</span><span class="l">need you</span></div>
+    <div class="stat"><span class="n" class:working={working > 0}>{working}</span><span class="l">working</span></div>
+    <div class="stat"><span class="n" class:needs={needsYou > 0}>{needsYou}</span><span class="l">need you</span></div>
     <div class="stat"><span class="n">{idle}</span><span class="l">idle</span></div>
     <div class="stat"><span class="n">{sessions.length}</span><span class="l">open</span></div>
   </div>
@@ -45,7 +54,7 @@
       {#each sessions as s (s.id)}
         <li>
           <button class="row" onclick={() => ws.navigateToSession(s.id)} title="Open {s.title}">
-            <StatusDot status={ws.statusMap[s.id] ?? s.status} needsYou={ws.needsYou[s.id] === true} />
+            <StatusDot state={stateOf(s)} />
             <ProviderIcon provider={s.provider} size={12} />
             <span class="title ellipsis">{s.title}</span>
             {#if ws.needsYou[s.id]}<span class="pill needs">needs you</span>{/if}
@@ -66,33 +75,40 @@
     height: 100%;
     min-height: 0;
   }
+  /* Widget figures: number over label, split by hairlines — no tile fills
+     (the calm desktop-widget look shared by every Home box). */
   .stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
+    gap: 0;
   }
   .stat {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 6px 4px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
+    align-items: flex-start;
+    min-width: 0;
+    padding: 2px 12px;
+    border-inline-start: 1px solid var(--separator);
+  }
+  .stat:first-child {
+    padding-inline-start: 2px;
+    border-inline-start: none;
   }
   .n {
-    font-size: 18px;
-    font-weight: 700;
+    font-size: var(--fs-xl);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
+  /* Tone only when there is something to see: a green "0 working" was noise. */
   .n.working {
-    color: var(--status-working);
+    color: var(--success);
   }
   .n.needs {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .rows {
@@ -128,7 +144,7 @@
   .pill {
     padding: 0 6px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .pill.needs {
     color: var(--status-warn);

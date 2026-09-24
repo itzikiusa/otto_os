@@ -17,6 +17,12 @@
   const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,scope);});
   const detail = $derived(database.objectDetail);
+  /** The object being opened, named from its path while its detail loads. */
+  const loadingName = $derived.by(() => {
+    const last = (database.selectedObjectPath ?? '').split('/').pop() ?? '';
+    const sep = last.indexOf(':');
+    return sep > 0 ? last.slice(sep + 1) : last;
+  });
 
   /** Re-issue the failed openObject for the still-selected path. openObject only
    *  needs the node's id (path) for the fetch — label/kind are rebuilt from the
@@ -636,7 +642,25 @@
 
 <div class="structure">
   {#if database.objectLoading}
-    <div class="loading"><Icon name="refresh" size={16} /><span>Loading structure…</span></div>
+    <!-- The loaded layout's own header + a skeleton of the Columns table, so
+         the structure fills in place instead of a centred spinner snapping to
+         a top-aligned page when the detail lands. -->
+    <div class="st-head" role="status" aria-live="polite" aria-label="Loading structure">
+      <div class="st-title">
+        <Icon name="grid" size={15} />
+        <h2 class="mono">{loadingName}</h2>
+        <span class="kind-chip skel-chip">loading</span>
+      </div>
+      <div class="st-head-actions"></div>
+    </div>
+    <div class="block">
+      <div class="block-title">Columns</div>
+      <div class="tbl-wrap skel-tbl" aria-hidden="true">
+        {#each { length: 7 } as _, i (i)}
+          <div class="skel-line"><span style="width:{30 + ((i * 23) % 45)}%"></span></div>
+        {/each}
+      </div>
+    </div>
   {:else if !detail && database.objectError}
     <!-- A failed open stays visible here (the toast fades) instead of decaying
          into the neutral "no object" empty state. -->
@@ -1114,15 +1138,28 @@
   .structure {
     height: 100%;
     overflow-y: auto;
+    /* A table long enough to scroll must not narrow the page by a scrollbar
+       width once its columns render. */
+    scrollbar-gutter: stable;
     padding: 4px 2px 24px;
   }
-  .loading {
+  .skel-chip {
+    opacity: 0.6;
+  }
+  .skel-tbl {
+    padding: 6px 0;
+  }
+  .skel-line {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 24px;
-    color: var(--text-dim);
-    font-size: 12.5px;
+    height: 27px;
+    padding: 0 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .skel-line span {
+    height: 8px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
   }
   .st-head-actions {
     display: flex;
@@ -1142,7 +1179,7 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .st-title h2 {
     margin: 0;
@@ -1151,7 +1188,7 @@
     color: var(--text);
   }
   .kind-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1197,7 +1234,7 @@
   }
   .mini-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .idx-builder {
     margin-top: 8px;
@@ -1274,7 +1311,7 @@
   }
   .ib-row.on {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ib-fname {
     min-width: 0;
@@ -1288,9 +1325,9 @@
     flex-shrink: 0;
     width: 16px;
     text-align: end;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* The selected row is a flex CONTAINER now (name + direction + remove), so the
      name itself is the clickable part rather than the whole row. */
@@ -1310,10 +1347,10 @@
   .ib-dir {
     flex-shrink: 0;
     padding: 1px 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
@@ -1336,12 +1373,12 @@
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
   }
   .ib-row.custom .ib-ord {
-    color: var(--ok, #3fb950);
+    color: var(--success);
   }
   .ib-custom-tag {
     flex-shrink: 0;
-    font-size: 10px;
-    color: var(--ok, #3fb950);
+    font-size: var(--fs-xs);
+    color: var(--success);
   }
   .ib-sep {
     height: 1px;
@@ -1362,7 +1399,7 @@
     white-space: nowrap;
   }
   .hint {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 400;
   }
   .ib-empty {
@@ -1406,11 +1443,11 @@
     font-size: 11px;
     line-height: 1.5;
     color: var(--text-dim);
-    border-inline-start: 2px solid var(--danger, #e5534b);
+    border-inline-start: 2px solid var(--danger);
     padding-inline-start: 8px;
   }
   .ib-warn code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 3px;
     border-radius: 3px;
@@ -1488,7 +1525,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     border: none;
@@ -1496,7 +1533,7 @@
     font-weight: 500;
   }
   .copy-ddl:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .count {
     color: var(--text-dim);
@@ -1517,7 +1554,7 @@
     padding: 6px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -1545,13 +1582,13 @@
   }
   .nullable {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .pk {
     margin-inline-start: 6px;
     font-size: 9px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 0 4px;
     border-radius: 3px;
@@ -1645,11 +1682,11 @@
   }
   .idx-act:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .idx-act.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--danger, #e5534b) 18%, transparent);
-    color: var(--danger, #e5534b);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   .idx-act:disabled {
     opacity: 0.35;
@@ -1717,7 +1754,7 @@
     border-radius: 999px;
   }
   .tag.unique {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .ddl {
@@ -1769,7 +1806,7 @@
     border: none;
     background: transparent;
     padding: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font: inherit;
     font-size: inherit;

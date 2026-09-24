@@ -194,7 +194,17 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/discard`, { paths });
       onstatus(s);
-      toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+      // Trust the fresh status, not the 200: a discard that left a file
+      // changed must never toast "Discarded".
+      const left = paths.filter((p) => s.changes.some((c) => c.path === p));
+      if (left.length > 0) {
+        toasts.error(
+          'Discard incomplete',
+          `${left.length} file${left.length === 1 ? ' still has' : 's still have'} changes: ${left.slice(0, 3).join(', ')}${left.length > 3 ? '…' : ''}`,
+        );
+      } else {
+        toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+      }
     } catch (e) {
       toasts.error('Discard failed', e instanceof Error ? e.message : String(e));
     }
@@ -791,7 +801,7 @@
   .wp-title {
     font-size: 13px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .wp-count {
     font-size: 11px;
@@ -846,7 +856,7 @@
     text-align: start;
   }
   .wp-sec-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     min-width: 16px;
     padding: 0 5px;
@@ -856,9 +866,9 @@
     text-align: center;
   }
   .wp-sec-action {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 2px 7px;
     border-radius: var(--radius-s);
   }
@@ -961,7 +971,7 @@
     white-space: nowrap;
   }
   .wp-fold-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
@@ -987,7 +997,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 6px;
     border-radius: var(--radius-s);
@@ -1022,7 +1032,7 @@
   }
   .k-renamed {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .k-conflicted {
     background: color-mix(in srgb, var(--status-exited) 35%, transparent);
@@ -1121,14 +1131,14 @@
     height: 15px;
     padding: 0 5px;
     font-size: 9px;
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
     flex-shrink: 0;
   }
   .wp-target > button {
     height: 18px;
     padding: 0 7px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .dim {
     color: var(--text-dim);

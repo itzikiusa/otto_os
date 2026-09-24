@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Users admin (root): create/disable users + per-workspace role matrix + feature grants.
   import { api } from '../../lib/api/client';
   import type { GrantEntry, MemberEntry, User, UserGrantsResp, WorkspaceRole } from '../../lib/api/types';
@@ -144,7 +147,7 @@
   const ALL_FEATURES: Feature[] = [
     'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
+    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas', 'design',
     'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto', 'browser',
     'aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds', 'kubernetes',
   ];
@@ -154,7 +157,7 @@
     api_client: 'API Client', workflows: 'Workflows', channels: 'Channels',
     skill_eval: 'Skills Evaluator', skills: 'Skills', insights: 'Insights',
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
-    settings: 'Settings', users: 'Users', canvas: 'Canvas',
+    settings: 'Settings', users: 'Users', canvas: 'Canvas', design: 'Design Hall',
     proof_pack: 'Proof Packs', mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
     run_with_otto: 'Run with Otto', browser: 'Browser',
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
@@ -337,14 +340,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Users</h1>
-      <div class="sub">Root manages accounts and per-workspace roles.</div>
-    </div>
-    <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('users')} subtitle="Root manages accounts and per-workspace roles">
+    {#snippet actions()}
+      <button class="btn primary" onclick={() => (createOpen = true)}>New User</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={3} height={40} />
@@ -569,6 +571,7 @@
       {/if}
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 {#if createOpen}
@@ -599,6 +602,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .user-filter-row {
     display: flex;
     align-items: center;
@@ -633,7 +643,7 @@
     height: 28px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 25%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     font-weight: 600;
     display: grid;
@@ -657,7 +667,7 @@
     display: flex;
     justify-content: space-between;
     padding: 8px 14px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -701,7 +711,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 8px 14px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;

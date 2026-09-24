@@ -9,7 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   interface Props {
@@ -189,7 +189,7 @@
     }
   }
 
-  function iconFor(e: SftpEntry): string {
+  function iconFor(e: SftpEntry): IconName {
     if (e.kind === 'dir') return 'folder';
     if (e.kind === 'symlink') return 'link';
     return 'file';
@@ -421,7 +421,7 @@
     font: inherit;
   }
   .crumb:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--surface);
   }
   .sep {
@@ -451,7 +451,7 @@
     position: sticky;
     top: 0;
     background: var(--surface);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -480,7 +480,7 @@
     font: inherit;
   }
   .cell.name.nav:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .link-to {
     font-size: 11px;
@@ -497,7 +497,7 @@
     font-size: 12.5px;
   }
   .err {
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .viewer {
     max-height: 60vh;

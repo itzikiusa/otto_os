@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { openPage } from './helpers';
+import { openApiEditor } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API client — open request tabs persist across reloads (per workspace):
@@ -45,11 +45,11 @@ async function settleWrite(page: Page): Promise<void> {
 async function switchWorkspace(page: Page, wsId: string): Promise<void> {
   await page.evaluate((id) => localStorage.setItem('otto_workspace', id as string), wsId);
   await page.reload();
-  await openPage(page, 'api');
+  await openApiEditor(page);
 }
 
 test('open tabs + active index survive a reload', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   await expect(tabs(page)).toHaveCount(1);
 
   // Tab 1: POST https://example.com/one with a custom header.
@@ -67,7 +67,7 @@ test('open tabs + active index survive a reload', async ({ page }) => {
 
   await settleWrite(page);
   await page.reload();
-  await openPage(page, 'api');
+  await openApiEditor(page);
 
   // Both tabs restored; the second one still active with its URL.
   await expect(tabs(page)).toHaveCount(2);
@@ -84,7 +84,7 @@ test('open tabs + active index survive a reload', async ({ page }) => {
 });
 
 test('a closed tab stays closed after reload', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   await urlInput(page).fill('https://example.com/keep-1');
   await page.locator('.req-tab-new').click();
   await urlInput(page).fill('https://example.com/drop');
@@ -97,7 +97,7 @@ test('a closed tab stays closed after reload', async ({ page }) => {
   await expect(tabs(page)).toHaveCount(2);
   await settleWrite(page);
   await page.reload();
-  await openPage(page, 'api');
+  await openApiEditor(page);
 
   await expect(tabs(page)).toHaveCount(2);
   await expect(tabs(page).first()).toContainText('keep-1');
@@ -105,7 +105,7 @@ test('a closed tab stays closed after reload', async ({ page }) => {
 });
 
 test('tab sets are per-workspace', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   await urlInput(page).fill('https://a.example.com/only-in-A');
   await settleWrite(page);
 
@@ -134,7 +134,7 @@ test('corrupt persisted payload is discarded gracefully', async ({ page }) => {
     localStorage.setItem('e2e_corrupt_injected', '1');
     localStorage.setItem(`otto_api_tabs_v1:${wsId}`, '{not json!!');
   }, wsA);
-  await openPage(page, 'api');
+  await openApiEditor(page);
 
   // Fresh blank tab, page functional.
   await expect(tabs(page)).toHaveCount(1);
@@ -144,6 +144,6 @@ test('corrupt persisted payload is discarded gracefully', async ({ page }) => {
   await urlInput(page).fill('https://example.com/recovered');
   await settleWrite(page);
   await page.reload();
-  await openPage(page, 'api');
+  await openApiEditor(page);
   await expect(urlInput(page)).toHaveValue('https://example.com/recovered');
 });

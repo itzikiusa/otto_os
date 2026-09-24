@@ -1,0 +1,51 @@
+{
+  "type": "otto-site",
+  "version": 1,
+  "title": "Instant refunds",
+  "pages": [
+    {
+      "id": "home",
+      "title": "Home",
+      "path": "/",
+      "sections": [
+        {
+          "id": "nav",
+          "block": "nav/bar",
+          "props": { "logo": "acme", "cta_label": "Start a refund", "cta_href": "#" },
+          "style": { "spacing": "s" },
+          "blocks": [
+            { "id": "l1", "block": "item/link", "props": { "label": "How it works", "href": "#how" } },
+            { "id": "l2", "block": "item/link", "props": { "label": "FAQ", "href": "#faq" } }
+          ]
+        },
+        {
+          "id": "hero",
+          "block": "hero/centered",
+          "props": {
+            "eyebrow": "New · Instant refunds",
+            "headline": "Damaged order? Refunded in a minute.",
+            "subhead": "Snap a photo of the damage and get store credit instantly — no forms, no waiting.",
+            "primary_label": "Start a refund",
+            "primary_href": "#",
+            "secondary_label": "How it works",
+            "secondary_href": "#how",
+            "trust": "★★★★★ 4.9 from 8,000 happy customers"
+          },
+          "style": { "background": "gradient:soft", "spacing": "xl", "align": "center", "motion": "fade-up" },
+          "blocks": []
+        },
+        {
+          "id": "features",
+          "block": "features/grid",
+          "props": { "eyebrow": "Why it works", "heading": "Fair, fast and friendly.", "subheading": "" },
+          "style": { "spacing": "l", "motion": "scroll-reveal" },
+          "blocks": [
+            { "id": "f1", "block": "item/feature", "props": { "icon": "bolt", "title": "Under a minute", "body": "Credit lands before you close the app." } },
+            { "id": "f2", "block": "item/feature", "props": { "icon": "shield", "title": "Fraud-aware", "body": "Risky claims go to a person, never a bot." } },
+            { "id": "f3", "block": "item/feature", "props": { "icon": "heart", "title": "No hassle", "body": "No forms, no calls, no shipping it back." } }
+          ]
+        }
+      ]
+    }
+  ]
+}

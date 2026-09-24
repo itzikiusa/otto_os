@@ -8,7 +8,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
 
-  let { onnew }: { onnew: () => void } = $props();
+  // inbar: rendered inside the PageHeader bar (no own border row / padding).
+  let { onnew, inbar = false }: { onnew: () => void; inbar?: boolean } = $props();
 
   function close(e: MouseEvent, id: string): void {
     e.stopPropagation();
@@ -16,7 +17,7 @@
   }
 </script>
 
-<div class="strip">
+<div class="strip" class:inbar>
   {#each browser.tabs as tab (tab.id)}
     <button
       class="tab"
@@ -44,6 +45,11 @@
     padding: 0.35rem 0.5rem;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
+  }
+  .strip.inbar {
+    padding: 0;
+    border-bottom: none;
+    min-width: 0;
   }
   .tab {
     display: flex;

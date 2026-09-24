@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from '../settings/sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Git accounts settings page: provider, label, username, token (write-only),
   // api_base_url for self-hosted GitLab.
   import { api } from '../../lib/api/client';
@@ -217,14 +220,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Git Accounts</h1>
-      <div class="sub">Tokens live in the macOS Keychain and authenticate PR actions + https pushes.</div>
-    </div>
-    <button class="btn primary" onclick={openAdd}>Add Account</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('git-accounts')} subtitle="Keychain tokens for PR actions and HTTPS pushes">
+    {#snippet actions()}
+      <button class="btn primary" onclick={openAdd}>Add account</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={2} height={48} />
@@ -233,7 +235,7 @@
       <p class="dim" style="margin: 0 0 10px">
         No git accounts yet. Add one to list pull requests and push over https.
       </p>
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     </div>
   {:else}
     <div class="acct-list">
@@ -287,6 +289,7 @@
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 {#if addOpen}
@@ -375,7 +378,7 @@
           disabled={busy || label.trim() === '' || username.trim() === ''}
           onclick={save}
         >
-          {busy ? 'Saving…' : 'Save Changes'}
+          {busy ? 'Saving…' : 'Save changes'}
         </button>
       {:else}
         <button
@@ -383,7 +386,7 @@
           disabled={busy || label.trim() === '' || username.trim() === '' || token === ''}
           onclick={create}
         >
-          {busy ? 'Adding…' : 'Add Account'}
+          {busy ? 'Adding…' : 'Add account'}
         </button>
       {/if}
     {/snippet}
@@ -391,6 +394,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .acct-list {
     display: flex;
     flex-direction: column;
@@ -408,7 +418,7 @@
     height: 30px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
   }
@@ -438,7 +448,7 @@
     word-break: break-word;
   }
   .test-result.ok {
-    color: var(--status-running, #3fb950);
+    color: var(--success);
   }
   .test-result.bad {
     color: var(--status-exited, #f85149);
@@ -452,9 +462,6 @@
      can't push the page wider than the viewport; bump icon-button + segmented
      tap targets. The modal box is already viewport-clamped by Modal.svelte. ── */
   @media (max-width: 1024px) {
-    .page {
-      padding: 16px 12px 32px;
-    }
     .acct-list {
       max-width: none;
     }

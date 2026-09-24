@@ -6,6 +6,8 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster } from '../../lib/api/types';
   import type { LagAlert } from './types';
 
@@ -16,6 +18,8 @@
 
   let alerts = $state<LagAlert[]>([]);
   let loading = $state(true);
+  /** Failed load — inline with Retry, never "No alerts configured.". */
+  let loadError = $state<string | null>(null);
 
   // New alert form fields.
   let newTopic = $state('');
@@ -25,14 +29,19 @@
 
   $effect(() => {
     void cluster.id;
-    loading = true;
     alerts = [];
+    loadAlerts();
+  });
+
+  function loadAlerts(): void {
+    loading = true;
+    loadError = null;
     api
       .get<LagAlert[]>(`/brokers/clusters/${cluster.id}/lag-alerts`)
       .then((a) => (alerts = a))
-      .catch((e) => toasts.error('Failed to load lag alerts', String(e)))
+      .catch((e) => (loadError = loadErrorText(e)))
       .finally(() => (loading = false));
-  });
+  }
 
   async function createAlert() {
     if (!newTopic.trim() || !newGroup.trim()) return;
@@ -84,6 +93,8 @@
 
   {#if loading}
     <p class="muted pad">Loading…</p>
+  {:else if loadError}
+    <LoadState what="lag alerts" variant="compact" error={loadError} empty onretry={loadAlerts} />
   {:else}
     {#if alerts.length > 0}
       <table>
@@ -183,7 +194,7 @@
     font-size: 11.5px;
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 4px;
   }

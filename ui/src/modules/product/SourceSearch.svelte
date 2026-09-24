@@ -312,7 +312,7 @@
   .picker-select,
   .picker-input {
     width: 100%;
-    background: var(--input-bg, var(--surface-raised));
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s, 4px);
     color: var(--text);
@@ -361,7 +361,7 @@
     font-size: 12px;
     font-weight: 700;
     font-family: var(--font-mono);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .issue-summary {
@@ -373,7 +373,7 @@
   }
   .status-chip {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -388,7 +388,7 @@
     margin-top: 2px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     background: transparent;
     border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: var(--radius-s);

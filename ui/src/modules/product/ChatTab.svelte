@@ -113,7 +113,7 @@
   <ListPane title="Chats" isEmpty={!loading && !loadError && chats.length === 0}>
     {#snippet actions()}
       <button
-        class="p-btn primary"
+        class="btn small primary"
         onclick={createChat}
         disabled={creating}
         title="Start a new discovery chat"
@@ -236,7 +236,7 @@
     color: var(--text);
   }
   .chat-item.active .chat-title {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .chat-meta {
@@ -252,14 +252,14 @@
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chat-status.status-archived {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
   }
   .chat-date {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -271,7 +271,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
     transition: opacity 100ms, background 100ms;
@@ -295,7 +295,7 @@
     padding: 12px 10px;
   }
   .error-msg {
-    color: #ef4444;
+    color: var(--danger);
     font-size: 12px;
     padding: 8px 10px;
   }

@@ -1,8 +1,10 @@
 <script lang="ts">
-  // One tile on the Home grid: a header (kind icon + title, refresh, zoom,
-  // menu), the kind's live body, and — in the grid — a drag handle for
-  // reordering plus a corner handle for resizing in grid units. The same
-  // component renders the zoomed (full-page) box, minus the grid affordances.
+  // One widget on the Home desktop: a quiet header (kind icon + title; the
+  // refresh / zoom / menu controls surface on hover or focus), the kind's live
+  // body, and — in the grid — a drag grip for reordering plus a corner handle
+  // for resizing in grid units. The same component renders the zoomed
+  // (full-page) widget, minus the grid affordances. Widgets are opaque content
+  // cards resting on the ambient backdrop (elevation 1, --shadow-card).
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
@@ -150,13 +152,13 @@
     {#if !zoomed && !viewport.isPhone}
       <span class="grip" draggable="true" ondragstart={onDragStart} ondragend={onDragEnd} title="Drag to reorder" aria-hidden="true"><Icon name="grip" size={12} /></span>
     {/if}
-    <Icon name={def.icon} size={13} />
+    <span class="hb-icon"><Icon name={def.icon} size={13} /></span>
     <span class="hb-title ellipsis">{def.label}</span>
     <button class="icon-btn" onclick={() => (tick += 1)} title="Refresh" aria-label="Refresh {def.label}"><Icon name="refresh" size={12} /></button>
     <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom (Esc)' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'}>
       <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
     </button>
-    <button class="icon-btn" onclick={menu} title="More" aria-label="Box menu"><Icon name="dot" size={12} /></button>
+    <button class="icon-btn" onclick={menu} title="More" aria-label="Box menu"><Icon name="more" size={14} /></button>
   </header>
   <div class="hb-body">
     {#if box.kind === 'sessions'}
@@ -200,7 +202,8 @@
     min-width: 0;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-l);
+    box-shadow: var(--shadow-card);
     overflow: hidden;
     transition: box-shadow 130ms ease-out, border-color 130ms ease-out;
   }
@@ -219,18 +222,45 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 6px 6px 10px;
-    border-bottom: 1px solid var(--border);
+    min-height: 36px;
+    padding: 6px 6px 2px 12px;
     color: var(--text-dim);
     flex: none;
     user-select: none;
+  }
+  .hb-icon {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  /* Calm at rest: the header controls surface on hover / keyboard focus
+     (always shown where there is no hover, e.g. touch). */
+  @media (hover: hover) {
+    .hb-head .icon-btn,
+    .grip {
+      opacity: 0;
+      transition: opacity 130ms ease-out;
+    }
+    .hbox:hover .hb-head .icon-btn,
+    .hbox:hover .grip,
+    .hbox:focus-within .hb-head .icon-btn,
+    .hbox:focus-within .grip,
+    .hbox.zoomed .hb-head .icon-btn {
+      opacity: 1;
+    }
   }
   .grip {
     display: inline-grid;
     place-items: center;
     cursor: grab;
     color: var(--text-dim);
-    margin-inline-start: -4px;
+    margin-inline-start: -8px;
+    width: 12px;
   }
   .grip:active {
     cursor: grabbing;
@@ -238,14 +268,14 @@
   .hb-title {
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
   .hb-body {
     flex: 1;
     min-height: 0;
-    padding: 8px 10px 10px;
+    padding: 6px 12px 12px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -276,11 +306,14 @@
     border-inline-end: 2px solid var(--text-dim);
     border-bottom: 2px solid var(--text-dim);
     border-end-end-radius: 2px;
-    opacity: 0.45;
+    /* Revealed on hover/focus only: a permanent corner mark on every box was
+       visual noise. */
+    opacity: 0;
+    transition: opacity 130ms ease-out;
   }
   .hbox:hover .resize::after,
   .resize:focus-visible::after {
-    opacity: 1;
+    opacity: 0.7;
   }
   .resize:focus-visible {
     outline: 2px solid var(--accent);

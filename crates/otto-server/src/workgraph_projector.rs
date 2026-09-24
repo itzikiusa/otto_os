@@ -296,22 +296,26 @@ async fn upsert_session(ctx: &ServerCtx, session: &Session) {
         context_summary: Some(ctx_summary),
         started_by_id: None,
     };
-    if let Err(e) = ctx.workgraph.record(up).await {
-        tracing::debug!("workgraph upsert_session: {e}");
-    } else {
+    match ctx.workgraph.record(up).await {
+        Err(e) => tracing::debug!("workgraph upsert_session: {e}"),
         // A session links to itself in the UI via a deep-link artifact (evidence).
-        add_artifact_if_absent(
-            ctx,
-            NewArtifact {
-                work_item_id: session.id.clone(),
-                workspace_id: session.workspace_id.clone(),
-                kind: ArtifactKind::Session,
-                title: "Open session".into(),
-                reference: Some(session.id.clone()),
-                payload: json!({ "session_id": session.id }),
-            },
-        )
-        .await;
+        // Keyed by the WORK ITEM's id — `work_items.id` is a fresh id, not the
+        // source id, so attaching by `session.id` failed the foreign key and
+        // every such artifact was silently dropped.
+        Ok(item) => {
+            add_artifact_if_absent(
+                ctx,
+                NewArtifact {
+                    work_item_id: item.id.clone(),
+                    workspace_id: session.workspace_id.clone(),
+                    kind: ArtifactKind::Session,
+                    title: "Open session".into(),
+                    reference: Some(session.id.clone()),
+                    payload: json!({ "session_id": session.id }),
+                },
+            )
+            .await;
+        }
     }
 }
 
@@ -386,12 +390,12 @@ async fn upsert_goal_loop(ctx: &ServerCtx, loop_id: &Id) {
         )),
         started_by_id: None,
     };
-    if ctx.workgraph.record(up).await.is_ok() {
+    if let Ok(item) = ctx.workgraph.record(up).await {
         if let Some(branch) = &gl.branch {
             add_artifact_if_absent(
                 ctx,
                 NewArtifact {
-                    work_item_id: gl.id.clone(),
+                    work_item_id: item.id.clone(),
                     workspace_id: gl.workspace_id.clone(),
                     kind: ArtifactKind::Link,
                     title: format!("Branch {branch}"),
@@ -451,6 +455,15 @@ fn pr_source_key(repo_id: &str, pr_number: u64) -> Option<String> {
     (pr_number != 0).then(|| format!("{repo_id}:{pr_number}"))
 }
 
+/// Status of the `pr` item a review reviews: running while that review is in
+/// flight, done once it has settled.
+fn pr_item_status(review_status: WorkStatus) -> WorkStatus {
+    match review_status {
+        WorkStatus::Pending | WorkStatus::Running | WorkStatus::Waiting => WorkStatus::Running,
+        _ => WorkStatus::Done,
+    }
+}
+
 async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
     let review = match ctx.reviews_store.get_review(review_id).await {
         Ok(r) => r,
@@ -487,17 +500,19 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         )),
         started_by_id: None,
     };
-    if ctx.workgraph.record(up).await.is_err() {
-        return;
-    }
+    let review_item = match ctx.workgraph.record(up).await {
+        Ok(it) => it,
+        Err(_) => return,
+    };
 
     // Evidence: the review report artifact. Keyed by the review id — one verdict
-    // per review — so re-deriving it never grows a second row.
+    // per review — so re-deriving it never grows a second row. Attached to the
+    // review's WORK ITEM (by its id, not the review id — that failed the FK).
     if review.summary_md.is_some() || review.verdict.is_some() {
         add_artifact_if_absent(
             ctx,
             NewArtifact {
-                work_item_id: review.id.clone(),
+                work_item_id: review_item.id.clone(),
                 workspace_id: workspace_id.clone(),
                 kind: ArtifactKind::Report,
                 title: "Review verdict".into(),
@@ -524,7 +539,10 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         source_id: pr_source.clone(),
         title: format!("PR #{} · {}", review.pr_number, repo_label),
         goal: None,
-        status: WorkStatus::Running,
+        // The PR is "running" only while a review of it runs; once that review
+        // settles the item is done (it was hard-coded Running, so every reviewed
+        // PR showed as running forever). A new review flips it back.
+        status: pr_item_status(status),
         owner: None,
         owner_kind: WorkActor::System,
         repo_id: Some(review.repo_id.clone()),
@@ -543,10 +561,16 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         Err(_) => return,
     };
 
-    // Edge: review --reviews--> pr.
+    // Edge: review --reviews--> pr, between the two WORK ITEMS (the review id
+    // is not a work-item id — the FK rejected every such edge: 0 rows).
     let _ = ctx
         .workgraph
-        .add_edge(workspace_id, &review.id, &pr_item.id, EdgeRelation::Reviews)
+        .add_edge(
+            workspace_id,
+            &review_item.id,
+            &pr_item.id,
+            EdgeRelation::Reviews,
+        )
         .await;
 
     // Evidence: the PR link artifact, keyed by the same `repo:pr` identity as the
@@ -756,5 +780,20 @@ mod tests {
         assert_eq!(pr_source_key("repo1", 42).as_deref(), Some("repo1:42"));
         assert_eq!(pr_source_key("repo1", 1).as_deref(), Some("repo1:1"));
         assert_eq!(pr_source_key("repo1", 0), None);
+    }
+
+    /// A reviewed PR leaves `running` once its review settles (it was
+    /// hard-coded Running forever); a new review in flight makes it running.
+    #[test]
+    fn pr_item_follows_its_review() {
+        assert_eq!(pr_item_status(WorkStatus::Running), WorkStatus::Running);
+        assert_eq!(pr_item_status(WorkStatus::Pending), WorkStatus::Running);
+        for settled in [
+            WorkStatus::Succeeded,
+            WorkStatus::Failed,
+            WorkStatus::Cancelled,
+        ] {
+            assert_eq!(pr_item_status(settled), WorkStatus::Done);
+        }
     }
 }

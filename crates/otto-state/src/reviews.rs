@@ -269,6 +269,30 @@ impl ReviewsRepo {
         self.get_comment(id).await
     }
 
+    /// Atomically claim a comment for posting to the forge: flips `posted`
+    /// 0→1 and returns `true` only for the ONE caller that flipped it. A double
+    /// click / retried request sees `false` and must not post again (the
+    /// unconditional state update used to let both requests post).
+    pub async fn claim_comment_post(&self, id: &Id) -> Result<bool> {
+        let res = sqlx::query("UPDATE pr_review_comments SET posted = 1 WHERE id = ? AND posted = 0")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("claim comment post"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Undo [`claim_comment_post`](Self::claim_comment_post) after the forge
+    /// call failed, so a later approve can try again.
+    pub async fn release_comment_post(&self, id: &Id) -> Result<()> {
+        sqlx::query("UPDATE pr_review_comments SET posted = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("release comment post"))?;
+        Ok(())
+    }
+
     /// Fetch ALL reviews for a (repo_id, pr_number) pair, newest-first, each
     /// fully loaded with comments and agents.
     pub async fn list_for_pr(&self, repo_id: &Id, pr_number: i64) -> Result<Vec<Review>> {
@@ -480,6 +504,22 @@ mod tests {
 
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn comment_post_claim_is_exclusive_and_releasable() {
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        let c = repo
+            .add_comment(&review.id, Some("a.rs"), Some(3), CommentSeverity::Warn, "x")
+            .await
+            .unwrap();
+        assert!(repo.claim_comment_post(&c.id).await.unwrap());
+        // A second (double-click / retried) approve must not post again.
+        assert!(!repo.claim_comment_post(&c.id).await.unwrap());
+        // A failed post releases the claim so a later approve can retry.
+        repo.release_comment_post(&c.id).await.unwrap();
+        assert!(repo.claim_comment_post(&c.id).await.unwrap());
     }
 
     #[tokio::test]

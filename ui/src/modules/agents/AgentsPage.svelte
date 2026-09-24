@@ -6,13 +6,8 @@
   import FirstRunCoach from './FirstRunCoach.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { router } from '../../lib/router.svelte';
-  // Importing the History module here (not only from App's `#/history` branch)
-  // registers its palette command at boot, so "Go to History" works from any page.
-  import '../agents/history';
 
   const tiled = $derived(ws.viewMode === 'tiled');
   const mission = $derived(ws.viewMode === 'mission');
@@ -30,22 +25,26 @@
     })(),
   );
   const showCoach = $derived(!coachDismissed && ws.agentSessions.length === 0);
+
+  // Never open onto a "pick one" void when there are sessions: once per
+  // workspace, if its restored layout has no panes, open the most recently
+  // active session. Only on ARRIVAL — closing the last tab later leaves the
+  // empty state alone (the user just chose that).
+  let autoOpenedFor: string | null | undefined = undefined;
+  $effect(() => {
+    if (!ws.layoutReady || ws.sessionsLoading) return;
+    const key = ws.currentId;
+    if (autoOpenedFor === key) return;
+    autoOpenedFor = key;
+    if (ws.panes.length > 0 || tiled || mission) return;
+    const latest = [...ws.mainSessions].sort(
+      (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),
+    )[0];
+    if (latest) ws.navigateToSession(latest.id);
+  });
 </script>
 
 <div class="agents">
-  <!-- Slim header: the one place every Agents view (tabs / tiled / mission)
-       shares; hosts the History entry point (⌘K "Go to History" and the
-       sidebar row are the others). -->
-  <div class="agents-bar">
-    <button
-      class="bar-btn"
-      onclick={() => router.go('history')}
-      title="Browse past conversations — every Claude/Codex session, resumable"
-      data-testid="agents-history-btn"
-    >
-      <Icon name="clock" size={12} /> History
-    </button>
-  </div>
   <div class="agents-body">
   {#if ws.sessionsLoading && ws.sessions.length === 0}
     <div style="padding: 16px">
@@ -70,7 +69,7 @@
       <EmptyState
         icon="terminal"
         title="No open tabs"
-        body="Pick a session from the navigator on the left, switch to tiled view, or start a new one."
+        body="Pick a session in the sidebar, switch to tiled view, or start a new one."
         actionLabel="New Session  ⌘T"
         onaction={() => (ui.newSessionOpen = true)}
       />
@@ -87,35 +86,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-  .agents-bar {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 6px;
-    height: 26px;
-    padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .bar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 20px;
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-  .bar-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
   }
   .agents-body {
     flex: 1;

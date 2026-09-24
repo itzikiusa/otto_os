@@ -51,7 +51,11 @@ test('connection export covers all workspaces and includes passwords only by opt
     const uris = await download(page, card.getByRole('button', { name: /^Download / }).first());
     expect(uris).toContain('mongodb://'); expect(uris).toContain('mongo.invalid'); expect(uris).not.toContain('mysql.invalid');
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole('button', { name: 'Close Navigator', exact: true }).click();
+    // Phone: the Navigator is an off-canvas drawer with its own state, closed by
+    // default (never the desktop sidebar's expanded preference) — so the page is
+    // not covered and nothing needs dismissing. Assert that rather than assume it.
+    await expect(page.getByRole('button', { name: 'Open navigator', exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Navigator', exact: true })).toHaveCount(0);
     await card.scrollIntoViewIfNeeded();
     await expect(card).toBeVisible();
     await card.getByLabel('Export format', { exact: true }).selectOption('json');

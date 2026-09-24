@@ -2,8 +2,12 @@
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import { envTone } from '../../lib/status';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import QueryEditor from './QueryEditor.svelte';
   import QueryBuilder from './QueryBuilder.svelte';
@@ -31,6 +35,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
   import type {
     BrokerCluster,
@@ -177,6 +182,7 @@
       ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
+      ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
       { separator: true },
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
@@ -245,6 +251,48 @@
   function nodeCount(n: TreeNode): number {
     return (
       n.items.length + n.clusters.length + n.children.reduce((sum, c) => sum + nodeCount(c), 0)
+    );
+  }
+  // Sections holding anything at all (any kind, unfiltered), ancestors
+  // included. A truly empty folder isn't "filtered out" — it has nothing to
+  // filter — so it stays visible under a type filter as a drop target.
+  const occupiedSectionIds = $derived.by(() => {
+    const parentOf = new Map(sections.map((s) => [s.id, s.parent_id ?? null]));
+    const occ = new Set<string>();
+    const mark = (id: string | null | undefined): void => {
+      let cur = id ?? null;
+      while (cur && parentOf.has(cur) && !occ.has(cur)) {
+        occ.add(cur);
+        cur = parentOf.get(cur) ?? null;
+      }
+    };
+    for (const c of database.connections) mark(c.section_id);
+    for (const c of database.otherConnections) mark(c.section_id);
+    for (const cl of brokers.clusters) mark(cl.section_id);
+    return occ;
+  });
+  // While anything is being dragged, a type filter reveals every folder so
+  // any section is a reachable drop target. Flipped on a macrotask: mutating
+  // the DOM inside `dragstart` makes WebKit abort the drag.
+  let dragReveal = $state(false);
+  $effect(() => {
+    const dragging = !!(draggedConnId || draggedClusterId || draggedSectionId);
+    if (!dragging) {
+      dragReveal = false;
+      return;
+    }
+    const t = setTimeout(() => (dragReveal = true), 0);
+    return () => clearTimeout(t);
+  });
+  /** Under a type filter a folder shows when it has matches, is empty, has a
+   *  visible sub-folder, or a drag is in progress. */
+  function nodeVisible(n: TreeNode): boolean {
+    return (
+      !filtering ||
+      dragReveal ||
+      nodeCount(n) > 0 ||
+      !occupiedSectionIds.has(n.sec.id) ||
+      n.children.some(nodeVisible)
     );
   }
 
@@ -588,6 +636,9 @@
       void (async () => {
         await database.loadConnections();
         await database.restoreWorkbench();
+        // `#/database/<connId>` (a pop-out window, a link) opens that tab.
+        const deep = router.module === 'database' ? router.parts[1] : undefined;
+        if (deep && database.connections.some((c) => c.id === deep)) await database.openConnection(deep);
       })();
       void loadSections();
       void brokers.load(ws.currentId); // clusters render in the same tree
@@ -604,15 +655,29 @@
     return parts.join(' · ');
   }
 
-  const mainTabs: { id: DbMainTab; label: string; show: () => boolean }[] = [
-    { id: 'query', label: 'Query', show: () => true },
-    { id: 'builder', label: 'Builder', show: () => database.supportsBuilder },
-    { id: 'structure', label: 'Structure', show: () => true },
+  const mainTabs: { id: DbMainTab; label: string; icon: IconName; show: () => boolean }[] = [
+    { id: 'query', label: 'Query', icon: 'terminal', show: () => true },
+    { id: 'builder', label: 'Builder', icon: 'layers', show: () => database.supportsBuilder },
+    { id: 'structure', label: 'Structure', icon: 'columns', show: () => true },
     // ERD is table/collection-oriented; Redis (keys, no table model) is excluded.
-    { id: 'diagram', label: 'Diagram', show: () => database.capabilities?.engine !== 'redis' },
-    { id: 'dashboards', label: 'Dashboards', show: () => true },
+    { id: 'diagram', label: 'Diagram', icon: 'shapes', show: () => database.capabilities?.engine !== 'redis' },
+    { id: 'dashboards', label: 'Dashboards', icon: 'chart', show: () => true },
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
+  /** ←/→ (and Home/End) between the workbench views, focus following. */
+  function onViewKey(e: KeyboardEvent): void {
+    const i = visibleTabs.findIndex((t) => t.id === database.mainTab);
+    let j = i;
+    if (e.key === 'ArrowRight') j = (i + 1) % visibleTabs.length;
+    else if (e.key === 'ArrowLeft') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = visibleTabs.length - 1;
+    else return;
+    e.preventDefault();
+    database.setMainTab(visibleTabs[j].id);
+    const bar = e.currentTarget as HTMLElement;
+    queueMicrotask(() => bar.querySelectorAll<HTMLButtonElement>('.mt')[j]?.focus());
+  }
 
   // ── DB Assistant split (resizable, persisted) ────────────────────────────────
   // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
@@ -750,15 +815,34 @@
   type EnvGuarded = Pick<Connection, 'environment' | 'read_only'>;
   const isProdConn = (c: EnvGuarded): boolean => c.environment === 'prod';
   const isGuardedConn = (c: EnvGuarded): boolean => c.environment === 'prod' || c.read_only;
-  // Short badge label, or '' when neither (dev/staging, not read-only).
-  function envBadge(c: EnvGuarded): string {
-    if (c.environment === 'prod') return 'PROD';
-    if (c.read_only) return 'RO';
-    if (c.environment === 'staging') return 'STG';
-    return '';
+  // Whether a row gets the shared <EnvBadge> — the same rule as Brokers /
+  // Kubernetes / AWS: prod and staging are badged, and so is read-only (RO);
+  // dev (the default) stays unbadged. Uses `envTone` so env aliases agree with
+  // the badge itself.
+  function envBadge(c: EnvGuarded): boolean {
+    return envTone(c.environment).key !== 'dev' || c.read_only;
   }
 </script>
 
+<div class="db-root">
+<!-- One header for the Connections hub. "New connection" is the page's primary
+     (it used to be a bare "+" in the side-tab strip); while there is nothing
+     to open, the empty state owns that CTA instead. Phone keeps its accordion
+     head buttons, so the header stays action-free there. -->
+<PageHeader title="Connections">
+  {#snippet actions()}
+    {#if !viewport.isPhone}
+      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster">
+        <Icon name="arrowDown" size={12} /> Import
+      </button>
+      {#if database.connections.length > 0 || brokers.clusters.length > 0}
+        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)">
+          <Icon name="plus" size={12} /> New connection
+        </button>
+      {/if}
+    {/if}
+  {/snippet}
+</PageHeader>
 <div class="db-page">
   {#if !viewport.isPhone && database.sidebarCollapsed}
     <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
@@ -823,15 +907,16 @@
     {:else}
       <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
            the list takes the full sidebar height instead of a capped section. -->
-      <div class="side-switch" role="tablist">
-        <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
-        <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
-        <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
-        <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+      <div class="side-switch">
+        <!-- The tabs get their own tablist: the strip also carries plain
+             buttons (Refresh, Hide sidebar), which a tablist may not own. -->
+        <div class="ss-tabs" role="tablist" aria-label="Sidebar view">
+          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} onclick={() => database.setSideTab('connections')}>Connections</button>
+          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
+          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
+          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+        </div>
         <span class="grow"></span>
-        <!-- Persistent "New connection" — visible on every side tab, not only
-             inside the Connections tab body. -->
-        <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)" aria-label="New connection"><Icon name="plus" size={12} /></button>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
@@ -880,14 +965,22 @@
     {#if !hasAnyTab}
       <!-- Always actionable: create the first connection, or surface the picker
            (which may be hidden behind a collapsed rail / another side tab). -->
+      <!-- One CTA, and only when it does something: create the first
+           connection, or reveal a picker that is hidden (collapsed rail /
+           another side tab). With the list already on screen there is no
+           button — "Show connections" next to the visible list was noise. -->
       <EmptyState
+        variant={viewport.isPhone ? 'panel' : 'page'}
         icon="db"
         title="Open a connection"
         body={database.connections.length === 0 && brokers.clusters.length === 0
           ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
-          : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
-        actionLabel={database.connections.length === 0 && auth.isRoot ? 'New connection' : 'Show connections'}
-        onaction={database.connections.length === 0 && auth.isRoot ? newConnection : showConnections}
+          : `Choose a connection, Kafka cluster or SSH host ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
+        actionLabel={database.connections.length === 0 && brokers.clusters.length === 0
+          ? auth.isRoot ? 'New connection' : undefined
+          : database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
+        actionIcon={database.connections.length === 0 && brokers.clusters.length === 0 ? 'plus' : undefined}
+        onaction={database.connections.length === 0 && brokers.clusters.length === 0 ? newConnection : showConnections}
       />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -899,7 +992,7 @@
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
-              {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
+              {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
             {#if st?.phase === 'connecting'}
               <span class="conn-tab-spin spin" title="Connecting…"><Icon name="refresh" size={10} /></span>
@@ -929,7 +1022,7 @@
             <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
               <span class="conn-tab-name ellipsis">{cl.name}</span>
-              {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+              {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
               <Icon name="x" size={11} />
@@ -980,12 +1073,22 @@
       {/if}
 
       <div class="main-tabs">
-        {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}<button class="mt" onclick={()=>changesOpen=true}>Changes</button>{/if}
-        {#each visibleTabs as t (t.id)}
-          <button class="mt" class:active={database.mainTab === t.id} role="tab" aria-selected={database.mainTab === t.id} onclick={() => database.setMainTab(t.id)}>
-            {t.label}
-          </button>
-        {/each}
+        <!-- The workbench views: a segmented control (selection = surface
+             lift), ←/→ move between them like any tablist. -->
+        <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onViewKey}>
+          {#each visibleTabs as t (t.id)}
+            <button
+              class="mt"
+              class:active={database.mainTab === t.id}
+              role="tab"
+              aria-selected={database.mainTab === t.id}
+              tabindex={database.mainTab === t.id ? 0 : -1}
+              onclick={() => database.setMainTab(t.id)}
+            >
+              <Icon name={t.icon} size={12} />{t.label}
+            </button>
+          {/each}
+        </div>
         <span class="grow"></span>
         <div class="conn-status">
           {#if database.capabilities}
@@ -1005,6 +1108,11 @@
                 <span class="health-lat">{database.activeConnStatus.latencyMs} ms</span>
               {/if}
             </span>
+          {/if}
+          {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
+            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection">
+              <Icon name="branch" size={11} />Changes
+            </button>
           {/if}
           <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
             <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
@@ -1060,13 +1168,19 @@
     {/if}
   </div>
 </div>
+</div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  {#if !(filtering && nodeCount(node) === 0)}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+  {#if nodeVisible(node)}
+    <!-- The whole header toggles (the caret button stays the keyboard/AT
+         control); clicks on its own buttons — caret, row actions — don't. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="sec-head"
+      onclick={(e) => {
+        if (!(e.target as Element).closest('button')) toggleCollapse(node.sec.id);
+      }}
       class:drop-target={(draggedSectionId && draggedSectionId !== node.sec.id) ||
         draggedConnId ||
         draggedClusterId}
@@ -1086,12 +1200,17 @@
         onSectionDrop(node.sec.id);
       }}
     >
-      <button class="caret" onclick={() => toggleCollapse(node.sec.id)} aria-label="Toggle section">
+      <button
+        class="caret"
+        onclick={() => toggleCollapse(node.sec.id)}
+        aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
+        aria-expanded={isOpen}
+      >
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       <Icon name="folder" size={12} />
       <span class="sec-name grow ellipsis">{node.sec.name}</span>
-      <span class="count">{nodeCount(node)}</span>
+      {#if nodeCount(node) > 0}<span class="count">{nodeCount(node)}</span>{/if}
       <div class="sec-actions">
         <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
           <Icon name="plus" size={11} />
@@ -1143,8 +1262,8 @@
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name">{c.name}</span>
       <span class="kind-tag mono">{c.kind}</span>
-      {#if opening[c.id]}<span class="env-badge mono">…</span>{/if}
-      {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
+      {#if opening[c.id]}<span class="kind-tag" title="Opening…">…</span>{/if}
+      {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">
       {#if auth.isRoot || connectionAccess(c,'manage_access','admin')}<button class="icon-btn" aria-label={`Access for ${c.name}`} title="Access" onclick={() => accessFor=c}><Icon name="key" size={11} /></button>{/if}
@@ -1189,7 +1308,7 @@
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
       <span class="conn-name">{cl.name}</span>
       <span class="kind-tag mono">kafka</span>
-      {#if envBadge(cl)}<span class="env-badge mono" class:prod={isProdConn(cl)}>{envBadge(cl)}</span>{/if}
+      {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
       <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
@@ -1226,11 +1345,12 @@
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
-  <div class="type-chips" role="tablist" aria-label="Filter by connection type">
+  <div class="type-chips" role="group" aria-label="Filter by connection type">
     {#each FILTER_CHIPS as chip (chip.id)}
       <button
         class="type-chip"
         class:on={filterKind === chip.id}
+        aria-pressed={filterKind === chip.id}
         data-testid="connhub-filter-{chip.id}"
         onclick={() => setFilter(chip.id)}
       >{chip.label}</button>
@@ -1240,7 +1360,20 @@
 
 {#snippet connListBody()}
   {@render connSearchBox()}
-  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
+  {#if database.connectionsError}
+    <!-- A failed load is not "No connections yet" (brokers may still list below). -->
+    <LoadState
+      what="connections"
+      variant="compact"
+      loading={database.connectionsLoading}
+      error={database.connectionsError}
+      empty
+      onretry={() => void database.loadConnections()}
+    />
+  {/if}
+  {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0 && (database.connectionsError || database.connectionsLoading)}
+    {#if !database.connectionsError}<LoadState what="connections" variant="compact" loading empty />{/if}
+  {:else if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
     <div class="conn-empty">
       No connections yet.
       <button class="link" disabled={!auth.isRoot} onclick={newConnection}>New connection →</button>
@@ -1262,7 +1395,7 @@
     {/each}
 
     {#if sections.length > 0}
-      {#if !(filtering && ungrouped.length + ungroupedClusters.length === 0)}
+      {#if !(filtering && !dragReveal && ungrouped.length + ungroupedClusters.length === 0)}
         <!-- Ungrouped doubles as the root / no-section drop target. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -1339,7 +1472,17 @@
               <span class="ellipsis">{q.name}</span>
             </button>
             <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={11} /></button>
-            <button class="icon-btn row-del" onclick={() => database.deleteSavedQuery(q.id)} aria-label="Delete saved query" title="Delete"><Icon name="trash" size={11} /></button>
+            <button
+              class="icon-btn row-del"
+              onclick={async () => {
+                const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
+                  title: 'Delete saved query',
+                  confirmLabel: 'Delete query',
+                });
+                if (ok) void database.deleteSavedQuery(q.id);
+              }}
+              aria-label="Delete saved query “{q.name}”…"
+              title="Delete…"><Icon name="trash" size={11} /></button>
           {/if}
         </div>
       {/each}
@@ -1376,6 +1519,16 @@
       {/if}
     {/if}
   {:else}
+    {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
+    {#if sc}
+      <!-- Which server this tree is: engine mark, name, environment. -->
+      <div class="schema-conn" title="{sc.name} · {sc.kind}">
+        <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
+        <span class="schema-conn-name ellipsis">{sc.name}</span>
+        {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
+        <span class="kind-tag mono">{sc.kind}</span>
+      </div>
+    {/if}
     <SchemaTree />
   {/if}
 {/snippet}
@@ -1423,8 +1576,15 @@
 {/if}
 
 <style>
-  .db-page {
+  .db-root {
     height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+  .db-page {
+    flex: 1;
     display: flex;
     min-height: 0;
     /* Let the page shrink inside its (flex) content pane instead of forcing its
@@ -1551,7 +1711,7 @@
     width: 100%;
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11.5px;
     padding: 8px 6px;
@@ -1567,7 +1727,7 @@
   .link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11.5px;
     padding: 0;
@@ -1602,7 +1762,7 @@
     padding: 6px 8px 2px;
   }
   .conn-head-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1615,13 +1775,14 @@
   }
   /* --- Section hierarchy rows --- */
   .sec-head {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 4px;
     height: 24px;
     padding: 0 6px;
     border-radius: var(--radius-s);
-    cursor: grab;
+    cursor: pointer;
     user-select: none;
     color: var(--text-dim);
   }
@@ -1638,7 +1799,7 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .sec-name {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1663,26 +1824,40 @@
     width: 16px;
     flex-shrink: 0;
   }
+  /* The folder count sits in the same end column as the connection rows'
+     type/env badges: the section's hover actions float over the row end (like
+     .conn-actions) instead of reserving their width, and the count is sized
+     like a badge so the numbers line up with the pills below them. */
   .count {
-    font-size: 9.5px;
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    min-width: 14px;
-    text-align: center;
+    min-width: 16px;
+    text-align: end;
     font-variant-numeric: tabular-nums;
   }
   .sec-actions {
+    position: absolute;
+    inset-inline-end: 2px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     gap: 0;
-    flex-shrink: 0;
+    padding: 1px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
     opacity: 0;
   }
-  .sec-head:hover .sec-actions {
+  .sec-head:hover .sec-actions,
+  .sec-head:focus-within .sec-actions {
     opacity: 1;
   }
   .conn-row.dragging {
     opacity: 0.5;
   }
   .conn-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -1691,14 +1866,24 @@
     flex: 1;
     min-width: 0;
   }
+  /* Hover actions float over the row's end instead of reserving their width in
+     every row — that dead space squeezed the name + type/env badges until names
+     broke mid-word. */
   .conn-actions {
+    position: absolute;
+    inset-inline-end: 2px;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
     gap: 1px;
-    flex-shrink: 0;
+    padding: 1px 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
     opacity: 0;
-    padding-inline-end: 2px;
   }
-  .conn-row:hover .conn-actions {
+  .conn-row:hover .conn-actions,
+  .conn-row:focus-within .conn-actions {
     opacity: 1;
   }
   .conn-glyph {
@@ -1709,7 +1894,7 @@
   }
   .conn-glyph.mysql,
   .conn-glyph.clickhouse {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-glyph.postgres {
     color: #336791;
@@ -1721,7 +1906,7 @@
     color: var(--status-working);
   }
   .conn-row.active .conn-item .conn-glyph {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-name {
     flex: 1;
@@ -1739,6 +1924,7 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  .ss-tabs { display: contents; }
   .side-switch {
     display: flex;
     align-items: center;
@@ -1770,7 +1956,7 @@
   }
   .ss.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .side-body {
     flex: 1;
@@ -1840,7 +2026,7 @@
     font-size: 11px;
   }
   .hist-meta {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
@@ -1851,6 +2037,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    container: dbmain / inline-size;
   }
   /* Production connection → a persistent red rail down the main area. */
   .db-main.danger-rail {
@@ -1878,27 +2065,32 @@
     border-bottom-color: color-mix(in srgb, var(--status-exited) 40%, transparent);
     font-weight: 600;
   }
-  /* Environment badge on connection tabs / rows. */
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
   /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
      env badge keeps the color signal. */
+  .schema-conn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 6px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    min-width: 0;
+  }
+  .schema-conn-name {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-s);
+    font-weight: 600;
+  }
   .kind-tag {
     flex-shrink: 0;
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.03em;
     padding: 1px 5px;
     border-radius: 999px;
-    color: var(--text-3);
-    background: color-mix(in srgb, var(--text-3) 12%, transparent);
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
   /* Type-filter chips under the tree search. */
   .type-chips {
@@ -1906,28 +2098,24 @@
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 8px 6px;
-    border-bottom: 1px solid var(--border-1);
+    border-bottom: 1px solid var(--border);
   }
   .type-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
-    border: 1px solid var(--border-1);
+    border: 1px solid var(--border);
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-dim);
     cursor: pointer;
   }
   .type-chip:hover {
-    background: var(--bg-2);
+    background: var(--surface-2);
   }
   .type-chip.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   /* Prod / guarded connection tabs get a tinted edge. */
   .conn-tab.prod {
@@ -1959,7 +2147,7 @@
     font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-radius: 999px;
     padding: 1px 6px;
@@ -2010,7 +2198,7 @@
   }
   .conn-tab-glyph.mysql,
   .conn-tab-glyph.clickhouse {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-tab-glyph.postgres {
     color: #336791;
@@ -2022,7 +2210,7 @@
     color: var(--status-working);
   }
   .conn-tab.active .conn-tab-glyph {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .conn-tab-name {
     min-width: 0;
@@ -2051,40 +2239,62 @@
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);
     color: var(--text);
   }
+  /* Workbench toolbar: the view switch (segmented) + connection status/actions. */
   .main-tabs {
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 8px 14px 0;
+    gap: 8px;
+    height: 44px;
+    box-sizing: border-box;
+    padding: 0 16px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
-  .mt {
-    height: 30px;
-    padding: 0 13px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+  .view-switch {
+    flex-shrink: 0;
   }
-  .mt:hover {
-    color: var(--text);
+  .view-switch .mt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 11px;
   }
-  .mt.active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
+  .view-switch .mt :global(svg) {
+    opacity: 0.75;
+  }
+  .view-switch .mt.active :global(svg) {
+    opacity: 1;
+  }
+  .view-switch .mt:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: 1px;
   }
   .conn-status {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-bottom: 4px;
+    min-width: 0;
+  }
+  /* A narrower workbench first sheds the redundant status (the engine is on
+     the schema header too, the version is in the dot's tooltip); only a
+     phone-narrow one drops the view words and keeps the icons. */
+  @container dbmain (max-width: 900px) {
+    .cap-chip,
+    .health-ver,
+    .health-lat {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 600px) {
+    .view-switch .mt {
+      font-size: 0;
+      gap: 0;
+      padding: 0 9px;
+    }
   }
   .cap-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -2143,7 +2353,7 @@
     white-space: nowrap;
   }
   .health-lat {
-    color: var(--text-faint, var(--text-dim));
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
@@ -2211,7 +2421,7 @@
     gap: 8px;
     padding: 6px 0;
     border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-    background: var(--surface, #1c1c1e);
+    background: var(--surface);
   }
   .rail-btn {
     display: flex;
@@ -2221,18 +2431,18 @@
     height: 22px;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: var(--radius-s, 5px);
-    background: var(--surface-2, #323238);
-    color: var(--text, #f2f2f5);
+    background: var(--surface-2);
+    color: var(--text);
     cursor: pointer;
   }
   .rail-btn:hover {
-    border-color: var(--accent, #0a84ff);
+    border-color: var(--accent);
   }
   .rail-label {
     writing-mode: vertical-rl;
     font-size: 9px;
     letter-spacing: 0.12em;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     user-select: none;
   }
   .db-side.collapsed {
@@ -2283,7 +2493,6 @@
        overflow:hidden and fixed-height — we can't change that from here). */
     .db-page {
       flex-direction: column;
-      height: 100%;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
@@ -2402,9 +2611,15 @@
     /* Let the tab row wrap so the engine chip + Test button drop to their own
        line on the narrowest phones instead of jutting past the edge. */
     .main-tabs {
-      padding: 8px 12px 0;
+      height: auto;
+      min-height: 44px;
+      padding: 6px 12px;
       flex-wrap: wrap;
       row-gap: 4px;
+    }
+    .view-switch {
+      max-width: 100%;
+      overflow-x: auto;
     }
     /* The flexible spacer would push conn-status onto an overflowing line —
        make it a full-width break so the status wraps cleanly below the tabs. */
@@ -2412,13 +2627,10 @@
       flex-basis: 100%;
       height: 0;
     }
-    .conn-status {
-      padding-bottom: 8px;
-    }
-    .mt {
-      height: 36px;
-      font-size: 13.5px;
-      padding: 0 12px;
+    .view-switch .mt {
+      height: 30px;
+      font-size: var(--fs-m);
+      padding: 0 10px;
     }
     .conn-name {
       font-size: 14px;
@@ -2450,6 +2662,9 @@
       max-width: 45vw;
     }
     .main-tabs {
+      height: auto;
+      min-height: 44px;
+      padding: 6px 12px;
       flex-wrap: wrap;
       row-gap: 4px;
     }

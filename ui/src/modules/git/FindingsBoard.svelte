@@ -14,8 +14,9 @@
     FindingStatus,
     FindingSeverity,
   } from '../../lib/api/types';
-  import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { findingBus } from '../../lib/events.svelte';
   import FindingActions from './FindingActions.svelte';
   import ProofPackView from './ProofPackView.svelte';
@@ -28,6 +29,8 @@
 
   let findings: Finding[] = $state([]);
   let loading = $state(true);
+  /** Failed list load — inline with Retry, never "No tracked findings". */
+  let loadError = $state<string | null>(null);
   let expanded: Record<string, boolean> = $state({});
   let details: Record<string, FindingDetail> = $state({});
   let detailLoading: Record<string, boolean> = $state({});
@@ -60,8 +63,9 @@
     loading = true;
     try {
       findings = await listFindings(rid);
+      loadError = null;
     } catch (e) {
-      toasts.error('Could not load findings', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -72,6 +76,7 @@
     try {
       const next = await listFindings(reviewId);
       findings = next;
+      loadError = null;
       // Refresh any open detail so its timeline reflects the new events.
       for (const id of Object.keys(expanded)) {
         if (expanded[id] && details[id]) void loadDetail(id, true);
@@ -155,7 +160,9 @@
     </button>
   </div>
 
-  {#if loading}
+  {#if loadError && findings.length === 0}
+    <LoadState what="findings" {loading} error={loadError} empty onretry={() => void load(reviewId)} />
+  {:else if loading}
     <Skeleton rows={3} height={48} />
   {:else if findings.length === 0}
     <p class="dim fb-empty">No tracked findings for this review yet.</p>
@@ -311,7 +318,7 @@
     flex-wrap: wrap;
   }
   .fb-count { font-size: 12.5px; font-weight: 600; }
-  .fb-hchip { font-size: 10.5px; }
+  .fb-hchip { font-size: var(--fs-xs); }
   .fb-empty { font-size: 12.5px; padding: 12px 0; }
 
   /* Filters */
@@ -341,11 +348,11 @@
     line-height: 1.6;
   }
   .fb-pill:hover { color: var(--text); }
-  /* Active filter pill: high-contrast light-green + black (selection-contrast rule). */
+  /* Active filter pill: the accent tint every selection uses. */
   .fb-pill.active {
-    background: #7ee787;
-    color: #000;
-    border-color: #7ee787;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     font-weight: 600;
   }
 
@@ -378,7 +385,7 @@
   }
   .fb-cat {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: var(--radius-s, 4px);
     padding: 1px 6px;
     text-transform: capitalize;
@@ -392,19 +399,19 @@
   }
   .fb-reviewer { font-size: 11px; }
   .fb-artifact {
-    font-size: 10px;
-    background: color-mix(in srgb, #7ee787 16%, transparent);
+    font-size: var(--fs-xs);
+    background: color-mix(in srgb, var(--success) 16%, transparent);
     color: var(--text);
   }
   .fb-jira { text-decoration: none; }
   .fb-jira:hover { text-decoration: underline; }
   .fb-regress-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--status-warn) 18%, transparent);
     color: var(--status-warn);
   }
   .fb-gate-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--status-warn) 20%, transparent);
     color: var(--status-warn);
   }
@@ -420,7 +427,7 @@
   }
   .fb-field { display: flex; flex-direction: column; gap: 3px; }
   .fb-field-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -449,9 +456,9 @@
 
   /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
   .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .chip.status-fixed { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .chip.status-verified { background: #7ee787; color: #000; font-weight: 700; }
+  .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 700; }
   .chip.status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
   .chip.status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
@@ -459,7 +466,7 @@
   .chip.sev2-critical { background: var(--status-exited); color: #fff; font-weight: 700; }
   .chip.sev2-high { background: color-mix(in srgb, var(--status-exited) 20%, transparent); color: var(--status-exited); }
   .chip.sev2-medium { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .chip.sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .chip.sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .chip.sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
   /* The filter pills reuse status-/sev2- classes for their idle tint, but the

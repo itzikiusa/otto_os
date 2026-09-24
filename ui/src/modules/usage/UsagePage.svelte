@@ -5,6 +5,9 @@
   // All data comes from the daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { usage } from '../../lib/api/usage.svelte';
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
@@ -193,13 +196,15 @@
   const AXIS_B = 22;  // bottom margin for x-axis labels
 
   const dailyCosts = $derived((usage.summary?.daily ?? []).map((d) => d.cost_usd));
-  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0.001));
+  const dailyMaxCost = $derived(Math.max(...dailyCosts, 0));
   const dailyDays = $derived(usage.summary?.daily ?? []);
 
   // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value.
+  // The step never drops below one cent: sub-cent steps all format as
+  // "<$0.01", so a near-zero window used to print the same label three times.
   const yTicks = $derived.by(() => {
     const top = dailyMaxCost;
-    const raw = top / 3;
+    const raw = Math.max(top / 3, 0.01);
     // Pick a magnitude step that gives readable labels.
     const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
     const nice = Math.ceil(raw / mag) * mag;
@@ -247,10 +252,10 @@
     cache_write_tokens: number;
   };
   const TOKEN_CATS = [
-    { label: 'Input', color: 'var(--accent)', pick: (o: TokenParts) => o.input_tokens },
-    { label: 'Cache write', color: '#f59e0b', pick: (o: TokenParts) => o.cache_write_tokens },
-    { label: 'Cache read', color: '#10b981', pick: (o: TokenParts) => o.cache_read_tokens },
-    { label: 'Output', color: '#8b5cf6', pick: (o: TokenParts) => o.output_tokens },
+    { label: 'Input', color: 'var(--cat-1)', pick: (o: TokenParts) => o.input_tokens },
+    { label: 'Cache write', color: 'var(--cat-2)', pick: (o: TokenParts) => o.cache_write_tokens },
+    { label: 'Cache read', color: 'var(--cat-3)', pick: (o: TokenParts) => o.cache_read_tokens },
+    { label: 'Output', color: 'var(--cat-4)', pick: (o: TokenParts) => o.output_tokens },
   ] as const;
 
   type Seg = { label: string; color: string; v: number; pct: number };
@@ -299,56 +304,61 @@
 </script>
 
 <div class="usage">
-  <header class="usage-head">
-    <div class="title">
-      <Icon name="chart" size={16} />
-      <h1>Usage &amp; Metrics</h1>
+  <PageHeader title="Usage & Metrics" icon="chart">
+    {#snippet badge()}
       {#if usage.status?.available}
         <span class="pill ok" title={usage.status.version ?? ''}>ClickHouse</span>
       {/if}
-    </div>
-    <div class="grow"></div>
-    {#if usage.status?.available}
-      <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
-        <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
-          Otto
-        </button>
-        <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
-          All
-        </button>
-      </div>
-      <div class="seg">
-        {#each WINDOWS as w (w.days)}
-          <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
-            {w.label}
+    {/snippet}
+    {#snippet tabs()}
+      {#if usage.status?.available}
+        <div class="seg" title="Scope: only sessions run inside Otto, or all Claude/codex usage on this machine">
+          <button class="seg-btn" class:active={usage.ottoOnly} onclick={() => usage.setOttoOnly(true)}>
+            Otto
           </button>
-        {/each}
-      </div>
-      <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
-        <Icon name="refresh" size={13} /> Refresh
-      </button>
-      <button
-        class="btn"
-        class:active={usage.autoRefresh}
-        onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
-        title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
-      >
-        <Icon name="clock" size={13} />
-        {usage.autoRefresh ? 'Live' : 'Auto'}
-      </button>
-      <button
-        class="btn"
-        disabled={!usage.summary}
-        onclick={() => usage.exportSummaryJson()}
-        title="Download full summary as JSON"
-      >
-        <Icon name="download" size={13} /> Export
-      </button>
-      <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings">
-        <Icon name="gear" size={13} />
-      </button>
-    {/if}
-  </header>
+          <button class="seg-btn" class:active={!usage.ottoOnly} onclick={() => usage.setOttoOnly(false)}>
+            All
+          </button>
+        </div>
+        <div class="seg">
+          {#each WINDOWS as w (w.days)}
+            <button class="seg-btn" class:active={usage.days === w.days} onclick={() => usage.setDays(w.days)}>
+              {w.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      {#if usage.status?.available}
+        <button class="btn" onclick={() => usage.loadAll()} disabled={usage.loading} title="Refresh">
+          <Icon name="refresh" size={13} /> Refresh
+        </button>
+        <button
+          class="btn"
+          class:active={usage.autoRefresh}
+          onclick={() => usage.setAutoRefresh(!usage.autoRefresh)}
+          title={usage.autoRefresh ? 'Auto-refresh ON — click to stop' : 'Auto-refresh OFF — click to enable (refreshes every 60s)'}
+          data-label={usage.autoRefresh ? 'Stop auto-refresh' : 'Auto-refresh every 60s'}
+        >
+          <Icon name="clock" size={13} />
+          {usage.autoRefresh ? 'Live' : 'Auto'}
+        </button>
+        <button
+          class="btn"
+          disabled={!usage.summary}
+          onclick={() => usage.exportSummaryJson()}
+          title="Download full summary as JSON"
+          data-label="Export JSON"
+        >
+          <Icon name="download" size={13} /> Export
+        </button>
+        <button class="btn" class:active={configOpen} onclick={() => (configOpen = !configOpen)} title="Settings" aria-label="Usage settings" data-label="Settings">
+          <Icon name="gear" size={13} />
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
 
   <!-- Live budget-exceeded banner (driven by BudgetExceeded WS event).
        Dismissible; clears automatically on a "recovered" event. -->
@@ -371,13 +381,25 @@
   {/if}
 
   {#if !auth.isRoot}
-    <div class="empty">
-      <Icon name="gauge" size={28} />
-      <p>Usage analytics are available to the root account.</p>
-    </div>
-  {:else if usage.loading && !usage.status}
-    <div class="empty"><p>Loading…</p></div>
-  {:else if !usage.status?.available}
+    <EmptyState
+      variant="page"
+      icon="gauge"
+      title="Usage is root-only"
+      body="Usage analytics are available to the root account."
+    />
+  {:else if !usage.status}
+    <!-- Status unknown (loading, or /usage/status failed): never fall through to
+         the "Install ClickHouse" prompt — a failed load is not "not installed". -->
+    <LoadState
+      what="usage"
+      variant="page"
+      rows={6}
+      loading={usage.loading || !usage.statusError}
+      error={usage.statusError}
+      empty
+      onretry={() => void usage.loadAll()}
+    />
+  {:else if !usage.status.available}
     <!-- ClickHouse not installed: install / configure prompt -->
     <div class="install card">
       <Icon name="db" size={26} />
@@ -426,6 +448,16 @@
     </div>
   {:else}
     <div class="body">
+      {#if usage.summaryError}
+        <!-- Summary failed: inline error (no data yet) or a stale-data bar. -->
+        <LoadState
+          what="usage summary"
+          loading={usage.loading}
+          error={usage.summaryError}
+          empty={!usage.summary}
+          onretry={() => void usage.loadAll()}
+        />
+      {/if}
       <!-- Stat cards -->
       {#if usage.summary}
         <div class="cards">
@@ -542,7 +574,9 @@
               </button>
             {/if}
           </div>
-          {#if usage.summary && usage.summary.daily.length > 0}
+          {#if usage.summary && usage.summary.daily.length > 0 && dailyMaxCost === 0}
+            <p class="dim small" data-testid="daily-cost-empty">No spend recorded in this window.</p>
+          {:else if usage.summary && usage.summary.daily.length > 0}
             {@const days = dailyDays}
             {@const n = days.length}
             <svg
@@ -710,6 +744,14 @@
               </p>
             {/each}
           {/if}
+        {:else if usage.budgetsError}
+          <LoadState
+            what="budgets"
+            variant="compact"
+            error={usage.budgetsError}
+            empty
+            onretry={() => void usage.loadBudgets()}
+          />
         {:else}
           <p class="dim small">No budgets set. Configure caps to track spend against a target.</p>
         {/if}
@@ -977,30 +1019,8 @@
     flex-direction: column;
     overflow: hidden;
   }
-  .usage-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    flex-wrap: wrap;
-  }
-  .title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-  }
-  .title h1 {
-    font-size: 15px;
-    margin: 0;
-  }
-  .grow {
-    flex: 1;
-  }
   .pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 7px;
     border-radius: 999px;
@@ -1013,6 +1033,8 @@
   }
   .seg {
     display: flex;
+    flex-shrink: 0;
+    margin-inline-end: 6px;
     background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 2px;
@@ -1049,12 +1071,18 @@
   }
   .btn.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
+  /* The local .btn above re-sets the background at the same specificity as the
+     global .btn.primary, so restate the global primary from tokens (no #fff —
+     Warm dark's accent fill carries dark text). */
   .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: transparent;
+    color: var(--accent-contrast);
+  }
+  .btn.primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent-solid) 88%, black);
   }
   .btn:disabled {
     opacity: 0.55;
@@ -1064,7 +1092,7 @@
   .body {
     flex: 1;
     overflow-y: auto;
-    padding: 16px;
+    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -1283,7 +1311,7 @@
   }
   .axis-label {
     fill: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .y-label {
@@ -1327,7 +1355,7 @@
     stroke: var(--accent);
   }
   .spark-mem {
-    stroke: #10b981;
+    stroke: var(--success);
   }
 
   /* Sessions leaderboard: fixed column header + VirtualList rows ----------- */
@@ -1402,38 +1430,14 @@
   }
   .kind-badge {
     flex-shrink: 0;
-    font-size: 9.5px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    /* Kinds are categories, not statuses: one neutral chip, told apart by the
+       word (foundations.md — no categorical rainbows). */
+    background: var(--surface-2);
     color: var(--text-dim);
-  }
-  .kind-review {
-    background: color-mix(in srgb, #f59e0b 20%, transparent);
-    color: #b45309;
-  }
-  .kind-product {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
-  }
-  .kind-channel {
-    background: color-mix(in srgb, var(--status-working, #4a9eff) 20%, transparent);
-    color: var(--status-working, #4a9eff);
-  }
-  .kind-agent {
-    background: color-mix(in srgb, #8b5cf6 20%, transparent);
-    color: #8b5cf6;
-  }
-  .kind-swarm {
-    background: color-mix(in srgb, #10b981 22%, transparent);
-    color: #0f9d6e;
-  }
-  .kind-connection {
-    background: color-mix(in srgb, #64748b 22%, transparent);
-    color: #64748b;
   }
 
   /* By-feature rows: widen the label column so the feature badge fits. */
@@ -1484,16 +1488,6 @@
   .input.mono,
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-
-  .empty {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
   }
 
   .install {
@@ -1564,7 +1558,7 @@
   .link-btn {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
     padding: 0;
@@ -1573,7 +1567,7 @@
     text-decoration: underline;
   }
   .link-btn.danger {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
   .budget-rows {
     display: flex;
@@ -1603,18 +1597,18 @@
     white-space: nowrap;
   }
   .budget-row.warn .bar-fill {
-    background: var(--warn, #d08a18);
+    background: var(--warning);
   }
   .budget-row.over .bar-fill {
-    background: var(--danger, #c0392b);
+    background: var(--danger);
   }
   .warn-tag {
-    color: var(--warn, #d08a18);
+    color: var(--warning);
     font-weight: 600;
     margin-inline-start: 4px;
   }
   .over-tag {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
     font-weight: 600;
     margin-inline-start: 4px;
     text-transform: uppercase;
@@ -1627,14 +1621,14 @@
     padding: 8px 12px;
     margin: 0 0 8px;
     border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
     font-size: 12.5px;
   }
   .budget-banner.recovered {
-    background: color-mix(in srgb, var(--success, #27ae60) 12%, transparent);
-    border-color: color-mix(in srgb, var(--success, #27ae60) 40%, transparent);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--success) 40%, transparent);
   }
   .budget-banner span {
     flex: 1;
@@ -1655,8 +1649,8 @@
     margin-top: 10px;
     padding: 8px 10px;
     border-radius: var(--radius-s, 6px);
-    background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--text);
     font-size: 12px;
   }
@@ -1720,14 +1714,6 @@
   }
 
   @media (max-width: 640px) {
-    .usage-head {
-      padding: 8px 12px;
-      gap: 6px;
-    }
-    /* The grow spacer collapses so the seg groups wrap to their own rows */
-    .grow {
-      flex-basis: 100%;
-    }
     .body {
       padding: 10px;
     }
@@ -1831,8 +1817,8 @@
     padding: 1px 4px;
     border-radius: 3px;
     margin-inline-start: 4px;
-    background: color-mix(in srgb, #f59e0b 22%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
     vertical-align: middle;
   }
 
@@ -1853,7 +1839,7 @@
     gap: 1px;
   }
   .model-name {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     overflow: hidden;
     text-overflow: ellipsis;

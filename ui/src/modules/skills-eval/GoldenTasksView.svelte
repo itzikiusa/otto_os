@@ -5,6 +5,7 @@
   // add/edit/delete a task and kick off a single score-only run against the
   // workspace's working tree — the result opens in the run detail via `onopenrun`.
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { GoldenTask, GoldenTaskReq, SkillEval } from '../../lib/api/types';
@@ -158,7 +159,7 @@
   }
 
   async function remove(t: GoldenTask): Promise<void> {
-    if (!window.confirm(`Delete golden task “${t.name}”? This cannot be undone.`)) return;
+    if (!(await confirmer.ask(`Delete golden task “${t.name}”? This cannot be undone.`, { title: 'Delete golden task' }))) return;
     try {
       await skillsEvalApi.deleteGolden(t.id);
       tasks = tasks.filter((x) => x.id !== t.id);
@@ -441,7 +442,7 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: 999px;
     padding: 0 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .gt-card {
     border: 1px solid var(--border);
@@ -476,11 +477,11 @@
   }
   /* Run / pass affordance: high-contrast light-green. */
   .btn.gt-run {
-    color: #7ee787;
-    border-color: color-mix(in srgb, #7ee787 45%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 45%, transparent);
   }
   .btn.gt-run:hover {
-    background: color-mix(in srgb, #7ee787 16%, transparent);
+    background: color-mix(in srgb, var(--success) 16%, transparent);
   }
   .gt-badge {
     font-size: 9.5px;
@@ -492,9 +493,9 @@
     flex-shrink: 0;
   }
   .gt-badge.regression {
-    color: #f5a623;
-    background: color-mix(in srgb, #f5a623 20%, transparent);
-    border: 1px solid color-mix(in srgb, #f5a623 42%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
   }
   .gt-badge.muted {
     color: var(--text-dim);
@@ -544,7 +545,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

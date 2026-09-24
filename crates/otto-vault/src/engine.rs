@@ -363,6 +363,17 @@ impl VaultEngine {
         }
     }
 
+    /// Rescan after a filesystem mutation that has ALREADY succeeded (move to
+    /// trash, rename, restore). A scan failure here must not turn the call
+    /// into an error: the UI would stay on the old path and later recreate
+    /// the moved note there. Log it and retry in the background instead.
+    pub(crate) async fn rescan_after_mutation(self: &Arc<Self>, id: i64) {
+        if let Err(e) = self.scan(id).await {
+            tracing::warn!(vault = id, error = %e, "vault rescan after mutation failed; retrying in background");
+            self.kick_scan(id);
+        }
+    }
+
     /// Incremental scan (parse changed, drop removed, re-resolve links).
     /// Explicit scans always run after acquiring the lock: an older scan may
     /// have walked a path before our write, even if it completed after it.
@@ -455,8 +466,16 @@ impl VaultEngine {
             }
             let prepared = match self.preparation.file(root.join(&rel), rel.clone()).await {
                 Ok(note) => note,
-                Err(_) => {
+                // Transient (changed mid-read, canceled): retry the scan.
+                Err(Error::Conflict(_)) => {
                     incomplete = true;
+                    continue;
+                }
+                // A persistent per-file problem (unreadable, not a regular
+                // file) must not fail every scan forever: the path is present
+                // in the walk, so skipping it cannot prune anything wrongly.
+                Err(e) => {
+                    tracing::warn!(vault = id, path = %rel, error = %e, "vault note skipped by scan");
                     continue;
                 }
             };
@@ -536,7 +555,21 @@ impl VaultEngine {
                 }
                 match tokio::fs::symlink_metadata(root.join(&rel)).await {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => {
+                    // Something answers at this path: only a byte-exact
+                    // regular file is the indexed entry reappearing. A case
+                    // variant (APFS case-only rename) or a symlink is not.
+                    Ok(_) => {
+                        let (root_owned, rel_owned) = (root.to_path_buf(), rel.clone());
+                        let exact = tokio::task::spawn_blocking(move || {
+                            scan::exact_regular_file(&root_owned, &rel_owned)
+                        })
+                        .await;
+                        if !matches!(exact, Ok(Ok(false))) {
+                            incomplete = true;
+                            continue;
+                        }
+                    }
+                    Err(_) => {
                         incomplete = true;
                         continue;
                     }
@@ -625,6 +658,24 @@ impl VaultEngine {
             }
         }
         Ok(target)
+    }
+
+    /// Fully canonicalized path of an EXISTING `rel` for reads that follow the
+    /// path (asset streaming, backlink context). `abs_guarded` only vets the
+    /// parent, so a final-component symlink (`logo.png -> ~/.ssh/id_rsa`)
+    /// escaped the vault; here the resolved target itself must stay inside.
+    pub(crate) fn abs_confined(root: &str, rel: &str) -> Result<PathBuf> {
+        let rootc = Path::new(root)
+            .canonicalize()
+            .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
+        let resolved = rootc
+            .join(rel)
+            .canonicalize()
+            .map_err(|_| Error::NotFound(rel.to_string()))?;
+        if !resolved.starts_with(&rootc) {
+            return Err(Error::Forbidden("path escapes the vault".into()));
+        }
+        Ok(resolved)
     }
 
     /// Open (and create where absent) every parent component relative to a held
@@ -1033,7 +1084,7 @@ impl VaultEngine {
         )
         .map_err(|e| Error::Internal(format!("trash move: {e}")))?;
         drop(publication);
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(())
     }
 
@@ -1147,6 +1198,14 @@ impl VaultEngine {
         }
         let moved_new_to_old: HashMap<&String, &String> =
             moved.iter().map(|(o, n)| (n, o)).collect();
+        // …and AFTER it: every rewritten raw is checked against this so a
+        // shortened form can never land on a different note (a same-folder
+        // or now-ambiguous basename wins over the moved target).
+        let mut ix_after = ix_before.clone();
+        for (old, new) in &moved {
+            ix_after.remove(old);
+            ix_after.insert(new.clone());
+        }
 
         let mut links_updated = 0i64;
         for src in &affected {
@@ -1165,26 +1224,27 @@ impl VaultEngine {
             let new_content = parse::rewrite_links(&content, |kind, raw| {
                 let dst_old = ix_before.resolve(&src_before, raw)?;
                 let moved_to = moved.get(&dst_old);
-                let src_dir_now = src_now.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
                 let src_moved = src_before != src_now;
-                match (moved_to, src_moved, kind) {
-                    // Target moved → point at its new home, preserving style.
-                    (Some(new_dst), _, k) => {
-                        count_here += 1;
-                        Some(new_raw_for(raw, k, src_dir_now, new_dst))
-                    }
-                    // Target stayed, but THIS note moved and uses a relative md
-                    // link → recompute the relative path from the new folder.
-                    (None, true, "md") => {
-                        if raw.starts_with('/') {
-                            None
-                        } else {
-                            count_here += 1;
-                            Some(relative_path(src_dir_now, &dst_old))
-                        }
-                    }
-                    _ => None,
+                if moved_to.is_none() && !src_moved {
+                    return None;
                 }
+                let desired = moved_to.unwrap_or(&dst_old);
+                // Still lands on the same note from where the source now
+                // lives (unchanged basename, `/`-absolute to a stayed note…).
+                if ix_after.resolve(&src_now, raw).as_ref() == Some(desired) {
+                    return None;
+                }
+                let src_dir_now = src_now.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                // Target moved → its new home in the link's own style; target
+                // stayed but THIS note moved → recompute relative forms (md,
+                // wiki and embeds alike) from the new folder.
+                let styled = new_raw_for(raw, kind, src_dir_now, desired);
+                let fixed = resolving_raw(&ix_after, &src_now, kind, styled, desired);
+                if fixed == raw {
+                    return None;
+                }
+                count_here += 1;
+                Some(fixed)
             });
             if new_content != content && count_here > 0 {
                 let revision = Self::prepare_revision(
@@ -1206,7 +1266,7 @@ impl VaultEngine {
         // One scan picks up the moved files, rewritten sources, and re-resolves
         // everything (including newly-ambiguous basenames).
         drop(publication);
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(RenameResult {
             from: from_rel,
             to: to_rel,
@@ -1405,28 +1465,30 @@ impl VaultEngine {
         let mut out = Vec::new();
         for (src, title, kind) in self.store.backlinks(id, &rel).await? {
             // Context: first line mentioning the target (wikilink or md link).
-            let abs = Self::abs_guarded(&v.root_path, &src)?;
-            let context = tokio::fs::read_to_string(&abs)
-                .await
-                .ok()
-                .and_then(|c| {
-                    let stem = rel.rsplit('/').next().unwrap_or(&rel);
-                    let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
-                    c.lines()
-                        .find(|l| {
-                            let ll = l.to_lowercase();
-                            ll.contains(&stem_noext) || ll.contains(&rel.to_lowercase())
-                        })
-                        .map(|l| {
-                            let t = l.trim();
-                            if t.chars().count() > 240 {
-                                t.chars().take(240).collect::<String>()
-                            } else {
-                                t.to_string()
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            // A source that resolves outside the vault contributes no context.
+            let abs = Self::abs_confined(&v.root_path, &src).ok();
+            let context = match abs {
+                Some(abs) => tokio::fs::read_to_string(&abs).await.ok(),
+                None => None,
+            }
+            .and_then(|c| {
+                let stem = rel.rsplit('/').next().unwrap_or(&rel);
+                let stem_noext = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
+                c.lines()
+                    .find(|l| {
+                        let ll = l.to_lowercase();
+                        ll.contains(&stem_noext) || ll.contains(&rel.to_lowercase())
+                    })
+                    .map(|l| {
+                        let t = l.trim();
+                        if t.chars().count() > 240 {
+                            t.chars().take(240).collect::<String>()
+                        } else {
+                            t.to_string()
+                        }
+                    })
+            })
+            .unwrap_or_default();
             out.push(Backlink {
                 path: src,
                 title,
@@ -1441,7 +1503,10 @@ impl VaultEngine {
     pub async fn asset_path(&self, ws: &str, id: i64, path: &str) -> Result<PathBuf> {
         let v = self.get_scoped(ws, id).await?;
         let rel = Self::check_rel(path)?;
-        let abs = Self::abs_guarded(&v.root_path, &rel)?;
+        let abs = Self::abs_confined(&v.root_path, &rel).map_err(|e| match e {
+            Error::NotFound(_) => Error::NotFound(format!("asset {rel}")),
+            other => other,
+        })?;
         if !abs.is_file() {
             return Err(Error::NotFound(format!("asset {rel}")));
         }
@@ -1798,6 +1863,29 @@ fn new_raw_for(old_raw: &str, kind: &str, src_dir_now: &str, new_dst: &str) -> S
                 base.to_string()
             }
         }
+    }
+}
+
+/// `styled` if it resolves (from `src`) to `dst`; otherwise the full vault
+/// path, then the `/`-absolute form — so a rewrite never retargets a link to a
+/// different note that happens to share the shortened name.
+fn resolving_raw(ix: &ResolveIndex, src: &str, kind: &str, styled: String, dst: &str) -> String {
+    let lands = |cand: &str| ix.resolve(src, cand).as_deref() == Some(dst);
+    if lands(&styled) {
+        return styled;
+    }
+    let full = if kind == "md" || styled.to_ascii_lowercase().ends_with(".md") {
+        dst.to_string()
+    } else {
+        dst.strip_suffix(".md").unwrap_or(dst).to_string()
+    };
+    let absolute = format!("/{full}");
+    if lands(&full) {
+        full
+    } else if lands(&absolute) {
+        absolute
+    } else {
+        styled
     }
 }
 

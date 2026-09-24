@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Trust & Safety Center (root only): a derived security-posture summary plus
   // the filterable, paged security audit log. Reads `GET /security-posture` and
   // `GET /audit-log`; writes nothing. user_id -> username is resolved from the
@@ -182,13 +185,9 @@
   const canNext = $derived(offset + PAGE_SIZE < total);
 </script>
 
-<div class="page trust-page">
-  <div class="page-header">
-    <div>
-      <h1>Trust &amp; Safety</h1>
-      <div class="sub">Security posture and the append-only audit log.</div>
-    </div>
-    <div class="header-actions">
+<div class="settings-section trust-section">
+  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and the append-only audit log">
+    {#snippet actions()}
       <button
         class="btn"
         disabled={logLoading || postureLoading}
@@ -200,8 +199,9 @@
         <Icon name="refresh" size={13} />
         Refresh
       </button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
+  <PageBody padded={false} fill>
 
   <!-- Security posture summary -->
   <section class="posture">
@@ -331,22 +331,19 @@
       </table>
     {/if}
   </div>
+  </PageBody>
 </div>
 
 <style>
-  .trust-page {
-    height: 100%;
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
     display: flex;
     flex-direction: column;
+    height: 100%;
     min-height: 0;
   }
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
   .posture {
-    padding: 0 24px 14px;
+    padding: 16px 20px 14px;
   }
   .cards {
     display: flex;
@@ -362,10 +359,10 @@
     background: var(--surface-2);
   }
   .card.warn {
-    border-color: color-mix(in srgb, var(--warn, #d08400) 50%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
   }
   .card.ok {
-    border-color: color-mix(in srgb, var(--ok, #2f9e44) 40%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 40%, var(--border));
   }
   .card-label {
     font-size: 11px;
@@ -390,7 +387,7 @@
     flex-wrap: wrap;
     align-items: end;
     gap: 10px;
-    padding: 0 24px 12px;
+    padding: 0 20px 12px;
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
     padding-top: 12px;
@@ -413,7 +410,7 @@
     justify-content: space-between;
     align-items: center;
     gap: 12px;
-    padding: 0 24px;
+    padding: 0 20px;
     color: var(--text-dim);
     font-size: 11.5px;
     border-bottom: 1px solid var(--border);
@@ -426,7 +423,7 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 4px 24px 32px;
+    padding: 4px 20px 32px;
   }
   .empty {
     padding: 24px;
@@ -434,7 +431,7 @@
     font-size: 12.5px;
   }
   .empty.error {
-    color: var(--err, #e03131);
+    color: var(--danger);
   }
   .audit-table {
     width: 100%;
@@ -479,8 +476,8 @@
     font-size: 11px;
   }
   .badge.danger {
-    border-color: color-mix(in srgb, var(--err, #e03131) 45%, var(--border));
-    color: var(--err, #e03131);
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+    color: var(--danger);
   }
 
   /* Quick time-range preset buttons */

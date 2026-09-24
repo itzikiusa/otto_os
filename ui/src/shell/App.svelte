@@ -27,6 +27,8 @@
   import Icon from '../lib/components/Icon.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
+  import FloatingBar from '../lib/components/FloatingBar.svelte';
+  import { barStore } from '../lib/stores/bar.svelte';
   import ShortcutsOverlay from './ShortcutsOverlay.svelte';
   import Handover from '../modules/agents/Handover.svelte';
   import AttachIssue from '../modules/agents/AttachIssue.svelte';
@@ -54,8 +56,11 @@
   import UsagePage from '../modules/usage/UsagePage.svelte';
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
+  import { GUIDES } from '../modules/help/sections';
+  import { availableSections, groupLabel as settingsGroupLabel } from '../modules/settings/sections';
   import ProductPage from '../modules/product/ProductPage.svelte';
   import CanvasPage from '../modules/canvas/CanvasPage.svelte';
+  import DesignHallPage from '../modules/design-hall/DesignHallPage.svelte';
   import InsightsPage from '../modules/insights/InsightsPage.svelte';
   import MissionControlPage from '../modules/mission-control/MissionControlPage.svelte';
   import SwarmPage from '../modules/swarm/SwarmPage.svelte';
@@ -63,6 +68,7 @@
   import ProofPage from '../modules/proof/ProofPage.svelte';
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
+  import AssistantPage from '../modules/assistant/AssistantPage.svelte';
   import AwsPage from '../modules/aws/AwsPage.svelte';
   import KubernetesPage from '../modules/kubernetes/KubernetesPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
@@ -75,6 +81,7 @@
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
+  import { isPopout, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   // Old bookmarks lead to the workspace's existing context editor.
@@ -87,6 +94,7 @@
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
   import { registry } from '../lib/commands.svelte';
+  import { availableModules, groupLabel, moduleLabel } from '../lib/sidebar';
   import { api, baseUrl } from '../lib/api/client';
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
@@ -95,20 +103,39 @@
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
+  // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
+  // view behind the page, so the document goes transparent and ONLY chrome
+  // lets it through — the sidebar's `.sidebar-material` 78% tint and the
+  // titlebar strips — while `.center` / right panel / status bar stay opaque.
+  // Off for the full-screen routes (snip editor, share view) and under
+  // reduced transparency (CSS below).
+  const vibrant = $derived(
+    isTauri && (viewport.isDesktop || isPopout) && router.module !== 'snip' && router.module !== 's',
+  );
+  $effect(() => {
+    document.documentElement.classList.toggle('otto-vibrant', vibrant);
+    return () => document.documentElement.classList.remove('otto-vibrant');
+  });
+  // Phone top-bar title: the registry label ("Mission Control", "Skills Lab"),
+  // a plugin's own name, never the raw route id.
+  const moduleTitle = $derived(
+    moduleName === 'plugin'
+      ? (plugins.list.find((p) => p.slug === router.parts[1])?.name ?? 'Plugin')
+      : moduleLabel(moduleName),
+  );
+  // The phone Navigator drawer closes on every navigation (tapping a module or
+  // a session row in it should land on that page, not leave it covered).
+  $effect(() => {
+    void router.parts.join('/');
+    ui.navDrawerOpen = false;
+  });
+
   // The right activity panel (Git/Files/Notes/Activity/Info/Browser/API) is only
   // meaningful for coding-agent sessions. Connection terminals (SSH / DB / custom,
   // kind === 'connection') are opened from the Connections page but run in the
   // Agents view; they don't need the panel — so gate it on the focused session
   // actually being an agent session.
   const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
-
-  // When the Workflows editor docks its inspector to a right column, that panel
-  // owns the top-right corner — it renders its OWN notification bell in its
-  // header (agents-style) and reaches the window edge. So here we (a) hide the
-  // floating shell bell and (b) drop the 42px bell-gutter that would otherwise
-  // hold the panel 42px short of the edge (the black strip). Every other view
-  // keeps the floating bell + gutter.
-  const wfDocked = $derived(moduleName === 'workflows' && ui.wfDockSide);
 
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
@@ -331,7 +358,10 @@
     return installKeyMap((action, _e, index) => {
       switch (action) {
         case 'palette':
+          // Desktop: ⌘K focuses the floating bar (the one command surface).
+          // Phone/tablet, pop-outs and a hidden bar keep the palette sheet.
           if (ui.paletteOpen) ui.paletteOpen = false;
+          else if (barStore.mounted) barStore.requestFocus();
           else ui.openPalette('commands');
           break;
         case 'askOtto':
@@ -454,34 +484,17 @@
       { id: 'core.split-v', title: 'Split Vertically', group: 'Sessions', shortcut: '⌘D', run: () => ws.split('col') },
       { id: 'core.split-h', title: 'Split Horizontally', group: 'Sessions', shortcut: '⌘⇧D', run: () => ws.split('row') },
       { id: 'core.new-workspace', title: 'Add Workspace', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
-      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Sessions', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
-      { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Sessions', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
-      { id: 'core.go-home', title: 'Go to Home', group: 'Navigate', keywords: 'module home dashboard overview boxes views', run: () => router.go('home') },
-      { id: 'core.go-agents', title: 'Go to Agents', group: 'Navigate', keywords: 'module terminal', run: () => router.go('agents') },
-      { id: 'core.go-connections', title: 'Go to Connections', group: 'Navigate', keywords: 'module ssh mysql redis', run: () => router.go('connections') },
-      { id: 'core.go-git', title: 'Go to Git', group: 'Navigate', keywords: 'module repos prs pull requests', run: () => router.go('git') },
-      { id: 'core.go-api', title: 'Go to API Client', group: 'Navigate', keywords: 'module postman http request rest curl', run: () => router.go('api') },
-      { id: 'core.go-skills-eval', title: 'Go to Skills Lab', group: 'Navigate', keywords: 'module skill lab evaluate validate review edit improve', run: () => router.go('skills-eval') },
-      { id: 'core.go-usage', title: 'Go to Usage & Metrics', group: 'Navigate', keywords: 'module usage cost tokens clickhouse metrics cpu ram billing analytics', run: () => router.go('usage') },
+      { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
+      { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
-      { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
-      { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
-      { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
-      { id: 'core.go-scheduled-tasks', title: 'Go to Scheduled Tasks', group: 'Navigate', keywords: 'module scheduled task cron recurring job report cadence hourly daily', run: () => router.go('scheduled-tasks') },
-      { id: 'core.go-aws', title: 'Go to AWS', group: 'Navigate', keywords: 'module aws amazon cloud s3 bucket sqs queue ec2 instance athena query eks account profile sso', run: () => router.go('aws') },
-      { id: 'core.go-kubernetes', title: 'Go to Kubernetes', group: 'Navigate', keywords: 'module kubernetes k8s kubectl k9s cluster context namespace pod deployment logs exec rollout argo argocd restart', run: () => router.go('kubernetes') },
-      { id: 'core.go-personal-agents', title: 'Go to Personal Agents', group: 'Navigate', keywords: 'module personal agent persona soul bot room chat schedule recap', run: () => router.go('personal-agents') },
-      { id: 'core.go-run-with-otto', title: 'Go to Run with Otto', group: 'Navigate', keywords: 'run with otto one button launch jira github issue pr confluence finding test story channel review proof approval pr draft', run: () => router.go('run-with-otto') },
-      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
-      { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
-      { id: 'core.go-swarm', title: 'Go to Swarm', group: 'Navigate', keywords: 'swarm agents team org orchestrator kanban board company', run: () => router.go('swarm') },
-      { id: 'core.go-loops', title: 'Go to Goal Loops', group: 'Navigate', keywords: 'goal loop iterate autonomous objective plan execute evaluate', run: () => router.go('loops') },
-      { id: 'core.go-proof', title: 'Go to Proof', group: 'Navigate', keywords: 'proof pack evidence badge verified tests ci approval audit', run: () => router.go('proof') },
-      { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
-      { id: 'core.go-mcp', title: 'Go to MCP Control Plane', group: 'Navigate', keywords: 'mcp model context protocol server tool governance allowlist policy approval audit injection risk', run: () => router.go('mcp') },
-      { id: 'core.go-browser', title: 'Go to Browser', group: 'Navigate', keywords: 'browser reader mode tabs annotate url fetch page', run: () => router.go('browser') },
+      { id: 'core.go-walkthroughs', title: 'Open Help', group: 'Navigate', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding', run: () => router.go('walkthroughs') },
+      { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
+      // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
+      // but stays a route of its own — keep it one ⌘K away.
+      { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2', run: () => router.go('canvas') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
+      ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in New Window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toasts.error('Could not open window', e instanceof Error ? e.message : String(e))) }] : []),
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
       { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'Appearance', run: () => ui.setTheme('pro-dark') },
       { id: 'core.theme-warm', title: 'Theme: Warm', group: 'Appearance', run: () => ui.setTheme('warm') },
@@ -492,6 +505,65 @@
     ]);
     return unreg;
   });
+
+  // ---- palette commands: Go to <module> ----
+  // Derived from the sidebar registry (RBAC-filtered + permitted plugins), so
+  // every module is reachable by ⌘K and the list can never drift from the
+  // sidebar. Hidden modules are included on purpose — ⌘K is the way back to
+  // one you've hidden. The sidebar section shows as secondary text.
+  $effect(() => {
+    const pluginEntries = plugins.list
+      .filter((p) => auth.canPlugin(p.slug, 'view'))
+      .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name }));
+    const mods = availableModules((f) => auth.can(f, 'view'), pluginEntries);
+    return registry.register(
+      'nav',
+      mods.map((m) => ({
+        id: `core.go-${m.id}`,
+        title: `Go to ${m.label}`,
+        group: 'Navigate',
+        detail: groupLabel(m.group),
+        keywords: `module ${m.id.replace(/[-/]/g, ' ')} ${groupLabel(m.group)} ${m.keywords ?? ''}`,
+        run: () => router.go(m.id),
+      })),
+    );
+  });
+
+  // ---- palette commands: Settings sections ----
+  // One "Settings: <section>" per section the role can open, generated from
+  // the Settings registry (modules/settings/sections.ts) the same way Go-to
+  // commands come from the sidebar — a new section is ⌘K-reachable for free.
+  $effect(() => {
+    const sections = availableSections(auth);
+    return registry.register(
+      'settings',
+      sections.map((s) => ({
+        id: `settings.${s.id}`,
+        title: `Settings: ${s.label}`,
+        group: 'Settings',
+        detail: settingsGroupLabel(s.group),
+        keywords: `settings preferences ${s.id.replace(/-/g, ' ')} ${s.keywords ?? ''}`,
+        run: () => router.go(`settings/${s.id}`),
+      })),
+    );
+  });
+
+  // ---- palette commands: Help guides ----
+  // One "Guide: <title>" per README in modules/help/sections (static, bundled
+  // at build time), so any guide is ⌘K away from anywhere in the app.
+  $effect(() =>
+    registry.register(
+      'guides',
+      GUIDES.map((g) => ({
+        id: `help.guide.${g.id}`,
+        title: `Guide: ${g.title}`,
+        group: 'Help',
+        detail: g.group,
+        keywords: `help guide readme docs ${g.id.replace(/-/g, ' ')} ${g.summary} ${g.shortcuts.join(' ')}`,
+        run: () => router.go(`walkthroughs/${g.id}`),
+      })),
+    ),
+  );
 
   // ---- palette commands: focused session ----
   // Lifecycle verbs for the currently-active session (mirrors the per-pane ⋯
@@ -554,6 +626,20 @@
     return unreg;
   });
 
+  // ---- palette commands: repos ("open repo <name>") ----
+  $effect(() => {
+    return registry.register(
+      'repos',
+      git.repos.map((r) => ({
+        id: `repo.${r.id}`,
+        title: `Open Repo: ${r.name}`,
+        group: 'Git',
+        keywords: `repository ${r.path}`,
+        run: () => router.go(`git/${r.id}`),
+      })),
+    );
+  });
+
   // ---- palette commands: connections ("connect <name>") ----
   $effect(() => {
     const wsId = ws.currentId;
@@ -600,8 +686,10 @@
   {#key router.parts[1]}
     <SnipEditor />
   {/key}
+  <!-- Its "Delete…" asks first — the shell's own dialog host isn't mounted here. -->
+  <ConfirmDialog />
 {:else}
-<!-- Center column: banners + notification bell + (agents) TabBar + the module
+<!-- Center column: banners + (agents) TabBar + the module
      router. Extracted to a snippet so the desktop 3-pane and the mobile
      single-pane shells render byte-for-byte identical content — only the
      surrounding chrome differs by viewport. -->
@@ -641,19 +729,18 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
     </div>
   {/if}
-  {#if !wfDocked}
-    <div class="bell-anchor" class:tauri-top={isTauri}>
-      <NotificationBell />
-    </div>
-  {/if}
   {#if moduleName === 'agents'}
-    <TabBar bellGutter />
+    <TabBar />
   {/if}
-  <div class="content" class:bell-gutter={moduleName !== 'agents' && !wfDocked}>
+  <div class="content">
     {#if moduleName === 'agents'}
       <AgentsPage />
     {:else if moduleName === 'home'}
       <HomePage />
+    {:else if moduleName === 'assistant'}
+      <!-- Otto Assistant: threads (Spaces 01–04 + Recent) and a chat rendered
+           from the CLI transcript, with Tasks · Memory · Permissions tabs. -->
+      <AssistantPage />
     {:else if moduleName === 'history'}
       <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
            read-only conversation view. `#/history`, not `#/agents/…`, whose
@@ -696,6 +783,10 @@
       <Walkthroughs />
     {:else if moduleName === 'product'}
       <ProductPage />
+    {:else if moduleName === 'design'}
+      <!-- Design Hall: one library for every studio (#/design…). Canvas below
+           stays routable as its Whiteboard studio. -->
+      <DesignHallPage />
     {:else if moduleName === 'canvas'}
       <CanvasPage />
     {:else if moduleName === 'insights'}
@@ -724,8 +815,10 @@
   </div>
 {/snippet}
 
-{#if viewport.isDesktop}
-<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. -->
+{#if viewport.isDesktop || isPopout}
+<!-- DESKTOP (≥1025px): the original, unchanged 3-pane shell. A pop-out window
+     (`?popout=1`, desktop shell `open_popout`) renders the same shell at any
+     width minus the sidebar + status bar, under a slim unified title strip. -->
 <!-- App zoom: Tauri uses the native WKWebView page-zoom (applyNativeZoom). In a
      BROWSER we used to apply CSS `zoom:${ui.zoom}` here, but CSS zoom (a) stretches
      the WebGL terminal canvas (oversized + clipped fit) and (b) breaks click
@@ -733,8 +826,17 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell">
+<div class="shell" class:vibrant>
+  {#if isPopout && isTauri}
+    <!-- Pop-out title strip: the overlaid traffic lights sit in it and it
+         drags the window (double-click zooms), like a unified title bar. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="popout-titlebar sidebar-material" data-tauri-drag-region onmousedown={startWindowDrag}>
+      <span class="popout-title">{popoutTitle()}</span>
+    </div>
+  {/if}
   <div class="shell-main">
+    {#if !isPopout}
     <div class="sidebar" class:tauri-top={isTauri}>
       <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
            window can be moved by dragging the top-left (the native title bar is
@@ -750,9 +852,16 @@
         <Rail />
       {/if}
     </div>
+    {/if}
 
     <div class="center">
       {@render centerContent()}
+      {#if !isPopout && viewport.isDesktop}
+        <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
+             centre over the content column, docking into the status bar
+             while you scroll or type elsewhere. -->
+        <FloatingBar host="app" />
+      {/if}
     </div>
 
     <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
@@ -764,7 +873,9 @@
     {/if}
   </div>
 
-  <StatusBar />
+  {#if !isPopout}
+    <StatusBar />
+  {/if}
 </div>
 {:else}
 <!-- MOBILE (phone ≤640px / tablet 641–1024px): single-pane content with the
@@ -782,7 +893,7 @@
     {#if viewport.isPhone}
       <button
         class="mtop-btn"
-        onclick={() => ui.toggleRail()}
+        onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
         title="Menu"
         aria-label="Open navigator"
       >
@@ -792,8 +903,13 @@
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
          the title so the thumb can reach them comfortably on phone + tablet. -->
     <NavButtons />
-    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName}</span>
+    <span class="mtop-title">{moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle}</span>
     <span class="grow"></span>
+    <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
+         Navigator is a closed drawer, so the top bar carries it instead. -->
+    {#if viewport.isPhone}
+      <NotificationBell placement="below" />
+    {/if}
     {#if showRightPanel}
       <button
         class="mtop-btn"
@@ -809,8 +925,10 @@
 
   <!-- Phone-only quick-action bar: exposes ⌘K/⌘T/⌘W/⌘F/⌘⇧B to touch users
        who can't produce those chords. Wired to the exact same functions the
-       keyboard map calls; desktop is completely unaffected. -->
-  {#if viewport.isPhone}
+       keyboard map calls; desktop is completely unaffected. Session verbs, so
+       it rides with the Agents page only — elsewhere it was a third chrome row
+       (the palette stays one tap away under BottomNav → More). -->
+  {#if viewport.isPhone && moduleName === 'agents'}
     <MobileActionBar
       onpalette={mobileOpenPalette}
       onnewSession={mobileNewSession}
@@ -837,13 +955,19 @@
     <BottomNav />
   {/if}
 
-  <StatusBar />
+  <!-- The phone already spends a top bar + bottom nav on chrome; the status
+       bar only earns its row there when the event stream needs attention. -->
+  {#if !viewport.isPhone || events.state !== 'connected'}
+    <StatusBar />
+  {/if}
 </div>
 
-<!-- Phone: Navigator lives in a LEFT drawer (reuses ui.railExpanded as its
-     open-state). On tablet the Navigator is persistent, so no left drawer. -->
+<!-- Phone: Navigator lives in a LEFT drawer with its own open-state
+     (ui.navDrawerOpen — not persisted, closed on load, closed on navigation;
+     never the desktop sidebar's railExpanded preference). On tablet the
+     Navigator is persistent, so no left drawer. -->
 {#if viewport.isPhone}
-  <Drawer bind:open={ui.railExpanded} side="left" label="Navigator" width="min(86vw, 280px)">
+  <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width="min(86vw, 280px)">
     <Navigator />
   </Drawer>
 {/if}
@@ -902,7 +1026,12 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    /* The ambient backdrop (tokens.css) lives on the window itself: the
+       sidebar's glass blurs it; content columns stay opaque (.center). */
+    background-color: var(--bg);
+    background-image: var(--ambient-image);
+    background-size: cover;
+    background-position: center;
   }
   .shell-main {
     flex: 1;
@@ -929,12 +1058,59 @@
     height: 26px;
     z-index: 5;
   }
+  /* Native vibrancy (see `vibrant` in the script): the document is transparent
+     so the window's NSVisualEffectView shows through chrome only; content
+     columns keep an opaque background. The traffic-lights strip gets the same
+     78% tint as `.sidebar-material` so the sidebar reads as one surface. */
+  /* The ambient image stays: a Subtle wash is translucent, so the native
+     material shows through it; a Wallpaper paints its own opaque base. */
+  :global(html.otto-vibrant),
+  :global(html.otto-vibrant body),
+  .shell.vibrant {
+    background-color: transparent;
+  }
+  .shell.vibrant .titlebar-drag {
+    background: var(--glass-tint-native);
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    :global(html.otto-vibrant body),
+    .shell.vibrant {
+      background-color: var(--bg);
+    }
+  }
+  :global(html.otto-vibrant[data-transparency='reduced'] body),
+  :global(html[data-transparency='reduced']) .shell.vibrant {
+    background-color: var(--bg);
+  }
+  /* Pop-out window title strip (unified title bar: traffic lights at the
+     start, centred title). */
+  .popout-titlebar {
+    flex-shrink: 0;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 80px;
+    border-block-end: 1px solid var(--separator);
+    user-select: none;
+  }
+  .popout-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-s);
+    font-weight: 600;
+    color: var(--text-dim);
+  }
   .center {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
     position: relative;
+    /* Content is opaque: the ambient backdrop only ever shows through chrome
+       (and on Home, which paints it on purpose — HomePage.svelte). */
+    background: var(--bg);
   }
 
   /* ---------- mobile shell (phone ≤640 / tablet 641–1024) ---------- */
@@ -971,17 +1147,21 @@
     color: var(--text);
   }
   .mtop-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .mtop-title {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    text-transform: capitalize;
+  }
+  /* A module page that draws its own PageHeader already titles itself right
+     below the bar — don't show the same name twice. */
+  :global(.shell.mobile:has(.mcenter [data-testid='page-header'])) .mtop-title {
+    display: none;
   }
   .mbody {
     flex: 1;
@@ -1013,9 +1193,9 @@
     gap: 10px;
     padding: 7px 14px;
     font-size: 12.5px;
-    background: color-mix(in srgb, #e0a000 18%, var(--surface));
+    background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--text);
-    border-bottom: 1px solid color-mix(in srgb, #e0a000 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
     z-index: 5;
   }
   .pb-dismiss {
@@ -1051,29 +1231,12 @@
     flex-shrink: 0;
   }
   .imp-countdown.imp-urgent {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 600;
-  }
-  /* Always-visible notification bell, anchored to the top-right of the main
-     column so it's reachable from every module (the tab bar only renders on
-     Agents). Sits above content; the dropdown opens downward from here. */
-  .bell-anchor {
-    position: absolute;
-    top: 6px;
-    inset-inline-end: 10px;
-    z-index: 50;
-  }
-  .bell-anchor.tauri-top {
-    top: 8px;
   }
   .content {
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  /* Reserve room on the right of a module page so its header action buttons
-     never sit under the floating notification bell. */
-  .content.bell-gutter {
-    padding-inline-end: 42px;
   }
 </style>

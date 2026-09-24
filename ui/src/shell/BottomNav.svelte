@@ -12,9 +12,16 @@
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { assistant } from '../lib/stores/assistant.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
-  import { availableModules, navIdForModule, resolveOrder, visibleOrder } from '../lib/sidebar';
+  import {
+    availableModules,
+    groupModules,
+    activeNavId,
+    resolveOrder,
+    visibleOrder,
+  } from '../lib/sidebar';
 
   // How many primary tabs sit on the bar before everything spills into "More".
   const PRIMARY_COUNT = 4;
@@ -24,15 +31,20 @@
       .filter((p) => auth.canPlugin(p.slug, 'view'))
       .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
+  // Flattened section by section, so the bar's order matches the sidebar's.
   const modules = $derived(
-    visibleOrder(
-      resolveOrder(
-        availableModules((f) => auth.can(f, 'view'), pluginEntries),
-        ui.sidebarOrder,
+    groupModules(
+      visibleOrder(
+        resolveOrder(
+          availableModules((f) => auth.can(f, 'view'), pluginEntries),
+          ui.sidebarOrder,
+        ),
+        ui.sidebarHidden,
       ),
-      ui.sidebarHidden,
-    ),
+    ).flatMap((s) => s.modules),
   );
+  // The entry the current route highlights (plugin slug, '' → Agents, …).
+  const current = $derived(activeNavId(router.parts));
   const primary = $derived(modules.slice(0, PRIMARY_COUNT));
   const overflow = $derived(modules.slice(PRIMARY_COUNT));
 
@@ -46,17 +58,20 @@
   // "More" is active when the current module lives in the overflow set (or
   // Settings), so the bar reflects where you are even for spilled modules.
   const moreActive = $derived(
-    router.module === 'settings' || overflow.some((m) => m.id === navIdForModule(router.module)),
+    router.module === 'settings' || overflow.some((m) => m.id === current),
   );
 </script>
 
 <nav class="bottomnav" aria-label="Primary">
   {#each primary as m (m.id)}
-    <button class="bn-btn" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
+    <button class="bn-btn" class:active={current === m.id} onclick={() => go(m.id)}>
       <span class="bn-icon">
         <Icon name={m.icon} size={20} />
         {#if m.id === 'agents' && ws.workingCount > 0}
           <span class="bn-badge">{ws.workingCount}</span>
+        {/if}
+        {#if m.id === 'assistant' && assistant.needsYouCount > 0}
+          <span class="bn-badge needs">{assistant.needsYouCount}</span>
         {/if}
       </span>
       <span class="bn-label">{m.label}</span>
@@ -80,7 +95,7 @@
     <div class="sheet-grip"></div>
     <div class="sheet-grid">
       {#each overflow as m (m.id)}
-        <button class="sheet-item" class:active={navIdForModule(router.module) === m.id} onclick={() => go(m.id)}>
+        <button class="sheet-item" class:active={current === m.id} onclick={() => go(m.id)}>
           <Icon name={m.icon} size={22} />
           <span>{m.label}</span>
         </button>
@@ -110,7 +125,7 @@
     background: var(--bg-sidebar);
     /* iOS home-indicator safe area. */
     padding-bottom: env(safe-area-inset-bottom, 0);
-    z-index: 60;
+    z-index: var(--z-mobile-nav);
   }
   .bn-btn {
     flex: 1;
@@ -127,7 +142,7 @@
     min-width: 0;
   }
   .bn-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .bn-icon {
     position: relative;
@@ -136,7 +151,7 @@
     height: 22px;
   }
   .bn-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     line-height: 1;
     overflow: hidden;
@@ -159,19 +174,23 @@
     display: grid;
     place-items: center;
   }
+  .bn-badge.needs {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
 
   .sheet-backdrop {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
-    z-index: 92;
+    z-index: calc(var(--z-drawer) + 2);
   }
   .more-sheet {
     position: fixed;
     inset-inline-start: 0;
     inset-inline-end: 0;
     bottom: 0;
-    z-index: 93;
+    z-index: calc(var(--z-drawer) + 3);
     background: var(--bg);
     border-top: 1px solid var(--border);
     border-radius: 14px 14px 0 0;
@@ -179,7 +198,7 @@
     padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0));
     /* The grid is data-driven (all overflow modules + every installed plugin):
        cap the sheet so it never grows past the top edge and scroll inside. */
-    max-height: calc(100vh - 48px);
+    max-height: calc(100% - 48px); /* % of the window — vh is the screen's in WKWebView */
     display: flex;
     flex-direction: column;
   }
@@ -213,7 +232,7 @@
     cursor: pointer;
   }
   .sheet-item.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   }
   .sheet-item span {

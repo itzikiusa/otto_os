@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, ApiResult, GitCtx};
-use crate::local::{LocalGit, SpawnClass};
+use crate::local::{GitCmd, LocalGit, SpawnClass};
 
 /// Everything `GET /repos/{id}/log` can ask for. `limit == 0` means NO `-n` at
 /// all (the whole reachable history) — same contract as [`LocalGit::log`].
@@ -104,11 +104,10 @@ impl LocalGit {
         if o.follow {
             args.push("--follow");
         }
-        if let Some(p) = &o.path {
-            args.push("--");
-            args.push(p);
-        }
-        let out = self.run_read(&args).await?;
+        // A LITERAL path (`app/[id]/page.tsx` is a file, not a glob that also
+        // pulls `app/d/page.tsx`'s history into the list).
+        let cmd = GitCmd::read(&args).maybe_path(o.path.as_deref());
+        let out = self.exec_text(&cmd).await?;
         crate::parse::parse_log(&out)
     }
 

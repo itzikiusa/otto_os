@@ -12,6 +12,9 @@
   import { parsePlan, setItemStatus, type Status, type Task } from './plan_parse';
   import type { ProductStoryVersion } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import Icon from '../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
 
   // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
   // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
@@ -333,7 +336,7 @@
   // list so the user picks WHICH swarm (e.g. Platform Team) implements the story.
   let targetSwarmId = $state('');
   $effect(() => {
-    if (ws.currentId && swarm.swarms.length === 0) void swarm.loadSwarms(ws.currentId);
+    if (ws.currentId) void swarm.ensureSwarms(ws.currentId);
   });
 
   // Existing linked swarm project, if this story was already sent (drives the
@@ -392,22 +395,24 @@
       <div class="muted">Loading plan…</div>
     {:else if !planVersion}
       <!-- ── No plan yet: generate panel ─────────────────────────────────────── -->
-      <section class="card gen-panel">
+      <section class="pl-card gen-panel">
         <!-- Provider multi-select (plan by one or many agents at once). -->
         <div class="cfg-row">
           <span class="field-label">
             Planning agents
             <span class="sel-count">{selectedProviders.length} selected</span>
           </span>
-          <div class="chip-group">
+          <div class="pl-provider-group">
             {#each availableProviders as p (p)}
               <button
-                class="chip"
-                class:chip-on={selectedProviders.includes(p)}
+                class="pill-toggle"
+                class:on={selectedProviders.includes(p)}
+                aria-pressed={selectedProviders.includes(p)}
                 disabled={generating || pollTimer !== null}
                 onclick={() => toggleProvider(p)}
                 title={p}
               >
+                <ProviderIcon provider={p} size={12} />
                 {p}
               </button>
             {/each}
@@ -420,7 +425,7 @@
             <label class="field-label" for="plan-summarizer-sel">Summarizer</label>
             <select
               id="plan-summarizer-sel"
-              class="sel"
+              class="input pl-sel"
               bind:value={summarizerProvider}
               disabled={generating || pollTimer !== null}
             >
@@ -442,7 +447,7 @@
 
         <div class="gen-row">
           <button
-            class="action-btn primary"
+            class="btn primary"
             onclick={generate}
             disabled={generating || pollTimer !== null || selectedProviders.length === 0}
           >
@@ -460,18 +465,19 @@
             <span class="polling-indicator">checking every 3s…</span>
           {/if}
           {#if !swarmLink && swarm.swarms.length > 1}
-            <select class="action-btn swarm-pick" bind:value={targetSwarmId} title="Which swarm implements this story">
+            <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
               <option value="">First swarm</option>
               {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
             </select>
           {/if}
           <button
-            class="action-btn swarm"
+            class="btn"
             onclick={sendToSwarm}
             disabled={sendingToSwarm}
             title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story (the swarm planner generates tasks)'}
           >
-            {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}⚡ Send to Swarm{/if}
+            <Icon name="zap" size={13} />
+            {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
           </button>
         </div>
       </section>
@@ -483,7 +489,7 @@
             Watching {planSessionIds.length} planning agent{planSessionIds.length > 1 ? 's' : ''}
             {planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)'}
           </span>
-          <button class="watching-btn" onclick={tilePlanSessions}>Show agents</button>
+          <button class="btn small" onclick={tilePlanSessions}>Show agents</button>
         </div>
       {/if}
       {#if swarmLink}
@@ -496,11 +502,13 @@
       {/if}
     {:else}
       <!-- ── Plan exists: header + task tree ─────────────────────────────────── -->
-      <section class="card plan-header">
+      <section class="pl-card plan-header">
         <div class="ph-row">
           <div class="ph-info">
             <span class="ph-label">Implementation Plan v{planVersion.version_no}</span>
-            <span class="ph-date">{new Date(planVersion.created_at).toLocaleString()}</span>
+            <!-- Agent-written: attributed (the version row carries no provider,
+                 so the byline names Otto) and a draft the PO works through. -->
+            <AgentByline at={planVersion.created_at} testid="plan-byline" />
           </div>
           <div class="ph-progress">
             <span class="prog-text">
@@ -514,32 +522,34 @@
             </div>
           </div>
           <div class="ph-actions">
-            {#if saving}<span class="saving">saving…</span>{:else if savedTick}<span class="saved-tick">saved ✓</span>{/if}
+            {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
             {#if swarmLink}
-              <span class="swarm-badge" title="This story is linked to a swarm project">
-                ⚡ {swarmLink.project_name}
+              <span class="chip pl-swarm-chip" title="This story is linked to a swarm project">
+                <Icon name="zap" size={10} /> {swarmLink.project_name}
               </span>
             {/if}
-            <button class="action-btn" onclick={refresh} disabled={generating}>Refresh</button>
-            <button class="action-btn" onclick={() => (showRaw = !showRaw)}>
+            <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
+            <button class="btn small" aria-pressed={showRaw} onclick={() => (showRaw = !showRaw)}>
               {showRaw ? 'Hide raw' : 'Raw'}
             </button>
+            <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
+              {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
+            </button>
             {#if !swarmLink && swarm.swarms.length > 1}
-              <select class="action-btn swarm-pick" bind:value={targetSwarmId} title="Which swarm implements this story">
+              <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
                 <option value="">First swarm</option>
                 {#each swarm.swarms as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
               </select>
             {/if}
+            <!-- The plan's next step — hand it to a swarm — is THE primary. -->
             <button
-              class="action-btn swarm"
+              class="btn small primary"
               onclick={sendToSwarm}
               disabled={sendingToSwarm}
               title={swarmLink ? 'Open the linked swarm project' : 'Create a swarm project from this story'}
             >
-              {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}⚡ Send to Swarm{/if}
-            </button>
-            <button class="action-btn primary" onclick={regenerate} disabled={generating || pollTimer !== null}>
-              {pollTimer !== null ? 'Generating…' : 'Regenerate'}
+              <Icon name="zap" size={12} />
+              {#if sendingToSwarm}Sending…{:else if swarmLink}Open in Swarm{:else}Send to Swarm…{/if}
             </button>
           </div>
         </div>
@@ -551,7 +561,7 @@
 
       <div class="tasks">
         {#each tasks as task (task.lineIndex)}
-          <section class="card task" class:done={task.status === 'done'}>
+          <section class="pl-card task" class:done={task.status === 'done'}>
             <header class="task-head">
               <span class="task-status status-{task.status}">{statusLabel(task.status)}</span>
               <h3 class="task-title">{task.title}</h3>
@@ -576,7 +586,7 @@
       </div>
 
       {#if showRaw}
-        <section class="card raw">
+        <section class="pl-card raw">
           <div class="md-body">{@html renderedRaw}</div>
         </section>
       {/if}
@@ -599,11 +609,11 @@
     width: 100%;
   }
 
-  .card {
+  .pl-card {
     border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    border-radius: var(--radius-m);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* Generate panel */
@@ -621,7 +631,7 @@
     flex-wrap: wrap;
   }
   .field-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -630,40 +640,21 @@
   }
   .sel-count {
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
     margin-inline-start: 4px;
   }
   .cfg-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
 
-  /* Provider chips (multi-select) — mirrors AnalysisTab's chip styling. */
-  .chip-group { display: flex; flex-wrap: wrap; gap: 5px; }
-  .chip {
-    height: 24px;
-    padding: 0 11px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
-    white-space: nowrap;
-  }
-  .chip:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
-  .chip-on {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .chip:disabled { cursor: not-allowed; opacity: 0.5; }
+  /* Provider multi-select: global .pill-toggle + the provider mark. */
+  .pl-provider-group { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pl-provider-group .pill-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
 
   /* Autonomy toggle */
   .autonomy-toggle {
@@ -677,7 +668,7 @@
     border-bottom: 1px solid var(--border);
   }
   .autonomy-toggle input { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
-  .autonomy-text { font-size: 12.5px; color: var(--text); line-height: 1.4; }
+  .autonomy-text { font-size: var(--fs-s); color: var(--text); line-height: 1.4; }
 
   /* Live "watching N agents" banner */
   .watching {
@@ -685,43 +676,23 @@
     align-items: center;
     gap: 10px;
     padding: 8px 12px;
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--info-soft);
   }
   .watching-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--info);
     flex-shrink: 0;
     animation: watch-pulse 1.4s ease-in-out infinite;
   }
   @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-  .watching-text { font-size: 12.5px; color: var(--text); flex: 1; min-width: 0; }
-  .watching-btn {
-    height: 26px;
-    padding: 0 12px;
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .watching-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
-  .sel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: 12px;
-    padding: 4px 8px;
-  }
-  .polling-indicator { font-size: 11.5px; color: var(--text-dim); font-style: italic; }
+  @media (prefers-reduced-motion: reduce) { .watching-dot { animation: none; } }
+  .watching-text { font-size: var(--fs-s); color: var(--text); flex: 1; min-width: 0; }
+  .pl-sel { width: auto; font-size: var(--fs-s); }
+  .polling-indicator { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
 
   /* Plan header */
   .ph-row {
@@ -731,8 +702,7 @@
     flex-wrap: wrap;
   }
   .ph-info { display: flex; flex-direction: column; gap: 2px; min-width: 160px; }
-  .ph-label { font-size: 13px; font-weight: 600; color: var(--text); }
-  .ph-date { font-size: 11px; color: var(--text-dim); }
+  .ph-label { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
   .ph-progress { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 160px; }
   .prog-text { font-size: 12px; color: var(--text-dim); }
   .prog-bar {
@@ -747,59 +717,11 @@
     transition: width 160ms;
   }
   .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-inline-start: auto; }
-  .saving { font-size: 11.5px; color: var(--text-dim); font-style: italic; }
-  .saved-tick { font-size: 11.5px; color: var(--status-idle, #3a8c3a); font-weight: 600; }
+  .saving { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
+  .saved-tick { font-size: var(--fs-xs); color: var(--success); font-weight: 600; }
 
-  /* Buttons */
-  .action-btn {
-    height: 30px;
-    padding: 0 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms, color 110ms, opacity 110ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .action-btn.primary {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-weight: 600;
-  }
-  .action-btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-  }
-  /* Send to Swarm — a distinct accent so the cross-feature hand-off stands out. */
-  .action-btn.swarm {
-    border-color: #8b5cf6;
-    color: #8b5cf6;
-    background: color-mix(in srgb, #8b5cf6 10%, transparent);
-    font-weight: 600;
-  }
-  .action-btn.swarm:hover:not(:disabled) {
-    background: color-mix(in srgb, #8b5cf6 20%, transparent);
-  }
-  .swarm-badge {
-    font-size: 11px;
-    font-weight: 600;
-    color: #8b5cf6;
-    background: color-mix(in srgb, #8b5cf6 14%, transparent);
-    padding: 3px 9px;
-    border-radius: 999px;
-    white-space: nowrap;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+  /* Linked swarm project: a neutral chip + the kind icon (no per-feature hue). */
+  .pl-swarm-chip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 
   /* Tasks */
   .tasks { display: flex; flex-direction: column; gap: 10px; }
@@ -812,7 +734,7 @@
     margin-bottom: 8px;
   }
   .task-title {
-    font-size: 14px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     margin: 0;
@@ -820,7 +742,7 @@
   }
   .task-count { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .task-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -828,9 +750,9 @@
     border-radius: 999px;
     white-space: nowrap;
   }
-  .status-todo { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .status-in_progress { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
-  .status-done { background: color-mix(in srgb, #22c55e 18%, transparent); color: #15803d; }
+  .status-todo { background: var(--surface-2); color: var(--text-dim); }
+  .status-in_progress { background: var(--warning-soft); color: var(--warning); }
+  .status-done { background: var(--success-soft); color: var(--success); }
 
   .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 5px; }
   .item { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; line-height: 1.5; }
@@ -843,8 +765,8 @@
     border-radius: 4px;
     border: 1.5px solid var(--border);
     background: var(--surface);
-    color: #fff;
-    font-size: 12px;
+    color: var(--surface);
+    font-size: var(--fs-s);
     line-height: 1;
     display: inline-flex;
     align-items: center;
@@ -854,8 +776,8 @@
     transition: background 110ms, border-color 110ms;
   }
   .checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
-  .checkbox.status-done { background: #22c55e; border-color: #22c55e; }
-  .checkbox.status-in_progress { background: #f59e0b; border-color: #f59e0b; color: #422006; font-weight: 700; }
+  .checkbox.status-done { background: var(--success); border-color: var(--success); }
+  .checkbox.status-in_progress { background: var(--warning); border-color: var(--warning); font-weight: 700; }
   .checkbox.status-todo:hover:not(:disabled) { border-color: var(--accent); }
 
   /* Raw markdown */

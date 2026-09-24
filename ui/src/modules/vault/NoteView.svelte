@@ -9,11 +9,12 @@
   import { authedBlobUrl } from '../../lib/api/client';
   import { assetPath, vaultNote } from '../../lib/api/vault';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
   import RefineDrawer from './RefineDrawer.svelte';
-  import { vault } from './vault.svelte';
+  import { vault, vaultConflictKind } from './vault.svelte';
 
   // -- "Refine with AI" drawer — open state lives here keyed BY PATH (outside
   // the note data), so reloading the note after the agent edits it does not
@@ -90,7 +91,9 @@
     if (raw && t.getAttribute('data-unresolved')) {
       e.preventDefault();
       const p = raw.endsWith('.md') ? raw : `${raw}.md`;
-      if (confirm(`Create "${p}"?`)) void vault.createNote(p, `# ${raw}\n\n`);
+      void confirmer.ask(`Create "${p}"?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
+        if (ok) void vault.createNote(p, `# ${raw}\n\n`);
+      });
     }
   }
 
@@ -104,33 +107,60 @@
   }
 
   // Hydrate note embeds (depth 1, no recursion — embedded bodies render plain).
+  // At most EMBED_WORKERS reads in flight: the daemon admits only a handful of
+  // concurrent note preparations and answers the rest "busy" (409), which
+  // used to mark every embed past the 4th as broken. A busy answer is
+  // retried with a short backoff instead of failing the embed.
+  const EMBED_WORKERS = 2;
+
+  async function readEmbed(wsId: string, vaultId: number, path: string) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await vaultNote(wsId, vaultId, path);
+      } catch (e) {
+        if (attempt >= 4 || vaultConflictKind(e) !== 'busy') throw e;
+        await new Promise((r) => setTimeout(r, 250 * 2 ** attempt));
+      }
+    }
+  }
+
   $effect(() => {
     void rendered;
     const host = readEl;
     if (!host || !vault.current) return;
+    const wsId = vault.wsId, vaultId = vault.current.id;
     const seen = new Set<string>([vault.notePath ?? '']);
+    const queue: [Element, string][] = [];
     for (const el of Array.from(host.querySelectorAll('div.note-embed[data-embed-path]'))) {
       const p = el.getAttribute('data-embed-path')!;
       if (el.getAttribute('data-hydrated') || seen.has(p)) continue;
       el.setAttribute('data-hydrated', '1');
-      untrack(() =>
-        vaultNote(vault.wsId, vault.current!.id, p)
-          .then((n) => {
-            const html = renderNote(stripFrontmatter(n.raw), {
-              // Embedded content resolves its own links but never re-embeds.
-              resolve: resolverFrom(n.outgoing),
-              assetUrl,
-            });
-            const body = document.createElement('div');
-            body.className = 'embed-body md-body';
-            body.innerHTML = html;
-            // Strip nested embeds inside the embed (depth guard).
-            body.querySelectorAll('div.note-embed').forEach((x) => x.removeAttribute('data-embed-path'));
-            el.appendChild(body);
-          })
-          .catch(() => el.classList.add('embed-error')),
-      );
+      queue.push([el, p]);
     }
+    const worker = async (): Promise<void> => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const [el, p] = next;
+        try {
+          const n = await readEmbed(wsId, vaultId, p);
+          const html = renderNote(stripFrontmatter(n.raw), {
+            // Embedded content resolves its own links but never re-embeds.
+            resolve: resolverFrom(n.outgoing),
+            assetUrl,
+          });
+          const body = document.createElement('div');
+          body.className = 'embed-body md-body';
+          body.innerHTML = html;
+          // Strip nested embeds inside the embed (depth guard).
+          body.querySelectorAll('div.note-embed').forEach((x) => x.removeAttribute('data-embed-path'));
+          el.appendChild(body);
+        } catch {
+          el.classList.add('embed-error');
+        }
+      }
+    };
+    untrack(() => {
+      for (let i = 0; i < Math.min(EMBED_WORKERS, queue.length); i++) void worker();
+    });
   });
 
   // -- diagram blocks: render mermaid / D2 fences to inline SVG -----------------
@@ -255,9 +285,9 @@
 
     {#if vault.conflict}
       <div class="conflict" role="alert">
-        This note changed on disk while you were editing.
-        <button onclick={() => void vault.conflictReload()}>Reload disk version</button>
-        <button class="danger" onclick={() => void vault.conflictOverwrite()}>Overwrite</button>
+        This note changed on disk while you were editing. Your edits are kept until you choose.
+        <button onclick={() => void vault.conflictOverwrite()} title="Save your version; the disk version stays in History">Keep my edits</button>
+        <button class="danger" onclick={() => void vault.conflictReload()}>Discard my edits…</button>
       </div>
     {/if}
 
@@ -338,7 +368,7 @@
     display: inline-flex;
   }
   .mode-btn:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .mode-btn.refine-on {
     border-color: var(--accent, #7a9cff);

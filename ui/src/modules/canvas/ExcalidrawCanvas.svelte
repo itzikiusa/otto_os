@@ -193,7 +193,13 @@
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return;
       }
-      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: src });
+      // Bound to THIS editor's scene: a switch during the (long) agent turn
+      // must not pour the result into the newly-open scene.
+      if (canvas.currentId !== sceneId) {
+        toasts.success('Ask AI finished', 'The drawing was saved to the scene you asked from.');
+        return;
+      }
+      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: src }, sceneId);
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {

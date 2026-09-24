@@ -71,6 +71,11 @@ class SwarmStore {
   pendingKanban = $state(false);
 
   private wsId: string | null = null;
+  /** Workspace whose swarm list is loaded (or loading) — plain fields, NOT
+   *  runes, so {@link ensureSwarms} can be called from an `$effect` without
+   *  subscribing it to anything. */
+  private swarmsFor: string | null = null;
+  private swarmsInflight: Promise<void> | null = null;
   private graphDebounce: ReturnType<typeof setTimeout> | null = null;
 
   get openId(): string | null {
@@ -98,12 +103,36 @@ class SwarmStore {
       if (this.wsId !== workspaceId) return; // a newer switch won the race
       this.swarms = list;
       this.swarmsError = null;
+      this.swarmsFor = workspaceId;
     } catch (e) {
       if (this.wsId !== workspaceId) return;
       // Keep whatever is on screen (if it's this workspace's) and say what went
       // wrong — blanking the rail on a transient failure looks like data loss.
       this.swarmsError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * Load `workspaceId`'s swarm list once, for pickers that only need it
+   * populated (Product's discovery team / Send-to-Swarm). Idempotent: a no-op
+   * when that workspace is already loaded or a load is in flight.
+   *
+   * Callers must use this — never `if (swarms.length === 0) loadSwarms()` in an
+   * `$effect`: `loadSwarms` reassigns `swarms`, which re-runs the effect, and a
+   * workspace with NO swarms stays at length 0, so that pattern re-fetched in a
+   * hot loop (thousands of GETs a second while a story was open). A failed load
+   * is not retried here; the next workspace switch (or SwarmPage) retries.
+   */
+  ensureSwarms(workspaceId: string): Promise<void> {
+    if (this.swarmsFor === workspaceId && this.wsId === workspaceId) return Promise.resolve();
+    if (this.swarmsInflight && this.wsId === workspaceId) return this.swarmsInflight;
+    const p = this.loadSwarms(workspaceId).finally(() => {
+      if (this.swarmsInflight === p) this.swarmsInflight = null;
+      // Settled (ok or failed): don't re-fetch for this workspace from a picker.
+      if (this.wsId === workspaceId) this.swarmsFor = workspaceId;
+    });
+    this.swarmsInflight = p;
+    return p;
   }
 
   /**

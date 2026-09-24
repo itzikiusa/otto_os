@@ -410,7 +410,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -442,7 +442,7 @@
   }
   .ft-close-btn:hover {
     opacity: 1;
-    color: var(--danger, #e05252);
+    color: var(--danger);
   }
 
   /* ── tree ─────────────────────────────── */
@@ -557,11 +557,11 @@
     color: var(--text);
   }
   .truncated-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     border-radius: 3px;
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .close-btn {
@@ -590,14 +590,14 @@
   }
   .pv.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .preview-frame {
     flex: 1;
     min-height: 0;
     width: 100%;
     border: none;
-    background: var(--surface-1, #1a1a1a);
+    background: #1a1a1a; /* PREVIEW_CSS in the srcdoc is dark-only */
   }
 
   /* ── misc ─────────────────────────────── */
@@ -608,7 +608,7 @@
   .error-msg {
     padding: 12px;
     font-size: 12px;
-    color: var(--danger, #e05252);
+    color: var(--danger);
     word-break: break-all;
   }
 </style>

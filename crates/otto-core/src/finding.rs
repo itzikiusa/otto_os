@@ -230,6 +230,10 @@ pub struct FindingActionResp {
     pub finding: Finding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Id>,
+    /// Verify only: the evidence behind a pass (e.g. "3 tests passed") or why
+    /// the finding was NOT verified (no linked test, zero tests ran, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

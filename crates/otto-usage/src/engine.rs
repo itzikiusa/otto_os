@@ -606,6 +606,30 @@ impl UsageEngine {
         .await
     }
 
+    /// The model with the most events for `provider` over the last 30 days —
+    /// `None` when the engine is down or has no history for it.
+    async fn dominant_model(&self, provider: &str) -> Option<String> {
+        let ch = self.ch()?;
+        let provider = ch_string(provider);
+        let rows = ch
+            .query_rows(&format!(
+                "SELECT model, count() AS n
+                 FROM usage_events
+                 WHERE event_date >= today() - 29
+                   AND provider = '{provider}'
+                   AND model != ''
+                 GROUP BY model
+                 ORDER BY n DESC
+                 LIMIT 1"
+            ))
+            .await
+            .ok()?;
+        rows.first()
+            .and_then(|r| r["model"].as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+    }
+
     /// `POST /usage/forecast` — estimate the cost of a future run from recent
     /// per-run averages. `req.feature` is the usage-kind label ("review",
     /// "product", "agent", …). When `req.est_tokens` is given the projected cost
@@ -619,12 +643,18 @@ impl UsageEngine {
         if let Some(est) = req.est_tokens.filter(|&t| t > 0) {
             // Split evenly between input / output for pricing (conservative).
             let half = est / 2;
-            let cost = crate::pricing::estimate_cost(&req.provider, half, half, 0, 0);
+            // Price by the provider's dominant recent MODEL: the rate card is
+            // keyed by model id, and a bare provider name ("claude") matched
+            // nothing, so every forecast used the flagship fallback rate.
+            let model = self
+                .dominant_model(&req.provider)
+                .await
+                .unwrap_or_else(|| req.provider.clone());
+            let cost = crate::pricing::estimate_cost(&model, half, half, 0, 0);
             return ForecastResp {
                 projected_cost_usd: cost,
                 basis: format!(
-                    "priced {est} estimated tokens ({half} in / {half} out) at {provider} rates",
-                    provider = req.provider
+                    "priced {est} estimated tokens ({half} in / {half} out) at {model} rates"
                 ),
             };
         }
@@ -644,8 +674,8 @@ impl UsageEngine {
         // the `origin` dimension (stamped by the runner) as a proxy. "review" →
         // origin="review"; "product" → "product"; plain sessions → "manual".
         // This is best-effort: un-attributed sessions return the "no data" path.
-        let feature = req.feature.replace('\'', "''");
-        let provider = req.provider.replace('\'', "''");
+        let feature = ch_string(&req.feature);
+        let provider = ch_string(&req.provider);
 
         // Per-session totals subquery — one row per session_id, all within the
         // last 30 days, matching origin + provider. The outer query averages them.
@@ -721,7 +751,7 @@ impl UsageEngine {
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<SessionTotals> {
         // session ids are ULIDs, but escape defensively for the embedded query.
-        let sid = session_id.replace('\'', "''");
+        let sid = ch_string(session_id);
         // `ts` is a DateTime64(3); a `'YYYY-MM-DD HH:MM:SS.mmm'` literal compares
         // correctly against it. The timestamp is our own (no escaping needed).
         let since_clause = since
@@ -1119,4 +1149,25 @@ async fn scalar_count(ch: &ClickHouse) -> u64 {
         .and_then(|r| r.into_iter().next())
         .and_then(|v| v.get("n").and_then(serde_json::Value::as_u64))
         .unwrap_or(0)
+}
+
+/// Escape `s` for a single-quoted ClickHouse string literal. ClickHouse treats
+/// a backslash as an escape character inside literals, so doubling only `'`
+/// let a trailing `\` swallow the closing quote and break out of the string.
+fn ch_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+#[cfg(test)]
+mod ch_string_tests {
+    use super::ch_string;
+
+    #[test]
+    fn escapes_backslash_and_quote() {
+        assert_eq!(ch_string("review"), "review");
+        assert_eq!(ch_string("o'brien"), "o\\'brien");
+        // A trailing backslash can no longer escape the closing quote.
+        assert_eq!(ch_string("x\\"), "x\\\\");
+        assert_eq!(ch_string("a\\' OR 1=1 --"), "a\\\\\\' OR 1=1 --");
+    }
 }

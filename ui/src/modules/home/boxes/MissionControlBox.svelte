@@ -30,23 +30,30 @@
 
   const limit = $derived(zoomed ? 60 : Math.max(5, Number(box.config.limit) || 12));
 
+  // Request token: a workspace/limit change starts a new poller while the old
+  // one's fetch may still be in flight — only the newest load may land.
+  let seq = 0;
+
   async function load(): Promise<boolean> {
     const id = ws.currentId;
     if (!id) return true;
+    const mine = ++seq;
     try {
       const [s, its] = await Promise.all([
         missionControlApi.summary(id),
         missionControlApi.items(id, { limit }),
       ]);
+      if (mine !== seq) return true;
       summary = s;
       items = its;
       error = '';
       return true;
     } catch (e) {
+      if (mine !== seq) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
@@ -77,7 +84,7 @@
     <EmptyState icon="radar" title="Mission Control unavailable" body={error} />
   {:else if summary}
     <div class="stats">
-      <div class="stat"><span class="n working">{summary.active}</span><span class="l">active</span></div>
+      <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>
       <div class="stat"><span class="n" class:needs={summary.needs_approval > 0}>{summary.needs_approval}</span><span class="l">need approval</span></div>
       <div class="stat"><span class="n">{summary.total}</span><span class="l">items</span></div>
       <div class="stat"><span class="n">{fmtCost(summary.total_cost)}</span><span class="l">spend</span></div>
@@ -119,33 +126,40 @@
     height: 100%;
     min-height: 0;
   }
+  /* Widget figures: number over label, split by hairlines — no tile fills
+     (the calm desktop-widget look shared by every Home box). */
   .stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
+    gap: 0;
   }
   .stat {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 6px 4px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
+    align-items: flex-start;
+    min-width: 0;
+    padding: 2px 12px;
+    border-inline-start: 1px solid var(--separator);
+  }
+  .stat:first-child {
+    padding-inline-start: 2px;
+    border-inline-start: none;
   }
   .n {
-    font-size: 18px;
-    font-weight: 700;
+    font-size: var(--fs-xl);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
+  /* Tone only when there is something to see: a green "0 working" was noise. */
   .n.working {
-    color: var(--status-working);
+    color: var(--success);
   }
   .n.needs {
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .chips {
@@ -158,7 +172,7 @@
     align-items: center;
     gap: 4px;
     padding: 1px 7px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--text-dim);
@@ -206,7 +220,7 @@
     min-width: 0;
   }
   .st {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .ago {
     color: var(--text-dim);

@@ -264,7 +264,7 @@
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Local-file export dialog ─────────────────────────────────────────────── */
@@ -336,7 +336,7 @@
     position: relative;
     height: 6px;
     border-radius: 999px;
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-3);
     overflow: hidden;
   }
   .exp-bar-fill {

@@ -6,6 +6,11 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import RunLauncher from './RunLauncher.svelte';
   import RunDetail from './RunDetail.svelte';
   import RunStageRail from './RunStageRail.svelte';
@@ -31,16 +36,13 @@
   }
 </script>
 
+<div class="rwo-page">
+<PageHeader
+  title="Run with Otto"
+  subtitle="Turn any source — a Jira story, a GitHub issue/PR, a Slack thread, a finding, a failing test — into a reviewed, evidence-backed PR draft. One button."
+/>
+<PageBody>
 <div class="rwo">
-  <header class="head">
-    <div>
-      <h1>Run with Otto</h1>
-      <p class="sub">
-        Turn any source — a Jira story, a GitHub issue/PR, a Slack thread, a finding, a failing
-        test — into a reviewed, evidence-backed PR draft. One button.
-      </p>
-    </div>
-  </header>
 
   {#if ws.currentId}
     <RunLauncher wsId={ws.currentId} {onLaunched} />
@@ -48,11 +50,16 @@
 
   <div class="body" class:has-detail={openRun}>
     <section class="list-col">
-      {#if runWithOtto.loadingList && list.length === 0}
-        <div class="muted">Loading runs…</div>
-      {:else if list.length === 0}
-        <div class="empty">No runs yet. Paste a source above and press Run with Otto.</div>
-      {:else}
+      <LoadState
+        what="runs"
+        loading={runWithOtto.loadingList}
+        error={runWithOtto.listError}
+        empty={list.length === 0}
+        onretry={() => ws.currentId && void runWithOtto.loadList(ws.currentId)}
+      >
+        {#snippet emptyView()}
+          <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto." />
+        {/snippet}
         <ul class="runs">
           {#each list as r (r.id)}
             <li>
@@ -80,13 +87,13 @@
                   <span class="agent mono" title="Executing agent (provider · model)">
                     {r.provider}{r.model ? ` · ${r.model}` : ''}
                   </span>
-                  <span class="when">{r.updated_at}</span>
+                  <span class="when"><RelTime iso={r.updated_at} /></span>
                 </div>
               </button>
             </li>
           {/each}
         </ul>
-      {/if}
+      </LoadState>
     </section>
 
     {#if openRun}
@@ -96,18 +103,16 @@
     {/if}
   </div>
 </div>
+</PageBody>
+</div>
 
 <style>
-  .rwo { padding: 1rem 1.25rem; max-width: 1100px; margin: 0 auto; }
-  .head { margin-bottom: 0.75rem; }
-  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
-  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 72ch; }
+  .rwo-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .body { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
   .body.has-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
   @media (max-width: 860px) {
     .body.has-detail { grid-template-columns: 1fr; }
   }
-  .empty, .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .run {
     width: 100%; text-align: left; cursor: pointer;
@@ -143,6 +148,6 @@
   .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

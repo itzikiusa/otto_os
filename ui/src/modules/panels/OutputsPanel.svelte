@@ -18,7 +18,7 @@
   import { authedBlobUrl, authedText } from '../../lib/api/client';
   import { renderNote } from '../vault/mdRender';
   import { toasts } from '../../lib/toast.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { Artifact } from '../../lib/api/types';
 
@@ -79,7 +79,7 @@
     return 'download';
   }
 
-  const KIND_ICON: Record<Artifact['kind'], string> = {
+  const KIND_ICON: Record<Artifact['kind'], IconName> = {
     file: 'file',
     pr: 'pr',
     image: 'image',
@@ -296,14 +296,14 @@
     padding: 10px 10px 6px;
   }
   .section-title {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--text-dim);
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     background: var(--surface-2);
@@ -370,7 +370,7 @@
   }
   .ameta {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .preview {
@@ -459,7 +459,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    color: var(--accent);
+    color: var(--accent-text);
     word-break: break-all;
   }
   .md :global(pre) {

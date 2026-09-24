@@ -10,7 +10,10 @@
 //! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
 //! and the API-client writers `otto_api_execute` (sends one saved request),
 //! `otto_api_upsert_request` (persists a saved request), and
-//! `otto_api_run_automation` (runs a human-authored automation)
+//! `otto_api_run_automation` (runs a human-authored automation), and the Otto
+//! Assistant tools `assistant_*` (advertised to `source: "assistant"` sessions
+//! only; they write the owner's OWN assistant data — memories with Undo,
+//! tasks, reminders — and open approvals, never an outward action themselves)
 //! — which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
 //! to be agent-drawable, the vault is the agents' documentation home
@@ -41,6 +44,12 @@
 //! `otto_create_pr` still waits on a human approval. Native tools win by name
 //! (see `governed_tools_for`), so what the control plane shows as enabled is
 //! what a session can call, with no second hand-maintained list to drift.
+//!
+//! The Design Hall WRITES (`otto_design_assist` — start an agent turn that
+//! commits a version, `otto_design_link` — file an explicit link) are
+//! deliberately NOT native: they exist only as that governed bridge, so they
+//! stay approval-gated (DANGEROUS) unless the operator exempts them, and no
+//! tool approves a design version (humans only).
 //!
 //! Beyond Otto's own data, the DB tools (`otto_list_connections`,
 //! `otto_db_schema`/`_children`/`_object`, `otto_db_query`) expose the user's
@@ -174,13 +183,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            // Surface the daemon's error text (already small) but don't leak a
-            // huge body; the status is the actionable part for the agent.
-            let snippet = String::from_utf8_lossy(&body);
-            let snippet = snippet.chars().take(300).collect::<String>();
-            return Err(format!("daemon returned {status}: {snippet}"));
+            return Err(daemon_error(status, &body));
         }
-        serde_json::from_slice(&body).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&body)
     }
 
     /// POST an `/api/v1` path with the bearer token. Used by the governed gateway
@@ -190,11 +195,25 @@ impl Ctx {
     /// Same body-size cap as [`Self::get_json`] so a large result can't blow the
     /// agent transcript.
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+        self.post_json_within(path, body, CALL_TIMEOUT).await
+    }
+
+    /// [`Self::post_json`] with an explicit wall-clock budget — for calls whose
+    /// route legitimately runs longer than [`CALL_TIMEOUT`] (a saved API request
+    /// with its own `timeout_ms`, an automation, a governed call that first
+    /// waits on a human approval).
+    async fn post_json_within(
+        &self,
+        path: &str,
+        body: &Value,
+        budget: Duration,
+    ) -> Result<Value, String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = tokio::time::timeout(
-            CALL_TIMEOUT,
+            budget,
             self.http
                 .post(&url)
+                .timeout(budget)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -204,7 +223,7 @@ impl Ctx {
                 .send(),
         )
         .await
-        .map_err(|_| "upstream timeout".to_string())?
+        .map_err(|_| format!("upstream timeout after {}s", budget.as_secs()))?
         .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
         if let Some(len) = resp.content_length() {
@@ -222,13 +241,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// PUT an `/api/v1` path with the bearer token. Used ONLY by
@@ -267,13 +282,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// PATCH an `/api/v1` path with the bearer token. Used by the swarm write
@@ -312,13 +323,9 @@ impl Ctx {
             ));
         }
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&bytes);
-            return Err(format!(
-                "daemon returned {status}: {}",
-                snippet.chars().take(300).collect::<String>()
-            ));
+            return Err(daemon_error(status, &bytes));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+        parse_ok_body(&bytes)
     }
 
     /// DELETE an `/api/v1` path with the bearer token. Used ONLY by
@@ -346,11 +353,7 @@ impl Ctx {
             return Ok(());
         }
         let bytes = resp.bytes().await.unwrap_or_default();
-        let snippet = String::from_utf8_lossy(&bytes);
-        Err(format!(
-            "daemon returned {status}: {}",
-            snippet.chars().take(300).collect::<String>()
-        ))
+        Err(daemon_error(status, &bytes))
     }
 
     /// GET an `/api/v1` path that answers `text/plain` (today only the pod-logs
@@ -366,6 +369,9 @@ impl Ctx {
             TEXT_CALL_TIMEOUT,
             self.http
                 .get(&url)
+                // The client's default 20 s timeout would cut the 60 s kubectl
+                // budget short; a per-request timeout overrides it.
+                .timeout(TEXT_CALL_TIMEOUT)
                 .bearer_auth(&self.token)
                 .header(
                     "X-Otto-Session",
@@ -391,11 +397,10 @@ impl Ctx {
                 body.len()
             ));
         }
-        let text = String::from_utf8_lossy(&body);
         if !status.is_success() {
-            let snippet = text.chars().take(300).collect::<String>();
-            return Err(format!("daemon returned {status}: {snippet}"));
+            return Err(daemon_error(status, &body));
         }
+        let text = String::from_utf8_lossy(&body);
         Ok(tail_text(&text, MAX_TEXT_CHARS))
     }
 
@@ -491,6 +496,48 @@ impl Ctx {
     }
 }
 
+/// Cap on a daemon error MESSAGE surfaced to the agent. Larger than the raw
+/// snippet cap because some messages are the actionable part — a repo
+/// reference that did not resolve lists the candidates to pick from.
+const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+
+/// The agent-facing text for a non-2xx daemon reply. A JSON `Problem`
+/// (`{code, message}`, or a module's `{error}`) surfaces that message (capped at
+/// [`MAX_ERROR_MESSAGE_CHARS`]); anything else is a raw 300-char snippet so a
+/// huge body never reaches the transcript. The status stays in front — it is
+/// the actionable part when the message is terse.
+fn daemon_error(status: reqwest::StatusCode, body: &[u8]) -> String {
+    let message = serde_json::from_slice::<Value>(body).ok().and_then(|v| {
+        v.get("message")
+            .or_else(|| v.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    match message {
+        Some(m) => format!(
+            "daemon returned {status}: {}",
+            m.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>()
+        ),
+        None => format!(
+            "daemon returned {status}: {}",
+            String::from_utf8_lossy(body)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    }
+}
+
+/// Parse a 2xx daemon body. An EMPTY body (`204 No Content` — e.g. a Jira
+/// transition, a delete) is a success, not a "parse json: EOF" error the agent
+/// would read as a failure and retry: it becomes `{"ok": true}`.
+fn parse_ok_body(body: &[u8]) -> Result<Value, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({ "ok": true }));
+    }
+    serde_json::from_slice(body).map_err(|e| format!("parse json: {e}"))
+}
+
 /// Recursively cap the number of elements in every JSON array to [`MAX_ROWS`],
 /// appending a string marker element when truncation happens. Returns the capped
 /// value and the largest array length seen (used as the audited `rows`).
@@ -552,16 +599,137 @@ fn tail_text(text: &str, max: usize) -> (String, bool) {
 
 /// The static tool catalog returned by `tools/list`. Kept in one place so the
 /// `tools/call` dispatch and the advertised schema can't drift.
+/// The full native catalog: the static first-party tools plus the Otto
+/// Assistant tools (which [`tool_catalog_for_source`] shows only to
+/// assistant sessions).
 fn tool_catalog() -> Value {
+    let mut catalog = base_tool_catalog();
+    if let Some(tools) = catalog["tools"].as_array_mut() {
+        tools.extend(assistant_tool_specs());
+    }
+    catalog
+}
+
+// ---------------------------------------------------------------------------
+// Otto Assistant tools (native; only advertised to `source: "assistant"`
+// sessions). Each posts to `POST /assistant/agent/{tool}` AS THE SESSION
+// OWNER with this session's id; the daemon resolves the session to its
+// assistant thread (the token's session binding wins over the body), so a
+// session can only ever act for its own thread. They write only the owner's
+// own assistant data (memories with chips + Undo, tasks, reminders); the
+// outward-action tool OPENS an approval, it never performs the action.
+// ---------------------------------------------------------------------------
+
+/// `(native tool name, /assistant/agent/{tool} segment)`.
+const ASSISTANT_TOOLS: [(&str, &str); 8] = [
+    ("assistant_remember", "remember"),
+    ("assistant_forget", "forget"),
+    ("assistant_recall", "recall"),
+    ("assistant_create_reminder", "reminder"),
+    ("assistant_create_task", "task"),
+    ("assistant_update_task", "task_update"),
+    ("assistant_delegate", "delegate"),
+    ("assistant_request_approval", "approval"),
+];
+
+/// The session source that sees the assistant tools.
+const ASSISTANT_SOURCE: &str = "assistant";
+
+fn assistant_tool_specs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "assistant_remember",
+            "description": "Otto Assistant: save ONE short, atomic fact about the user (a preference, a person, a recurring plan). Never store secrets. The user sees it as a chip with Undo; with memory approval on it waits for their review.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "kind": { "type": "string", "description": "fact | decision | learning … (default fact)" },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["text"] }
+        }),
+        json!({
+            "name": "assistant_forget",
+            "description": "Otto Assistant: forget the user's memories matching `query` (\"forget my old address\"). Up to 10 go; the user can undo. Say what was forgotten.",
+            "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+        }),
+        json!({
+            "name": "assistant_recall",
+            "description": "Otto Assistant: read the user's profile and the memories matching `query` (omit it for the most recent). Use before answering anything personal.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string" },
+                "k": { "type": "integer", "minimum": 1, "maximum": 20 }
+            } }
+        }),
+        json!({
+            "name": "assistant_create_reminder",
+            "description": "Otto Assistant: remind the user at `run_at` (RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone`, default the Mac's). Delivered into this thread and as a notification.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "run_at": { "type": "string" },
+                "timezone": { "type": "string", "description": "IANA name, e.g. Asia/Jerusalem" }
+            }, "required": ["text", "run_at"] }
+        }),
+        json!({
+            "name": "assistant_create_task",
+            "description": "Otto Assistant: open a task card for a longer job (it starts `running`). Keep it current with assistant_update_task.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string" },
+                "detail": { "type": "string" }
+            }, "required": ["title"] }
+        }),
+        json!({
+            "name": "assistant_update_task",
+            "description": "Otto Assistant: move a task you created to `running`, `needs_you` (with a `question`, optional `options`), `done` or `failed` (optional `result` object).",
+            "inputSchema": { "type": "object", "properties": {
+                "task_id": { "type": "string" },
+                "state": { "type": "string", "enum": ["running", "needs_you", "done", "failed"] },
+                "question": { "type": "string" },
+                "options": { "type": "array", "items": { "type": "string" } },
+                "result": { "type": "object" }
+            }, "required": ["task_id", "state"] }
+        }),
+        json!({
+            "name": "assistant_delegate",
+            "description": "Otto Assistant: hand a directive to one of the user's Personal Agents (`agent` = its id or exact name). It runs in the background; its summary is posted back into this thread. Tell the user who you asked.",
+            "inputSchema": { "type": "object", "properties": {
+                "agent": { "type": "string" },
+                "directive": { "type": "string" }
+            }, "required": ["agent", "directive"] }
+        }),
+        json!({
+            "name": "assistant_request_approval",
+            "description": "Otto Assistant: REQUIRED before anything outward (send, post, publish, purchase, delete, submit a form, anything touching production). State `where` it goes, `what` is sent, `who_sees` it and your `reason`; add `tool` + `destination` when known and a `category`. Returns `approved`, `denied` or `pending` (pass `wait_seconds` ≤ 30 to wait). Proceed ONLY on approved.",
+            "inputSchema": { "type": "object", "properties": {
+                "where": { "type": "string" },
+                "what": { "type": "string" },
+                "who_sees": { "type": "string" },
+                "reason": { "type": "string" },
+                "tool": { "type": "string" },
+                "destination": { "type": "string" },
+                "category": { "type": "string", "enum": ["send", "post", "publish", "purchase", "delete", "submit", "prod", "other"] },
+                "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 30 }
+            }, "required": ["where", "what", "who_sees", "reason"] }
+        }),
+    ]
+}
+
+/// The `/assistant/agent/{tool}` segment of a native assistant tool name.
+fn assistant_segment(name: &str) -> Option<&'static str> {
+    ASSISTANT_TOOLS
+        .iter()
+        .find_map(|(n, seg)| (*n == name).then_some(*seg))
+}
+
+fn base_tool_catalog() -> Value {
     json!({
         "tools": [
             {
                 "name": "otto_list_connections",
-                "description": "Read-only: list the database connections available to this session — id, name, kind, environment, read_only. Use this FIRST to discover connection ids, then call otto_db_schema / otto_db_query with a returned id. Only queryable DB kinds are listed (mysql, redis, mongodb, clickhouse).",
+                "description": "Read-only: the database connections across EVERY workspace you can read — `{connections}` with id, name, kind, environment, read_only, workspace_id + workspace_name (this session's workspace first). A connection may live in another workspace, so look here before concluding it is missing. The DB tools take a connection's id OR name. Only queryable DB kinds are listed (mysql, postgres, redis, mongodb, clickhouse).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | redis | mongodb | clickhouse." }
+                        "kind": { "type": "string", "description": "Optional filter to one kind: mysql | postgres | redis | mongodb | clickhouse." },
+                        "workspace_id": { "type": "string", "description": WS_DIR_DESC }
                     }
                 }
             },
@@ -571,7 +739,7 @@ fn tool_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "connection_id": { "type": "string", "description": "Otto connection id (a DB-kind connection)." }
+                        "connection_id": { "type": "string", "description": "Otto connection id or name (a DB-kind connection)." }
                     },
                     "required": ["connection_id"]
                 }
@@ -582,7 +750,7 @@ fn tool_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "connection_id": { "type": "string", "description": "Otto connection id or name (otto_list_connections)." },
                         "path": { "type": "string", "description": "NodePath of the node to expand, e.g. 'db:shop/folder:tables'." },
                         "filter": { "type": "string", "description": "Optional substring/prefix filter (e.g. a Redis key prefix)." }
                     },
@@ -595,7 +763,7 @@ fn tool_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "connection_id": { "type": "string", "description": "Otto connection id or name (otto_list_connections)." },
                         "path": { "type": "string", "description": "NodePath of the table/collection." }
                     },
                     "required": ["connection_id", "path"]
@@ -603,11 +771,11 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_db_query",
-                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
+                "description": "Run a READ-ONLY query against a connection and return rows {columns, rows, truncated}. SQL (mysql/postgres/clickhouse): a SELECT/SHOW/DESCRIBE/EXPLAIN/WITH statement. Redis: a read command per line (GET/HGETALL/SCAN/…). Mongo: a find/aggregate. Writes/DDL are REFUSED server-side. `database` scopes the active database (SQL/Mongo); Redis selects a keyspace via `node` 'kdb:N'. `max_rows` caps rows (server hard cap 200).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "connection_id": { "type": "string", "description": "Otto connection id." },
+                        "connection_id": { "type": "string", "description": "Otto connection id or name (otto_list_connections)." },
                         "statement": { "type": "string", "description": "The read-only statement / command." },
                         "database": { "type": "string", "description": "Optional active database to scope SQL/Mongo execution." },
                         "node": { "type": "string", "description": "Optional raw node context (e.g. 'kdb:0' for a Redis keyspace); overrides `database`." },
@@ -618,14 +786,14 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_git_pr_review",
-                "description": "Read-only: a pull request plus its review summary (state, reviewers, review comments) for an Otto-tracked repo.",
+                "description": "Read-only: a pull request (state, reviewers, approvals, comments) plus Otto's multi-agent review runs of it (`reviews[]`: id, status, verdict, blocker_count — the `review_id` otto_list_findings takes; empty when none ran).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "repo_id": { "type": "string", "description": "Otto repo id." },
+                        "repo_id": { "type": "string", "description": REPO_REF_DESC },
                         "pr_number": { "type": "integer", "description": "Pull request number." }
                     },
-                    "required": ["repo_id", "pr_number"]
+                    "required": ["pr_number"]
                 }
             },
             {
@@ -634,29 +802,28 @@ fn tool_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "story_id": { "type": "string", "description": "Otto product story id." }
+                        "story_id": { "type": "string", "description": "Otto product story id, or its Jira key (e.g. GS-123) / exact title." }
                     },
                     "required": ["story_id"]
                 }
             },
             {
                 "name": "canvas_list_scenes",
-                "description": "Read-only: list the Canvas Studio scenes (id/title/timestamps) in a workspace. Use canvas_create_scene to draw a new one.",
+                "description": "Read-only: list the Canvas Studio scenes (id/title/format/section/timestamps) in a workspace (default: this session's). Use canvas_create_scene to draw a new one.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "workspace_id": { "type": "string", "description": "Otto workspace id." }
-                    },
-                    "required": ["workspace_id"]
+                        "workspace_id": { "type": "string", "description": "Optional workspace id or name (default: this session's)." }
+                    }
                 }
             },
             {
                 "name": "canvas_get_scene",
-                "description": "Read-only: a Canvas Studio scene by id, including its full Scene JSON document (nodes/edges/slides). Use canvas_update_scene to edit it.",
+                "description": "Read-only: a Canvas Studio scene by id or title — its row plus `doc_json` (a JSON STRING holding `{type:\"otto-canvas\", format, source}`: the mermaid / D2 / excalidraw source). Use canvas_update_scene to edit it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "scene_id": { "type": "string", "description": "Otto canvas scene id." }
+                        "scene_id": { "type": "string", "description": "Otto canvas scene id or title." }
                     },
                     "required": ["scene_id"]
                 }
@@ -688,34 +855,119 @@ fn tool_catalog() -> Value {
                 }
             },
             {
-                "name": "otto_list_workflows",
-                "description": "Read-only: list this session's workspace's workflows (visual node-graph automations) — id, name, status.",
+                "name": "design_list",
+                "description": "Read-only: list Design Hall artifacts (frames, graphics, sites, 3D scenes, whiteboards, brand kits) — id, title, studio, format, status, head version, who created / last edited it (created_by_name, last_editor_name) and the product stories it implements (story_ids). The library is global; filter by project_id / studio / format / status / story_id. Newest first; for the next page pass cursor = the last row's `updated_at|id`. Use design_search to find references by content.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": { "type": "string", "description": "Optional — narrows the global library to one workspace." },
+                        "project_id": { "type": "string", "description": "Optional design project id." },
+                        "studio": { "type": "string", "description": "frames | graphics | site | 3d | whiteboard | brand | spatial" },
+                        "format": { "type": "string", "description": "html | mermaid | d2 | excalidraw | scene3d | otto-canvas | otto-site | png | glb | …" },
+                        "status": { "type": "string", "description": "draft | review | approved | shipped | archived" },
+                        "story_id": { "type": "string", "description": "Only artifacts that implement this product story." },
+                        "limit": { "type": "integer", "description": "Max rows (default 100, cap 500)." },
+                        "cursor": { "type": "string", "description": "Next page: `<updated_at>|<id>` of the previous page's last row." }
+                    }
+                }
+            },
+            {
+                "name": "design_get",
+                "description": "Read-only: one design artifact — metadata, head + approved versions, link counts, its working-copy and thumbnail file paths, and (text formats) its source, from the head or `version` (`v3` or a version id). Cite what you borrow as otto://design/<id>@v<seq>.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Design artifact id." },
+                        "version": { "type": "string", "description": "Optional `v<seq>` or version id (default: head)." },
+                        "include_content": { "type": "boolean", "description": "Inline the ≤ 256 KiB text source (default true)." }
+                    },
+                    "required": ["artifact_id"]
+                }
+            },
+            {
+                "name": "design_links",
+                "description": "Read-only: a design artifact's links — what it uses (embeds, components, brand tokens, the stories it implements, what it was derived from) and where it is used — with the linked artifacts' titles; broken references are flagged.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Design artifact id." },
+                        "dir": { "type": "string", "description": "out | in | both (default)." }
+                    },
+                    "required": ["artifact_id"]
+                }
+            },
+            {
+                "name": "design_search",
+                "description": "Read-only: full-text search over the design library (titles, tags, extracted copy / layer / token names, linked story keys, project names), shipped work first. Use it to find earlier work to build on and cite.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search text." },
+                        "workspace_id": { "type": "string", "description": "Optional — narrows to one workspace." },
+                        "studio": { "type": "string" },
+                        "format": { "type": "string" },
+                        "status": { "type": "string" },
+                        "story_id": { "type": "string" },
+                        "project_id": { "type": "string" },
+                        "limit": { "type": "integer", "description": "Max hits (default 50)." }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "otto_list_workspaces",
+                "description": "Read-only: the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name.",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "otto_list_workflows",
+                "description": "Read-only: workflows (visual node-graph automations) across EVERY workspace you can read — `{items, current_workspace_id, workspace_count}`, each id, name, description, version, workspace_id + workspace_name, this session's workspace first. A workflow lives in ONE workspace, so look here before concluding it is missing. Workflow tools accept its id OR name.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": WS_DIR_DESC } } }
+            },
+            {
+                "name": "otto_list_workflow_runs",
+                "description": "Read-only: the most recent runs (newest first, ≤ 50) of a workflow — id, status, timing, waiting_approval. Pass `summary:false` for full rows. Feed a run id to otto_get_workflow_run.",
+                "inputSchema": { "type": "object", "properties": { "workflow_id": { "type": "string", "description": "Workflow id or name (otto_list_workflows)." }, "summary": { "type": "boolean", "description": "Default true." } }, "required": ["workflow_id"] }
             },
             {
                 "name": "otto_get_workflow_run",
-                "description": "Read-only: a workflow run's status, per-node step states and outputs, by run id.",
+                "description": "Read-only: a workflow run's status, per-node step states and outputs, by run id (otto_list_workflow_runs).",
                 "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string", "description": "Workflow run id." } }, "required": ["run_id"] }
             },
             {
+                "name": "otto_list_goal_loops",
+                "description": "Read-only: goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": WS_DIR_DESC } } }
+            },
+            {
                 "name": "otto_list_broker_clusters",
-                "description": "Read-only: list this workspace's message-broker clusters (Kafka).",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: message-broker (Kafka) clusters across EVERY workspace you can read (global profiles once) — `{items, …}` with id, name, bootstrap_servers, workspace_id + workspace_name. Broker tools accept a cluster's id OR name.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": WS_DIR_DESC } } }
             },
             {
                 "name": "otto_list_broker_topics",
                 "description": "Read-only: list the topics of a broker cluster.",
-                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string", "description": "Broker cluster id." } }, "required": ["cluster_id"] }
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string", "description": "Broker cluster id or name (otto_list_broker_clusters)." } }, "required": ["cluster_id"] }
+            },
+            {
+                "name": "otto_list_issue_accounts",
+                "description": "Read-only: YOUR Jira/Confluence accounts — `{items}` with id, label, email, base_url, provider (never the token). Issue tools take `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account.",
+                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search Jira issues for an issue account. `query` is JQL (empty → most recent). Optional `project`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "query": { "type": "string" }, "project": { "type": "string" } }, "required": ["account_id"] }
+                "description": "Read-only: search Jira issues. `query` is FREE TEXT (summary + description), or an issue key (`GS-123`) for that issue — NOT JQL. Empty `query` → issues assigned to you. Optional `project` key. Up to 25 `{key, summary, status, issue_type, url}`; page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "start_at": { "type": "integer" } } }
+            },
+            {
+                "name": "otto_list_issue_transitions",
+                "description": "Read-only: a Jira issue's available status transitions `[{id, name, to_status}]`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "key": { "type": "string" } }, "required": ["key"] }
             },
             {
                 "name": "otto_list_swarms",
-                "description": "Read-only: list this workspace's agent swarms.",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: agent swarms across EVERY workspace you can read — `{items, …}` with id, name, status, workspace_id + workspace_name. Swarm tools accept a swarm's id OR name.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": WS_DIR_DESC } } }
             },
             {
                 "name": "swarm_list_projects",
@@ -744,12 +996,12 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "swarm_run_task",
-                "description": "Dispatch a board task now (Editor-gated): creates a run and launches the assignee's agent session immediately instead of waiting for the coordinator tick.",
+                "description": "Dispatch a board task now (Editor-gated): creates a run and launches the assignee's agent session immediately instead of waiting for the coordinator tick. Refused (409) when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused, or the agent is busy; 400 when the swarm has no active agent.",
                 "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }
             },
             {
                 "name": "swarm_stop_run",
-                "description": "Stop an in-flight swarm run (Editor-gated): cancels the turn and marks the run stopped. Use on wedged or duplicate dispatches.",
+                "description": "Stop an in-flight swarm run (Editor-gated): cancels the turn and marks the run stopped. Use on wedged or duplicate dispatches. A run that already finished is returned unchanged — check `run.status`.",
                 "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] }
             },
             {
@@ -759,13 +1011,13 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_repos",
-                "description": "Read-only: list this workspace's git repositories (id, name, branch, remote).",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: list the git repositories in EVERY workspace you can read — `{repos, current_workspace_id, workspace_count}`; each row has id, name, path, remote_url, workspace_id + workspace_name, and `current` (this session's workspace, listed first). A repo is registered in exactly one workspace, so the one you need may live in another — look here before concluding it is missing. Optional `workspace_id` narrows to one workspace.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional: only this workspace's repos." } } }
             },
             {
                 "name": "otto_list_sessions",
-                "description": "Read-only: list this workspace's agent/terminal sessions (your own unless you are an admin).",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: list a workspace's agent/terminal sessions (your own unless you are an admin). Default: this session's workspace; `workspace_id` (id or name) picks another.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional workspace id or name (default: this session's)." } } }
             },
             {
                 "name": "otto_get_session",
@@ -789,54 +1041,54 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_product_stories",
-                "description": "Read-only: list this workspace's product stories.",
+                "description": "Read-only: product stories — a GLOBAL library shared by every workspace — `{items}` with id, source_key (the Jira key), title, stage, url. otto_product_story accepts a story's id OR its Jira key.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_list_findings",
-                "description": "Read-only: list a code review's findings (with workflow state) by review id.",
+                "description": "Read-only: list a code review's findings (with workflow state) by review id — review ids come from otto_git_pr_review (`reviews[].id`).",
                 "inputSchema": { "type": "object", "properties": { "review_id": { "type": "string" } }, "required": ["review_id"] }
             },
             {
                 "name": "otto_list_prs",
-                "description": "Read-only: list a repo's pull requests as `{items, has_more, page, per_page}` (each item: number, title, state, source/destination branches, author, url). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } }, "required": ["repo_id"] }
+                "description": "Read-only: list a repo's pull requests as `{items, has_more, page, per_page}` (each item: number, title, state, source/destination branches, author, url). Optional `state` (open|merged|declined|all); page with `page` while `has_more`, `per_page` ≤ 100 (default 50). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC }, "state": { "type": "string" }, "page": { "type": "integer" }, "per_page": { "type": "integer" } } }
             },
             {
                 "name": "otto_get_pr",
                 "description": "Read-only: one pull request plus its existing review comments (id, body, path, line, thread_id). Call this BEFORE commenting so you can dedupe and reply in-thread instead of posting duplicates.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" }, "pr_number": { "type": "integer" } }, "required": ["repo_id", "pr_number"] }
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC }, "pr_number": { "type": "integer" } }, "required": ["pr_number"] }
             },
             {
                 "name": "otto_comment_pr",
                 "description": "Post a comment on a pull request. Pass `path` (and optionally `line`) to anchor it INLINE on a file in the diff; omit both for a PR-level comment; pass `in_reply_to` with an existing comment id to reply in that thread. Mutating and outward-facing — the comment is visible to everyone on the PR.",
                 "inputSchema": { "type": "object", "properties": {
-                    "repo_id": { "type": "string" },
+                    "repo_id": { "type": "string", "description": REPO_REF_DESC },
                     "pr_number": { "type": "integer" },
                     "body": { "type": "string", "description": "Markdown comment body." },
                     "path": { "type": "string", "description": "Repo-relative file path to anchor the comment to." },
                     "line": { "type": "integer", "description": "1-indexed line in `path` to anchor to." },
                     "in_reply_to": { "type": "string", "description": "Existing comment id to reply to." }
-                }, "required": ["repo_id", "pr_number", "body"] }
+                }, "required": ["pr_number", "body"] }
             },
             {
                 "name": "otto_usage_summary",
-                "description": "Read-only: token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean error). Optional `days` (default 30).",
-                "inputSchema": { "type": "object", "properties": { "days": { "type": "integer" } } }
+                "description": "Read-only: token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean error). Optional `days` (default 30); `otto_only` (default true) — false includes usage outside Otto sessions.",
+                "inputSchema": { "type": "object", "properties": { "days": { "type": "integer" }, "otto_only": { "type": "boolean" } } }
             },
             {
                 "name": "otto_list_improvement_runs",
-                "description": "Read-only: list this workspace's self-improvement runs (status + summary).",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: list a workspace's self-improvement runs (status + summary). Default: this session's workspace.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional workspace id or name." } } }
             },
             {
                 "name": "otto_list_improvement_edits",
-                "description": "Read-only: list this workspace's self-improvement edit suggestions (pending/applied) with their status.",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Read-only: list a workspace's self-improvement edit suggestions. `status` defaults to pending; pass applied / rejected / rolled_back / conflict to see others. Default: this session's workspace.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional workspace id or name." }, "status": { "type": "string" } } }
             },
             {
                 "name": "otto_vault_list",
-                "description": "Read-only: list this workspace's markdown doc vaults (id, name, root_path, okf, note/link counts, scan state). Vault ids feed every other otto_vault_* tool.",
+                "description": "Read-only: list the markdown doc vaults — a GLOBAL library every workspace shares (id, name, root_path, okf, note/link counts, scan state). Every other otto_vault_* tool takes a vault's id OR name as `vault_id`.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
@@ -925,6 +1177,11 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": { "domain": { "type": "string" } }, "required": ["domain"] }
             },
             {
+                "name": "otto_list_agent_rooms",
+                "description": "Read-only: agent rooms across EVERY workspace you can read — `{items, …}` with id, name, workspace_id + workspace_name. otto_room_read / otto_room_post take a room's id OR name.",
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": WS_DIR_DESC } } }
+            },
+            {
                 "name": "otto_room_post",
                 "description": "Personal agents: post a message (max 16KB) into an agent room this agent is a member of. The message is persisted and shown to the user live — rooms are the only agent-to-agent channel. Your session identity determines which agent is speaking.",
                 "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "text": { "type": "string" } }, "required": ["room_id", "text"] }
@@ -981,7 +1238,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_api_upsert_request",
-                "description": "PERSISTS: create (no `request_id`) or update a saved request. Accepts fields or a `curl` line (parsed server-side; explicit fields win). `collection_name` finds-or-creates a collection. Omitted `auth`/`extras` keep the stored values. Returns the saved request with secrets masked.",
+                "description": "PERSISTS: create (no `request_id`; `name` required) or update a saved request. Accepts fields or a `curl` line (parsed server-side; explicit fields win). `collection_name` finds-or-creates a collection. On update every field you omit keeps its stored value (`docs_md` merges into the stored extras). Returns the saved request with secrets masked.",
                 "inputSchema": { "type": "object", "properties": {
                     "request_id": { "type": "string", "description": "Saved request id to update; omit to create." },
                     "name": { "type": "string", "description": "Saved request name." },
@@ -996,7 +1253,7 @@ fn tool_catalog() -> Value {
                     "collection_name": { "type": "string", "description": "Unique collection name to find or create." },
                     "docs_md": { "type": "string", "description": "Markdown request documentation." },
                     "curl": { "type": "string", "description": "curl command parsed server-side; explicit fields win." }
-                }, "required": ["name"] }
+                } }
             },
             {
                 "name": "otto_api_run_automation",
@@ -1014,7 +1271,7 @@ fn tool_catalog() -> Value {
             // expired — tell the user to press "Sign in" in the AWS module.
             {
                 "name": "aws_list_accounts",
-                "description": "Read-only: list the AWS accounts configured in Otto — id, name, auth_mode, region, environment, identity (account/arn) and the cached per-service permission probe (s3/sqs/ec2/athena/eks: allowed|denied|unknown). Call this FIRST to obtain an `account_id` for every other aws_* tool; never contains secrets.",
+                "description": "Read-only: list the AWS accounts configured in Otto — id, name, auth_mode, region, environment and (for users who may configure the account) identity (account/arn) + the cached per-service permission probe. Every other aws_* tool takes an account's id OR name as `account_id`; never contains secrets.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
@@ -1024,7 +1281,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "aws_s3_list_objects",
-                "description": "Read-only: list one level of an S3 bucket like a folder — `prefixes` (sub-folders) and `objects` (key, size, last_modified, storage_class, etag) under `prefix` (use a trailing `/`). Page with `token` = the previous result's `next_token`; `max` caps keys per page (default 1000).",
+                "description": "Read-only: list one level of an S3 bucket like a folder — `prefixes` (sub-folders) and `objects` (key, size, last_modified, storage_class, etag) under `prefix` (use a trailing `/`). Page with `token` = the previous result's `next_token` while `is_truncated`; `max` caps keys per page (default 500, max 1000).",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "bucket": { "type": "string" }, "prefix": { "type": "string" }, "token": { "type": "string" }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "bucket"] }
             },
             {
@@ -1077,7 +1334,7 @@ fn tool_catalog() -> Value {
             // `kubernetes` feature (View for reads, Edit for `k8s_action`).
             {
                 "name": "k8s_list_clusters",
-                "description": "Read-only: list the Kubernetes clusters registered in Otto — id, name, source (kubeconfig|imported|eks), context_name, default_namespace, environment and the cached `capabilities` (server_version, metrics_server, argo_rollouts, argocd). Call this FIRST to obtain a `cluster_id` for every other k8s_* tool.",
+                "description": "Read-only: list the Kubernetes clusters registered in Otto — id, name, source (kubeconfig|imported|eks), default_namespace, environment (and, for users who may configure it, context_name + cached `capabilities`). Every other k8s_* tool takes a cluster's id OR name as `cluster_id`.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
@@ -1087,8 +1344,8 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "k8s_describe",
-                "description": "Read-only: full detail of ONE resource — `manifest` (JSON, managedFields stripped, Secret data redacted), `describe` (kubectl describe text) and its recent `events` (type, reason, message, count, last_seen). `kind` is the plural from k8s_get_resources; `namespace` + `name` identify the object.",
-                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "kind": { "type": "string" }, "namespace": { "type": "string" }, "name": { "type": "string" } }, "required": ["cluster_id", "kind", "namespace", "name"] }
+                "description": "Read-only: full detail of ONE resource — `manifest` (JSON, managedFields stripped, Secret data redacted), `describe` (kubectl describe text) and its recent `events` (type, reason, message, count, last_seen). `kind` is the plural from k8s_get_resources; `namespace` + `name` identify the object (omit `namespace` for cluster-scoped kinds: nodes, namespaces).",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "kind": { "type": "string" }, "namespace": { "type": "string" }, "name": { "type": "string" } }, "required": ["cluster_id", "kind", "name"] }
             },
             {
                 "name": "k8s_logs",
@@ -1099,6 +1356,11 @@ fn tool_catalog() -> Value {
                 "name": "k8s_top",
                 "description": "Read-only: live CPU (millicores) and memory (bytes) usage per pod (with per-container breakdown) from metrics-server, optionally limited to `namespace`. `available:false` means the cluster has no metrics-server — nothing else to fetch.",
                 "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "namespace": { "type": "string" } }, "required": ["cluster_id"] }
+            },
+            {
+                "name": "k8s_health",
+                "description": "Read-only: compact health digest for a MONITORED cluster (Kubernetes → Monitor enabled): classified restarts (oom / crash / probe) with pod + memory-limit detail, planned churn, memory outliers vs limits, error-rate / p95 spikes vs the 24h baseline, version drift and the collector + metrics-server status. `window` = 1h|6h|24h|7d (default 1h). Every list is capped at 20; prefer it over k8s_get_resources for periodic health checks.",
+                "inputSchema": { "type": "object", "properties": { "cluster_id": { "type": "string" }, "window": { "type": "string" } }, "required": ["cluster_id"] }
             },
             {
                 "name": "k8s_action",
@@ -1139,6 +1401,15 @@ fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
 
 fn tool_catalog_for_source(source: Option<&str>) -> Value {
     let mut catalog = tool_catalog();
+    if source != Some(ASSISTANT_SOURCE) {
+        if let Some(tools) = catalog["tools"].as_array_mut() {
+            tools.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| assistant_segment(name).is_none())
+            });
+        }
+    }
     if is_vault_docs_reviewer(source) {
         if let Some(tools) = catalog["tools"].as_array_mut() {
             tools.retain(|tool| {
@@ -1178,6 +1449,40 @@ const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
     ("get_usage_summary", "otto_usage_summary"),
     ("get_product_story", "otto_product_story"),
     ("query_db_readonly", "otto_db_query"),
+    // Design Hall reads are served natively under their bare names.
+    ("design_list", "design_list"),
+    ("design_get", "design_get"),
+    ("design_links", "design_links"),
+    ("design_search", "design_search"),
+    // Otto Assistant memory: served natively (session-bound, chip + Undo).
+    ("assistant_remember", "assistant_remember"),
+    ("assistant_forget", "assistant_forget"),
+    ("assistant_recall", "assistant_recall"),
+    // Swarm board reads + PR review runs are native under other names.
+    ("list_swarm_projects", "swarm_list_projects"),
+    ("list_swarm_tasks", "swarm_list_tasks"),
+    ("list_pr_reviews", "otto_git_pr_review"),
+    // The cloud consoles are native under their bare names; without these the
+    // session saw every AWS/K8s tool twice (`k8s_top` AND `otto_k8s_top`).
+    ("aws_list_accounts", "aws_list_accounts"),
+    ("aws_s3_list_buckets", "aws_s3_list_buckets"),
+    ("aws_s3_list_objects", "aws_s3_list_objects"),
+    ("aws_s3_preview", "aws_s3_preview"),
+    ("aws_sqs_list_queues", "aws_sqs_list_queues"),
+    ("aws_sqs_peek", "aws_sqs_peek"),
+    ("aws_sqs_send", "aws_sqs_send"),
+    ("aws_ec2_list_instances", "aws_ec2_list_instances"),
+    ("aws_athena_list_tables", "aws_athena_list_tables"),
+    ("aws_athena_query", "aws_athena_query"),
+    ("aws_athena_get_query", "aws_athena_get_query"),
+    ("aws_eks_list_clusters", "aws_eks_list_clusters"),
+    ("k8s_list_clusters", "k8s_list_clusters"),
+    ("k8s_get_resources", "k8s_get_resources"),
+    ("k8s_describe", "k8s_describe"),
+    ("k8s_logs", "k8s_logs"),
+    ("k8s_top", "k8s_top"),
+    ("k8s_health", "k8s_health"),
+    ("k8s_action", "k8s_action"),
 ];
 
 /// How long a governed call waits for a human decision before returning
@@ -1254,15 +1559,19 @@ fn governed_tools_for(enabled: &[String]) -> Vec<Value> {
 }
 
 /// Arguments for a governed call: the agent's arguments plus this session's
-/// `workspace_id` when the tool's schema takes one and the agent omitted it —
+/// `workspace_id` when the tool's schema REQUIRES one and the agent omitted it —
 /// the same courtesy the native tools extend, so an agent needn't know its own
 /// workspace id to open a PR.
 fn governed_invoke_args(ctx: &Ctx, spec: &Value, args: &Value) -> Value {
     let mut out = args.as_object().cloned().unwrap_or_default();
-    let takes_ws = spec["inputSchema"]["properties"]
-        .as_object()
-        .is_some_and(|p| p.contains_key("workspace_id"));
-    if takes_ws && !out.contains_key("workspace_id") {
+    // Only a REQUIRED workspace is defaulted to this session's: an optional one
+    // means "omit to span every workspace you can read" (the cross-workspace
+    // list tools) or is filled server-side (vaults, design), so injecting it
+    // would silently narrow the answer to this workspace.
+    let needs_ws = spec["inputSchema"]["required"]
+        .as_array()
+        .is_some_and(|r| r.iter().any(|k| k == "workspace_id"));
+    if needs_ws && !out.contains_key("workspace_id") {
         if let Some(ws) = &ctx.workspace_id {
             out.insert("workspace_id".into(), Value::String(ws.clone()));
         }
@@ -1314,12 +1623,11 @@ async fn run_reviewer_read(ctx: &Ctx, name: &str, args: &Value) -> Result<Value,
 /// ([`read_route`]); this is the set the dispatcher recognises before the
 /// catch-all "unknown tool". All are reads (GET, or a read-only viewer POST).
 const FEATURE_READ_TOOLS: &[&str] = &[
-    "otto_list_workflows",
+    "otto_list_workflow_runs",
     "otto_get_workflow_run",
-    "otto_list_broker_clusters",
     "otto_list_broker_topics",
     "otto_search_issues",
-    "otto_list_swarms",
+    "otto_list_issue_transitions",
     "swarm_list_projects",
     "swarm_list_tasks",
     "swarm_utilization",
@@ -1330,7 +1638,6 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_list_sessions",
     "otto_get_session",
     "otto_wait_session",
-    "otto_list_product_stories",
     "otto_list_findings",
     "otto_usage_summary",
     "otto_list_improvement_runs",
@@ -1343,6 +1650,11 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_vault_tags",
     "otto_vault_graph",
     "otto_vault_okf_validate",
+    // Design Hall reads (the global design library; find + cite earlier work).
+    "design_list",
+    "design_get",
+    "design_links",
+    "design_search",
     // AWS console reads (`aws_sqs_peek` is the one read-only POST: a
     // receive-message with visibility timeout 0, graded View by the policy table).
     "aws_list_accounts",
@@ -1360,7 +1672,214 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "k8s_get_resources",
     "k8s_describe",
     "k8s_top",
+    "k8s_health",
 ];
+
+/// Native list tools served by the daemon's cross-workspace directory
+/// (`GET /refs/directory`, `otto_server::agent_refs`): every workspace the
+/// session owner can read, each row annotated with its workspace, this
+/// session's workspace first. `otto_list_connections` also uses it (then
+/// keeps only the queryable DB kinds).
+const NATIVE_DIRECTORY_TOOLS: &[(&str, &str)] = &[
+    ("otto_list_workspaces", "workspace"),
+    ("otto_list_workflows", "workflow"),
+    ("otto_list_goal_loops", "goal_loop"),
+    ("otto_list_broker_clusters", "broker_cluster"),
+    ("otto_list_swarms", "swarm"),
+    ("otto_list_product_stories", "product_story"),
+    ("otto_list_agent_rooms", "agent_room"),
+    ("otto_list_issue_accounts", "issue_account"),
+];
+
+/// Native `(tool, argument, kind)` whose argument is a friendly reference —
+/// the id, or a name / title / Jira key / label — resolved by the daemon
+/// (`GET /refs/resolve`, as the session owner) before the call. An omitted
+/// issue account resolves to the owner's only account.
+const NATIVE_REF_ARGS: &[(&str, &str, &str)] = &[
+    ("otto_db_schema", "connection_id", "connection"),
+    ("otto_db_children", "connection_id", "connection"),
+    ("otto_db_object", "connection_id", "connection"),
+    ("otto_db_query", "connection_id", "connection"),
+    ("otto_list_broker_topics", "cluster_id", "broker_cluster"),
+    ("otto_search_issues", "account_id", "issue_account"),
+    ("otto_list_issue_transitions", "account_id", "issue_account"),
+    ("otto_list_workflow_runs", "workflow_id", "workflow"),
+    ("swarm_list_projects", "swarm_id", "swarm"),
+    ("swarm_utilization", "swarm_id", "swarm"),
+    ("otto_product_story", "story_id", "product_story"),
+    ("otto_vault_dir", "vault_id", "vault"),
+    ("otto_vault_read", "vault_id", "vault"),
+    ("otto_vault_search", "vault_id", "vault"),
+    ("otto_vault_backlinks", "vault_id", "vault"),
+    ("otto_vault_tags", "vault_id", "vault"),
+    ("otto_vault_graph", "vault_id", "vault"),
+    ("otto_vault_okf_validate", "vault_id", "vault"),
+    ("otto_vault_write", "vault_id", "vault"),
+    ("otto_vault_write_file", "vault_id", "vault"),
+    ("otto_vault_rename", "vault_id", "vault"),
+    ("otto_vault_delete", "vault_id", "vault"),
+    ("design_get", "artifact_id", "design_artifact"),
+    ("design_links", "artifact_id", "design_artifact"),
+    ("canvas_get_scene", "scene_id", "canvas_scene"),
+    ("canvas_update_scene", "scene_id", "canvas_scene"),
+    ("otto_room_post", "room_id", "agent_room"),
+    ("otto_room_read", "room_id", "agent_room"),
+    ("aws_s3_list_buckets", "account_id", "aws_account"),
+    ("aws_s3_list_objects", "account_id", "aws_account"),
+    ("aws_s3_preview", "account_id", "aws_account"),
+    ("aws_sqs_list_queues", "account_id", "aws_account"),
+    ("aws_sqs_peek", "account_id", "aws_account"),
+    ("aws_sqs_send", "account_id", "aws_account"),
+    ("aws_ec2_list_instances", "account_id", "aws_account"),
+    ("aws_athena_list_tables", "account_id", "aws_account"),
+    ("aws_athena_query", "account_id", "aws_account"),
+    ("aws_athena_get_query", "account_id", "aws_account"),
+    ("aws_eks_list_clusters", "account_id", "aws_account"),
+    ("k8s_get_resources", "cluster_id", "k8s_cluster"),
+    ("k8s_describe", "cluster_id", "k8s_cluster"),
+    ("k8s_logs", "cluster_id", "k8s_cluster"),
+    ("k8s_top", "cluster_id", "k8s_cluster"),
+    ("k8s_health", "cluster_id", "k8s_cluster"),
+    ("k8s_action", "cluster_id", "k8s_cluster"),
+];
+
+/// The `/refs/directory` query for a native list tool. Pure — unit-tested.
+fn directory_path(kind: &str, args: &Value, session_ws: Option<&str>) -> String {
+    let mut path = format!("/refs/directory?kind={}", seg(kind));
+    path.push_str(&opt_query(args, &[("workspace_id", "workspace_id")]));
+    if let Some(ws) = session_ws.filter(|s| !s.is_empty()) {
+        path.push_str(&format!("&prefer_workspace_id={}", seg(ws)));
+    }
+    path
+}
+
+/// The references a native call needs resolved: `(arg, kind, reference)` —
+/// a present value that is not an id, a workspace NAME, or an omitted issue
+/// account (the owner's sole account). Pure — unit-tested.
+fn native_ref_plan(name: &str, args: &Value) -> Vec<(&'static str, &'static str, Option<String>)> {
+    let text = |k: &str| -> Option<String> {
+        match args.get(k)? {
+            Value::String(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    let mut plan = Vec::new();
+    if let Some(ws) = text("workspace_id").filter(|w| !otto_server::agent_refs::looks_like_id(w)) {
+        plan.push(("workspace_id", "workspace", Some(ws)));
+    }
+    for (tool, arg, kind) in NATIVE_REF_ARGS {
+        if *tool != name {
+            continue;
+        }
+        match text(arg) {
+            Some(v) if !otto_server::agent_refs::looks_like_id(&v) => {
+                plan.push((*arg, *kind, Some(v)))
+            }
+            None if *kind == "issue_account" => plan.push((*arg, *kind, None)),
+            _ => {}
+        }
+    }
+    plan
+}
+
+/// Resolve every friendly reference a native call carries (see
+/// [`native_ref_plan`]) through `GET /refs/resolve`, returning the arguments
+/// with canonical ids. An unknown / ambiguous reference errors with the
+/// daemon's candidate listing.
+async fn resolve_native_refs(ctx: &Ctx, name: &str, args: &Value) -> Result<Option<Value>, String> {
+    let plan = native_ref_plan(name, args);
+    if plan.is_empty() {
+        return Ok(None);
+    }
+    let mut out = args.clone();
+    if !out.is_object() {
+        out = json!({});
+    }
+    for (arg, kind, reference) in plan {
+        let mut path = format!("/refs/resolve?kind={}&arg={}", seg(kind), seg(arg));
+        if let Some(r) = &reference {
+            path.push_str(&format!("&ref={}", seg(r)));
+        }
+        if let Some(ws) = ctx.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+            path.push_str(&format!("&prefer_workspace_id={}", seg(ws)));
+        }
+        let v = match ctx.get_json(&path).await {
+            Ok(v) => v,
+            // The daemon could not be reached at all: pass the reference
+            // through untouched so the call's own argument checks — and then
+            // its own request — report the real problem. A daemon ANSWER
+            // (unknown / ambiguous reference) always surfaces.
+            Err(e) if e.starts_with("request failed") || e.starts_with("upstream timeout") => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let id = v["id"]
+            .as_str()
+            .ok_or_else(|| format!("{arg}: resolution returned no id"))?;
+        out[arg] = if kind == "vault" {
+            id.parse::<i64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| json!(id))
+        } else {
+            json!(id)
+        };
+    }
+    Ok(Some(out))
+}
+
+/// Native tools whose `repo_id` is a friendly reference: resolved by the
+/// daemon (`GET /git/repos/resolve`) before the call — id, name, local path or
+/// remote, across EVERY workspace the session owner can read, falling back to
+/// the session's own cwd when omitted. The governed `otto.*` git tools get the
+/// same resolution server-side in the invoke choke point.
+const NATIVE_REPO_REF_TOOLS: &[&str] = &[
+    "otto_git_pr_review",
+    "otto_list_prs",
+    "otto_get_pr",
+    "otto_comment_pr",
+];
+
+/// Schema text for a friendly `repo_id` (kept in step with the governed
+/// catalog's wording in `otto_server::mcp_outward`).
+/// Schema text for the cross-workspace list tools' optional `workspace_id`.
+const WS_DIR_DESC: &str = "Optional: only this workspace (id or name). Omit to list every workspace you can read (this session's first).";
+/// Schema text for an issue-account argument (resolved by `/refs/resolve`).
+const ISSUE_ACCOUNT_DESC: &str = "Your Jira/Confluence account id, label, email or base URL (otto_list_issue_accounts). Omit when you have exactly one account.";
+
+const REPO_REF_DESC: &str = "Otto repo id — or a repo name, local path, or remote (`owner/repo` or URL). Resolved across EVERY workspace you can read, not just this one. Omit it to use the repo this session is working in. An ambiguous or unknown reference returns the candidates to pick from.";
+
+/// The `/git/repos/resolve` query for a tool call's `repo_id` (+ optional
+/// `workspace_id` filter). Pure, so the binding is unit-tested.
+fn resolve_repo_path(args: &Value) -> String {
+    let q = opt_query(
+        args,
+        &[("ref", "repo_id"), ("workspace_id", "workspace_id")],
+    );
+    let q = q.trim_start_matches('&');
+    if q.is_empty() {
+        "/git/repos/resolve".to_string()
+    } else {
+        format!("/git/repos/resolve?{q}")
+    }
+}
+
+/// Resolve `args.repo_id` (a friendly reference, or absent) to the canonical
+/// Otto repo id via the daemon, returning the arguments with `repo_id`
+/// rewritten. The daemon authorizes as the session owner (Git:View +
+/// workspace Viewer), so a reference only ever lands on a repo the owner could
+/// already list; an unknown/ambiguous reference errors with the candidates.
+async fn resolve_repo_arg(ctx: &Ctx, args: &Value) -> Result<Value, String> {
+    let v = ctx.get_json(&resolve_repo_path(args)).await?;
+    let id = v["repo"]["id"]
+        .as_str()
+        .ok_or("repo resolution returned no repo")?
+        .to_string();
+    let mut out = args.clone();
+    out["repo_id"] = json!(id);
+    Ok(out)
+}
 
 /// Append `&key=<value>` for every `(key, arg)` whose argument is a non-empty
 /// string or a number, percent-encoding string values. Optional query filters
@@ -1461,7 +1980,25 @@ fn check_override_vars(vars: &Value) -> Result<(), String> {
 
 /// Merge a parsed curl shape under explicit tool arguments. Auth and extras are
 /// absent unless supplied so PATCH preserves the daemon's stored values.
-fn merge_upsert(args: &Value, parsed_curl: Option<&Value>) -> Value {
+///
+/// On UPDATE (`stored` = the saved request, read raw as the session owner and
+/// never returned to the agent) every field the agent did not send keeps its
+/// stored value: the PATCH route replaces the row wholesale (only auth/extras
+/// are preserved server-side), so defaulting an omitted `method` to GET or an
+/// omitted `headers` to `[]` silently rewrote the request. `docs_md` merges
+/// into the stored `extras` instead of replacing its scripts/settings.
+fn merge_upsert(args: &Value, parsed_curl: Option<&Value>, stored: Option<&Value>) -> Value {
+    const STORED_FIELDS: [&str; 9] = [
+        "name",
+        "method",
+        "url",
+        "headers",
+        "query",
+        "body_mode",
+        "body",
+        "collection_id",
+        "ssh_connection_id",
+    ];
     const CURL_FIELDS: [&str; 7] = [
         "method",
         "url",
@@ -1484,6 +2021,13 @@ fn merge_upsert(args: &Value, parsed_curl: Option<&Value>) -> Value {
     ];
 
     let mut merged = serde_json::Map::new();
+    if let Some(stored) = stored {
+        for field in STORED_FIELDS {
+            if let Some(value) = stored.get(field).filter(|v| !v.is_null()) {
+                merged.insert(field.to_string(), value.clone());
+            }
+        }
+    }
     if let Some(parsed) = parsed_curl {
         for field in CURL_FIELDS {
             if let Some(value) = parsed.get(field) {
@@ -1503,7 +2047,14 @@ fn merge_upsert(args: &Value, parsed_curl: Option<&Value>) -> Value {
         .entry("body_mode".to_string())
         .or_insert_with(|| json!("none"));
     if let Some(docs_md) = args.get("docs_md") {
-        merged.insert("extras".to_string(), json!({ "v": 1, "docs_md": docs_md }));
+        let mut extras = stored
+            .and_then(|s| s.get("extras"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        extras.entry("v".to_string()).or_insert_with(|| json!(1));
+        extras.insert("docs_md".to_string(), docs_md.clone());
+        merged.insert("extras".to_string(), Value::Object(extras));
     }
     Value::Object(merged)
 }
@@ -1518,12 +2069,13 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             .ok_or_else(|| "no workspace context (OTTO_WORKSPACE_ID unset)".to_string())
     };
     Ok(match name {
-        "otto_list_workflows" => ReadCall::get(format!("/workspaces/{}/workflows", seg(ws_req()?))),
+        "otto_list_workflow_runs" => ReadCall::get(format!(
+            "/workflows/{}/runs?summary={}",
+            seg(&arg_str(args, "workflow_id")?),
+            args.get("summary").and_then(Value::as_bool).unwrap_or(true)
+        )),
         "otto_get_workflow_run" => {
             ReadCall::get(format!("/workflow-runs/{}", seg(&arg_str(args, "run_id")?)))
-        }
-        "otto_list_broker_clusters" => {
-            ReadCall::get(format!("/workspaces/{}/brokers/clusters", seg(ws_req()?)))
         }
         "otto_list_broker_topics" => ReadCall::get(format!(
             "/brokers/clusters/{}/topics",
@@ -1542,9 +2094,14 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             {
                 path.push_str(&format!("&project={}", seg(p)));
             }
+            path.push_str(&opt_query(args, &[("start_at", "start_at")]));
             ReadCall::get(path)
         }
-        "otto_list_swarms" => ReadCall::get(format!("/workspaces/{}/swarm/swarms", seg(ws_req()?))),
+        "otto_list_issue_transitions" => ReadCall::get(format!(
+            "/issue/{}/{}/transitions",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "key")?)
+        )),
         "swarm_list_projects" => ReadCall::get(format!(
             "/swarm/swarms/{}/projects",
             seg(&arg_str(args, "swarm_id")?)
@@ -1559,14 +2116,28 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         )),
         "otto_search_memory" => {
             // `k` defaults to 0 server-side (MemoryQuery) → no hits; supply a useful default.
-            let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
+            let k = args.get("k").and_then(u64_lenient).unwrap_or(20);
             let body = json!({ "text": arg_str(args, "query")?, "k": k });
             ReadCall::post(
                 format!("/workspaces/{}/memory/search", seg(ws_req()?)),
                 body,
             )
         }
-        "otto_list_repos" => ReadCall::get(format!("/workspaces/{}/repos", seg(ws_req()?))),
+        // Every workspace the caller can read, this session's first (the
+        // daemon also infers "current" from the session token); an explicit
+        // `workspace_id` narrows it.
+        "otto_list_repos" => {
+            let mut q = opt_query(args, &[("workspace_id", "workspace_id")]);
+            if let Some(ws) = ws.filter(|s| !s.is_empty()) {
+                q.push_str(&format!("&prefer_workspace_id={}", seg(ws)));
+            }
+            let q = q.trim_start_matches('&');
+            ReadCall::get(if q.is_empty() {
+                "/git/repos/directory".to_string()
+            } else {
+                format!("/git/repos/directory?{q}")
+            })
+        }
         "otto_list_sessions" => ReadCall::get(format!("/workspaces/{}/sessions", seg(ws_req()?))),
         "otto_get_session" => {
             ReadCall::get(format!("/sessions/{}", seg(&arg_str(args, "session_id")?)))
@@ -1580,32 +2151,49 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             )
             .trim_start_matches('&')
         )),
-        "otto_list_product_stories" => {
-            ReadCall::get(format!("/workspaces/{}/product/stories", seg(ws_req()?)))
-        }
         "otto_list_findings" => ReadCall::get(format!(
             "/reviews/{}/findings",
             seg(&arg_str(args, "review_id")?)
         )),
-        "otto_list_prs" => ReadCall::get(format!("/repos/{}/prs", seg(&arg_str(args, "repo_id")?))),
+        "otto_list_prs" => {
+            let q = opt_query(
+                args,
+                &[
+                    ("state", "state"),
+                    ("page", "page"),
+                    ("per_page", "per_page"),
+                ],
+            );
+            let q = q.trim_start_matches('&');
+            let repo = seg(&arg_str(args, "repo_id")?);
+            ReadCall::get(if q.is_empty() {
+                format!("/repos/{repo}/prs")
+            } else {
+                format!("/repos/{repo}/prs?{q}")
+            })
+        }
         "otto_get_pr" => ReadCall::get(format!(
             "/repos/{}/prs/{}",
             seg(&arg_str(args, "repo_id")?),
             arg_u64(args, "pr_number")?
         )),
         "otto_usage_summary" => {
-            let mut path = "/usage/summary".to_string();
-            if let Some(d) = args.get("days").and_then(Value::as_u64) {
-                path.push_str(&format!("?days={d}"));
-            }
-            ReadCall::get(path)
+            let q = opt_query(args, &[("days", "days"), ("otto_only", "otto_only")]);
+            let q = q.trim_start_matches('&');
+            ReadCall::get(if q.is_empty() {
+                "/usage/summary".to_string()
+            } else {
+                format!("/usage/summary?{q}")
+            })
         }
         "otto_list_improvement_runs" => {
             ReadCall::get(format!("/workspaces/{}/improvement/runs", seg(ws_req()?)))
         }
-        "otto_list_improvement_edits" => {
-            ReadCall::get(format!("/workspaces/{}/improvement/edits", seg(ws_req()?)))
-        }
+        "otto_list_improvement_edits" => ReadCall::get(format!(
+            "/workspaces/{}/improvement/edits{}",
+            seg(ws_req()?),
+            opt_query(args, &[("status", "status")]).replacen('&', "?", 1)
+        )),
         "otto_vault_list" => ReadCall::get(format!("/workspaces/{}/vault/vaults", seg(ws_req()?))),
         "otto_vault_dir" => {
             let v = arg_i64(args, "vault_id")?;
@@ -1626,7 +2214,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         }
         "otto_vault_search" => {
             let v = arg_i64(args, "vault_id")?;
-            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20);
+            let limit = args.get("limit").and_then(u64_lenient).unwrap_or(20);
             let body = json!({ "query": arg_str(args, "query")?, "limit": limit });
             ReadCall::post(
                 format!("/workspaces/{}/vault/vaults/{v}/search", seg(ws_req()?)),
@@ -1664,7 +2252,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             if let Some(f) = focus {
                 path.push_str(&format!("&path={}", seg(f)));
             }
-            if let Some(d) = args.get("depth").and_then(Value::as_u64) {
+            if let Some(d) = args.get("depth").and_then(u64_lenient) {
                 path.push_str(&format!("&depth={d}"));
             }
             ReadCall::get(path)
@@ -1719,7 +2307,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             // Read-only POST: `receive-message --visibility-timeout 0` — nothing
             // is consumed or deleted (the policy table grades `/peek` as View).
             let mut body = json!({ "url": arg_str(args, "url")?, "visibility_timeout": 0 });
-            if let Some(max) = args.get("max").and_then(Value::as_u64) {
+            if let Some(max) = args.get("max").and_then(u64_lenient) {
                 body["max"] = json!(max.clamp(1, 10));
             }
             ReadCall::post(
@@ -1770,17 +2358,81 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             seg(&arg_str(args, "kind")?),
             opt_query(args, &[("ns", "namespace"), ("label", "label"), ("q", "q")])
         )),
+        // `ns` omitted for cluster-scoped kinds (nodes, namespaces).
         "k8s_describe" => ReadCall::get(format!(
-            "/k8s/clusters/{}/resource?kind={}&ns={}&name={}",
+            "/k8s/clusters/{}/resource?kind={}&name={}{}",
             seg(&arg_str(args, "cluster_id")?),
             seg(&arg_str(args, "kind")?),
-            seg(&arg_str(args, "namespace")?),
-            seg(&arg_str(args, "name")?)
+            seg(&arg_str(args, "name")?),
+            opt_query(args, &[("ns", "namespace")])
+        )),
+        "k8s_health" => ReadCall::get(format!(
+            "/k8s/clusters/{}/monitor/health?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(args, &[("window", "window")]).trim_start_matches('&')
         )),
         "k8s_top" => ReadCall::get(format!(
             "/k8s/clusters/{}/metrics?{}",
             seg(&arg_str(args, "cluster_id")?),
             opt_query(args, &[("ns", "namespace")]).trim_start_matches('&')
+        )),
+        // ---- Design Hall (global library; `workspace_id` only narrows) ----
+        "design_list" => {
+            let q = opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("project_id", "project_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("limit", "limit"),
+                    ("cursor", "cursor"),
+                ],
+            );
+            let q = q.trim_start_matches('&');
+            ReadCall::get(if q.is_empty() {
+                "/design/artifacts".to_string()
+            } else {
+                format!("/design/artifacts?{q}")
+            })
+        }
+        "design_get" => {
+            let content = args
+                .get("include_content")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            ReadCall::get(format!(
+                "/design/artifacts/{}?content={content}{}",
+                seg(&arg_str(args, "artifact_id")?),
+                opt_query(args, &[("version", "version")])
+            ))
+        }
+        "design_links" => ReadCall::get(format!(
+            "/design/artifacts/{}/links?dir={}",
+            seg(&arg_str(args, "artifact_id")?),
+            seg(args
+                .get("dir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("both"))
+        )),
+        "design_search" => ReadCall::get(format!(
+            "/design/search?q={}{}",
+            seg(&arg_str(args, "query")?),
+            opt_query(
+                args,
+                &[
+                    ("workspace_id", "workspace_id"),
+                    ("studio", "studio"),
+                    ("format", "format"),
+                    ("status", "status"),
+                    ("story_id", "story_id"),
+                    ("project_id", "project_id"),
+                    ("limit", "limit"),
+                ],
+            )
         )),
         other => return Err(format!("unknown feature read tool `{other}`")),
     })
@@ -1852,11 +2504,22 @@ fn arg_optional_string(args: &Value, key: &str) -> Result<Option<String>, String
     }
 }
 
-/// Extract a required integer argument.
+/// Extract a required integer argument (a numeric string is accepted — some
+/// MCP clients stringify every argument).
 fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
     args.get(key)
-        .and_then(|v| v.as_i64())
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .ok_or_else(|| format!("missing required integer argument `{key}`"))
+}
+
+/// A JSON number, or a string holding one — for optional unsigned arguments
+/// (limits, sizes, delays) that a stringifying client sends as `"5"`.
+fn u64_lenient(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 /// Percent-encode a path segment so an id with `/` or spaces can't break out of
@@ -1877,6 +2540,20 @@ fn seg(s: &str) -> String {
 /// Run one tool by name. Returns the capped+redacted result `Value` and the
 /// audited row count, or an error string surfaced to the agent.
 async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
+    // Git tools: turn a friendly repo reference (or none → this session's
+    // repo) into the canonical id before any arm builds a `/repos/{id}` path.
+    let resolved;
+    let args = if NATIVE_REPO_REF_TOOLS.contains(&name) {
+        resolved = resolve_repo_arg(ctx, args).await?;
+        &resolved
+    } else {
+        args
+    };
+    // Every other friendly reference (a connection / cluster / account /
+    // vault / workflow NAME, a workspace name, an omitted sole issue account)
+    // → canonical ids, via the daemon's `/refs/resolve` as the session owner.
+    let refs = resolve_native_refs(ctx, name, args).await?;
+    let args = refs.as_ref().unwrap_or(args);
     match name {
         // API-client reads and writes are thin wrappers over the masked,
         // workspace-scoped daemon routes. All returned values pass `finalize`.
@@ -2029,17 +2706,36 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     body[key] = value.clone();
                 }
             }
+            // The request itself may wait up to its `timeout_ms` (≤ 60 s).
+            let budget_ms = args
+                .get("timeout_ms")
+                .and_then(u64_lenient)
+                .unwrap_or(30_000)
+                .min(60_000);
             let raw = ctx
-                .post_json(
+                .post_json_within(
                     &format!("{base}/requests/{}/execute", seg(&request_id)),
                     &body,
+                    Duration::from_millis(budget_ms) + Duration::from_secs(15),
                 )
                 .await?;
             Ok(finalize(raw))
         }
         "otto_api_upsert_request" => {
             let base = api_base(ctx)?;
-            let _name = arg_str(args, "name")?;
+            let update_id = arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty());
+            // Update: the stored row (raw, as the owner — only ever sent back
+            // in the PATCH, never to the agent) supplies every omitted field.
+            let stored = match &update_id {
+                Some(id) => Some(
+                    ctx.get_json(&format!("{base}/requests/{}", seg(id)))
+                        .await?,
+                ),
+                None => {
+                    arg_str(args, "name")?;
+                    None
+                }
+            };
             let parsed_curl =
                 match arg_optional_string(args, "curl")?.filter(|curl| !curl.is_empty()) {
                     Some(curl) => Some(
@@ -2091,10 +2787,8 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     effective_args["collection_id"] = json!(collection_id);
                 }
             }
-            let body = merge_upsert(&effective_args, parsed_curl.as_ref());
-            let saved = if let Some(request_id) =
-                arg_optional_string(args, "request_id")?.filter(|id| !id.is_empty())
-            {
+            let body = merge_upsert(&effective_args, parsed_curl.as_ref(), stored.as_ref());
+            let saved = if let Some(request_id) = update_id {
                 ctx.patch_json(&format!("{base}/requests/{}", seg(&request_id)), &body)
                     .await?
             } else {
@@ -2136,10 +2830,25 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     .to_string()
             };
             let raw = ctx
-                .post_json(
+                .post_json_within(
                     &format!("{base}/automations/{}/run", seg(&automation_id)),
                     &json!({}),
+                    Duration::from_secs(180),
                 )
+                .await?;
+            Ok(finalize(raw))
+        }
+        // Otto Assistant tools: forward the arguments plus this session's id;
+        // the daemon resolves the session to its thread (the token's own
+        // session binding wins) and refuses non-assistant sessions.
+        name if assistant_segment(name).is_some() => {
+            let seg_name = assistant_segment(name).unwrap_or_default();
+            let mut body = if args.is_object() { args.clone() } else { json!({}) };
+            if let Some(sid) = ctx.session_id.clone() {
+                body["session_id"] = json!(sid);
+            }
+            let raw = ctx
+                .post_json(&format!("/assistant/agent/{seg_name}"), &body)
                 .await?;
             Ok(finalize(raw))
         }
@@ -2185,26 +2894,30 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             Ok(finalize(json!({ "messages": raw })))
         }
         "otto_list_connections" => {
-            let Some(ws) = ctx.workspace_id.as_deref() else {
-                return Err(
-                    "no workspace context (OTTO_WORKSPACE_ID unset); cannot list connections"
-                        .into(),
-                );
-            };
+            // Every workspace the owner can read (a connection is registered
+            // in ONE workspace, not necessarily this session's), this
+            // session's first — the daemon's cross-workspace directory.
             let raw = ctx
-                .get_json(&format!("/workspaces/{}/connections", seg(ws)))
+                .get_json(&directory_path(
+                    "connection",
+                    args,
+                    ctx.workspace_id.as_deref(),
+                ))
                 .await?;
             // Keep only queryable DB kinds, optionally one kind, and slim each row
             // so the agent sees ids/names/kinds without connection params/secrets.
             let kind_filter = args.get("kind").and_then(Value::as_str);
-            let items: Vec<Value> = raw
+            let items: Vec<Value> = raw["items"]
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
                 .iter()
                 .filter_map(|c| {
                     let kind = c.get("kind").and_then(Value::as_str).unwrap_or("");
-                    if !matches!(kind, "mysql" | "redis" | "mongodb" | "clickhouse") {
+                    if !matches!(
+                        kind,
+                        "mysql" | "postgres" | "redis" | "mongodb" | "clickhouse"
+                    ) {
                         return None;
                     }
                     if kind_filter.is_some_and(|kf| kf != kind) {
@@ -2216,6 +2929,8 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                         "kind": kind,
                         "environment": c.get("environment").cloned().unwrap_or(Value::Null),
                         "read_only": c.get("read_only").cloned().unwrap_or(Value::Null),
+                        "workspace_id": c.get("workspace_id").cloned().unwrap_or(Value::Null),
+                        "workspace_name": c.get("workspace_name").cloned().unwrap_or(Value::Null),
                     }))
                 })
                 .collect();
@@ -2280,7 +2995,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             {
                 body["node"] = json!(db);
             }
-            if let Some(mr) = args.get("max_rows").and_then(Value::as_u64) {
+            if let Some(mr) = args.get("max_rows").and_then(u64_lenient) {
                 body["max_rows"] = json!(mr);
             }
             // POSTs to the read-only-enforced endpoint: any write/DDL is refused
@@ -2327,7 +3042,13 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             })))
         }
         "canvas_list_scenes" => {
-            let ws = arg_str(args, "workspace_id")?;
+            let ws = match arg_optional_string(args, "workspace_id")?.filter(|s| !s.is_empty()) {
+                Some(ws) => ws,
+                None => ctx
+                    .workspace_id
+                    .clone()
+                    .ok_or("no workspace context (OTTO_WORKSPACE_ID unset); pass `workspace_id`")?,
+            };
             let scenes = ctx
                 .get_json(&format!("/workspaces/{}/canvas/scenes", seg(&ws)))
                 .await?;
@@ -2756,7 +3477,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             if let Some(path) = arg_optional_string(args, "path")? {
                 payload["path"] = json!(path);
             }
-            if let Some(line) = args.get("line").and_then(Value::as_u64) {
+            if let Some(line) = args.get("line").and_then(u64_lenient) {
                 payload["line"] = json!(line);
             }
             if let Some(reply) = arg_optional_string(args, "in_reply_to")? {
@@ -2802,7 +3523,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         "aws_sqs_send" => {
             let acc = arg_str(args, "account_id")?;
             let mut body = json!({ "url": arg_str(args, "url")?, "body": arg_str(args, "body")? });
-            if let Some(d) = args.get("delay_seconds").and_then(Value::as_u64) {
+            if let Some(d) = args.get("delay_seconds").and_then(u64_lenient) {
                 body["delay_seconds"] = json!(d);
             }
             for k in ["group_id", "dedup_id"] {
@@ -2865,8 +3586,26 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .await?;
             Ok(finalize(raw))
         }
+        name if NATIVE_DIRECTORY_TOOLS.iter().any(|(t, _)| *t == name) => {
+            let kind = NATIVE_DIRECTORY_TOOLS
+                .iter()
+                .find(|(t, _)| *t == name)
+                .map(|(_, k)| *k)
+                .unwrap_or_default();
+            let raw = ctx
+                .get_json(&directory_path(kind, args, ctx.workspace_id.as_deref()))
+                .await?;
+            Ok(finalize(raw))
+        }
         name if FEATURE_READ_TOOLS.contains(&name) => {
-            let call = read_route(name, args, ctx.workspace_id.as_deref())?;
+            // An explicit (already resolved) `workspace_id` picks another
+            // workspace for the workspace-scoped reads; default: this session's.
+            let ws = args
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or(ctx.workspace_id.as_deref());
+            let call = read_route(name, args, ws)?;
             let raw = if call.post {
                 ctx.post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
                     .await?
@@ -2937,7 +3676,15 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
         "arguments": governed_invoke_args(ctx, &spec, args),
         "wait_seconds": GOVERNED_WAIT_SECS,
     });
-    let v = ctx.post_json("/mcp/otto-tools/invoke", &body).await?;
+    // The daemon first waits up to GOVERNED_WAIT_SECS on a human decision,
+    // then runs the tool with its own per-tool self-call budget (≤ 180 s).
+    let v = ctx
+        .post_json_within(
+            "/mcp/otto-tools/invoke",
+            &body,
+            Duration::from_secs(GOVERNED_WAIT_SECS + 190),
+        )
+        .await?;
     let is_error = matches!(
         v.get("decision").and_then(Value::as_str),
         Some("denied") | Some("error")
@@ -3432,6 +4179,7 @@ mod tests {
                 "docs_md": "Item docs"
             }),
             Some(&parsed),
+            None,
         );
         assert_eq!(merged["name"], json!("Items"));
         assert_eq!(merged["method"], json!("PUT"));
@@ -3441,11 +4189,52 @@ mod tests {
         assert_eq!(merged["auth"], parsed["auth"]);
         assert_eq!(merged["extras"], json!({"v":1,"docs_md":"Item docs"}));
 
-        let without_auth = merge_upsert(&json!({"name":"Health","url":"/health"}), None);
+        let without_auth = merge_upsert(&json!({"name":"Health","url":"/health"}), None, None);
         assert_eq!(without_auth["method"], json!("GET"));
         assert_eq!(without_auth["body_mode"], json!("none"));
         assert!(without_auth.get("auth").is_none());
         assert!(without_auth.get("extras").is_none());
+    }
+
+    /// An UPDATE that sends one field must not rewrite the rest: the PATCH
+    /// route replaces the row wholesale, so the stored values fill every
+    /// omitted field (never the GET / `none` create defaults), and `docs_md`
+    /// merges into the stored extras instead of dropping its scripts.
+    #[test]
+    fn merge_upsert_on_update_keeps_every_omitted_stored_field() {
+        let stored = json!({
+            "id": "q1", "name": "Create order", "method": "POST", "url": "{{base}}/orders",
+            "headers": [{"key":"X-Tenant","value":"7","enabled":true}],
+            "query": [], "body_mode": "json", "body": "{\"a\":1}", "collection_id": "c9",
+            "ssh_connection_id": null, "auth": {"type":"bearer","token":"__keychain__"},
+            "extras": {"v":1, "scripts": {"pre": "x()"}}
+        });
+        let merged = merge_upsert(
+            &json!({"url": "{{base}}/v2/orders", "docs_md": "Docs"}),
+            None,
+            Some(&stored),
+        );
+        assert_eq!(
+            merged["url"],
+            json!("{{base}}/v2/orders"),
+            "sent field wins"
+        );
+        assert_eq!(
+            merged["method"],
+            json!("POST"),
+            "not the GET create default"
+        );
+        assert_eq!(merged["body_mode"], json!("json"));
+        assert_eq!(merged["headers"], stored["headers"]);
+        assert_eq!(merged["collection_id"], json!("c9"));
+        assert_eq!(merged["name"], json!("Create order"));
+        assert!(merged.get("auth").is_none(), "auth stays server-side");
+        assert!(
+            merged.get("ssh_connection_id").is_none(),
+            "a null stays absent"
+        );
+        assert_eq!(merged["extras"]["scripts"]["pre"], json!("x()"));
+        assert_eq!(merged["extras"]["docs_md"], json!("Docs"));
     }
 
     #[test]
@@ -3472,21 +4261,84 @@ mod tests {
         assert_eq!(error, "ambiguous request 'login': r1, r3");
     }
 
-    #[tokio::test]
-    async fn list_connections_errors_without_workspace() {
-        // No OTTO_WORKSPACE_ID context ⇒ a clear tool error, no upstream call.
-        let mut ctx = test_ctx();
-        ctx.workspace_id = None;
-        let resp = handle(
-            &ctx,
-            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                    "params": { "name": "otto_list_connections", "arguments": {} } }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp["result"]["isError"], json!(true));
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("workspace"), "got: {text}");
+    /// The cross-workspace list tools read the daemon's directory — every
+    /// workspace the owner can read, this session's first — and work without
+    /// a session workspace at all (they used to list only `OTTO_WORKSPACE_ID`).
+    #[test]
+    fn list_tools_span_every_workspace_through_the_directory() {
+        assert_eq!(
+            directory_path("connection", &json!({}), Some("ws1")),
+            "/refs/directory?kind=connection&prefer_workspace_id=ws1"
+        );
+        assert_eq!(
+            directory_path("workflow", &json!({"workspace_id":"ws2"}), None),
+            "/refs/directory?kind=workflow&workspace_id=ws2"
+        );
+        for (tool, _) in NATIVE_DIRECTORY_TOOLS {
+            assert!(
+                !FEATURE_READ_TOOLS.contains(tool),
+                "{tool} is a directory tool"
+            );
+            let cat = tool_catalog();
+            let spec = cat["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == *tool)
+                .cloned()
+                .unwrap_or_else(|| panic!("catalog missing {tool}"));
+            assert!(
+                spec["inputSchema"]["required"].is_null(),
+                "{tool} requires nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn native_refs_resolve_names_and_the_sole_issue_account() {
+        let id = "01KZTKNK3Z8N6VD9Q0MTDQSJ3V";
+        // A plain id needs no lookup; a name does.
+        assert!(native_ref_plan("otto_db_query", &json!({"connection_id": id})).is_empty());
+        assert_eq!(
+            native_ref_plan(
+                "otto_db_query",
+                &json!({"connection_id": "GROOVE_SINATRA_STG"})
+            ),
+            vec![(
+                "connection_id",
+                "connection",
+                Some("GROOVE_SINATRA_STG".to_string())
+            )]
+        );
+        // An omitted issue account → the owner's only account.
+        assert_eq!(
+            native_ref_plan("otto_search_issues", &json!({"query":"x"})),
+            vec![("account_id", "issue_account", None)]
+        );
+        // A workspace NAME, and vault / cluster names.
+        assert_eq!(
+            native_ref_plan("otto_list_sessions", &json!({"workspace_id":"Casino"}))[0],
+            ("workspace_id", "workspace", Some("Casino".to_string()))
+        );
+        assert!(
+            native_ref_plan("otto_vault_read", &json!({"vault_id": 1, "path":"a.md"})).is_empty()
+        );
+        assert_eq!(
+            native_ref_plan("otto_vault_read", &json!({"vault_id": "Platform Docs"}))[0].1,
+            "vault"
+        );
+        assert_eq!(
+            native_ref_plan("k8s_top", &json!({"cluster_id":"AWS STG"}))[0].1,
+            "k8s_cluster"
+        );
+        // Every table entry names a tool this binary serves.
+        let names = native_tool_names();
+        for (tool, _, _) in NATIVE_REF_ARGS {
+            assert!(
+                names.iter().any(|n| n == tool),
+                "NATIVE_REF_ARGS names unknown tool {tool}"
+            );
+        }
     }
 
     #[test]
@@ -3649,9 +4501,48 @@ mod tests {
     }
 
     #[test]
+    fn design_writes_are_bridged_through_the_governed_path_only() {
+        // `design_assist` / `design_link` have NO native twin: they are served
+        // only as the governed `otto_design_*` bridge, so every call goes
+        // through the control plane's allow-list → approval → audit (a native
+        // tool would bypass the approval gate). The native design tools stay
+        // the four reads.
+        let native = native_tool_names();
+        for w in ["design_assist", "design_link"] {
+            assert!(!native.iter().any(|n| n == w), "{w} must not be native");
+            assert!(!FEATURE_READ_TOOLS.contains(&w), "{w} is a write");
+            let stdio = format!("otto_{w}");
+            assert_eq!(
+                governed_tool_for_stdio_name(&stdio).as_deref(),
+                Some(format!("otto.{w}").as_str()),
+                "{stdio} must proxy to the governed tool"
+            );
+        }
+        // Advertised only when the operator enabled them.
+        let none: Vec<String> = vec![];
+        assert!(!governed_tools_for(&none).iter().any(|t| t["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("otto_design_"))));
+        let enabled = vec![
+            "otto.design_assist".to_string(),
+            "otto.design_link".to_string(),
+        ];
+        let names: Vec<String> = governed_tools_for(&enabled)
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(names, vec!["otto_design_assist", "otto_design_link"]);
+        // The artifact carries the workspace: no session workspace is injected.
+        let ctx = test_ctx();
+        let spec = governed_spec_for_stdio_name("otto_design_assist").unwrap();
+        let args = governed_invoke_args(&ctx, &spec, &json!({"artifact_id": "A1", "prompt": "x"}));
+        assert!(args.get("workspace_id").is_none());
+    }
+
+    #[test]
     fn governed_invoke_args_get_the_session_workspace() {
         let ctx = test_ctx();
-        let spec = json!({"inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string"}}}});
+        let spec = json!({"inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}});
         let filled = governed_invoke_args(&ctx, &spec, &json!({"repo_id":"r1"}));
         assert_eq!(filled["workspace_id"], json!("ws-test"));
         assert_eq!(filled["repo_id"], json!("r1"));
@@ -3663,6 +4554,124 @@ mod tests {
         assert!(governed_invoke_args(&ctx, &no_ws, &json!({}))
             .get("workspace_id")
             .is_none());
+        // An OPTIONAL workspace means "span every workspace" (the directory
+        // list tools) — injecting the session's would narrow it back.
+        let optional = json!({"inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string"}}}});
+        assert!(governed_invoke_args(&ctx, &optional, &json!({}))
+            .get("workspace_id")
+            .is_none());
+    }
+
+    /// The bridged git tools (`otto_create_pr`, `otto_git_status`, …) must NOT
+    /// get the session's workspace injected: their `repo_id` is resolved across
+    /// every readable workspace server-side, and a `workspace_id` would narrow
+    /// that back to the session's own — the exact bug this resolution fixes.
+    #[test]
+    fn governed_git_tools_resolve_across_workspaces_not_the_session_one() {
+        let ctx = test_ctx();
+        for short in [
+            "create_pr",
+            "git_status",
+            "start_pr_review",
+            "open_pr_draft",
+        ] {
+            let spec = otto_server::mcp_outward::otto_tool_specs()
+                .into_iter()
+                .find(|s| s["name"] == format!("otto.{short}"))
+                .unwrap_or_else(|| panic!("otto.{short} spec"));
+            let args = governed_invoke_args(&ctx, &spec, &json!({"repo_id":"promotions"}));
+            assert!(args.get("workspace_id").is_none(), "{short}: {args}");
+            let required = spec["inputSchema"]["required"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !required.contains(&json!("repo_id")),
+                "{short}: repo_id must be optional (session cwd fallback)"
+            );
+        }
+    }
+
+    #[test]
+    fn native_git_tools_take_a_friendly_optional_repo_ref() {
+        let catalog = tool_catalog();
+        for name in NATIVE_REPO_REF_TOOLS {
+            let tool = catalog["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == *name)
+                .unwrap_or_else(|| panic!("{name} in catalog"));
+            let schema = &tool["inputSchema"];
+            assert_eq!(
+                schema["properties"]["repo_id"]["description"],
+                json!(REPO_REF_DESC),
+                "{name}"
+            );
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            assert!(!required.contains(&json!("repo_id")), "{name}");
+        }
+        // The resolve query forwards the reference + optional filter, encoded.
+        assert_eq!(
+            resolve_repo_path(&json!({"repo_id":"team/games_management"})),
+            "/git/repos/resolve?ref=team%2Fgames_management"
+        );
+        assert_eq!(
+            resolve_repo_path(&json!({"repo_id":"promotions","workspace_id":"ws-b"})),
+            "/git/repos/resolve?ref=promotions&workspace_id=ws-b"
+        );
+        // No reference → the daemon falls back to the session's cwd.
+        assert_eq!(resolve_repo_path(&json!({})), "/git/repos/resolve");
+    }
+
+    #[test]
+    fn list_repos_spans_every_workspace_current_first() {
+        assert_eq!(
+            read_route("otto_list_repos", &json!({}), Some("ws1")).unwrap(),
+            ReadCall::get("/git/repos/directory?prefer_workspace_id=ws1".into())
+        );
+        assert_eq!(
+            read_route(
+                "otto_list_repos",
+                &json!({"workspace_id":"ws2"}),
+                Some("ws1")
+            )
+            .unwrap(),
+            ReadCall::get("/git/repos/directory?workspace_id=ws2&prefer_workspace_id=ws1".into())
+        );
+        // No session workspace is no longer an error — it just lists everything.
+        assert_eq!(
+            read_route("otto_list_repos", &json!({}), None).unwrap(),
+            ReadCall::get("/git/repos/directory".into())
+        );
+    }
+
+    #[test]
+    fn daemon_error_surfaces_the_problem_message() {
+        let status = reqwest::StatusCode::NOT_FOUND;
+        let long = "x".repeat(1000);
+        let body = json!({"code":"not_found","message": format!("not found: {long}")});
+        let msg = daemon_error(status, body.to_string().as_bytes());
+        assert!(
+            msg.starts_with("daemon returned 404 Not Found: not found: xxx"),
+            "{msg}"
+        );
+        // The whole (bounded) message survives — candidate lists are the point.
+        assert!(msg.len() > 1000, "{}", msg.len());
+        // A non-Problem body stays a short raw snippet.
+        let raw = daemon_error(status, "y".repeat(5000).as_bytes());
+        assert!(raw.len() < 400, "{}", raw.len());
+        // A module's `{error}` body is surfaced too.
+        let e = daemon_error(status, br#"{"error":"no such thing"}"#);
+        assert!(e.ends_with("no such thing"), "{e}");
+    }
+
+    #[test]
+    fn an_empty_success_body_is_ok_not_a_parse_error() {
+        assert_eq!(parse_ok_body(b"").unwrap(), json!({"ok": true}));
+        assert_eq!(parse_ok_body(b" \n").unwrap(), json!({"ok": true}));
+        assert_eq!(parse_ok_body(br#"{"a":1}"#).unwrap(), json!({"a": 1}));
+        assert!(parse_ok_body(b"<html>").is_err());
     }
 
     #[tokio::test]
@@ -3714,6 +4723,86 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    #[test]
+    fn design_reads_are_native_read_only_and_route_to_the_design_api() {
+        let cat = tool_catalog();
+        let tools = cat["tools"].as_array().unwrap();
+        for t in ["design_list", "design_get", "design_links", "design_search"] {
+            let tool = tools
+                .iter()
+                .find(|x| x["name"] == t)
+                .unwrap_or_else(|| panic!("catalog missing design tool {t}"));
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Read-only"),
+                "{t} must advertise itself as read-only"
+            );
+            assert!(
+                FEATURE_READ_TOOLS.contains(&t),
+                "{t} must be a feature read"
+            );
+            // Served natively — never re-advertised through the governed path.
+            assert!(governed_tool_for_stdio_name(t).is_none(), "{t}");
+            assert!(
+                governed_tool_for_stdio_name(&format!("otto_{t}")).is_none(),
+                "{t}"
+            );
+        }
+        let ws = Some("ws1");
+        assert_eq!(
+            read_route("design_list", &json!({}), ws).unwrap().path,
+            "/design/artifacts"
+        );
+        assert_eq!(
+            read_route("design_list", &json!({"studio": "3d"}), ws)
+                .unwrap()
+                .path,
+            "/design/artifacts?studio=3d"
+        );
+        assert_eq!(
+            read_route(
+                "design_list",
+                &json!({"limit": 2, "cursor": "2026-09-23T10:00:00Z|A9"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/design/artifacts?limit=2&cursor=2026-09-23T10%3A00%3A00Z%7CA9"
+        );
+        let c = read_route(
+            "design_get",
+            &json!({"artifact_id": "A1", "version": "v2"}),
+            ws,
+        )
+        .unwrap();
+        assert!(!c.post);
+        assert_eq!(c.path, "/design/artifacts/A1?content=true&version=v2");
+        assert_eq!(
+            read_route(
+                "design_links",
+                &json!({"artifact_id": "A1", "dir": "in"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/design/artifacts/A1/links?dir=in"
+        );
+        assert_eq!(
+            read_route(
+                "design_search",
+                &json!({"query": "hero card", "status": "shipped"}),
+                None
+            )
+            .unwrap()
+            .path,
+            "/design/search?q=hero%20card&status=shipped"
+        );
+        assert!(read_route("design_get", &json!({}), ws).is_err());
+        assert!(read_route("design_search", &json!({}), ws).is_err());
     }
 
     #[test]
@@ -4129,18 +5218,64 @@ mod tests {
     fn read_route_maps_workspace_and_arg_tools() {
         let ws = Some("ws1");
         assert_eq!(
-            read_route("otto_list_workflows", &json!({}), ws).unwrap(),
+            read_route("otto_list_sessions", &json!({}), ws).unwrap(),
             ReadCall {
                 post: false,
-                path: "/workspaces/ws1/workflows".into(),
+                path: "/workspaces/ws1/sessions".into(),
                 body: None
             }
         );
         assert_eq!(
-            read_route("otto_list_broker_clusters", &json!({}), ws)
+            read_route("otto_list_workflow_runs", &json!({"workflow_id":"w1"}), ws)
                 .unwrap()
                 .path,
-            "/workspaces/ws1/brokers/clusters"
+            "/workflows/w1/runs?summary=true"
+        );
+        assert_eq!(
+            read_route(
+                "otto_list_issue_transitions",
+                &json!({"account_id":"a","key":"K-1"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/issue/a/K-1/transitions"
+        );
+        assert_eq!(
+            read_route(
+                "otto_list_prs",
+                &json!({"repo_id":"r","state":"all","page":2}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/repos/r/prs?state=all&page=2"
+        );
+        assert_eq!(
+            read_route(
+                "otto_list_improvement_edits",
+                &json!({"status":"applied"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/workspaces/ws1/improvement/edits?status=applied"
+        );
+        assert_eq!(
+            read_route("k8s_health", &json!({"cluster_id":"c","window":"6h"}), ws)
+                .unwrap()
+                .path,
+            "/k8s/clusters/c/monitor/health?window=6h"
+        );
+        assert_eq!(
+            read_route(
+                "k8s_describe",
+                &json!({"cluster_id":"c","kind":"nodes","name":"n1"}),
+                ws
+            )
+            .unwrap()
+            .path,
+            "/k8s/clusters/c/resource?kind=nodes&name=n1"
         );
         assert_eq!(
             read_route("otto_get_workflow_run", &json!({"run_id":"r1"}), ws)
@@ -4534,7 +5669,7 @@ mod tests {
             )
             .unwrap()
             .path,
-            "/k8s/clusters/c1/resource?kind=deployments&ns=prod&name=web"
+            "/k8s/clusters/c1/resource?kind=deployments&name=web&ns=prod"
         );
         assert_eq!(
             read_route(
@@ -4626,7 +5761,7 @@ mod tests {
 
     #[test]
     fn read_route_errors_without_workspace_or_required_arg() {
-        assert!(read_route("otto_list_workflows", &json!({}), None).is_err());
+        assert!(read_route("otto_list_sessions", &json!({}), None).is_err());
         assert!(read_route("otto_get_workflow_run", &json!({}), Some("ws1")).is_err());
         assert!(read_route("otto_search_issues", &json!({}), Some("ws1")).is_err());
         assert!(read_route("nope", &json!({}), Some("ws1")).is_err());
@@ -4639,7 +5774,7 @@ mod tests {
         let resp = handle(
             &ctx,
             json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-                    "params": { "name": "otto_list_workflows", "arguments": {} } }),
+                    "params": { "name": "otto_list_sessions", "arguments": {} } }),
         )
         .await
         .unwrap();
@@ -4648,6 +5783,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("workspace"));
+    }
+
+    #[test]
+    fn assistant_tools_are_shown_only_to_assistant_sessions() {
+        let names = |source: Option<&str>| -> Vec<String> {
+            tool_catalog_for_source(source)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let assistant = names(Some("assistant"));
+        for (tool, _) in ASSISTANT_TOOLS {
+            assert!(assistant.contains(&tool.to_string()), "assistant catalog missing {tool}");
+        }
+        // Everyone else keeps the normal catalog without them.
+        for source in [None, Some("personal_agent"), Some("vault-docs")] {
+            let other = names(source);
+            assert!(other.contains(&"otto_db_schema".to_string()));
+            assert!(
+                !other.iter().any(|n| n.starts_with("assistant_")),
+                "{source:?} leaked assistant tools"
+            );
+        }
+        // Every assistant spec is well formed and maps to one endpoint segment.
+        for spec in assistant_tool_specs() {
+            let name = spec["name"].as_str().unwrap();
+            assert!(assistant_segment(name).is_some(), "{name}");
+            assert_eq!(spec["inputSchema"]["type"], json!("object"), "{name}");
+            if let Some(req) = spec["inputSchema"]["required"].as_array() {
+                for r in req {
+                    assert!(spec["inputSchema"]["properties"]
+                        .get(r.as_str().unwrap())
+                        .is_some());
+                }
+            }
+        }
+        assert_eq!(assistant_tool_specs().len(), ASSISTANT_TOOLS.len());
+    }
+
+    #[test]
+    fn assistant_memory_tools_win_over_their_governed_twins() {
+        // The governed otto.assistant_* catalog entries are covered natively,
+        // so `otto_assistant_remember` is never advertised twice.
+        for n in ["assistant_remember", "assistant_forget", "assistant_recall"] {
+            assert!(governed_tool_for_stdio_name(&format!("otto_{n}")).is_none(), "{n}");
+        }
+        let enabled = vec!["otto.assistant_recall".to_string()];
+        assert!(governed_tools_for(&enabled).is_empty());
+    }
+
+    #[tokio::test]
+    async fn assistant_tool_call_surfaces_a_daemon_error() {
+        let mut ctx = test_ctx();
+        ctx.source = Some("assistant".into());
+        let resp = handle(
+            &ctx,
+            json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{
+                "name":"assistant_remember","arguments":{"text":"likes tea"}
+            }}),
+        )
+        .await
+        .unwrap();
+        // The daemon is unreachable in tests: a tool error, never "unknown tool".
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("unknown tool"), "{text}");
     }
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above

@@ -2,11 +2,12 @@
   // Canvases linked to this story (canvas scenes whose story_id == this story).
   // Lists them with a click-to-open deep-link into the Canvas module, and a
   // "New canvas" action that creates one already linked to the story.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { CanvasFormat, CanvasSceneSummary } from '../canvas/types';
 
   interface Props {
@@ -19,7 +20,6 @@
   let creating = $state(false);
   let picking = $state(false);
   let linkingId = $state('');
-  let newMenu = $state(false);
 
   async function load(): Promise<void> {
     loading = true;
@@ -81,8 +81,17 @@
     return { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
   }
 
+  /** "New ▾": pick the format from the shared menu, anchored under the button
+   *  (same rows as the Canvas module's own "New scene" menu). */
+  function newMenu(e: MouseEvent): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: 'Excalidraw board', icon: 'shapes', action: () => void createLinked('excalidraw') },
+      { label: 'Mermaid diagram', icon: 'branch', action: () => void createLinked('mermaid') },
+      { label: 'D2 diagram', icon: 'layers', action: () => void createLinked('d2') },
+    ], { align: 'end' });
+  }
+
   async function createLinked(format: CanvasFormat): Promise<void> {
-    newMenu = false;
     if (creating) return;
     creating = true;
     try {
@@ -102,7 +111,7 @@
   }
 
   /** Icon + short label for a scene's source format. */
-  function formatMeta(f: CanvasFormat): { icon: string; label: string } {
+  function formatMeta(f: CanvasFormat): { icon: IconName; label: string } {
     switch (f) {
       case 'excalidraw': return { icon: 'shapes', label: 'Excalidraw' };
       case 'd2': return { icon: 'layers', label: 'D2' };
@@ -130,32 +139,9 @@
       <button class="lc-btn" class:on={picking} onclick={openPicker}>
         <Icon name="plug" size={12} /> Link existing
       </button>
-      <div class="lc-new-wrap">
-        <button
-          class="lc-btn primary"
-          onclick={() => (newMenu = !newMenu)}
-          disabled={creating}
-        >
-          <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New'}
-        </button>
-        {#if newMenu}
-          <button class="lc-menu-backdrop" aria-label="Close menu" onclick={() => (newMenu = false)}></button>
-          <div class="lc-new-menu">
-            <button onclick={() => createLinked('excalidraw')}>
-              <Icon name="shapes" size={14} />
-              <span><strong>Excalidraw board</strong><small>Editable shapes — draw by hand</small></span>
-            </button>
-            <button onclick={() => createLinked('mermaid')}>
-              <Icon name="branch" size={14} />
-              <span><strong>Mermaid diagram</strong><small>Auto-rendered, any type</small></span>
-            </button>
-            <button onclick={() => createLinked('d2')}>
-              <Icon name="layers" size={14} />
-              <span><strong>D2 diagram</strong><small>Architecture, sequence &amp; SQL tables</small></span>
-            </button>
-          </div>
-        {/if}
-      </div>
+      <button class="lc-btn primary" onclick={newMenu} disabled={creating} aria-haspopup="menu">
+        <Icon name="plus" size={12} /> {creating ? 'Creating…' : 'New'}
+      </button>
     </div>
   </div>
 
@@ -254,63 +240,16 @@
   .lc-btn:hover,
   .lc-btn.on {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .lc-btn.primary {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     border-color: var(--accent);
   }
   .lc-btn.primary:hover {
-    color: #fff;
+    color: var(--accent-contrast);
     filter: brightness(1.08);
-  }
-  .lc-new-wrap {
-    position: relative;
-  }
-  .lc-menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 19;
-    border: none;
-    background: transparent;
-    cursor: default;
-  }
-  .lc-new-menu {
-    position: absolute;
-    top: 32px;
-    inset-inline-end: 0;
-    z-index: 20;
-    min-width: 210px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    box-shadow: var(--shadow, 0 8px 28px rgba(0, 0, 0, 0.25));
-    overflow: hidden;
-  }
-  .lc-new-menu button {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 11px;
-    border: none;
-    background: none;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-  }
-  .lc-new-menu button:hover {
-    background: var(--surface-2);
-  }
-  .lc-new-menu span {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.3;
-  }
-  .lc-new-menu small {
-    color: var(--text-dim);
-    font-size: 10.5px;
   }
   .lc-picker {
     display: flex;

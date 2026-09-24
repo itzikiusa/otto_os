@@ -7,7 +7,7 @@
   //   3. create the kept ones (passwords are never imported — the user sets them
   //      after, exactly like a hand-made connection).
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api, importSources, importScan, importCreate } from '../../lib/api/client';
   import type {
@@ -29,7 +29,7 @@
   let { wsId, onclose, onimported }: Props = $props();
 
   // Same kind→icon mapping the connection list rows use, so a row reads the same.
-  const kindIcons: Record<ConnectionKind, string> = {
+  const kindIcons: Record<ConnectionKind, IconName> = {
     ssh: 'key',
     mysql: 'db',
     postgres: 'db',
@@ -423,7 +423,7 @@
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tool-body {
     display: flex;
@@ -441,7 +441,7 @@
     color: var(--text-dim);
   }
   .tool-sub.found {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tool-caret {
     color: var(--text-dim);
@@ -508,14 +508,14 @@
     gap: 4px;
     padding: 8px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, #b8860b 10%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .prev-warn-line {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 11.5px;
-    color: #b8860b;
+    color: var(--warning);
     line-height: 1.4;
   }
   .prev-toolbar {
@@ -534,7 +534,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     padding: 2px 4px;
@@ -587,7 +587,7 @@
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row.disabled .row-kind {
     background: var(--surface-2);
@@ -624,15 +624,15 @@
     flex-shrink: 0;
   }
   .pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     flex-shrink: 0;
     white-space: nowrap;
   }
   .pill.warn {
-    color: #b8860b;
-    background: color-mix(in srgb, #b8860b 14%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 14%, transparent);
   }
   .pill.skip {
     color: var(--text-dim);

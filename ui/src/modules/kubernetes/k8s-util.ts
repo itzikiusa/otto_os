@@ -1,8 +1,8 @@
 // Shared helpers for the Kubernetes console: the kinds rail, formatting of
-// ages / bytes / millicores, health → CSS class, and the environment pill.
+// ages / bytes / millicores, and health → CSS class (the environment pill is the shared
+// <EnvBadge>).
 
 import type {
-  Environment,
   K8sCapabilities,
   K8sCluster,
   K8sHealth,
@@ -124,13 +124,6 @@ export function healthClass(h: K8sHealth | null | undefined, status?: string): s
   if (/crash|error|fail|backoff|evicted|degraded|notready|unknown/.test(s)) return 'health-bad';
   if (/pending|creating|init|progress|terminating|waiting/.test(s)) return 'health-progressing';
   return '';
-}
-
-/** Short environment tag for the card/top-bar pill (mirrors the DB hub). */
-export function envBadge(env: Environment | undefined): string {
-  if (env === 'prod') return 'PROD';
-  if (env === 'staging') return 'STG';
-  return 'DEV';
 }
 
 export function clusterLabel(c: K8sCluster | null): string {

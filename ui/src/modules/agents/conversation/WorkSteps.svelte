@@ -115,7 +115,7 @@
   }
   .steps-fail {
     height: 16px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .steps-caret {
     color: var(--text-dim);

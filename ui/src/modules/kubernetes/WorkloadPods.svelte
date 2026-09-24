@@ -153,7 +153,7 @@
     grid-template-columns: minmax(120px, 1fr) 44px minmax(90px, 0.8fr) 30px 56px 60px 52px 56px;
   }
   .wp-head {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -210,10 +210,10 @@
     flex-shrink: 0;
   }
   .health-ok {
-    color: var(--status-ready, #3fb950);
+    color: var(--success);
   }
   .health-ok .hdot {
-    background: var(--status-ready, #3fb950);
+    background: var(--success);
   }
   .health-bad {
     color: var(--status-exited, #f85149);

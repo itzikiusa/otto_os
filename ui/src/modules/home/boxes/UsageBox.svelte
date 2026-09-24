@@ -29,21 +29,30 @@
   let loading = $state(true);
   let error = $state('');
 
+  // Request token: a window change starts a new poller while the old one's
+  // fetch may still be in flight — only the newest load may land, so the
+  // box never shows 30 days of totals under a "7d" label.
+  let seq = 0;
+
   async function load(): Promise<boolean> {
+    const mine = ++seq;
+    const span = days;
     try {
-      status = await api.get<UsageStatus>('/usage/status');
-      if (status.available) {
-        summary = await api.get<UsageSummary>(`/usage/summary?days=${days}&otto_only=false`);
-      } else {
-        summary = null;
-      }
+      const st = await api.get<UsageStatus>('/usage/status');
+      const sum = st.available
+        ? await api.get<UsageSummary>(`/usage/summary?days=${span}&otto_only=false`)
+        : null;
+      if (mine !== seq) return true;
+      status = st;
+      summary = sum;
       error = '';
       return true;
     } catch (e) {
+      if (mine !== seq) return true;
       error = e instanceof Error ? e.message : String(e);
       return false;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
@@ -152,35 +161,41 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     cursor: pointer;
   }
   .seg button.on {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
+  /* Widget figures: number over label, split by hairlines — no tile fills
+     (the calm desktop-widget look shared by every Home box). */
   .stats {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
+    gap: 0;
   }
   .stat {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 6px 4px;
-    background: var(--surface-2);
-    border-radius: var(--radius-s);
+    align-items: flex-start;
+    min-width: 0;
+    padding: 2px 12px;
+    border-inline-start: 1px solid var(--separator);
+  }
+  .stat:first-child {
+    padding-inline-start: 2px;
+    border-inline-start: none;
   }
   .n {
-    font-size: 18px;
-    font-weight: 700;
+    font-size: var(--fs-xl);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .spark {

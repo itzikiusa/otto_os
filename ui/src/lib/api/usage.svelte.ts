@@ -4,6 +4,7 @@
 
 import { api } from './client';
 import { toasts } from '../toast.svelte';
+import { loadErrorText } from '../loadError';
 import { exportCsv, downloadJson } from '../components/exporters';
 import type { Id } from './types';
 
@@ -194,12 +195,25 @@ class UsageStore {
   budgets: UsageBudgetStatus | null = $state(null);
   savingBudgets = $state(false);
 
+  // Load failures render INLINE with Retry (never a toast, never mistaken for
+  // "ClickHouse isn't installed" / "no usage" / "no budgets").
+  /** `/usage/status` failed — we don't know whether the engine is installed. */
+  statusError = $state<string | null>(null);
+  /** Summary/metrics failed while the engine IS available. */
+  summaryError = $state<string | null>(null);
+  budgetsError = $state<string | null>(null);
+
   // --- Auto-refresh (opt-in) -----------------------------------------------
   /** Whether the dashboard should auto-refresh the full summary on a timer. */
   autoRefresh = $state(false);
   private autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /** Default auto-refresh cadence in ms (mirrors the Brokers panel pattern). */
   static readonly AUTO_REFRESH_MS = 60_000;
+
+  /** Request token for summary fetches: clicking 90d then 7d must never let
+   *  the slower 90-day response land last under the "7d" label (or into a
+   *  `-7d` CSV export). Every summary load bumps it; only the newest writes. */
+  private summarySeq = 0;
 
   // --- Metrics-tick throttle -----------------------------------------------
   private lastMetricsFetch = 0;
@@ -213,8 +227,9 @@ class UsageStore {
   async loadStatus(): Promise<void> {
     try {
       this.status = await api.get<UsageStatus>('/usage/status');
+      this.statusError = null;
     } catch (e) {
-      toasts.error('Could not load usage status', errMsg(e));
+      this.statusError = loadErrorText(e);
     }
   }
 
@@ -224,22 +239,29 @@ class UsageStore {
     try {
       await this.loadStatus();
       if (this.status?.available) {
+        const mine = ++this.summarySeq;
         const [summary, metrics] = await Promise.all([
           api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`),
           api.get<MetricPoint[]>('/usage/metrics?minutes=180'),
         ]);
-        this.summary = summary;
+        if (mine === this.summarySeq) {
+          this.summary = summary;
+          this.summaryError = null;
+        }
         this.metrics = metrics;
         this.lastMetricsFetch = Date.now();
-      } else {
+      } else if (this.status) {
         this.summary = null;
         this.metrics = [];
       }
-      // Budgets are config (not engine) data — load them whether or not the
-      // engine is available so the caps are still editable.
-      await this.loadBudgets();
     } catch (e) {
-      toasts.error('Could not load usage', errMsg(e));
+      this.summaryError = loadErrorText(e);
+    }
+    try {
+      // Budgets are config (not engine) data — load them whether or not the
+      // engine is available (or the summary failed) so the caps are still
+      // editable, and a skipped load never reads as "No budgets set".
+      await this.loadBudgets();
     } finally {
       this.loading = false;
     }
@@ -249,9 +271,10 @@ class UsageStore {
   async loadBudgets(): Promise<void> {
     try {
       this.budgets = await api.get<UsageBudgetStatus>('/usage/budgets');
+      this.budgetsError = null;
     } catch (e) {
-      // Non-fatal: the dashboard still renders without budgets.
-      toasts.error('Could not load usage budgets', errMsg(e));
+      // Non-fatal: the dashboard still renders; the Budgets panel shows why.
+      this.budgetsError = loadErrorText(e);
     }
   }
 
@@ -325,10 +348,15 @@ class UsageStore {
 
   private async refreshSummary(): Promise<void> {
     if (!this.status?.available) return;
+    const mine = ++this.summarySeq;
     try {
-      this.summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      const summary = await api.get<UsageSummary>(`/usage/summary?${this.summaryQuery()}`);
+      if (mine === this.summarySeq) {
+        this.summary = summary;
+        this.summaryError = null;
+      }
     } catch (e) {
-      toasts.error('Could not load usage', errMsg(e));
+      if (mine === this.summarySeq) this.summaryError = loadErrorText(e);
     }
   }
 

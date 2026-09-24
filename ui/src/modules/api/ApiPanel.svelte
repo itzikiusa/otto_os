@@ -1,15 +1,17 @@
 <script lang="ts">
   // Compact API client for the right-side panel. Reuses RequestBuilder +
   // ResponseViewer; a slim collection/history dropdown replaces the big tree.
+  import { untrack } from 'svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import RequestBuilder from './RequestBuilder.svelte';
   import ResponseViewer from './ResponseViewer.svelte';
   import EnvSelector from './EnvSelector.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
 
-  // Load on first mount / workspace change.
+  // Load on first mount / workspace change — keyed on the workspace only
+  // (loadAll's synchronous prologue reads the tabs, which must not re-trigger).
   $effect(() => {
-    if (ws.currentId) void apiClient.loadAll();
+    if (ws.currentId) untrack(() => void apiClient.loadAll());
   });
 
   // A flat picker: pick a saved request or a history entry to load into the builder.
@@ -30,11 +32,16 @@
 </script>
 
 <div class="panel">
-  {#if apiClient.historyLoadingId}<span role="status">Loading history request…</span>{/if}
+  {#if apiClient.historyLoadingId}<span class="note" role="status">Loading history request…</span>{/if}
+  {#if apiClient.requestsLoadError}
+    <div class="note err" role="alert">
+      Couldn’t load saved requests. <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
+    </div>
+  {/if}
   <div class="picker-row">
     <select class="input picker" onchange={onPick} aria-label="Load request">
       <option value="">Load…</option>
-      <option value="new">＋ New request</option>
+      <option value="new">New request</option>
       {#if apiClient.requests.length > 0}
         <optgroup label="Saved">
           {#each apiClient.requests as r (r.id)}
@@ -75,6 +82,16 @@
     padding: 10px;
     gap: 10px;
   }
+  .note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .note.err {
+    color: var(--danger);
+  }
   .picker-row {
     flex-shrink: 0;
   }
@@ -93,12 +110,12 @@
   }
   .env-fold > summary {
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     user-select: none;
   }
   .env-on {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .resp-wrap {

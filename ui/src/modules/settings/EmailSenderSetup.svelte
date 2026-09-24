@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
   // always shows an empty password field so the user can update it without seeing the
@@ -139,16 +143,10 @@
   const hasStoredPassword = $derived(!!(status?.gmail_address));
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Sharing — Email Sender</h1>
-      <div class="sub">
-        Configure a Gmail sender so Otto can email one-time codes to guests before
-        they attach to a shared session.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('sharing')} subtitle="Emails one-time codes to guests of shared sessions" />
+  <PageBody width="readable">
+  <SectionIntro>Configure a Gmail sender so Otto can email one-time codes to guests before they attach to a shared session.</SectionIntro>
 
   <!-- ── Status card ── -->
   <div class="section-title">Current sender</div>
@@ -281,9 +279,17 @@
       </li>
     </ol>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .status-row {
     display: flex;
     align-items: center;
@@ -298,7 +304,7 @@
 
   /* Verified / unverified / not-configured badge */
   .badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -308,14 +314,14 @@
     flex-shrink: 0;
   }
   .badge.verified {
-    color: #22c55e;
-    border-color: color-mix(in srgb, #22c55e 35%, transparent);
-    background: color-mix(in srgb, #22c55e 10%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, transparent);
   }
   .badge.unverified {
-    color: #f59e0b;
-    border-color: color-mix(in srgb, #f59e0b 35%, transparent);
-    background: color-mix(in srgb, #f59e0b 10%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .badge.none {
     color: var(--text-dim);
@@ -327,7 +333,7 @@
     margin: 0 0 14px;
   }
   .card-intro a {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
   }
 
@@ -366,7 +372,7 @@
   .inline-link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     padding: 0 0 0 6px;
@@ -377,8 +383,8 @@
     margin-top: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-s, 5px);
-    background: color-mix(in srgb, #ef4444 10%, transparent);
-    border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
     color: var(--text);
     font-size: 12.5px;
     line-height: 1.5;

@@ -1,10 +1,14 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // MCP Servers settings page: per-workspace, user-managed MCP servers that Otto
   // merges into the workspace's `.mcp.json` when an agent session spawns there
   // (alongside Otto's own managed entries, e.g. the browser server). Nothing is
   // auto-enabled — each server is off until you flip it on, and it's only written
   // to `.mcp.json` the next time a session spawns in the workspace.
   import { auth } from '../../lib/stores/auth.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mcpApi } from '../../lib/api/mcp';
   import { api } from '../../lib/api/client';
@@ -226,7 +230,7 @@
 
   async function remove(s: McpServer): Promise<void> {
     if (!wsId) return;
-    if (!confirm(`Remove MCP server "${s.name}"?`)) return;
+    if (!(await confirmer.ask(`Remove MCP server "${s.name}"?`, { title: 'Remove MCP server', confirmLabel: 'Remove' }))) return;
     busyId = s.id;
     try {
       await mcpApi.remove(s.id);
@@ -240,21 +244,16 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>MCP Servers</h1>
-      <div class="sub">
-        Per-workspace Model Context Protocol servers. Enabled servers are merged into this
-        workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own
-        managed entries (e.g. the browser). Nothing is auto-enabled — a server is only written once
-        you turn it on.
-      </div>
-    </div>
-    {#if wsId}
-      <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
-    {/if}
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('mcp-servers')} subtitle="Per-workspace Model Context Protocol servers">
+    {#snippet actions()}
+      {#if wsId}
+        <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
+  <p class="section-intro">Enabled servers are merged into this workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own managed entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</p>
 
   <div class="card otto" data-testid="connections-mcp">
     <div class="otto-row">
@@ -419,29 +418,35 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    padding: 20px 24px;
-    max-width: min(760px, 92vw);
-  }
-  .page-header {
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-  h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .sub {
     font-size: 12.5px;
     color: var(--text-dim);
     line-height: 1.5;
     max-width: 560px;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
   }
   code {
     font-family: var(--font-mono, monospace);
@@ -450,7 +455,7 @@
   .card {
     border: 1px solid var(--border);
     border-radius: var(--radius-m, 8px);
-    background: var(--surface-1, var(--surface-2));
+    background: var(--surface);
     padding: 14px 16px;
   }
   .otto {
@@ -549,12 +554,12 @@
     cursor: pointer;
   }
   .btn:hover {
-    background: var(--surface-3, var(--surface-2));
+    background: var(--surface-3);
   }
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: var(--accent-fg, #fff);
+    color: var(--accent-contrast);
   }
   .btn.small {
     height: 24px;
@@ -562,8 +567,8 @@
     font-size: 11.5px;
   }
   .btn.danger:hover {
-    border-color: var(--danger, #c0392b);
-    color: var(--danger, #c0392b);
+    border-color: var(--danger);
+    color: var(--danger);
   }
   .btn:disabled {
     opacity: 0.5;
@@ -609,7 +614,7 @@
     color: var(--text-dim);
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
@@ -618,7 +623,7 @@
     color: var(--text-dim);
   }
   .badge.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }

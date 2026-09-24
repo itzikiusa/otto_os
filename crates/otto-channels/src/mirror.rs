@@ -12,8 +12,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -22,6 +24,8 @@ use otto_core::Id;
 use otto_sessions::SessionManager;
 
 use crate::adapter::Adapter;
+use crate::attach_guard::{AttachmentPolicy, MAX_ATTACHMENT_BYTES};
+use crate::secrets_redact::redact_secrets;
 use crate::transcript::{self, TranscriptEvent};
 
 /// Hook that runs Otto's self-improvement on a just-finished channel
@@ -101,6 +105,27 @@ struct SessionEntry {
     /// Whether the typing indicator should be sent right now (on while a turn is
     /// in progress, off after its Final).
     typing_active: Arc<AtomicBool>,
+    /// Where the feed + reply go. Replaced by every `attach`, so the LATEST
+    /// turn's destination wins: a webhook caller's own callback URL (a new
+    /// `WebhookAdapter` per request — two automations sharing a conversation
+    /// must not get each other's replies), and a Slack/Telegram adapter built
+    /// with the current (possibly rotated) token instead of a revoked one.
+    dest: Arc<StdMutex<Destination>>,
+}
+
+/// A session's channel destination (see [`SessionEntry::dest`]).
+#[derive(Clone)]
+struct Destination {
+    adapter: Arc<dyn Adapter>,
+    chat: String,
+    thread: Option<String>,
+    agent_reply: bool,
+}
+
+/// Snapshot the current destination (never held across an `.await`; a
+/// poisoned lock still yields the last value written).
+fn current_dest(dest: &StdMutex<Destination>) -> Destination {
+    dest.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 /// Shared mirror state — holds one entry per tracked session.
@@ -147,39 +172,45 @@ impl Mirror {
         thread: Option<String>,
         agent_reply: bool,
     ) {
+        let destination = Destination {
+            adapter,
+            chat,
+            thread,
+            agent_reply,
+        };
         let mut guard = self.sessions.lock().await;
 
-        // If we already have a live tailer for this session, do nothing.
-        if guard.contains_key(&session_id) {
+        // A live tailer already exists: just point it at this turn's
+        // destination (it re-reads it when `begin_turn` starts the turn).
+        if let Some(entry) = guard.get(&session_id) {
+            *entry.dest.lock().unwrap_or_else(|p| p.into_inner()) = destination;
             return;
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
         let new_turn = Arc::new(AtomicBool::new(false));
         let typing_active = Arc::new(AtomicBool::new(true));
+        let dest = Arc::new(StdMutex::new(destination));
         guard.insert(
             session_id.clone(),
             SessionEntry {
                 cancel: Arc::clone(&cancel),
                 new_turn: Arc::clone(&new_turn),
                 typing_active: Arc::clone(&typing_active),
+                dest: Arc::clone(&dest),
             },
         );
         drop(guard);
 
+        // Transcript lines older than this attach belong to earlier turns — a
+        // tailer re-attached to a live session's existing transcript must not
+        // replay (and re-post) them. The bridge attaches BEFORE it submits the
+        // turn's input, so every line of this turn is stamped at or after it.
+        let since = chrono::Utc::now();
         let mirror = Arc::clone(self);
         tokio::spawn(async move {
             mirror
-                .run_tailer(
-                    session_id,
-                    adapter,
-                    chat,
-                    thread,
-                    agent_reply,
-                    cancel,
-                    new_turn,
-                    typing_active,
-                )
+                .run_tailer(session_id, dest, since, cancel, new_turn, typing_active)
                 .await;
         });
     }
@@ -198,10 +229,8 @@ impl Mirror {
     async fn run_tailer(
         &self,
         session_id: Id,
-        adapter: Arc<dyn Adapter>,
-        chat: String,
-        thread: Option<String>,
-        agent_reply: bool,
+        dest: Arc<StdMutex<Destination>>,
+        since: chrono::DateTime<chrono::Utc>,
         cancel: Arc<AtomicBool>,
         new_turn: Arc<AtomicBool>,
         typing_active: Arc<AtomicBool>,
@@ -229,6 +258,7 @@ impl Mirror {
         tokio::spawn(async move {
             transcript::tail(
                 path,
+                Some(since),
                 move |evt| {
                     let _ = tx.send(evt);
                 },
@@ -245,20 +275,29 @@ impl Mirror {
         {
             let stop = Arc::clone(&typing_stop);
             let active = Arc::clone(&typing_active);
-            let adapter_clone = Arc::clone(&adapter);
-            let chat_clone = chat.clone();
+            let dest = Arc::clone(&dest);
             tokio::spawn(async move {
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
                     if active.load(Ordering::Relaxed) {
-                        let _ = adapter_clone.typing(&chat_clone).await;
+                        let d = current_dest(&dest);
+                        let _ = d.adapter.typing(&d.chat).await;
                     }
                     tokio::time::sleep(TYPING_INTERVAL).await;
                 }
             });
         }
+
+        // This turn's destination; refreshed from `dest` whenever a new turn
+        // starts (a later `attach` may have replaced it).
+        let Destination {
+            mut adapter,
+            mut chat,
+            mut thread,
+            mut agent_reply,
+        } = current_dest(&dest);
 
         // Process events: maintain a rolling feed of the agent's steps (edited in
         // place) whose header rotates through "still working" phrases on a timer
@@ -276,11 +315,10 @@ impl Mirror {
         // send forever, flooding the channel API into 429s.
         let mut feed = FeedHealth::new();
         let mut ticks_since_liveness: u32 = 0;
-        let thread_ref = thread.as_deref();
         // Slack renders mrkdwn (``` code fences) in chat.update text; Telegram's
         // in-place edit carries no parse mode, so fences would show literally —
         // there the command preview is rendered as plain indented lines instead.
-        let code_blocks = matches!(adapter.channel(), Channel::Slack);
+        let mut code_blocks = matches!(adapter.channel(), Channel::Slack);
 
         // Liveness ticker: advances the header phrase while a turn is in flight.
         let mut status_ticker = tokio::time::interval(STATUS_TICK);
@@ -301,6 +339,12 @@ impl Mirror {
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 feed = FeedHealth::new();
                 typing_active.store(true, Ordering::Relaxed);
+                let d = current_dest(&dest);
+                adapter = d.adapter;
+                chat = d.chat;
+                thread = d.thread;
+                agent_reply = d.agent_reply;
+                code_blocks = matches!(adapter.channel(), Channel::Slack);
             }
 
             tokio::select! {
@@ -324,7 +368,7 @@ impl Mirror {
                             if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                                 last_edit = Instant::now();
                                 let body = render_feed(&status_header(status_idx), &activity_lines);
-                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &body).await);
                             }
                         }
                         TranscriptEvent::Final { text } => {
@@ -345,7 +389,7 @@ impl Mirror {
                             let done_body = render_feed(&header, &activity_lines);
                             last_edit = Instant::now();
                             if feed.can_send() {
-                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &done_body).await);
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &done_body).await);
                             }
 
                             // Otto posts the reply itself via the adapter (the bot that
@@ -373,14 +417,16 @@ impl Mirror {
                             let joined = messages.join("\u{1e}");
                             if last_posted_final.as_deref() != Some(joined.as_str()) {
                                 for body in &messages {
-                                    let cleaned = strip_file_directives(body);
+                                    // Scrub tokens/passwords the agent may have
+                                    // echoed (emails stay — they're content).
+                                    let cleaned = redact_secrets(&strip_file_directives(body), true);
                                     let cleaned = cleaned.trim();
                                     if !cleaned.is_empty() {
-                                        post_reply(&adapter, &chat, thread_ref, cleaned).await;
+                                        post_reply(&adapter, &chat, thread.as_deref(), cleaned).await;
                                     }
                                 }
                                 for path in &file_paths {
-                                    upload_file_path(&adapter, &chat, thread_ref, path).await;
+                                    upload_file_path(&adapter, &chat, thread.as_deref(), path, &cwd).await;
                                 }
                                 last_posted_final = Some(joined);
 
@@ -432,7 +478,7 @@ impl Mirror {
                         if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                             last_edit = Instant::now();
                             let body = render_feed(&status_header(status_idx), &activity_lines);
-                            feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
+                            feed.apply(post_or_edit_feed(&adapter, &chat, thread.as_deref(), &mut rolling_msg_id, &body).await);
                         }
                         status_idx = status_idx.wrapping_add(1);
                     }
@@ -440,8 +486,11 @@ impl Mirror {
             }
         }
 
-        // Tailer winding down — stop the typing task.
+        // Tailer winding down — stop the typing task, and the transcript poller
+        // (it only exits on `cancel`; a liveness-probe exit used to leave it
+        // polling forever, one leaked poller per re-attach).
         typing_stop.store(true, Ordering::Relaxed);
+        cancel.store(true, Ordering::Relaxed);
 
         self.sessions.lock().await.remove(&session_id);
         debug!(session = %session_id, "mirror: tailer finished");
@@ -724,26 +773,80 @@ fn strip_file_directives(text: &str) -> String {
 
 /// Read a local file the agent asked to attach (via ⟦otto-file⟧) and upload it
 /// to the chat. Best-effort: a missing/unreadable path is logged, not fatal.
+///
+/// The path is agent output, i.e. attacker-influenced (prompt injection), and
+/// the upload is the DAEMON's egress — so it is confined by
+/// [`AttachmentPolicy`] (session cwd, /tmp, Otto artifact dirs; never secrets,
+/// keys or Otto's own DB/credentials) before a single byte is read. A refusal
+/// is logged with the resolved reason and noted in the thread.
 async fn upload_file_path(
     adapter: &Arc<dyn Adapter>,
     chat: &str,
     thread: Option<&str>,
     path: &str,
+    cwd: &str,
 ) {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("attachment");
-            // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
-            // binary attachments (images, PDFs, …).
-            match adapter.upload(chat, thread, filename, &bytes).await {
-                Ok(()) => info!(file = filename, "mirror: uploaded agent file attachment"),
-                Err(e) => warn!("mirror: file upload {path}: {e}"),
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment")
+        .to_string();
+    let policy = AttachmentPolicy::for_session(cwd);
+    let canon = match policy.vet(path, cwd) {
+        Ok((canon, _len)) => canon,
+        Err(reason) => {
+            warn!(
+                path,
+                cwd,
+                reason = reason.as_str(),
+                "mirror: refused ⟦otto-file⟧ attachment"
+            );
+            let note = format!("⚠️ Otto did not attach `{filename}`: {reason}.");
+            if let Err(e) = adapter.send(chat, thread, &note).await {
+                warn!("mirror: attachment-refusal note: {e}");
+            }
+            return;
+        }
+    };
+    // Read the CANONICAL path (no symlinks left to swap) and re-apply the size
+    // cap on the bytes actually read, so a file grown after the check can't
+    // blow the buffer.
+    let bytes = match tokio::fs::File::open(&canon).await {
+        Ok(f) => {
+            let mut buf = Vec::new();
+            match f.take(MAX_ATTACHMENT_BYTES + 1).read_to_end(&mut buf).await {
+                Ok(_) => buf,
+                Err(e) => {
+                    warn!(
+                        "mirror: could not read file to attach {}: {e}",
+                        canon.display()
+                    );
+                    return;
+                }
             }
         }
-        Err(e) => warn!("mirror: could not read file to attach {path}: {e}"),
+        Err(e) => {
+            warn!(
+                "mirror: could not open file to attach {}: {e}",
+                canon.display()
+            );
+            return;
+        }
+    };
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        warn!(path = %canon.display(), "mirror: refused ⟦otto-file⟧ attachment: grew past the size cap");
+        return;
+    }
+    // Upload the raw bytes verbatim — a UTF-8 round-trip would corrupt
+    // binary attachments (images, PDFs, …).
+    match adapter.upload(chat, thread, &filename, &bytes).await {
+        Ok(()) => info!(
+            file = filename.as_str(),
+            resolved = %canon.display(),
+            bytes = bytes.len(),
+            "mirror: uploaded agent file attachment"
+        ),
+        Err(e) => warn!("mirror: file upload {}: {e}", canon.display()),
     }
 }
 

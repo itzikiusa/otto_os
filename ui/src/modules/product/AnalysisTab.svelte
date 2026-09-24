@@ -4,6 +4,14 @@
   import { product } from '../../lib/stores/product.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import { runStatus, type StatusInfo } from '../../lib/status';
+  /** Shared run vocabulary (lib/status.ts); `partial` (some agents failed)
+   *  is analysis-specific and reads as a warning. */
+  function anStatus(s: string): StatusInfo {
+    return s === 'partial' ? { key: 'partial', label: 'Partial', tone: 'warning' } : runStatus(s);
+  }
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
@@ -457,7 +465,7 @@
           <div class="section-head">Synthesized Summary</div>
           {#if summarizerAgent}
             <div class="summarizer-badge">
-              <span class="rp-status-pill rp-status-{summarizerAgent.status}">{summarizerAgent.status}</span>
+              <span class="rp-status-pill" data-status={summarizerAgent.status}><StatusBadge status={anStatus(summarizerAgent.status)} /></span>
               {#if summarizerAgent.session_id}
                 <button
                   class="btn small ghost"
@@ -484,12 +492,7 @@
       <section class="agents-section">
         <div class="agents-header">
           <span class="section-head">Agents</span>
-          <span class="rp-status-pill rp-status-{analysisStatus}">
-            {#if analysisStatus === 'running' || analysisStatus === 'waiting'}
-              <span class="spinner-xs"></span>
-            {/if}
-            {analysisStatus}
-          </span>
+          <span class="rp-status-pill" data-status={analysisStatus}><StatusBadge status={anStatus(analysisStatus)} /></span>
         </div>
         <div class="rp-agents">
           {#each currentAgents as agent (agent.id)}
@@ -498,7 +501,7 @@
             <div class="rp-agent card">
               <div class="rp-agent-top">
                 <span class="rp-agent-name">{agent.name || agent.skill}</span>
-                <span class="rp-agent-chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
+                <AgentByline provider={agent.provider} model={agent.model} at={agent.finished_at ?? agent.started_at} />
                 <span class="grow"></span>
                 {#if agent.session_id}
                   <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id!)}>
@@ -525,12 +528,7 @@
                     {stoppingAgents.has(agent.id) ? 'Stopping…' : 'Stop'}
                   </button>
                 {/if}
-                <span class="rp-status-pill rp-status-{agent.status}">
-                  {#if agent.status === 'running' || agent.status === 'waiting'}
-                    <span class="spinner-xs"></span>
-                  {/if}
-                  {agent.status}
-                </span>
+                <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={anStatus(agent.status)} /></span>
               </div>
               {#if agent.error && agent.status === 'error' && !isLens}
                 <p class="rp-agent-note error-note">{agent.error}</p>
@@ -560,7 +558,10 @@
           {#if findings}
             <section class="findings-card card">
               <div class="findings-header">
-                <span class="findings-agent-name">{agent.name || agent.skill}</span>
+                <span class="findings-who">
+                  <span class="findings-agent-name">{agent.name || agent.skill}</span>
+                  <AgentByline provider={agent.provider} model={agent.model} at={agent.finished_at} />
+                </span>
                 <div class="findings-right">
                   {#if agent.session_id}
                     <button
@@ -581,7 +582,7 @@
                       {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                     </button>
                   {/if}
-                  <span class="rp-status-pill rp-status-done">done</span>
+                  <span class="rp-status-pill" data-status="done"><StatusBadge status={anStatus('done')} /></span>
                 </div>
               </div>
 
@@ -755,7 +756,7 @@
                     {retryingAgents.has(agent.id) ? 'Retrying…' : 'Retry'}
                   </button>
                 {/if}
-                <span class="rp-status-pill rp-status-error">error</span>
+                <span class="rp-status-pill" data-status="error"><StatusBadge status={anStatus('error')} /></span>
               </div>
             </div>
             {#if agent.session_id && openTerminals.has(agent.session_id)}
@@ -799,7 +800,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
 
   /* ── Run panel ─────────────────────────────────────────────────── */
@@ -873,7 +874,7 @@
   .chip-on {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip:disabled {
     cursor: not-allowed;
@@ -890,7 +891,7 @@
   }
   .focus-optional {
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
@@ -960,7 +961,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
@@ -982,7 +983,7 @@
     gap: 8px;
   }
   .hist-select {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -1057,24 +1058,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Agent-card provider chip. NOTE: deliberately NOT named `.chip` — that class
-   * is the provider-selection chip in the Configure panel, and a second `.chip`
-   * rule here would override its `.chip-on` selected state (equal specificity,
-   * later in source order). */
-  .rp-agent-chip {
-    flex-shrink: 0;
-    height: 22px;
-    display: inline-flex;
-    align-items: center;
-    padding: 0 9px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 10.5px;
-    font-weight: 500;
-    white-space: nowrap;
-  }
   .grow {
     flex: 1;
   }
@@ -1085,14 +1068,14 @@
     line-height: 1.4;
   }
   .rp-agent-note.error-note {
-    color: #b91c1c;
+    color: var(--danger);
     font-family: var(--font-mono, monospace);
   }
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: #b07d00;
+    color: var(--warning);
   }
 
   /* ── Shared small button — mirror PR review's .btn.small.ghost ── */
@@ -1118,7 +1101,7 @@
     color: var(--text-dim);
   }
   .btn.ghost:hover:not(:disabled) {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .btn:disabled {
@@ -1136,42 +1119,12 @@
     background: #1b1b1b;
   }
 
-  /* ── Status pills — mirror PR review's .rp-status-* ───────────── */
+  /* ── Status pills — the shared StatusBadge (same as PR review);
+     this wrapper is only the layout hook. ─────────────────────────── */
   .rp-status-pill {
     flex-shrink: 0;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-  }
-  .rp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-  }
-  .rp-status-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
-  }
-  .rp-status-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
-  }
-  .rp-status-error {
-    background: color-mix(in srgb, var(--status-exited, #ef4444) 15%, transparent);
-    color: var(--status-exited, #b91c1c);
-  }
-  .rp-status-partial {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
   }
 
   /* ── Findings card ────────────────────────────────────────────── */
@@ -1181,7 +1134,7 @@
     gap: 0;
   }
   .error-card {
-    border-color: color-mix(in srgb, #ef4444 35%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
   }
   .findings-header {
     display: flex;
@@ -1194,8 +1147,15 @@
     align-items: center;
     gap: 8px;
   }
+  .findings-who {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    min-width: 0;
+  }
   .findings-agent-name {
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
@@ -1256,7 +1216,7 @@
     color: var(--text);
   }
   .risk-list li {
-    color: #b45309;
+    color: var(--warning);
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
@@ -1275,7 +1235,7 @@
     line-height: 1.4;
   }
   .q-cat {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -1300,14 +1260,14 @@
     margin-bottom: 4px;
   }
   .sl-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sl-title {
     font-size: 12.5px;
@@ -1324,26 +1284,10 @@
   /* ── Error message ────────────────────────────────────────────── */
   .error-msg {
     font-size: 12.5px;
-    color: #b91c1c;
+    color: var(--danger);
     line-height: 1.5;
     margin: 4px 0 0;
     font-family: var(--font-mono, monospace);
-  }
-
-  /* ── Spinner (mirrors ReviewAgents) ───────────────────────────── */
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 2px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
 
@@ -1372,7 +1316,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;

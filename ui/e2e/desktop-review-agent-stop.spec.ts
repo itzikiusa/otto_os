@@ -165,7 +165,7 @@ test('UI: Stop on a running agent row; after stop the row shows error + Retry', 
   await stopBtn.click();
 
   // Row flips to error ("stopped by user") and stays one click from a re-run.
-  await expect(agentCard.locator('.rp-status-pill')).toHaveText(/error/i, { timeout: 15_000 });
+  await expect(agentCard.locator('.rp-status-pill')).toHaveText(/failed/i, { timeout: 15_000 });
   await expect(agentCard.getByText('stopped by user')).toBeVisible();
   await expect(agentCard.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   await expect(agentCard.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);

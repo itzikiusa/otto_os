@@ -6,6 +6,7 @@
 
 pub mod classify;
 pub mod config;
+pub mod design;
 pub mod digest;
 pub mod engine;
 mod evidence;
@@ -17,6 +18,7 @@ pub mod prompt;
 pub mod proposal;
 pub mod scheduler;
 
+pub use design::{DesignLearnOutcome, DesignRuleProposal};
 pub use engine::ImprovementEngine;
 pub use http::{router, ImproveCtx};
 pub use live::{LiveEvolver, LiveEvolverHandle};

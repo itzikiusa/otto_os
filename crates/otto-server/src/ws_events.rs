@@ -33,7 +33,7 @@ use crate::state::ServerCtx;
 
 /// Fixed first subprotocol the browser offers alongside the token; echoed back
 /// on a successful upgrade so the handshake completes.
-const BEARER_SUBPROTOCOL: &str = "otto-bearer";
+pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
@@ -81,7 +81,7 @@ pub async fn events_ws(
 
 /// Extract the bearer token from a `Sec-WebSocket-Protocol: otto-bearer, <token>`
 /// request header. Returns `None` when the header is absent or not in that form.
-fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?
         .to_str()
@@ -169,6 +169,9 @@ enum Scope<'a> {
         session_id: &'a Id,
         owner: Option<&'a Id>,
     },
+    /// Strictly one user's: delivered ONLY to that user's connections — not to
+    /// workspace members and not to root (the Otto Assistant is personal).
+    Owner(&'a Id),
 }
 
 /// Classify an event into its delivery [`Scope`]. Pure (no I/O), so the routing
@@ -274,10 +277,23 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // the other canvas-family live-edit events.
         | Event::BrowserTabUpdated { workspace_id, .. }
         | Event::BrowserAnnotationAdded { workspace_id, .. }
+        // A remote live session's lifecycle tick (no URL/title — owner-private
+        // details stay on the per-tab REST/WS surface).
+        | Event::BrowserLiveSessionUpdated { workspace_id, .. }
         // Live mockup-source edits + the mockup-agent-started signal go to the
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
         | Event::MockupSessionStarted { workspace_id, .. }
+        // Design Hall graph events (artifact content/meta, link moves, captured
+        // learning signals) go to the artifact's workspace members, exactly like
+        // the canvas/mockup live-edit events they supersede.
+        | Event::DesignArtifactUpdated { workspace_id, .. }
+        | Event::DesignLinkUpdated { workspace_id, .. }
+        | Event::DesignLearningUpdate { workspace_id, .. }
+        // Design-assist turn states + variant-run completion: workspace
+        // members, like the canvas/mockup agent-session-started signals.
+        | Event::DesignAssistUpdated { workspace_id, .. }
+        | Event::DesignVariantsReady { workspace_id, .. }
         // Live DB-Assistant answer edits + the assist-agent-started signal go to the
         // connection's workspace members (same delivery as canvas/mockup).
         | Event::DbAssistUpdated { workspace_id, .. }
@@ -316,7 +332,14 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::AwsInstallUpdated { .. }
         | Event::K8sClusterUpdated { .. }
         | Event::K8sInstallUpdated { .. }
+        // The Chromium download job is machine-wide, like the k8s installer.
+        | Event::BrowserEngineInstallUpdated { .. }
         | Event::K8sMonitorCycle { .. } => Scope::Everyone,
+        // Otto Assistant events are personal: the owner only (no root fan-out).
+        Event::AssistantTurn { user_id, .. }
+        | Event::AssistantTaskUpdate { user_id, .. }
+        | Event::AssistantNeedsYou { user_id, .. }
+        | Event::AssistantLimit { user_id, .. } => Scope::Owner(user_id),
     }
 }
 
@@ -338,6 +361,7 @@ async fn allowed(
                 Some(target) => user.is_root || &user.id == target,
             };
         }
+        Scope::Owner(target) => return &user.id == target,
         Scope::Workspace(workspace_id) => (workspace_id, None),
         Scope::Session {
             workspace_id,
@@ -783,5 +807,95 @@ mod tests {
             }),
             Scope::Workspace(_)
         ));
+    }
+
+    /// Otto Assistant events are owner-only — never workspace-wide or global.
+    #[test]
+    fn assistant_events_are_owner_scoped() {
+        let evs = [
+            Event::AssistantTurn {
+                user_id: "alice".into(),
+                thread_id: "t1".into(),
+                turn: serde_json::json!({}),
+                thread: None,
+            },
+            Event::AssistantTaskUpdate {
+                user_id: "alice".into(),
+                task: serde_json::json!({}),
+            },
+            Event::AssistantNeedsYou {
+                user_id: "alice".into(),
+                task: serde_json::json!({}),
+                open_count: 1,
+            },
+            Event::AssistantLimit {
+                user_id: "alice".into(),
+                thread_id: None,
+                limit: serde_json::json!({}),
+                suggestion: None,
+                task_id: None,
+                auto_switched: false,
+            },
+        ];
+        for ev in &evs {
+            assert!(
+                matches!(scope_of(ev), Scope::Owner(u) if u == "alice"),
+                "expected Scope::Owner(alice) for {ev:?}"
+            );
+        }
+    }
+
+    /// Design Hall graph events are workspace-member scoped (like the canvas /
+    /// mockup live-edit events they supersede), never global.
+    #[test]
+    fn design_events_are_workspace_scoped() {
+        for ev in [
+            Event::DesignArtifactUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                format: "html".into(),
+                change: "content".into(),
+                version_id: Some("v1".into()),
+                content: Some("<p>x</p>".into()),
+            },
+            Event::DesignLinkUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                link_id: None,
+                target_artifact_id: None,
+                target_version_id: None,
+                reason: "extracted".into(),
+            },
+            Event::DesignLearningUpdate {
+                workspace_id: "ws1".into(),
+                kind: "shipped".into(),
+                signal_id: None,
+                artifact_id: None,
+            },
+            Event::DesignAssistUpdated {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                turn_id: "t1".into(),
+                status: "done".into(),
+                mode: "refine".into(),
+                branch: "main".into(),
+                session_id: None,
+                version_id: Some("v2".into()),
+                error: None,
+            },
+            Event::DesignVariantsReady {
+                workspace_id: "ws1".into(),
+                artifact_id: "a1".into(),
+                run_id: "r1".into(),
+                base_version_id: None,
+                version_ids: vec![],
+                failed: 0,
+            },
+        ] {
+            assert!(
+                matches!(scope_of(&ev), Scope::Workspace(w) if w == "ws1"),
+                "{ev:?}"
+            );
+        }
     }
 }

@@ -537,6 +537,26 @@ test.describe('workflows page (desktop)', () => {
     expect(full.graph.nodes.length).toBe(2);
   });
 
+  test('delete asks first (Cancel keeps it), then opens a neighbour', async ({ page }) => {
+    const wfId = await createWorkflow('E2E Delete Me', [node('trigger', 'manual_trigger')], []);
+    await page.goto('/#/workflows');
+    const row = page.getByTestId(`wf-row-${wfId}`);
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await row.locator('.row-main').click();
+    await expect(row).toHaveClass(/active/);
+    await row.getByTestId('wf-delete-btn').click();
+    await expect(page.locator('.cf-msg')).toContainText('Delete “E2E Delete Me”');
+    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    expect((await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(true);
+
+    await row.getByTestId('wf-delete-btn').click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete workflow' }).click();
+    await expect(row).toHaveCount(0, { timeout: 10_000 });
+    await expect.poll(async () => (await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(false);
+    // Another workflow is open — never the empty "Pick a workflow" pane.
+    await expect(page.getByText('Pick a workflow')).toHaveCount(0);
+  });
+
   test('templates live in a dropdown (room freed); no always-open "Game templates"', async ({
     page,
   }) => {
@@ -577,6 +597,6 @@ test.describe('workflows page (desktop)', () => {
     await running.getByText('E2E Live').click();
     const label = page.locator('.insp-bar .tl-label');
     await expect(label).toBeVisible({ timeout: 10_000 });
-    await expect(label).toContainText('success', { timeout: 25_000 });
+    await expect(label).toContainText('Succeeded', { timeout: 25_000 });
   });
 });

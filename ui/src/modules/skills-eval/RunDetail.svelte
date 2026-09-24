@@ -19,9 +19,19 @@
   import { toasts } from '../../lib/toast.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus, sentenceCase, type StatusInfo } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import Scorecard from './Scorecard.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+
+  // Run / iteration / validator status → the shared run vocabulary
+  // (lib/status.ts). The eval's in-flight phases read as "running" (info,
+  // pulsing dot) but keep their own word.
+  const EVAL_PHASES = new Set(['implementing', 'validating', 'improving']);
+  function evalStatus(raw: string): StatusInfo {
+    return EVAL_PHASES.has(raw) ? { ...runStatus('running'), key: raw, label: sentenceCase(raw) } : runStatus(raw);
+  }
 
   interface Props {
     evalId: string;
@@ -358,10 +368,7 @@
       <div class="rd-title-row">
         <Icon name="zap" size={16} />
         <h2 class="rd-title">{run.source_skill}</h2>
-        <span class="status-pill st-{run.status}">
-          {#if run.status === 'running'}<span class="spinner-xs"></span>{/if}
-          {run.status}
-        </span>
+        <StatusBadge status={evalStatus(run.status)} />
         <span class="grow"></span>
         {#if run.best_score != null}
           <span class="score-badge {scoreClass(run.best_score)}">
@@ -423,10 +430,7 @@
           {#if it.status === 'done'}
             <span class="score-badge {scoreClass(it.score)}">{it.score.toFixed(0)}</span>
           {/if}
-          <span class="status-pill ist-{it.status}">
-            {#if it.status !== 'done' && it.status !== 'error'}<span class="spinner-xs"></span>{/if}
-            {it.status}
-          </span>
+          <StatusBadge status={evalStatus(it.status)} />
         </div>
 
         <!-- Implementation -->
@@ -492,10 +496,7 @@
                     {openFindings.has(key) ? 'Hide' : `${a.findings.length} issue${a.findings.length === 1 ? '' : 's'}`}
                   </button>
                 {/if}
-                <span class="status-pill ist-{a.status}">
-                  {#if a.status === 'running' || a.status === 'waiting'}<span class="spinner-xs"></span>{/if}
-                  {a.status}
-                </span>
+                <StatusBadge status={evalStatus(a.status)} />
               </div>
               {#if a.note && a.status !== 'done'}<p class="val-note">{a.note}</p>{/if}
               {#if a.status === 'waiting'}
@@ -690,12 +691,12 @@
     padding-top: 10px;
   }
   .gate-ok {
-    color: #1a7f37;
+    color: var(--success);
     font-size: 12.5px;
     margin: 0;
   }
   .gate-bad {
-    color: #a40e26;
+    color: var(--danger);
     font-size: 12.5px;
     margin: 0 0 4px;
     font-weight: 600;
@@ -767,7 +768,7 @@
   .rd-error {
     margin: 4px 0 0;
     font-size: 12px;
-    color: var(--status-exited);
+    color: var(--danger);
   }
 
   .iter {
@@ -787,12 +788,12 @@
     font-weight: 700;
   }
   .reg {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: var(--status-idle, #3a8c3a);
+    color: var(--success);
   }
   .reg.bad {
-    color: #b07d00;
+    color: var(--warning);
   }
 
   .impl,
@@ -831,7 +832,7 @@
   }
   .worktree {
     margin: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     word-break: break-all;
   }
@@ -866,7 +867,7 @@
   .val-waiting {
     margin: 0;
     font-size: 11px;
-    color: #b07d00;
+    color: var(--warning);
   }
 
   .findings {
@@ -895,23 +896,23 @@
   }
   .tag {
     display: inline-block;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     padding: 1px 5px;
     border-radius: 3px;
     margin-inline-end: 5px;
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
     vertical-align: middle;
   }
   .fix-tag {
-    background: color-mix(in srgb, var(--status-idle, #3a8c3a) 18%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .loc {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -931,7 +932,7 @@
     font-family: var(--font-mono, monospace);
     font-size: 11px;
     line-height: 1.45;
-    background: var(--bg-1, #1b1b1b);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 8px 10px;
@@ -942,65 +943,30 @@
     display: inline;
   }
   .dl.add {
-    color: #4caf6a;
+    color: var(--success);
   }
   .dl.del {
-    color: #d66;
+    color: var(--danger);
   }
   .dl.ctx {
     color: var(--text-dim);
   }
 
-  .status-pill {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .st-running,
-  .ist-implementing,
-  .ist-validating,
-  .ist-improving,
-  .ist-running,
-  .ist-pending {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-  }
-  .st-done,
-  .ist-done {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 15%, transparent);
-    color: var(--status-idle, #3a8c3a);
-  }
-  .st-error,
-  .ist-error,
-  .st-cancelled {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
-  .ist-waiting {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
-  }
 
   .pf {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     padding: 2px 6px;
     border-radius: var(--radius-s, 4px);
   }
   .pf.pass {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 18%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .pf.fail {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .score-badge {
@@ -1010,45 +976,45 @@
     border-radius: 999px;
   }
   .score-badge.sm {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
   }
   .score-badge.good,
   .chip.score.good {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 20%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .score-badge.ok,
   .chip.score.ok {
-    background: color-mix(in srgb, #e0a000 22%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .score-badge.bad,
   .chip.score.bad {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .sev {
     display: inline-block;
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .sev-info {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, #e0a000 20%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
+    color: var(--warning);
   }
   .sev-fail {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   .chip.subtle {
@@ -1089,7 +1055,7 @@
   .chip-toggle.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .spinner-xs {

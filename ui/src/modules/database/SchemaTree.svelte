@@ -3,7 +3,7 @@
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
   // opens its Structure; right-click offers "Explain with agent".
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -73,7 +73,7 @@
     'key',
   ]);
 
-  function iconFor(kind: DbNodeKind): string {
+  function iconFor(kind: DbNodeKind): IconName {
     switch (kind) {
       case 'database':
       case 'schema':
@@ -649,10 +649,10 @@
     min-width: 0;
   }
   .node:hover {
-    background: color-mix(in srgb, var(--text-dim) 9%, transparent);
+    background: var(--hover);
   }
   .node.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
   }
   .node:focus-visible {
     outline: none;
@@ -661,11 +661,11 @@
   }
   /* Active database = bold, like Workbench's default schema. */
   .node.active-db .nl-text {
-    font-weight: 700;
+    font-weight: 600;
     color: var(--text);
   }
   .node.active-db .node-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .caret {
     display: grid;
@@ -701,7 +701,7 @@
   .node-icon.table,
   .node-icon.view,
   .node-icon.collection {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Routines get a muted-accent tone so they read as distinct from data objects. */
   .node-icon.procedure,
@@ -727,21 +727,25 @@
     padding: 0;
   }
   .nl-text {
-    font-size: 12px;
+    font-size: var(--fs-s);
     min-width: 0;
     /* Name is the primary value: it only shrinks as a last resort. */
     flex: 0 1 auto;
   }
   .nl-detail {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 0;
+    /* Types and row-count estimates line up at the trailing edge. */
+    margin-inline-start: auto;
+    padding-inline-end: 4px;
+    font-variant-numeric: tabular-nums;
     /* Engine/detail is secondary: shrinks (and ellipsises away) ~100× faster
        than the name, so a long engine never crowds out the table name. */
     flex: 0 100 auto;
   }
   .node-empty {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding-top: 2px;
@@ -749,7 +753,7 @@
   }
   /* Truncation tail when a node's children exceed the render cap. */
   .node-more {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding-top: 2px;
@@ -760,7 +764,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     padding-top: 2px;
     padding-bottom: 2px;
@@ -770,13 +774,13 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0 6px;
     cursor: pointer;
   }
   .node-failed-retry:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ellipsis {
     overflow: hidden;
@@ -788,18 +792,18 @@
     align-items: center;
     gap: 8px;
     padding: 0 8px 5px;
-    font-size: 10.5px;
-    color: var(--text-dim, #98989f);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .scope-pick {
     flex: 1;
     min-width: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 4px;
-    background: var(--surface-2, #323238);
+    background: var(--surface-2);
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: var(--radius-s, 5px);
-    color: var(--text, #f2f2f5);
+    color: var(--text);
   }
   .counts-toggle {
     display: flex;
@@ -819,25 +823,25 @@
     padding: 1px 5px;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: var(--radius-s, 5px);
-    background: var(--surface-2, #323238);
-    color: var(--text, #f2f2f5);
+    background: var(--surface-2);
+    color: var(--text);
     font-size: 9.5px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     cursor: pointer;
   }
   .back-btn:hover {
-    border-color: var(--accent, #0a84ff);
+    border-color: var(--accent);
   }
   .hit-head {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
   }
   .hit-scan {
     text-transform: none;
@@ -851,13 +855,13 @@
     padding: 3px 8px;
     background: none;
     border: none;
-    color: var(--text, #f2f2f5);
+    color: var(--text);
     font-size: 11.5px;
     text-align: left;
     cursor: pointer;
   }
   .hit:hover {
-    background: color-mix(in srgb, var(--accent, #0a84ff) 16%, transparent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .hit-name {
     flex: 1;
@@ -872,8 +876,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--text-dim, #98989f);
-    font-size: 10px;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
   }
 
   /* Schema-tree filter bar */

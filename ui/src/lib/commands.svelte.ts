@@ -9,6 +9,8 @@ export interface Command {
   title: string;
   /** group header shown in the palette, e.g. "Sessions", "Git" */
   group?: string;
+  /** dim secondary text after the title, e.g. a Go-to target's sidebar section */
+  detail?: string;
   /** extra fuzzy-match terms */
   keywords?: string;
   /** display-only shortcut hint, e.g. "⌘T" */

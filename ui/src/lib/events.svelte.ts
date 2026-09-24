@@ -17,11 +17,13 @@ import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
 import { browser } from './stores/browser.svelte';
+import { browserLive } from './stores/browserLive.svelte';
 import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
 import { transcript } from './stores/transcript.svelte';
 import { apiClient } from './stores/apiClient.svelte';
+import { assistant } from './stores/assistant.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -206,7 +208,9 @@ export const budgetBus = new BudgetBus();
 
 /** Incremented each time a `work_graph_updated` WS event arrives. The Mission
  *  Control page subscribes and re-fetches the workspace summary/list when the
- *  event's workspace matches the open one — replacing any polling. */
+ *  event's workspace matches the open one — replacing any polling. A tick with
+ *  an EMPTY `workspaceId` is a resync (events were lost while the socket was
+ *  down) that every open view honours. */
 export class MissionControlBus {
   tick: number = $state(0);
   workspaceId: string = $state('');
@@ -218,6 +222,11 @@ export class MissionControlBus {
     this.itemId = itemId;
     this.status = status;
     this.tick += 1;
+  }
+
+  /** Events were missed (WS reconnect): every open Mission Control view reloads. */
+  resync(): void {
+    this.apply('', '', '');
   }
 }
 
@@ -263,6 +272,78 @@ export class CanvasRefsBus {
 }
 
 export const canvasRefsBus = new CanvasRefsBus();
+
+// ---------------------------------------------------------------------------
+// design_artifact_updated / design_link_updated / design_learning_update —
+// the Design Hall graph. Events land in a short, sequenced log (several can
+// arrive in one tick — a save emits artifact + link events together) so every
+// open view processes each one exactly once: it remembers the last `seq` it
+// handled and reads `since(lastSeq)` when `seq` changes. A WS reconnect bumps
+// `resyncTick` (events were lost → views reload).
+// ---------------------------------------------------------------------------
+
+export type DesignBusEvent = Extract<
+  OttoEvent,
+  { type: 'design_artifact_updated' } | { type: 'design_link_updated' } | { type: 'design_learning_update' }
+>;
+
+export class DesignBus {
+  /** Sequence number of the newest event (0 = none yet). */
+  seq: number = $state(0);
+  /** Bumped when events may have been missed (WS reconnect). */
+  resyncTick: number = $state(0);
+  private log: { seq: number; ev: DesignBusEvent }[] = [];
+
+  apply(ev: DesignBusEvent): void {
+    const seq = this.seq + 1;
+    this.log.push({ seq, ev });
+    if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+    this.seq = seq;
+  }
+
+  /** Events newer than `after`, oldest first. */
+  since(after: number): DesignBusEvent[] {
+    return this.log.filter((e) => e.seq > after).map((e) => e.ev);
+  }
+
+  resync(): void {
+    this.resyncTick += 1;
+  }
+}
+
+export const designBus = new DesignBus();
+
+// design_assist_updated / design_variants_ready — the design-assist pipeline
+// (agent turns + variant runs). Same sequenced-log shape as `designBus`, kept
+// separate so graph views don't refresh on every turn state change; the Otto
+// panel and the lobby hand-off read it.
+export type DesignAssistBusEvent = Extract<
+  OttoEvent,
+  { type: 'design_assist_updated' } | { type: 'design_variants_ready' }
+>;
+
+export class DesignAssistBus {
+  seq: number = $state(0);
+  resyncTick: number = $state(0);
+  private log: { seq: number; ev: DesignAssistBusEvent }[] = [];
+
+  apply(ev: DesignAssistBusEvent): void {
+    const seq = this.seq + 1;
+    this.log.push({ seq, ev });
+    if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+    this.seq = seq;
+  }
+
+  since(after: number): DesignAssistBusEvent[] {
+    return this.log.filter((e) => e.seq > after).map((e) => e.ev);
+  }
+
+  resync(): void {
+    this.resyncTick += 1;
+  }
+}
+
+export const designAssistBus = new DesignAssistBus();
 
 export type EventsState = 'connecting' | 'connected' | 'offline';
 
@@ -315,6 +396,31 @@ class EventsClient {
     this.connect();
   }
 
+  /** Refetch everything the always-mounted shell caches from events. A daemon
+   *  restart kills sessions and finishes runs without a single event reaching
+   *  this client, so the sidebar kept showing them "working", with stale
+   *  badges and unread counts, until a full reload. Page-scoped stores reload
+   *  on mount; swarm + open transcripts resync themselves. */
+  private resyncAfterReconnect(): void {
+    void swarm.resync();
+    transcript.resyncVisible();
+    missionControlBus.resync();
+    designBus.resync();
+    designAssistBus.resync();
+    void ws.refreshSessions().catch(() => {
+      /* transient — the next reconnect or workspace switch retries */
+    });
+    void ws.refreshActiveWorkflowRuns();
+    // refreshOtherSessions only SEEDS statuses (it must not clobber fresher
+    // event-fed values on a normal refresh); after a gap the fetched rows are
+    // the freshest truth, so apply them.
+    void ws.refreshOtherSessions().then(() => {
+      for (const s of ws.otherWsSessions) ws.statusMap[s.id] = s.status;
+    });
+    void notifications.load();
+    assistant.resync();
+  }
+
   private connect(): void {
     if (this.stopped) return;
     this.state = 'connecting';
@@ -334,10 +440,10 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
-      if (reconnected) {
-        void swarm.resync();
-        transcript.resyncVisible();
-      }
+      if (reconnected) this.resyncAfterReconnect();
+      // The Assistant's needs-you badge lives in the sidebar, so it loads on
+      // first connect too (quietly: an older daemon without the route → no badge).
+      else void assistant.loadNeedsYou();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
@@ -460,6 +566,17 @@ class EventsClient {
             parsed.format,
             parsed.content ?? null,
           );
+        } else if (
+          parsed.type === 'design_artifact_updated' ||
+          parsed.type === 'design_link_updated' ||
+          parsed.type === 'design_learning_update'
+        ) {
+          // Design Hall graph: the lobby, the open artifact, its Links panel and
+          // the learning log each re-fetch what the event touches.
+          designBus.apply(parsed);
+        } else if (parsed.type === 'design_assist_updated' || parsed.type === 'design_variants_ready') {
+          // Design assist: the Otto panel's turn states + the variants tray.
+          designAssistBus.apply(parsed);
         } else if (parsed.type === 'mockup_session_started') {
           // The mockup agent session is live (turn start) → attach its shell.
           mockupAssist.setSession(parsed.attachment_id, parsed.story_id, parsed.session_id);
@@ -491,6 +608,17 @@ class EventsClient {
         ) {
           // Browser page: tab strip / annotation list refresh in place.
           browser.applyEvent(parsed);
+        } else if (parsed.type === 'browser_engine_install_updated') {
+          // Browser page / Settings → Browser: Chromium download progress.
+          browserLive.applyEvent(parsed);
+        } else if (
+          parsed.type === 'assistant_turn' ||
+          parsed.type === 'assistant_task_update' ||
+          parsed.type === 'assistant_needs_you' ||
+          parsed.type === 'assistant_limit'
+        ) {
+          // Assistant: thread turns/cards, task board, needs-you badge, limits.
+          assistant.applyEvent(parsed);
         } else if (parsed.type === 'personal_agent_run_updated') {
           // Personal Agents page refreshes the agent's runs + schedule cursors.
           personalAgents.applyRunEvent(parsed);

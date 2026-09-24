@@ -380,6 +380,10 @@
     {/if}
   </header>
 
+  <!-- The scroller's frame: the "↓ new" pill anchors to ITS bottom edge, so it
+       always sits just above the composer whatever the composer's height
+       (attachments, a multi-line draft, the terminal-input strip). -->
+  <div class="conv-frame">
   <div class="conv-list" bind:this={listEl} onscroll={onScroll} dir="auto">
     {#if conv.error && !t}
       <div class="empty">
@@ -440,6 +444,7 @@
   {#if (unseen > 0 && !atBottom) || hasLater}
     <button class="new-pill" onclick={scrollToBottomAll}>↓ {hasLater ? 'latest' : 'new'}</button>
   {/if}
+  </div>
 
   {#if canCompose && sessionId}
     {#key sessionId}
@@ -521,7 +526,7 @@
     min-width: 0;
   }
   .search-n {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     min-width: 28px;
     text-align: center;
     white-space: nowrap;
@@ -552,6 +557,13 @@
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
+  }
+  .conv-frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
   }
   .conv-list {
     flex: 1;
@@ -593,17 +605,17 @@
     color: var(--text);
   }
   .inline-err {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
     font-size: 11.5px;
     padding: 4px 16px;
   }
   .new-pill {
     position: absolute;
-    bottom: 96px;
+    bottom: 12px;
     inset-inline-end: 50%;
     transform: translateX(50%);
-    background: var(--accent);
-    color: var(--accent-contrast, #fff);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
     border: 0;
     border-radius: 99px;
     padding: 4px 12px;

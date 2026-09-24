@@ -16,8 +16,10 @@
     onopen: (repoId: string) => void;
     /** Open the "Add repository" flow in a given mode (parent owns the modal). */
     onadd: (mode: 'register' | 'clone' | 'browse') => void;
+    /** Rendered inside the PageHeader bar (pill tabs, no own border row). */
+    embedded?: boolean;
   }
-  let { onopen, onadd }: Props = $props();
+  let { onopen, onadd, embedded = false }: Props = $props();
 
   const byId = $derived(new Map(git.allRepos.map((r) => [r.id, r])));
   const openRepos = $derived(
@@ -101,7 +103,7 @@
   }
 </script>
 
-<div class="git-tabs">
+<div class="git-tabs" class:embedded>
   <!-- The tablist must contain ONLY role="tab" children (ARIA
        aria-required-children); `display:contents` keeps the flex layout
        identical while moving the "new repo" button out of the tablist. -->
@@ -239,14 +241,14 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 110px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .git-tab.active .git-tab-branch {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .git-tab-close {
     border: none;
@@ -274,7 +276,7 @@
   }
   .git-tab-new:hover {
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Auto-fetch toggle: dim when paused, accent when on. */
   .git-autofetch {
@@ -296,11 +298,35 @@
     opacity: 1;
   }
   .git-autofetch.on {
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 1;
   }
   .mono {
     font-family: var(--font-mono);
+  }
+
+  /* Embedded in the PageHeader bar: pill tabs centred in the 46px row instead
+     of folder tabs sitting on their own border. */
+  .git-tabs.embedded {
+    align-items: center;
+    padding: 0;
+    border-bottom: none;
+    min-width: 0;
+    max-width: 100%;
+    gap: 3px;
+  }
+  .embedded .git-tab {
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    padding: 4px 6px 4px 9px;
+  }
+  .embedded .git-tab.active {
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+  .embedded .git-autofetch,
+  .embedded .git-tab-new {
+    height: 28px;
   }
 
   /* ── Mobile + tablet (≤1024px): the open-repo strip scrolls horizontally with

@@ -1,5 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
 import { openPage, expectFullyInViewport } from './helpers';
 
@@ -26,6 +29,20 @@ let claudeId = '';
 let claudeTitle = '';
 let base = '';
 let token = '';
+// A stand-in `claude` for the board shell: a symlink named `claude` to
+// /bin/sleep, so `ps` shows argv[0] = …/claude and the daemon's nested-agent
+// probe (`find_nested_agent`) sees a live claude under the shell's PTY.
+let fakeClaudeDir = '';
+
+/** Is the stand-in `claude` process running (i.e. did the shell exec it)? */
+function fakeClaudeRunning(): boolean {
+  try {
+    execFileSync('pgrep', ['-f', `${fakeClaudeDir}/claude`], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 test.beforeAll(async () => {
   const a = await apiCtx();
@@ -36,7 +53,9 @@ test.beforeAll(async () => {
   // Mission Control only lists LIVE sessions (running/working/idle) and the
   // only session that stays alive on the e2e daemon is a shell — so the board
   // card is a shell stamped the way the capture scan stamps one that ran
-  // `claude` (`meta.nested_provider`), which the board-task gate accepts.
+  // `claude` (`meta.nested_provider`). The stamp alone passes `nudgeable`; the
+  // daemon ALSO requires that claude to be alive under the PTY right now, which
+  // the Mission Control test arranges (and first checks the refusal without it).
   const b = await a.ctx.post(`${a.base}/api/v1/workspaces/${wsA}/sessions`, {
     data: {
       kind: 'agent',
@@ -59,6 +78,15 @@ test.beforeAll(async () => {
   });
   if (r.ok()) claudeId = ((await r.json()) as { id: string }).id;
   await a.ctx.dispose();
+});
+
+test.afterAll(() => {
+  if (!fakeClaudeDir) return;
+  try {
+    execFileSync('pkill', ['-f', `${fakeClaudeDir}/claude`], { stdio: 'ignore' });
+  } catch {
+    /* already gone */
+  }
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -133,7 +161,9 @@ test.describe('history page', () => {
   test('is reachable from the Agents header and the sidebar', async ({ page }) => {
     await openPage(page, 'agents');
     await page.getByTestId('agents-history-btn').click();
-    await expect(page).toHaveURL(/#\/history$/);
+    // History opens on an item (the last one viewed, else the first) instead
+    // of an empty "pick one" pane, so the route may carry that item's id.
+    await expect(page).toHaveURL(/#\/history(\/[^/]+)?$/);
     await expect(page.getByTestId('history-page')).toBeVisible();
   });
 });
@@ -185,9 +215,30 @@ test.describe('tasks from the board', () => {
     const before = (await tasksOf(page, boardId)).length;
     await card.getByTestId('subtask-btn').click();
     const title = `Sub-task ${Date.now().toString(36)}`;
-    await card.getByLabel('Sub-task title').fill(title);
-    await card.getByLabel('Sub-task title').press('Enter');
-    await expect(card.getByLabel('Sub-task title')).toHaveCount(0);
+    const input = card.getByLabel('Sub-task title');
+    await input.fill(title);
+
+    // Safety gate first: nothing is running `claude` in that terminal yet, so a
+    // queued nudge would be pasted into a bare shell and EXECUTED. The daemon
+    // refuses (409) and the card says so — keeping the draft, adding nothing.
+    await input.press('Enter');
+    await expect(page.locator('.toast.error', { hasText: 'Could not add sub-task' })).toBeVisible();
+    await expect(page.locator('.toast.error')).toContainText('agent not running in this terminal');
+    await expect(input).toHaveValue(title);
+    expect((await tasksOf(page, boardId)).length).toBe(before);
+
+    // Now run a (stand-in) claude inside the terminal, as a user would.
+    fakeClaudeDir = mkdtempSync(join(tmpdir(), 'otto-e2e-fake-claude-'));
+    symlinkSync('/bin/sleep', join(fakeClaudeDir, 'claude'));
+    const typed = await page.request.post(`${base}/api/v1/sessions/${boardId}/input`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { text: `${join(fakeClaudeDir, 'claude')} 3600`, submit: true },
+    });
+    expect(typed.ok(), await typed.text()).toBe(true);
+    await expect.poll(fakeClaudeRunning, { timeout: 15_000 }).toBe(true);
+
+    await input.press('Enter');
+    await expect(input).toHaveCount(0);
     await expect(card.getByTestId('task-strip-count')).toHaveText(new RegExp(`/${before + 1}$`));
     const tasks = await tasksOf(page, boardId);
     expect(tasks.some((t) => t.title === title && t.source === 'user')).toBe(true);

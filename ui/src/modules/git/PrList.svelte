@@ -93,7 +93,7 @@
   function ciChip(state: string | null | undefined): { glyph: string; cls: string } | null {
     if (state === 'passing' || state === 'success') return { glyph: '✓', cls: 'ok' };
     if (state === 'failing' || state === 'failure') return { glyph: '✗', cls: 'bad' };
-    if (state === 'pending') return { glyph: '●', cls: 'dim' };
+    if (state === 'pending') return { glyph: '●', cls: 'warn' };
     return null;
   }
 
@@ -215,7 +215,7 @@
   .filter-chip.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .pr-search {
     height: 22px;
@@ -242,11 +242,16 @@
     font-size: 12px;
     line-height: 1;
   }
+  /* CI glyph tones: passing = success, failing = danger, pending = warning
+     (the glyph shape carries the meaning too: ✓ ✗ ●). */
   .ci-chip.ok {
-    color: var(--status-idle, #34c759);
+    color: var(--success);
   }
   .ci-chip.bad {
-    color: var(--status-exited);
+    color: var(--danger);
+  }
+  .ci-chip.warn {
+    color: var(--warning);
   }
   .ci-chip.dim {
     color: var(--text-dim);

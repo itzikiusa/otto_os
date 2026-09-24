@@ -658,19 +658,7 @@ impl Driver for MongoDriver {
         if !matches!(parsed.op, MongoOp::Find | MongoOp::Aggregate) {
             return Err(types::invalid("export supports find / aggregate only"));
         }
-        let db_name = cfg
-            .database
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
-                    NodePath::parse(n)
-                        .get("db")
-                        .map(str::to_string)
-                        .unwrap_or_else(|| n.to_string())
-                })
-            })
-            .ok_or_else(|| types::invalid("no database selected for this connection"))?;
+        let db_name = resolve_db(cfg, node)?;
 
         let client = self.connect(cfg).await?;
         let db = client.database(&db_name);
@@ -812,25 +800,9 @@ impl MongoDriver {
         let parsed = parse_command(translated.as_deref().unwrap_or(&req.statement))?;
         // The active database arrives in `req.node` as a plain name (the UI's
         // active-DB selector, e.g. "promotions"), matching how SQL engines treat
-        // `node`. Tolerate a structured NodePath (`db:<name>/…`) too. Fall back to
-        // the connection's configured default database.
-        let db_name = cfg
-            .database
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                req.node
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|n| {
-                        NodePath::parse(n)
-                            .get("db")
-                            .map(str::to_string)
-                            .unwrap_or_else(|| n.to_string())
-                    })
-            })
-            .ok_or_else(|| types::invalid("no database selected for this connection"))?;
+        // `node`, or as a `db:<name>/…` path. It wins over the connection's
+        // configured default database (see `resolve_db`).
+        let db_name = resolve_db(cfg, req.node.as_deref())?;
 
         let client = self.connect(cfg).await?;
         let db = client.database(&db_name);
@@ -1481,6 +1453,8 @@ impl MongoDriver {
         const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
         /// Stdout lines kept in the result grid before truncation.
         const SCRIPT_MAX_LINES: usize = 10_000;
+        /// Stdout bytes kept in the result grid before truncation.
+        const SCRIPT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
         let started = Instant::now();
         let uri = mongosh_invocation(cfg, req.node.as_deref())?;
@@ -1510,15 +1484,11 @@ impl MongoDriver {
             .arg("--file")
             .arg(file.path())
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let out = match tokio::time::timeout(SCRIPT_TIMEOUT, cmd.output()).await {
-            Err(_) => {
-                return Err(types::upstream(format!(
-                    "mongosh script timed out after {} minutes",
-                    SCRIPT_TIMEOUT.as_secs() / 60
-                )))
-            }
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        let mut child = match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(types::invalid(
                     "this input is a mongosh SCRIPT (variables/functions/control flow), which \
                      Otto runs through the real `mongosh` CLI — but `mongosh` was not found on \
@@ -1527,12 +1497,45 @@ impl MongoDriver {
                      mongosh directly.",
                 ));
             }
-            Ok(Err(e)) => return Err(types::upstream(format!("spawn mongosh: {e}"))),
-            Ok(Ok(out)) => out,
+            Err(e) => return Err(types::upstream(format!("spawn mongosh: {e}"))),
+            Ok(child) => child,
         };
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        if !out.status.success() {
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(types::upstream("mongosh: output pipes unavailable"));
+        };
+        // Output is STREAMED into bounded collectors (the grid keeps the first
+        // lines up to a line and byte budget, the error report a short tail);
+        // everything past the caps is drained and dropped. Buffering it whole
+        // let a script printing a large cursor hold it all in daemon RAM for
+        // the script's lifetime.
+        let run = async {
+            let (out, err, status) = tokio::join!(
+                drain_script_pipe(
+                    stdout,
+                    ScriptOutput::new(SCRIPT_MAX_LINES, SCRIPT_MAX_BYTES)
+                ),
+                drain_script_pipe(stderr, ScriptOutput::new(0, 0)),
+                child.wait(),
+            );
+            Ok::<_, std::io::Error>((out?, err?, status?))
+        };
+        // The tab's timeout bounds a script like any other statement; without
+        // one the generous default applies. On expiry (or a Stop that aborts
+        // the run) the future is dropped and `kill_on_drop` kills the shell.
+        let timeout = script_timeout(req.timeout_ms, SCRIPT_TIMEOUT);
+        let (out, err, status) = match tokio::time::timeout(timeout, run).await {
+            Err(_) => {
+                return Err(types::upstream(format!(
+                    "mongosh script timed out after {}",
+                    human_duration(timeout)
+                )))
+            }
+            Ok(Err(e)) => return Err(types::upstream(format!("mongosh: {e}"))),
+            Ok(Ok(done)) => done,
+        };
+        let (lines, truncated, stdout_tail) = out.finish();
+        let (_, _, stderr_tail) = err.finish();
+        if !status.success() {
             // The script's own prints ARE the diagnostic (e.g. a "[FAIL] idx…"
             // line before an assertion throws) — surface the tail of both
             // streams, not just stderr.
@@ -1546,23 +1549,17 @@ impl MongoDriver {
                     .unwrap_or(0);
                 t[start..].to_string()
             };
-            let code = out
-                .status
+            let code = status
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "killed by signal".into());
             return Err(types::upstream(format!(
                 "mongosh exited {code}\n{}\n{}",
-                clip(&stderr),
-                clip(&stdout)
+                clip(&stderr_tail),
+                clip(&stdout_tail)
             )));
         }
-        let mut rows: Vec<Vec<Value>> = stdout
-            .lines()
-            .map(|l| vec![Value::String(l.to_string())])
-            .collect();
-        let truncated = rows.len() > SCRIPT_MAX_LINES;
-        rows.truncate(SCRIPT_MAX_LINES);
+        let rows: Vec<Vec<Value>> = lines.into_iter().map(|l| vec![Value::String(l)]).collect();
         let row_count = rows.len();
         Ok(QueryResult {
             columns: vec![Column::new("output")],
@@ -1576,6 +1573,139 @@ impl MongoDriver {
             truncated,
             ..QueryResult::empty()
         })
+    }
+}
+
+/// The wall-clock bound for a mongosh script: the request's `timeout_ms` when
+/// set (0 = unset, like every other engine), else `default`.
+fn script_timeout(timeout_ms: Option<u64>, default: std::time::Duration) -> std::time::Duration {
+    timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(default)
+}
+
+/// `90s` / `30 minutes` — for the script-timeout message.
+fn human_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 60, secs % 60) {
+        (0, 0) => format!("{}ms", d.as_millis()),
+        (0, s) => format!("{s}s"),
+        (m, 0) => format!("{m} minutes"),
+        (m, s) => format!("{m}m {s}s"),
+    }
+}
+
+/// Bytes of a stream's END kept for an error report (the message shows at most
+/// the last 4000 characters of each stream).
+const SCRIPT_TAIL_BYTES: usize = 16 * 1024;
+
+/// Bounded collector for one of a mongosh script's output streams. Keeps the
+/// first `max_lines` lines within a `max_bytes` budget (each line additionally
+/// capped at the grid's per-cell size) plus a rolling tail for error reports;
+/// anything past the caps is counted as truncation and dropped, never
+/// buffered. Pure, so the bounds are unit-tested without spawning a shell.
+struct ScriptOutput {
+    lines: Vec<String>,
+    current: Vec<u8>,
+    current_clipped: bool,
+    max_lines: usize,
+    budget: usize,
+    truncated: bool,
+    tail: Vec<u8>,
+}
+
+impl ScriptOutput {
+    fn new(max_lines: usize, max_bytes: usize) -> Self {
+        Self {
+            lines: Vec::new(),
+            current: Vec::new(),
+            current_clipped: false,
+            max_lines,
+            budget: max_bytes,
+            truncated: false,
+            tail: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.tail.extend_from_slice(chunk);
+        if self.tail.len() > 2 * SCRIPT_TAIL_BYTES {
+            let cut = self.tail.len() - SCRIPT_TAIL_BYTES;
+            self.tail.drain(..cut);
+        }
+        let mut rest = chunk;
+        while let Some(pos) = rest.iter().position(|&b| b == b'\n') {
+            self.append(&rest[..pos]);
+            self.end_line();
+            rest = &rest[pos + 1..];
+        }
+        self.append(rest);
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if self.lines.len() >= self.max_lines || self.budget == 0 {
+            self.truncated = true;
+            return;
+        }
+        let line_room = crate::types::MAX_CELL_CHARS.saturating_sub(self.current.len());
+        let room = line_room.min(self.budget);
+        let take = bytes.len().min(room);
+        self.current.extend_from_slice(&bytes[..take]);
+        self.budget -= take;
+        if take < bytes.len() {
+            if take == line_room {
+                self.current_clipped = true;
+            } else {
+                self.truncated = true;
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        if self.lines.len() >= self.max_lines || (self.budget == 0 && self.current.is_empty()) {
+            self.truncated = true;
+            self.current.clear();
+            return;
+        }
+        let mut line = String::from_utf8_lossy(&self.current).into_owned();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        if self.current_clipped {
+            line.push_str("…[line truncated]");
+            self.current_clipped = false;
+        }
+        self.lines.push(line);
+        self.current.clear();
+    }
+
+    /// `(lines kept, truncated, tail of the whole stream)`.
+    fn finish(mut self) -> (Vec<String>, bool, String) {
+        if !self.current.is_empty() || self.current_clipped {
+            self.end_line();
+        }
+        let tail = String::from_utf8_lossy(&self.tail).into_owned();
+        (self.lines, self.truncated, tail)
+    }
+}
+
+/// Read a child's output pipe to its end into `out`, chunk by chunk.
+async fn drain_script_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    mut out: ScriptOutput,
+) -> std::io::Result<ScriptOutput> {
+    use tokio::io::AsyncReadExt as _;
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(out);
+        }
+        out.push(&chunk[..n]);
     }
 }
 
@@ -2959,20 +3089,20 @@ async fn mongo_explain_value(db: &mongodb::Database, parsed: &Parsed) -> Result<
     Ok(bson_to_json(&Bson::Document(plan)))
 }
 
-/// The database a Mongo op runs against: the connection's configured database,
-/// else the active-db `node` (a plain name or a `db:<name>` path).
+/// The database a Mongo op runs against: the database SELECTED in the tree
+/// (`node` — a plain name or a `db:<name>` path, see [`crate::types::Scope`]),
+/// else the connection's configured default.
+///
+/// Selection first: a profile `db`/`database` param is only a default, exactly
+/// like the SQL engines' `USE`. The old order let the profile database win, so
+/// a find/update/export/import/script with `games_management` selected ran
+/// against the profile's `frb` while completion (already selection-first)
+/// showed `games_management`'s collections. Every Mongo entry point resolves
+/// through here — native run, script prelude, export, explain, import.
 fn resolve_db(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
-    cfg.database
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            node.map(str::trim).filter(|s| !s.is_empty()).map(|n| {
-                NodePath::parse(n)
-                    .get("db")
-                    .map(str::to_string)
-                    .unwrap_or_else(|| n.to_string())
-            })
-        })
+    crate::types::Scope::parse(node)
+        .and_then(|scope| scope.database().map(str::to_string))
+        .or_else(|| cfg.database.clone().filter(|s| !s.trim().is_empty()))
         .ok_or_else(|| types::invalid("no database selected for this connection"))
 }
 
@@ -3215,6 +3345,83 @@ mod tests {
             tls: Default::default(),
             params,
         }
+    }
+
+    /// Script output is collected within its caps as it streams: lines past
+    /// the line cap and bytes past the byte budget are counted as truncation,
+    /// never buffered; chunk boundaries never split a line; the tail survives
+    /// for error reports.
+    #[test]
+    fn script_output_is_bounded_while_streaming() {
+        let mut out = ScriptOutput::new(3, 1024);
+        out.push(b"one\ntw");
+        out.push(b"o\r\nthree\nfour\nfive");
+        let (lines, truncated, tail) = out.finish();
+        assert_eq!(lines, vec!["one", "two", "three"]);
+        assert!(truncated);
+        assert!(tail.ends_with("four\nfive"));
+
+        let mut exact = ScriptOutput::new(2, 1024);
+        exact.push(b"a\nb\n");
+        let (lines, truncated, _) = exact.finish();
+        assert_eq!(lines, vec!["a", "b"]);
+        assert!(!truncated, "exactly the cap is not truncation");
+
+        let mut small = ScriptOutput::new(100, 4);
+        small.push(b"abcdef\nxyz\n");
+        let (lines, truncated, _) = small.finish();
+        assert_eq!(lines, vec!["abcd"]);
+        assert!(truncated);
+
+        // The error tail stays bounded however much is written.
+        let mut err = ScriptOutput::new(0, 0);
+        for _ in 0..100 {
+            err.push(&[b'x'; 4096]);
+        }
+        let (lines, _, tail) = err.finish();
+        assert!(lines.is_empty());
+        assert!(tail.len() <= 2 * SCRIPT_TAIL_BYTES);
+    }
+
+    /// A script honours the tab timeout (it used to run for up to 30 minutes
+    /// whatever the tab said); 0 / unset keeps the generous default.
+    #[test]
+    fn script_timeout_honours_the_tab_timeout() {
+        use std::time::Duration;
+        let default = Duration::from_secs(30 * 60);
+        assert_eq!(script_timeout(None, default), default);
+        assert_eq!(script_timeout(Some(0), default), default);
+        assert_eq!(
+            script_timeout(Some(90_000), default),
+            Duration::from_secs(90)
+        );
+        assert_eq!(human_duration(default), "30 minutes");
+        assert_eq!(human_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(human_duration(Duration::from_secs(5)), "5s");
+        assert_eq!(human_duration(Duration::from_millis(250)), "250ms");
+    }
+
+    /// The database selected in the tree wins over a profile `db` param for
+    /// every entry point (they all resolve through `resolve_db`); the profile
+    /// database is only the fallback.
+    #[test]
+    fn selected_database_wins_over_the_profile_default() {
+        let mut cfg = script_cfg(serde_json::json!({}));
+        cfg.database = Some("frb".into());
+        assert_eq!(
+            resolve_db(&cfg, Some("games_management")).unwrap(),
+            "games_management"
+        );
+        assert_eq!(
+            resolve_db(&cfg, Some("db:games_management/coll:users")).unwrap(),
+            "games_management"
+        );
+        assert_eq!(resolve_db(&cfg, None).unwrap(), "frb");
+        assert_eq!(resolve_db(&cfg, Some("  ")).unwrap(), "frb");
+        // A database literally named `db` keeps its scope.
+        assert_eq!(resolve_db(&cfg, Some("db")).unwrap(), "db");
+        cfg.database = None;
+        assert!(resolve_db(&cfg, None).is_err());
     }
 
     /// The script runner must dial EXACTLY what the native client dials:

@@ -93,8 +93,8 @@ test('workspace: the seeded workspace is activated', async ({ page }, testInfo) 
   // The Navigator lists workspaces; the active one is marked with `.active-ws`
   // and shows its name ("E2E WS"). Where the Navigator lives differs by device:
   //   - desktop/tablet (ipad-landscape): persistent in the sidebar, always shown.
-  //   - phone (iphone-portrait): a LEFT drawer whose open-state is ui.railExpanded
-  //     — which DEFAULTS to open on a fresh profile, so it's usually already up.
+  //   - phone (iphone-portrait): a LEFT drawer (ui.navDrawerOpen) that is
+  //     closed on every load, so it has to be opened first.
   // So: only open it if it isn't already showing the workspace item. (Toggling
   // blindly would CLOSE an already-open drawer.)
   const activeWs = page.locator('.nav-item.active-ws', { hasText: 'E2E WS' });

@@ -1,6 +1,7 @@
 <script lang="ts">
   // History tab — sectioned event timeline with section filter for the selected story.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductEvent } from './types';
@@ -65,22 +66,9 @@
     ),
   );
 
-  function sectionColor(section: string): string {
-    switch (section) {
-      case 'source': return 'sec-source';
-      case 'analysis': return 'sec-analysis';
-      case 'questions': return 'sec-questions';
-      case 'notes': return 'sec-notes';
-      case 'rewrite': return 'sec-rewrite';
-      case 'tests': return 'sec-tests';
-      case 'publish': return 'sec-publish';
-      case 'inject': return 'sec-inject';
-      case 'watch': return 'sec-watch';
-      default: return 'sec-other';
-    }
-  }
-
-  function sectionIcon(section: string): string {
+  // Sections are kinds, not states: every section reads as a neutral chip with
+  // its kind icon (components.md §4 — no per-source hues).
+  function sectionIcon(section: string): IconName {
     switch (section) {
       case 'source': return 'file';
       case 'analysis': return 'gauge';
@@ -95,27 +83,6 @@
     }
   }
 
-  function relativeTime(iso: string): string {
-    const now = Date.now();
-    const then = new Date(iso).getTime();
-    const diffMs = now - then;
-    const diffMins = Math.floor(diffMs / 60000);
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    if (diffDays < 30) return `${diffDays}d ago`;
-    return new Date(iso).toLocaleDateString();
-  }
-
-  function absoluteTime(iso: string): string {
-    try {
-      return new Date(iso).toLocaleString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 {#if !story}
@@ -126,7 +93,7 @@
     <div class="toolbar">
       <Icon name="clock" size={13} />
       <span class="label">Section</span>
-      <select class="sec-select" value={selectedSection} onchange={onSectionChange} disabled={product.loadingEvents}>
+      <select class="input htab-select" aria-label="Section" value={selectedSection} onchange={onSectionChange} disabled={product.loadingEvents}>
         {#each SECTIONS as s (s.id)}
           <option value={s.id}>{s.label}</option>
         {/each}
@@ -149,15 +116,15 @@
           <div class="event-row">
             <!-- Connector line -->
             <div class="ev-line-col">
-              <div class="ev-dot {sectionColor(ev.section)}"></div>
+              <div class="ev-dot"></div>
               <div class="ev-connector"></div>
             </div>
 
             <!-- Content -->
             <div class="ev-content">
               <div class="ev-header">
-                <span class="sec-chip {sectionColor(ev.section)}">
-                  <Icon name={sectionIcon(ev.section)} size={10} />
+                <span class="chip hist-sec-chip">
+                  <Icon name={sectionIcon(ev.section)} size={11} />
                   {ev.section}
                 </span>
                 <span class="ev-kind">{ev.kind}</span>
@@ -165,9 +132,7 @@
                   <span class="ev-actor dim">· {ev.actor_id}</span>
                 {/if}
                 <span class="spacer"></span>
-                <span class="ev-time" title={absoluteTime(ev.created_at)}>
-                  {relativeTime(ev.created_at)}
-                </span>
+                <RelTime iso={ev.created_at} class="ev-time" />
               </div>
               <p class="ev-summary">{ev.summary}</p>
             </div>
@@ -201,25 +166,21 @@
     padding: 8px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
-  .sec-select {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: 12px;
-    padding: 3px 7px;
+  .htab-select {
+    width: auto;
+    font-size: var(--fs-s);
   }
   .dim {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .spacer {
@@ -251,6 +212,7 @@
     border-radius: 50%;
     flex-shrink: 0;
     border: 2px solid var(--surface);
+    background: var(--border-strong);
   }
   .ev-connector {
     flex: 1;
@@ -274,16 +236,8 @@
     flex-wrap: wrap;
     margin-bottom: 3px;
   }
-  .sec-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 7px;
-    border-radius: 999px;
+  .hist-sec-chip {
+    text-transform: capitalize;
   }
   .ev-kind {
     font-size: 12px;
@@ -291,10 +245,10 @@
     color: var(--text);
   }
   .ev-actor {
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
-  .ev-time {
-    font-size: 11px;
+  .ev-header :global(.ev-time) {
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     cursor: default;
@@ -309,15 +263,4 @@
     white-space: nowrap;
   }
 
-  /* Section color theme — dot + chip */
-  .sec-source   { background: color-mix(in srgb, #60a5fa 18%, transparent); color: #3b82f6; }
-  .sec-analysis { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-  .sec-questions { background: color-mix(in srgb, #a78bfa 18%, transparent); color: #7c3aed; }
-  .sec-notes    { background: color-mix(in srgb, #34d399 18%, transparent); color: #059669; }
-  .sec-rewrite  { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
-  .sec-tests    { background: color-mix(in srgb, #10b981 18%, transparent); color: #047857; }
-  .sec-publish  { background: color-mix(in srgb, #f97316 18%, transparent); color: #c2410c; }
-  .sec-inject   { background: color-mix(in srgb, #e879f9 18%, transparent); color: #a21caf; }
-  .sec-watch    { background: color-mix(in srgb, #64748b 18%, transparent); color: #475569; }
-  .sec-other    { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 </style>

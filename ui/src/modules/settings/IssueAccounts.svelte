@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Jira / issue-tracking accounts settings page.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -153,14 +156,13 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Jira Accounts</h1>
-      <div class="sub">Connect Jira to attach issues to sessions and track work in progress.</div>
-    </div>
-    <button class="btn primary" onclick={openAdd}>Add Account</button>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('jira')} subtitle="Attach issues to sessions and track work in progress">
+    {#snippet actions()}
+      <button class="btn primary" onclick={openAdd}>Add account</button>
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={2} height={48} />
@@ -169,7 +171,7 @@
       <p class="dim" style="margin: 0 0 10px">
         No Jira accounts yet. Add one to search and attach issues to your sessions.
       </p>
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     </div>
   {:else}
     <div class="acct-list">
@@ -201,16 +203,17 @@
               {/if}
             </div>
           </div>
-          <button class="icon-btn" title="Edit" onclick={() => openEdit(a)}>
+          <button class="icon-btn" title="Edit account" aria-label="Edit account" onclick={() => openEdit(a)}>
             <Icon name="edit" size={13} />
           </button>
-          <button class="icon-btn" title="Delete" onclick={() => remove(a)}>
+          <button class="icon-btn" title="Delete account" aria-label="Delete account" onclick={() => remove(a)}>
             <Icon name="trash" size={13} />
           </button>
         </div>
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 {#if addOpen}
@@ -275,7 +278,7 @@
           disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === ''}
           onclick={save}
         >
-          {busy ? 'Saving…' : 'Save Changes'}
+          {busy ? 'Saving…' : 'Save changes'}
         </button>
       {:else}
         <button
@@ -283,7 +286,7 @@
           disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || token === ''}
           onclick={create}
         >
-          {busy ? 'Adding…' : 'Add Account'}
+          {busy ? 'Adding…' : 'Add account'}
         </button>
       {/if}
     {/snippet}
@@ -291,6 +294,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .acct-list {
     display: flex;
     flex-direction: column;
@@ -308,7 +318,7 @@
     height: 30px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
   }
@@ -327,11 +337,11 @@
     color: var(--text-dim);
   }
   .expiry.expired {
-    color: #d9534f;
+    color: var(--danger);
     font-weight: 600;
   }
   .expiry-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 999px;
@@ -339,12 +349,12 @@
     text-transform: uppercase;
   }
   .expiry-badge-expired {
-    background: color-mix(in srgb, #d9534f 15%, transparent);
-    color: #d9534f;
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
   }
   .expiry-badge-soon {
-    background: color-mix(in srgb, #e0a000 15%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
+    color: var(--warning);
     text-transform: none;
   }
 </style>

@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { missionControlBus } from '../../lib/events.svelte';
   import { missionControlApi } from '../../lib/api/missionControl';
   import { ApiError } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -61,6 +63,21 @@
     void id;
     void wsId;
     void load();
+  });
+
+  // Live: reload when THIS item changes (or on a reconnect resync) — the
+  // pane used to keep showing a stale status while the list updated. Never
+  // while the user is editing (a reload resets the edit fields).
+  let seenTick = untrack(() => missionControlBus.tick);
+  $effect(() => {
+    const tick = missionControlBus.tick;
+    const evItem = missionControlBus.itemId;
+    const evWs = missionControlBus.workspaceId;
+    if (tick === seenTick) return;
+    seenTick = tick;
+    const resync = evWs === '' && evItem === '';
+    const mine = untrack(() => evItem === id && evWs === wsId);
+    if ((resync || mine) && !untrack(() => editing)) void load();
   });
 
   async function saveEdits(): Promise<void> {
@@ -209,7 +226,7 @@
                 </div>
                 {#if a.status === 'pending'}
                   <div class="ap-actions">
-                    <button class="btn small ok" disabled={busy} onclick={() => decide(a.id, 'approved')}>Approve</button>
+                    <button class="btn small primary" disabled={busy} onclick={() => decide(a.id, 'approved')}>Approve</button>
                     <button class="btn small danger" disabled={busy} onclick={() => decide(a.id, 'rejected')}>Reject</button>
                   </div>
                 {:else if a.decided_by}
@@ -311,7 +328,7 @@
     min-width: 0;
   }
   .d-kicon {
-    color: var(--accent);
+    color: var(--accent-text);
     margin-top: 2px;
   }
   .d-titletext {
@@ -361,7 +378,7 @@
     min-width: 0;
   }
   .flabel {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -427,7 +444,7 @@
   }
   .chip-status,
   .chip-risk {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -437,16 +454,17 @@
     white-space: nowrap;
   }
   .chip-status.sm {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
   }
   .badge-approve {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 999px;
-    background: #ffd33d;
-    color: #3a2c00;
+    background: var(--warning-soft);
+    color: var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
   }
   .approvals,
   .edges,
@@ -469,7 +487,7 @@
     padding: 6px 9px;
   }
   .ap.pending {
-    border: 1px solid #ffd33d66;
+    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
   }
   .ap-main {
     display: flex;
@@ -478,18 +496,18 @@
     min-width: 0;
   }
   .ap-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
   }
   .ap-pending {
-    color: #d6a800;
+    color: var(--warning);
   }
   .ap-approved {
-    color: #2ea043;
+    color: var(--success);
   }
   .ap-rejected {
-    color: #ff5f57;
+    color: var(--danger);
   }
   .ap-actions {
     display: flex;
@@ -542,10 +560,10 @@
     font-size: 12.5px;
   }
   .art-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--accent-text);
     flex: 0 0 auto;
   }
   .art-title {
@@ -575,13 +593,13 @@
     background: var(--text-dim);
   }
   .tl-dot.actor-user {
-    background: #7ee787;
+    background: var(--status-working);
   }
   .tl-dot.actor-agent {
     background: var(--accent);
   }
   .tl-dot.actor-integration {
-    background: #ffd33d;
+    background: var(--status-warn);
   }
   .tl-type {
     font-weight: 600;
@@ -596,7 +614,7 @@
     font-size: 11.5px;
   }
   .err {
-    color: #ff5f57;
+    color: var(--danger);
   }
   .grow {
     flex: 1 1 auto;

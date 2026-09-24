@@ -38,7 +38,7 @@
     height: 18px;
     padding: 0 7px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.01em;
     white-space: nowrap;

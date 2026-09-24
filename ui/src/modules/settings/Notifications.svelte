@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Notification preferences: expiry warning threshold + native/session toggles.
   // Also exposes the `channels.notify_self_improvement` opt-in flag so the user
   // can turn on Slack/Telegram self-improvement pings from one place (T6).
@@ -108,13 +111,9 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Notifications</h1>
-      <div class="sub">Control credential-expiry warnings and how Otto alerts you.</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('notifications')} subtitle="Credential-expiry warnings and how Otto alerts you" />
+  <PageBody width="readable">
 
   <div class="section-title">Credential expiry</div>
   <div class="card pad">
@@ -191,9 +190,17 @@
       {/each}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 520px;

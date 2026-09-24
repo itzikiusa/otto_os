@@ -2,6 +2,7 @@
   // xterm.js terminal bound to WS /ws/term/{id} per docs/contracts/ws.md.
   // Binary frames → term.write; JSON control frames for status/exit/scrollback.
   import { untrack } from 'svelte';
+  import { exitState } from '../status';
   import { Terminal } from '@xterm/xterm';
   // ILinkProvider isn't exported from the ambient module, so derive its shape
   // from registerLinkProvider's parameter (kept in lockstep with the version).
@@ -432,6 +433,11 @@
             break;
           }
           case 'status':
+            // A live status after an `exit` means the server moved this
+            // socket onto a respawned process (chat send, channel follow-up,
+            // restart from elsewhere) — drop the exited overlay; the
+            // accompanying snapshot rebuilds the screen.
+            if (msg.status !== 'exited' && msg.status !== 'reconnectable') exitCode = null;
             onstatus?.(msg.status as SessionStatus);
             break;
           case 'exit':
@@ -1154,6 +1160,12 @@
     };
     textarea?.addEventListener('focus', onFocus);
     textarea?.addEventListener('blur', onBlur);
+    // Focused before these listeners existed (auto-focus on mount): record it
+    // now, or ⌃-keys, ⌘F find and terminal zoom miss the focused terminal.
+    if (textarea && document.activeElement === textarea) {
+      keyContext.terminalFocused = true;
+      keyContext.openFind = openFind;
+    }
 
     // ── Image paste ───────────────────────────────────────────────────────────
     // Agent CLIs take an image as a FILE PATH, and the path has to exist on the
@@ -1503,8 +1515,11 @@
     ></div>
 
     {#if exitCode !== null}
+      <!-- Shared exit vocabulary (lib/status.ts): "Ended", "Suspended —
+           resumes on open", or "Failed (exit N)" — never a bare "exited (0)". -->
+      {@const ex = exitState(exitCode, resumable)}
       <div class="term-overlay">
-        <span class="badge {exitCode === 0 ? 'ok' : 'bad'}">exited ({exitCode})</span>
+        <span class="badge {ex.tone}" data-exit={ex.key} title={ex.hint}>{ex.key === 'suspended' ? ex.hint : ex.label}</span>
         {#if (restartable || resumable) && !readOnly}
           <button
             class="btn"
@@ -1661,7 +1676,7 @@
   }
   /* Scrollback match count / spinner badge next to the input */
   .find-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     user-select: none;
@@ -1703,7 +1718,7 @@
     min-width: 36px;
     text-align: end;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .find-result-text {
     overflow: hidden;
@@ -1713,9 +1728,9 @@
   }
   .find-result-more {
     padding: 3px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    font-family: var(--font-sans, sans-serif);
+    font-family: var(--font-ui);
     text-align: center;
     border-top: 1px solid var(--border);
   }
@@ -1732,21 +1747,21 @@
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border: 1px solid var(--border);
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     opacity: 0.9;
   }
   .term-overlay.dim {
     opacity: 0.7;
   }
   .term-overlay .badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0;
     background: none;
     border: none;
   }
   .term-overlay .btn {
     padding: 1px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .badge {
     font-size: 11px;
@@ -1756,18 +1771,16 @@
     color: var(--text-dim);
     border: 1px solid var(--border);
   }
-  .badge.ok {
-    color: var(--status-working);
-  }
-  .badge.bad {
-    color: var(--status-exited);
+  .badge.danger {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   .ro-chip {
     position: absolute;
     top: 8px;
     inset-inline-end: 8px;
     z-index: 4;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);
@@ -1868,10 +1881,10 @@
     color: var(--text);
   }
   .tb-btn.tb-active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-size {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 28px;
     text-align: center;

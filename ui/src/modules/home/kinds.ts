@@ -3,6 +3,7 @@
 // A kind is offered in the "Add box" picker only when the user can VIEW the
 // feature behind it — the same RBAC gate the module itself sits behind.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import type { Feature } from '../../lib/api/types';
 
 export type HomeBoxKind =
@@ -19,7 +20,7 @@ export interface HomeBoxKindDef {
   /** One line for the picker. */
   blurb: string;
   /** Icon name (see Icon.svelte). */
-  icon: string;
+  icon: IconName;
   /** RBAC gate (checked at 'view'). */
   feature: Feature;
   /** Default footprint on the 12-column grid. */

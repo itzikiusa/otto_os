@@ -1,51 +1,17 @@
 // Snip integration: the system-wide capture shortcut + the editor window.
 //
 // The shell contributes exactly three things to the snipping feature (all
-// business logic lives in the daemon + SPA): (1) a global shortcut registered
-// via tauri-plugin-global-shortcut, persisted in `<app-config>/snip.json`;
+// business logic lives in the daemon + SPA): (1) a global shortcut — the
+// `snip` entry of the shortcuts.rs registry (persisted chord, ⌘⌃⇧2 default);
 // (2) on fire, an `otto://menu` emit with id `"snip"` to exactly ONE window
 // (the SPA's existing menu bridge runs `startSnip()` there — the webview holds
 // the bearer token, the Rust side deliberately has none); (3) the
 // `open_snip_window` command that mints a `w<N>` editor window pre-routed to
 // `#/snip/<id>` via an injected `__OTTO_ROUTE__`.
 
-use std::fs;
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 pub const DEFAULT_SHORTCUT: &str = "Cmd+Ctrl+Shift+2";
-
-#[derive(Serialize, Deserialize, Default)]
-struct SnipConfig {
-    /// Global-shortcut accelerator; empty string = disabled.
-    shortcut: Option<String>,
-}
-
-fn config_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("snip.json"))
-}
-
-fn load_shortcut(app: &AppHandle) -> String {
-    config_path(app)
-        .and_then(|p| fs::read(p).ok())
-        .and_then(|raw| serde_json::from_slice::<SnipConfig>(&raw).ok())
-        .and_then(|c| c.shortcut)
-        .unwrap_or_else(|| DEFAULT_SHORTCUT.to_string())
-}
-
-fn save_shortcut(app: &AppHandle, accel: &str) {
-    let Some(path) = config_path(app) else { return };
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let cfg = SnipConfig { shortcut: Some(accel.to_string()) };
-    if let Ok(raw) = serde_json::to_vec_pretty(&cfg) {
-        let _ = fs::write(path, raw);
-    }
-}
 
 /// Snip ids are daemon-generated ULIDs; the id is embedded in a window
 /// initialization script, so anything but plain ASCII alphanumerics is
@@ -56,14 +22,15 @@ fn snip_id_ok(id: &str) -> bool {
 
 /// Route the trigger to exactly ONE window: focused first (the menu-event
 /// pattern), else `main`, else any real window — a global shortcut usually
-/// fires while Otto is NOT focused, so the fallbacks matter.
-fn emit_snip(app: &AppHandle) {
+/// fires while Otto is NOT focused, so the fallbacks matter. The assistant bar
+/// and the tray popover never qualify: their pages don't run the snip flow.
+pub fn emit_snip(app: &AppHandle) {
     let wins = app.webview_windows();
     let target = wins
         .iter()
-        .find(|(l, w)| !l.starts_with("otto-browser-") && w.is_focused().unwrap_or(false))
+        .find(|(l, w)| crate::windows::is_app_window(l) && w.is_focused().unwrap_or(false))
         .or_else(|| wins.get_key_value("main"))
-        .or_else(|| wins.iter().find(|(l, _)| !l.starts_with("otto-browser-")))
+        .or_else(|| wins.iter().find(|(l, _)| crate::windows::is_app_window(l)))
         .map(|(l, _)| l.clone());
     match target {
         Some(label) => {
@@ -75,46 +42,16 @@ fn emit_snip(app: &AppHandle) {
     }
 }
 
-/// (Re)register the global shortcut. Empty accel = disabled. Unregisters all
-/// previous snip shortcuts first (this module owns every global shortcut in
-/// the app today).
-pub fn register(app: &AppHandle, accel: &str) -> Result<(), String> {
-    let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
-    if accel.is_empty() {
-        return Ok(());
-    }
-    let sc: Shortcut = accel
-        .parse()
-        .map_err(|e| format!("invalid shortcut {accel:?}: {e}"))?;
-    gs.on_shortcut(sc, |app, _sc, event| {
-        if event.state() == ShortcutState::Pressed {
-            emit_snip(app);
-        }
-    })
-    .map_err(|e| format!("could not register {accel:?}: {e}"))
-}
-
-/// Startup: register the persisted (or default) chord. Non-fatal on failure —
-/// e.g. another app holds the chord; the in-app triggers still work and the
-/// Settings page surfaces the error on change.
-pub fn init(app: &AppHandle) {
-    let accel = load_shortcut(app);
-    if let Err(e) = register(app, &accel) {
-        eprintln!("snip: global shortcut unavailable: {e}");
-    }
-}
-
+/// The snip chord lives in the shortcuts.rs registry now; these two commands
+/// stay for the Snipping settings page (SnipSettings.svelte).
 #[tauri::command]
 pub fn snip_get_shortcut(app: AppHandle) -> String {
-    load_shortcut(&app)
+    crate::shortcuts::accel_for(&app, "snip")
 }
 
 #[tauri::command]
 pub fn snip_set_shortcut(app: AppHandle, accel: String) -> Result<(), String> {
-    register(&app, &accel)?;
-    save_shortcut(&app, &accel);
-    Ok(())
+    crate::shortcuts::set(&app, "snip", &accel)
 }
 
 /// Open a dedicated editor window for a snip, pre-routed to `#/snip/<id>`.

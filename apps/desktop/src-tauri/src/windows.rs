@@ -140,7 +140,48 @@ pub fn is_quitting() -> bool {
     QUITTING.load(Ordering::SeqCst)
 }
 
-fn monitors_of(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32)> {
+/// Window kinds, by label:
+///   * `main` / `w<N>` — full app windows, persisted in this registry;
+///   * `popout-<N>` — native pop-outs of one route (popout.rs; frames are kept
+///     per route in `popouts.json`, not here, and they aren't restored);
+///   * `otto-bar` / `otto-tray` — the assistant bar + tray popover panels:
+///     always-alive hidden chrome, never a menu/snip target, never counted
+///     as "the last window";
+///   * `otto-browser-*` — browser-tab child webviews (browser.rs).
+pub fn is_aux(label: &str) -> bool {
+    label == crate::bar::LABEL || label == crate::tray::POPOVER_LABEL
+}
+
+pub fn is_popout(label: &str) -> bool {
+    label.starts_with(crate::popout::PREFIX)
+}
+
+/// A window a person works in (`main`, `w<N>`, pop-outs): valid target for
+/// menu events and the snip trigger, and counted for last-window-quit.
+pub fn is_app_window(label: &str) -> bool {
+    !label.starts_with("otto-browser-") && !is_aux(label)
+}
+
+/// Windows whose frames this registry persists and restores.
+fn is_registry_window(label: &str) -> bool {
+    is_app_window(label) && !is_popout(label)
+}
+
+/// The window "Open Otto" should surface: `main`, else the focused app window,
+/// else any app window.
+pub fn primary_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(main) = app.get_webview_window("main") {
+        return Some(main);
+    }
+    let wins = app.webview_windows();
+    wins.values()
+        .find(|w| is_app_window(w.label()) && w.is_focused().unwrap_or(false))
+        .or_else(|| wins.values().find(|w| is_registry_window(w.label())))
+        .or_else(|| wins.values().find(|w| is_app_window(w.label())))
+        .cloned()
+}
+
+pub(crate) fn monitors_of(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32)> {
     app.available_monitors()
         .map(|ms| {
             ms.iter()
@@ -155,7 +196,7 @@ fn monitors_of(app: &tauri::AppHandle) -> Vec<(i32, i32, u32, u32)> {
 }
 
 /// Current physical frame of a live window (None while minimized/gone).
-fn live_frame(win: &tauri::WebviewWindow) -> Option<WinFrame> {
+pub(crate) fn live_frame(win: &tauri::WebviewWindow) -> Option<WinFrame> {
     let pos = win.outer_position().ok()?;
     let size = win.outer_size().ok()?;
     Some(WinFrame {
@@ -174,7 +215,7 @@ pub fn snapshot_all(app: &tauri::AppHandle) {
     let frames: Vec<WinFrame> = app
         .webview_windows()
         .values()
-        .filter(|w| !w.label().starts_with("otto-browser-"))
+        .filter(|w| is_registry_window(w.label()))
         .filter_map(live_frame)
         .collect();
     with_registry(|reg| {
@@ -202,20 +243,24 @@ pub fn schedule_snapshot(app: &tauri::AppHandle) {
 }
 
 /// A window is being closed by the user (not by quit): forget it — unless it is
-/// the LAST window, in which case its close IS the quit gesture on macOS-lite
-/// semantics (tauri exits when the last window closes), so snapshot instead.
+/// the LAST app window, in which case its close IS the quit gesture on
+/// macOS-lite semantics, so snapshot instead. The always-alive hidden panels
+/// (assistant bar, tray popover) don't count — and because they keep the
+/// window set non-empty, tauri would no longer exit on its own, so the quit is
+/// requested explicitly (same outcome as before they existed).
 pub fn on_close_requested(app: &tauri::AppHandle, label: &str) {
-    if is_quitting() || label.starts_with("otto-browser-") {
+    if is_quitting() || !is_app_window(label) {
         return;
     }
     let real_windows = app
         .webview_windows()
         .keys()
-        .filter(|l| !l.starts_with("otto-browser-"))
+        .filter(|l| is_app_window(l))
         .count();
     if real_windows <= 1 {
         mark_quitting();
         snapshot_all(app);
+        app.exit(0);
         return;
     }
     with_registry(|reg| reg.windows.retain(|w| w.label != label));
@@ -309,7 +354,7 @@ pub fn create_new_window(app: &tauri::AppHandle) {
     let base = app
         .webview_windows()
         .values()
-        .find(|w| w.is_focused().unwrap_or(false) && !w.label().starts_with("otto-browser-"))
+        .find(|w| w.is_focused().unwrap_or(false) && is_registry_window(w.label()))
         .and_then(live_frame)
         .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
     let mut frame = base.unwrap_or(WinFrame {
@@ -348,7 +393,7 @@ pub fn create_snip_window(app: &tauri::AppHandle, snip_id: &str) -> Result<(), S
     let base = app
         .webview_windows()
         .values()
-        .find(|w| w.is_focused().unwrap_or(false) && !w.label().starts_with("otto-browser-"))
+        .find(|w| w.is_focused().unwrap_or(false) && is_registry_window(w.label()))
         .and_then(live_frame)
         .or_else(|| app.get_webview_window("main").as_ref().and_then(live_frame));
     let mut frame = base.unwrap_or(WinFrame {
@@ -599,6 +644,17 @@ mod tests {
         assert!(covered("main"), "main window must keep IPC");
         assert!(covered("w2"), "first secondary window needs IPC");
         assert!(covered("w34"), "all minted w<N> labels need IPC");
+        // Pop-outs and the two panels load the bundled SPA and need IPC too
+        // (listen, invoke, drag) — labels pinned to the modules' constants.
+        assert!(
+            covered(&format!("{}7", crate::popout::PREFIX)),
+            "pop-outs need IPC"
+        );
+        assert!(covered(crate::bar::LABEL), "assistant bar needs IPC");
+        assert!(
+            covered(crate::tray::POPOVER_LABEL),
+            "tray popover needs IPC"
+        );
         // Tripwire only: browser webviews reach the label predicate via their
         // PARENT window's label, so this alone can't protect them — the
         // context assertions below are the real gate.

@@ -4,9 +4,15 @@
   // 13 sub-views into 4 workflow GROUPS (Story · Discover · Deliver · Log) —
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
-  import './product.css';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { storyStage } from '../../lib/status';
+  import { untrack } from 'svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -232,6 +238,28 @@
   /** The epic tree over the FILTERED list (the tag filter applies to the
    *  flattened list; a matching child whose epic didn't match shows at top level). */
   const tree = $derived(buildTree(filteredStories));
+
+  /** Stories view with nothing at all to list: the empty list pane is hidden
+   *  (≥641px) and the page EmptyState owns the ONE import CTA. */
+  const noStories = $derived(product.view === 'stories' && !product.loadingStories && product.stories.length === 0);
+
+  // List/detail never opens onto an empty "pick one" pane: once a workspace's
+  // stories are in, restore the last story opened here (or the first in the
+  // tree). Once per workspace, so closing a story is respected. Not on phone —
+  // there the accordion's list panel is the landing view.
+  let autoPickedFor: string | null = null;
+  $effect(() => {
+    const w = ws.currentId;
+    if (!w || autoPickedFor === w || product.loadingStories || product.view !== 'stories') return;
+    if (product.stories.length === 0) return;
+    untrack(() => {
+      autoPickedFor = w;
+      if (product.selectedId || viewport.isPhone) return;
+      const last = recallSelection('product');
+      const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
+      if (pick) void product.select(pick.id);
+    });
+  });
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
   const selectedStory = $derived(product.detail?.story ?? null);
   const selectedParent = $derived(product.parentOf(selectedStory));
@@ -259,7 +287,7 @@
   // `icon` is purely cosmetic (the merged header band renders it beside the
   // group label) — `id`/`label`/`subs` stay byte-for-byte what they were: the
   // sub `id`s ARE the `product.tab` values that E2E + deep links depend on.
-  type Group = { id: string; label: string; icon: string; subs: Sub[] };
+  type Group = { id: string; label: string; icon: IconName; subs: Sub[] };
   const GROUPS: Group[] = [
     {
       id: 'story',
@@ -327,17 +355,7 @@
     }
   }
 
-  function stageColor(stage: string): string {
-    switch (stage) {
-      case 'draft': return 'stage-draft';
-      case 'review': return 'stage-review';
-      case 'approved': return 'stage-approved';
-      case 'done': return 'stage-done';
-      default: return 'stage-other';
-    }
-  }
-
-  function sourceIcon(kind: string): string {
+  function sourceIcon(kind: string): IconName {
     switch (kind) {
       case 'jira': return 'ticket';
       case 'confluence': return 'globe';
@@ -347,10 +365,22 @@
 
   function selectStory(s: ProductStory): void {
     void product.select(s.id);
+    rememberSelection('product', s.id);
     // Reset to overview whenever a new story is selected.
     product.tab = 'overview';
     // On mobile, switch to the content panel so the picked story is visible.
     mobileSection = 'content';
+  }
+
+  /** The list in the order the tree shows it (epics followed by their
+   *  children), so "the next story" after a delete is the row below it. */
+  function visibleOrder(): ProductStory[] {
+    const out: ProductStory[] = [];
+    for (const n of tree) {
+      out.push(n.story);
+      for (const f of n.folders) out.push(...f.children);
+    }
+    return out;
   }
 
   async function deleteStory(s: ProductStory): Promise<void> {
@@ -359,8 +389,50 @@
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
-    void product.deleteStory(s.id);
+    // Deleting the open story lands on its neighbour (the row below, else the
+    // one above) — never on an empty "pick one" pane.
+    const wasOpen = product.selectedId === s.id;
+    const order = visibleOrder();
+    const i = order.findIndex((x) => x.id === s.id);
+    const gone = new Set([s.id, ...product.childrenOf(s.id).map((c) => c.id)]);
+    const next =
+      order.slice(i + 1).find((x) => !gone.has(x.id)) ??
+      order.slice(0, Math.max(i, 0)).reverse().find((x) => !gone.has(x.id)) ??
+      null;
+    try {
+      await product.deleteStory(s.id);
+    } catch (e) {
+      toasts.error(`Couldn't delete "${s.title}"`, product.errMsg(e));
+      return;
+    }
+    if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
+      product.tab = 'overview';
+      rememberSelection('product', next.id);
+      void product.select(next.id);
+    }
   }
+
+  /** Collection summary (shown only when no story is open): counts per stage
+   *  and the most recently touched stories, each one click away. */
+  const stageCounts = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const s of product.stories) if (s.tree_kind !== 'doc') m.set(s.stage, (m.get(s.stage) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  });
+  const recentStories = $derived(
+    [...product.stories].sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? '')).slice(0, 8),
+  );
+
+  /** Header title: the open story (Stories view), else the module. The parent
+   *  epic is the one crumb, so a child reads `Epic / Child`. */
+  const headerTitle = $derived(
+    product.view === 'stories' && selectedStory ? selectedStory.title : 'Product',
+  );
+  const headerCrumbs = $derived(
+    product.view === 'stories' && selectedParent
+      ? [{ label: selectedParent.title, onclick: () => void product.select(selectedParent.id) }]
+      : [],
+  );
 
   // ── Sidebar width (drag-resizable, persisted) ─────────────────────────────
   // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
@@ -431,12 +503,13 @@
           {#if node?.isEpic}
             <span class="epic-badge">epic · {node.childCount}</span>
           {:else}
-            <span class="stage-badge {stageColor(s.stage)}">{s.stage}</span>
+            <StatusBadge status={storyStage(s.stage)} variant="text" />
           {/if}
           {#if s.tree_kind === 'doc'}
             <span class="draft-badge doc">DOC</span>
           {:else if s.source_kind === 'draft'}
-            <span class="draft-badge">DRAFT</span>
+            <!-- A draft story's stage badge already says "draft". -->
+            {#if s.stage !== 'draft'}<span class="draft-badge">Draft</span>{/if}
           {:else}
             <span class="story-key mono">{s.source_key}</span>
           {/if}
@@ -469,7 +542,74 @@
   </div>
 {/snippet}
 
-<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
+<div class="product-shell">
+<PageHeader
+  title={headerTitle}
+  crumbs={headerCrumbs}
+  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Analyse Jira / Confluence stories — questions, plans and test cases, published back.'}
+>
+  {#snippet badge()}
+    {#if product.view === 'stories' && selectedStory}
+      <!-- Open story: its stage (or tree role), folder and source key sit beside
+           the title — the old breadcrumb row is folded into the header. -->
+      {#if selectedIsEpic}
+        <span class="chip pp-epic-chip"><Icon name="folder" size={10} /> Epic · {product.childrenOf(selectedStory.id).length} children</span>
+      {:else if selectedStory.tree_kind === 'doc'}
+        <span class="chip"><Icon name="note" size={10} /> Doc</span>
+      {:else}
+        <StatusBadge status={storyStage(selectedStory.stage)} />
+      {/if}
+      {#if selectedStory.folder}
+        <span class="chip pp-folder-chip" title="Folder inside the epic"><Icon name="folder" size={10} /> {selectedStory.folder}</span>
+      {/if}
+      {#if selectedStory.source_kind !== 'draft'}
+        <span class="pp-key mono">{selectedStory.source_key}</span>
+      {/if}
+    {/if}
+  {/snippet}
+  {#snippet tabs()}
+    <!-- The ONE Stories|Learnings toggle, at every breakpoint. -->
+    <div class="segmented m-view-toggle" role="tablist" aria-label="View">
+      <button
+        class:active={product.view === 'stories'}
+        role="tab"
+        aria-selected={product.view === 'stories'}
+        onclick={() => (product.view = 'stories')}
+      >Stories</button>
+      <button
+        class:active={product.view === 'learnings'}
+        role="tab"
+        aria-selected={product.view === 'learnings'}
+        onclick={() => (product.view = 'learnings')}
+      >Learnings</button>
+    </div>
+  {/snippet}
+  {#snippet actions()}
+    {#if product.view === 'stories'}
+      {#if selectedStory && selectedIsEpic}
+        <button class="btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
+          <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
+        </button>
+      {/if}
+      <button
+        class="btn"
+        onclick={newMenu}
+        title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
+        disabled={draftCreating}
+        data-label="New draft or epic…"
+      >
+        <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
+      </button>
+      <!-- The ONE import affordance (the empty state owns it while the list is empty). -->
+      {#if !noStories}
+        <button class="btn primary" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+          <Icon name="plus" size={12} /> Import
+        </button>
+      {/if}
+    {/if}
+  {/snippet}
+</PageHeader>
+<div class="product-page" class:no-stories={noStories} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
   <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
   <button
     class="m-acc-head"
@@ -485,50 +625,8 @@
 
   <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
   <aside class="product-side">
-    <!-- The ONE Stories|Learnings toggle, at every breakpoint — a compact
-         segmented control above the list, rather than a duplicate in the main
-         content header. (It's still absent from view while the mobile content
-         panel is open — this whole sidebar collapses then — but that's fine:
-         you pick Stories/Learnings before diving into a story's content.) -->
-    <div class="m-view-toggle" role="tablist" aria-label="View">
-      <button
-        class="vt"
-        class:active={product.view === 'stories'}
-        role="tab"
-        aria-selected={product.view === 'stories'}
-        onclick={() => (product.view = 'stories')}
-      >Stories</button>
-      <button
-        class="vt"
-        class:active={product.view === 'learnings'}
-        role="tab"
-        aria-selected={product.view === 'learnings'}
-        onclick={() => (product.view = 'learnings')}
-      >Learnings</button>
-    </div>
     {#if product.view === 'stories'}
-      <!-- Stories sidebar -->
-      <div class="side-head">
-        <span class="side-title">Stories</span>
-        <div class="side-head-actions">
-          <button
-            class="p-btn"
-            onclick={newMenu}
-            title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
-            disabled={draftCreating}
-          >
-            <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
-          </button>
-          <button
-            class="p-btn primary"
-            onclick={() => (importOpen = true)}
-            title="Import an existing Jira issue / Confluence page"
-          >
-            <Icon name="plus" size={12} /> Import
-          </button>
-        </div>
-      </div>
-
+      <!-- Stories sidebar (the header's Stories|Learnings toggle names it). -->
       <!-- Tag filter row (only when tags exist) -->
       {#if allTags.length > 0}
         <div class="tag-filter-row">
@@ -551,11 +649,7 @@
         {#if product.loadingStories}
           <div class="list-empty">Loading…</div>
         {:else if product.stories.length === 0}
-          <div class="list-empty">
-            No stories yet.
-            <button class="link" onclick={createDraft} disabled={draftCreating}>Start a draft →</button>
-            <button class="link" onclick={() => (importOpen = true)}>Import one →</button>
-          </div>
+          <div class="list-empty">No stories yet.</div>
         {:else if filteredStories.length === 0}
           <div class="list-empty">No stories match the selected tag.</div>
         {:else}
@@ -586,18 +680,8 @@
         {/if}
       </div>
 
-      <div class="side-footer">
-        <button class="import-btn" onclick={() => (importOpen = true)}>
-          <Icon name="plus" size={13} />
-          Import story
-        </button>
-      </div>
     {:else}
       <!-- Learnings sidebar — filter nav -->
-      <div class="side-head">
-        <span class="side-title">Learnings</span>
-      </div>
-
       <div class="learn-nav">
         {#each ([
           { value: 'all', label: 'All' },
@@ -653,33 +737,6 @@
          inline-end (wrapping on a narrow window); a single-sub group (Log)
          shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
-      {#if selectedStory && (selectedParent || selectedIsEpic)}
-        <!-- Breadcrumb `Epic › Folder › Title` for a child; an epic shows its
-             child count + the Add child ▾ menu (design §3.2). -->
-        <div class="crumb-row">
-          <nav class="crumbs" aria-label="Epic breadcrumb">
-            {#if selectedParent}
-              <button class="crumb" onclick={() => void product.select(selectedParent.id)} title="Open the epic">
-                <Icon name="folder" size={11} /> {selectedParent.title}
-              </button>
-              <span class="crumb-sep">›</span>
-              {#if selectedStory.folder}
-                <span class="crumb dim">{selectedStory.folder}</span>
-                <span class="crumb-sep">›</span>
-              {/if}
-              <span class="crumb cur">{selectedStory.title}</span>
-            {:else}
-              <span class="crumb cur"><Icon name="folder" size={11} /> {selectedStory.title}</span>
-              <span class="crumb dim">epic · {product.childrenOf(selectedStory.id).length} children</span>
-            {/if}
-          </nav>
-          {#if selectedIsEpic}
-            <button class="p-btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic">
-              <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
-            </button>
-          {/if}
-        </div>
-      {/if}
       <div class="product-header-row2">
         <div class="tab-strip" role="tablist" aria-label="Story tabs">
           {#each visibleGroups as g (g.id)}
@@ -718,24 +775,44 @@
     <div class="product-body">
       {#if product.view === 'learnings'}
         <LearningsView filter={learningsFilter} />
+      {:else if noStories}
+        <EmptyState
+          variant="page"
+          icon="file"
+          title="Analyse a story"
+          body="Import a Jira / Confluence issue, then ask questions, draft a plan and test cases, and publish back. Or start a blank draft from New."
+          actionLabel="Import story"
+          actionIcon="plus"
+          onaction={() => (importOpen = true)}
+        />
       {:else if !product.selectedId}
-        <div class="empty-wrap">
-          <EmptyState
-            icon="file"
-            title="Analyse a story"
-            body="Ask questions, draft a plan and test cases, then publish back — on an existing Jira/Confluence issue or a blank draft."
-          />
-          <div class="empty-actions">
-            <button class="p-btn primary" onclick={createDraft} disabled={draftCreating}>
-              <Icon name="plus" size={13} />
-              {draftCreating ? 'Creating…' : 'Start a draft'}
-            </button>
-            <button class="p-btn" onclick={() => (importOpen = true)}>
-              <Icon name="plus" size={13} />
-              Import story
-            </button>
-          </div>
-        </div>
+        <!-- No story open (a phone, or the list is still loading): a summary
+             of the collection with every recent story one click away. -->
+        <section class="pp-summary" aria-label="Stories summary">
+          <h2 class="pp-summary-title">
+            {product.stories.length} {product.stories.length === 1 ? 'story' : 'stories'}
+          </h2>
+          {#if stageCounts.length}
+            <div class="pp-summary-stages">
+              {#each stageCounts as [st, n] (st)}
+                <StatusBadge status={storyStage(st)} label="{n} {storyStage(st).label.toLowerCase()}" />
+              {/each}
+            </div>
+          {/if}
+          <div class="section-title">Recently updated</div>
+          <ul class="pp-recent">
+            {#each recentStories as r (r.id)}
+              <li>
+                <button class="pp-recent-row" onclick={() => selectStory(r)}>
+                  <Icon name={r.tree_kind === 'doc' ? 'note' : r.tree_kind === 'epic' ? 'folder' : sourceIcon(r.source_kind)} size={13} />
+                  <span class="pp-recent-title">{r.title}</span>
+                  <StatusBadge status={storyStage(r.stage)} variant="text" />
+                  <RelTime iso={r.updated_at} class="pp-recent-time" />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </section>
       {:else if product.tab === 'overview'}
         <OverviewTab />
       {:else if product.tab === 'chat'}
@@ -766,16 +843,30 @@
     </div>
   </div>
 </div>
+</div>
 
 {#if importOpen}
   <ImportDialog onclose={() => (importOpen = false)} />
 {/if}
 
 <style>
-  .product-page {
+  .product-shell {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .product-page {
+    flex: 1;
     display: flex;
     min-height: 0;
+  }
+  /* Nothing to list → no empty list pane beside the empty state (the phone
+     accordion keeps its two sections). */
+  @media (min-width: 641px) {
+    .product-page.no-stories .product-side {
+      display: none;
+    }
   }
 
   /* ── Sidebar ─────────────────────────────────────────────────── */
@@ -806,33 +897,13 @@
   .side-resizer:hover {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
-  .side-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px 4px;
-    flex-shrink: 0;
-  }
-  .side-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
+  /* Tree-role / draft markers are metadata, not selection: neutral. */
   .draft-badge {
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .side-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--surface-2);
     color: var(--text-dim);
   }
   .story-list {
@@ -849,14 +920,6 @@
     color: var(--text-dim);
     padding: 8px 4px;
     line-height: 1.5;
-  }
-  .link {
-    border: none;
-    background: none;
-    color: var(--accent);
-    cursor: pointer;
-    font-size: 11.5px;
-    padding: 0;
   }
   /* Wrapper handles hover background + shows delete btn */
   .story-row-wrap {
@@ -886,8 +949,9 @@
     cursor: pointer;
     text-align: start;
   }
-  .story-row.active {
-    color: var(--accent);
+  /* Selection is the row tint (set on the wrap); text stays --text. */
+  .story-row.active .story-title {
+    font-weight: 600;
   }
   /* Delete button — hidden until row is hovered or active */
   .delete-btn {
@@ -910,8 +974,8 @@
     color: var(--text-dim);
   }
   .delete-btn:hover {
-    background: color-mix(in srgb, #ef4444 15%, transparent) !important;
-    color: #ef4444 !important;
+    background: color-mix(in srgb, var(--danger) 15%, transparent) !important;
+    color: var(--danger) !important;
   }
   /* ── Epic tree rows ─────────────────────────────────────────── */
   .row-menu-btn {
@@ -934,7 +998,7 @@
   }
   .row-menu-btn:hover {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tree-toggle {
     display: grid;
@@ -972,7 +1036,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.03em;
     cursor: pointer;
@@ -993,66 +1057,14 @@
     opacity: 0.8;
   }
   .epic-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
-  }
-  .draft-badge.doc {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    background: var(--surface-2);
     color: var(--text-dim);
-  }
-  /* ── Breadcrumb row (child / epic header) ────────────────────── */
-  .crumb-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 14px 0;
-    flex-shrink: 0;
-  }
-  .crumbs {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-    min-width: 0;
-    font-size: 12px;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .crumb {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: none;
-    background: none;
-    color: var(--accent);
-    font-size: 12px;
-    padding: 0;
-    cursor: pointer;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 40%;
-  }
-  .crumb.dim {
-    color: var(--text-dim);
-    cursor: default;
-  }
-  .crumb.cur {
-    color: var(--text);
-    cursor: default;
-    font-weight: 600;
-  }
-  .crumb-sep {
-    color: var(--text-dim);
-  }
-  .add-child-btn {
-    flex-shrink: 0;
   }
   .story-icon {
     flex-shrink: 0;
@@ -1060,7 +1072,7 @@
     margin-top: 2px;
   }
   .story-row-wrap.active .story-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .story-info {
     flex: 1;
@@ -1070,7 +1082,7 @@
     gap: 3px;
   }
   .story-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     line-height: 1.3;
     display: -webkit-box;
@@ -1085,36 +1097,7 @@
     gap: 6px;
   }
   .story-key {
-    font-size: 10.5px;
-    color: var(--text-dim);
-  }
-  /* Stage badges */
-  .stage-badge {
-    font-size: 9.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 1px 6px;
-    border-radius: 999px;
-  }
-  .stage-draft {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .stage-review {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
-  }
-  .stage-approved {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .stage-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .stage-other {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   /* ── Tag filter row ─────────────────────────────────────────── */
@@ -1133,19 +1116,19 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms, color 100ms, border-color 100ms;
     white-space: nowrap;
   }
   .tag-filter-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tag-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -1156,38 +1139,15 @@
     gap: 3px;
     margin-top: 1px;
   }
+  /* Tags are metadata, not selection: neutral chips. */
   .story-tag-chip {
-    font-size: 9px;
-    padding: 1px 5px;
+    font-size: var(--fs-xs);
+    padding: 0 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-    opacity: 0.85;
+    background: var(--surface-2);
+    color: var(--text-dim);
   }
 
-  .side-footer {
-    padding: 8px;
-    border-top: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .import-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 10px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    transition: border-color 120ms, color 120ms;
-  }
-  .import-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
 
   /* ── Main area ───────────────────────────────────────────────── */
   .product-main {
@@ -1246,9 +1206,11 @@
   .st:hover {
     color: var(--text);
   }
+  /* Selection is the surface lift (components.md §3), not the accent. */
   .tab-strip .st.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1270,8 +1232,8 @@
   .sub-tab-strip .st {
     height: 24px;
     padding: 0 9px;
-    font-size: 11px;
-    color: color-mix(in srgb, var(--text-dim) 85%, transparent);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     border: 1px solid transparent;
   }
   .sub-tab-strip .st:hover {
@@ -1279,9 +1241,10 @@
     border-color: var(--border);
   }
   .sub-tab-strip .st.active {
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--border);
+    font-weight: 600;
   }
   .product-body {
     flex: 1;
@@ -1290,18 +1253,6 @@
     padding: 16px;
     display: flex;
     flex-direction: column;
-  }
-  .empty-wrap {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-  }
-  .empty-actions {
-    display: flex;
-    gap: 8px;
   }
   .mono {
     font-family: var(--font-mono, monospace);
@@ -1336,45 +1287,78 @@
   }
   .learn-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
+  }
+
+  /* ── Collection summary (no story open) ──────────────────────────── */
+  .pp-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 720px;
+    width: 100%;
+  }
+  .pp-summary-title {
+    margin: 0;
+    font-size: var(--fs-l);
+    font-weight: 600;
+  }
+  .pp-summary-stages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .pp-recent {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
+  .pp-recent li + li {
+    border-top: 1px solid var(--border);
+  }
+  .pp-recent-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 32px;
+    padding: 4px 10px;
+    border: none;
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-m);
+    text-align: start;
+    cursor: pointer;
+  }
+  .pp-recent-row:hover {
+    background: var(--hover);
+  }
+  .pp-recent-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pp-recent-row :global(.pp-recent-time) {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .pp-key {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
 
   /* ── Mobile accordion headers — hidden on desktop/tablet ──────────────── */
   .m-acc-head {
     display: none;
-  }
-
-  /* Stories|Learnings toggle — the ONE copy, a compact segmented control
-     living above the story list at every breakpoint. */
-  .m-view-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    margin: 8px 8px 2px;
-    padding: 2px;
-    border-radius: var(--radius-m, 8px);
-    background: color-mix(in srgb, var(--text-dim) 7%, transparent);
-    flex-shrink: 0;
-  }
-  .m-view-toggle .vt {
-    height: 24px;
-    padding: 0 10px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .m-view-toggle .vt:hover {
-    color: var(--text);
-  }
-  .m-view-toggle .vt.active {
-    background: var(--surface);
-    color: var(--accent);
   }
 
   @media (max-width: 640px) {
@@ -1387,12 +1371,9 @@
     }
 
     /* Slightly bigger touch target for the segmented view toggle. */
-    .m-view-toggle {
-      margin: 6px 8px 4px;
-    }
-    .m-view-toggle .vt {
-      height: 32px;
-      font-size: 13px;
+    .m-view-toggle > button {
+      height: 30px;
+      font-size: var(--fs-m);
       padding: 0 12px;
     }
 
@@ -1472,15 +1453,7 @@
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
-    .side-title {
-      font-size: 12px;
-    }
-    .p-btn {
-      font-size: 13px;
-      padding: 6px 11px;
-    }
-    .list-empty,
-    .link {
+    .list-empty {
       font-size: 14px;
     }
     .story-title {
@@ -1490,16 +1463,9 @@
     .story-meta {
       font-size: 12.5px;
     }
-    .stage-badge {
-      font-size: 11px;
-    }
     .tag-filter-btn,
     .story-tag-chip {
       font-size: 12px;
-    }
-    .import-btn {
-      font-size: 14px;
-      padding: 9px 12px;
     }
     .st {
       height: 38px;
@@ -1515,10 +1481,6 @@
     .learn-filter-btn {
       font-size: 14.5px;
       padding: 10px 12px;
-    }
-    .empty-actions .p-btn {
-      font-size: 14px;
-      padding: 9px 16px;
     }
     .product-body {
       padding: 14px;

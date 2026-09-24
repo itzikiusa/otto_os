@@ -54,7 +54,7 @@
 <style>
   .pill {
     display: inline-block;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -73,15 +73,15 @@
     color: var(--status-working, #28c840);
   }
   .pill.warn {
-    background: color-mix(in srgb, #e0a000 22%, transparent);
-    color: #e0a000;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .pill.bad {
     background: color-mix(in srgb, var(--status-exited, #ff5f57) 22%, transparent);
     color: var(--status-exited, #ff5f57);
   }
   .pill.info {
-    background: color-mix(in srgb, #3b82f6 20%, transparent);
-    color: #3b82f6;
+    background: var(--info-soft);
+    color: var(--info);
   }
 </style>

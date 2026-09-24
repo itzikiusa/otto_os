@@ -38,6 +38,9 @@
 
   let session = $state<Session | null>(null);
   let loadError = $state<string | null>(null);
+  /** Human cause for the error card (content.md §4) — the raw text is only the
+   *  dim detail line under it. */
+  let loadCause = $state('');
   let liveStatus = $state<SessionStatus | null>(null);
 
   // ── OTP form state ─────────────────────────────────────────────────────────
@@ -64,9 +67,22 @@
         viewState = 'otp';
       } else {
         loadError = e instanceof Error ? e.message : String(e);
+        loadCause = shareErrorCause(e);
         viewState = 'error';
       }
     }
+  }
+
+  /** What a guest can act on: a dead link vs. a host that's unreachable/busy. */
+  function shareErrorCause(e: unknown): string {
+    if (e instanceof ApiError) {
+      if (e.status === 401 || e.status === 403 || e.status === 404 || e.status === 410) {
+        return 'This share link was revoked or has expired. Ask the person who shared it for a new link.';
+      }
+      return 'The host had a problem opening this session. Try again in a moment.';
+    }
+    if (e instanceof TypeError) return 'Can’t reach the host. Check your connection, then try again.';
+    return 'Something went wrong opening this session. Try again in a moment.';
   }
 
   /** Recognise the OTP-pending 403 from the daemon's feature guard. */
@@ -235,9 +251,10 @@
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card">
       <div class="error-icon">&#9888;</div>
-      <h2>Could not load session</h2>
-      <p>{loadError}</p>
-      <p class="hint">The share link may have been revoked or may have expired.</p>
+      <h2>Couldn't load this session</h2>
+      <p>{loadCause}</p>
+      {#if loadError}<p class="hint">{loadError}</p>{/if}
+      <button class="btn ec-retry" onclick={() => void loadSession()}>Retry</button>
     </div>
   </div>
 
@@ -328,7 +345,7 @@
   }
   .otp-icon {
     font-size: 36px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .error-card h2 {
     font-size: 17px;
@@ -345,6 +362,10 @@
   .error-card .hint {
     font-size: 11px;
     opacity: 0.7;
+    overflow-wrap: anywhere;
+  }
+  .ec-retry {
+    align-self: center;
   }
   .dim {
     color: var(--text-dim);
@@ -376,7 +397,7 @@
   }
   .otp-error {
     font-size: 12px;
-    color: #ef4444;
+    color: var(--danger);
     margin: 0;
   }
   .otp-extend-row {
@@ -390,7 +411,7 @@
   .otp-link {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
     padding: 2px 4px;
@@ -447,7 +468,7 @@
 
   /* Status pill — mirrors the palette chip colours. */
   .status-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 2px 8px;
@@ -464,7 +485,7 @@
 
   /* Read-only badge — subtle, top-right inside the header. */
   .ro-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--text-dim);

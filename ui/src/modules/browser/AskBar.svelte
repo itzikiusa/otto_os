@@ -155,7 +155,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-size: 0.72rem;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     cursor: pointer;
     white-space: nowrap;
@@ -180,7 +180,7 @@
     border-radius: var(--radius-s);
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: var(--accent-fg, #fff);
+    color: var(--accent-contrast);
     cursor: pointer;
   }
   .send:disabled {

@@ -376,7 +376,7 @@
     color: var(--text-dim);
   }
   .imp-prog-text.ok {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .imp-prog-text.err {
     color: var(--status-exited);

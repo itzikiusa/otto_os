@@ -24,12 +24,15 @@ test.beforeEach(async ({page}) => {
 
 test('trash restores a file and edit history compares recoverable versions', async ({page}) => {
   await openPage(page, 'vault');
-  await page.getByTitle('Trash and restore', {exact: true}).click();
+  // History + trash live in the header's ⋯ (the toolbar keeps ≤5 controls).
+  await page.getByRole('button', {name: 'More vault actions', exact: true}).click();
+  await page.getByRole('menuitem', {name: 'Trash and restore'}).click();
   const trash = page.getByRole('region', {name: 'Vault trash'});
   await expect(trash.getByText('recovery.md', {exact: true})).toBeVisible();
   await trash.getByRole('button', {name: 'Restore', exact: true}).click();
   await expect(trash.getByText('No deleted items.')).toBeVisible();
-  await page.getByTitle('Edit history', {exact: true}).click();
+  await page.getByRole('button', {name: 'More vault actions', exact: true}).click();
+  await page.getByRole('menuitem', {name: 'Edit history'}).click();
   await page.getByLabel('History file path', {exact: true}).fill('recovery.md');
   await page.getByRole('navigation', {name: 'Saved revisions'}).getByRole('button').first().click();
   await expect(page.getByRole('button', {name: 'Restore before version'})).toBeEnabled();

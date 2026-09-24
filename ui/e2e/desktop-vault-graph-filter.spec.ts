@@ -119,11 +119,10 @@ test('focus survives a reload (sticky per vault)', async ({ page }) => {
 
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  // The view toggle may already have restored to graph mode — clicking again
-  // would turn it back off.
-  if (!(await page.locator('.center canvas').isVisible())) {
-    await page.locator('button[title="Graph view"]').click();
-  }
+  // The center mode is part of the persisted view ("come back to my page"), so
+  // the graph re-opens by itself. Never click the toggle here: the restore lands
+  // after the tree loads, and a click racing it turned the graph back OFF.
+  await expect(page.locator('button[title="Graph view"]')).toHaveClass(/\bactive\b/, { timeout: 15_000 });
   await expect(page.locator('.center canvas')).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => nodeCount(page), { timeout: 20_000 }).toBe(filtered);
 });

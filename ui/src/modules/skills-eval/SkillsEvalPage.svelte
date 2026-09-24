@@ -6,6 +6,7 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEval, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import { runStatus } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
@@ -172,15 +173,15 @@
 </script>
 
 <div class="se-wrap">
-  <div class="se-tabs" data-testid="eval-tabs">
-    <button class="se-tab" class:active={tab === 'runs'} onclick={() => (tab = 'runs')} data-testid="tab-runs">
-      <Icon name="zap" size={13} /> Runs
+  <div class="se-tabs" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs">
+    <button class="se-tab" role="tab" aria-selected={tab === 'runs'} class:active={tab === 'runs'} onclick={() => (tab = 'runs')} data-testid="tab-runs">
+      <Icon name="zap" size={12} /> Runs
     </button>
-    <button class="se-tab" class:active={tab === 'golden'} onclick={() => (tab = 'golden')} data-testid="tab-golden">
-      <Icon name="target" size={13} /> Golden Tasks
+    <button class="se-tab" role="tab" aria-selected={tab === 'golden'} class:active={tab === 'golden'} onclick={() => (tab = 'golden')} data-testid="tab-golden">
+      <Icon name="target" size={12} /> Golden tasks
     </button>
-    <button class="se-tab" class:active={tab === 'matrix'} onclick={() => (tab = 'matrix')} data-testid="tab-matrix">
-      <Icon name="grid" size={13} /> Matrix
+    <button class="se-tab" role="tab" aria-selected={tab === 'matrix'} class:active={tab === 'matrix'} onclick={() => (tab = 'matrix')} data-testid="tab-matrix">
+      <Icon name="grid" size={12} /> Matrix
     </button>
   </div>
   <div class="se-content">
@@ -232,7 +233,7 @@
                 </span>
               {/if}
               <span class="se-item-name">{r.source_skill}</span>
-              <span class="se-dot st-{r.status}"></span>
+              <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
             </div>
             <div class="se-item-sub">
               <span class="se-task">{r.task}</span>
@@ -301,10 +302,11 @@
     height: 100%;
     min-height: 0;
   }
+  /* Same underline tabs as a skill's detail pane (Overview · Edit · …). */
   .se-tabs {
     display: flex;
-    gap: 4px;
-    padding: 8px 12px 0;
+    gap: 2px;
+    padding: 0 16px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -312,24 +314,23 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border: 1px solid transparent;
-    border-bottom: none;
+    height: 34px;
+    margin-bottom: -1px;
+    border: none;
+    border-bottom: 2px solid transparent;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 7px 12px;
-    border-radius: 8px 8px 0 0;
+    font-size: var(--fs-m);
+    font-weight: 500;
+    padding: 0 12px;
     cursor: pointer;
   }
   .se-tab:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .se-tab.active {
-    color: #0b0b0b;
-    background: #7ee787;
-    border-color: #7ee787;
+    color: var(--text);
+    border-bottom-color: var(--accent);
   }
   .se-content {
     flex: 1;
@@ -347,6 +348,7 @@
     width: 280px;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
+    background: var(--surface);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -374,9 +376,9 @@
     padding: 12px 12px 8px;
   }
   .se-side-title {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-dim);
     flex: 1;
@@ -392,7 +394,7 @@
   .se-muted {
     padding: 16px 8px;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .se-item {
     text-align: start;
@@ -418,15 +420,15 @@
     gap: 6px;
   }
   .se-item-name {
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: var(--fs-m);
+    font-weight: 500;
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .se-task {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -437,7 +439,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .se-score {
@@ -449,16 +451,25 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
+  /* Run dot, same tones as runStatus: running = info (pulsing), done =
+     success, error = danger, cancelled = neutral. */
+  .se-dot {
+    background: var(--status-idle);
+  }
   .se-dot.st-running {
-    background: var(--status-working, var(--accent));
+    background: var(--info);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .se-dot.st-done {
-    background: var(--status-idle, #6bbf6b);
+    background: var(--success);
   }
-  .se-dot.st-error,
-  .se-dot.st-cancelled {
-    background: var(--status-exited, #d66);
+  .se-dot.st-error {
+    background: var(--status-exited);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .se-dot.st-running {
+      animation: none;
+    }
   }
   @keyframes pulse {
     50% {
@@ -492,7 +503,7 @@
   }
   .btn.active {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .grow {
     flex: 1;

@@ -84,11 +84,22 @@ async function askAi(page: Page, prompt: string): Promise<void> {
 test('the hero offers both modes; Excalidraw board mounts on create', async ({ page }) => {
   test.setTimeout(90_000);
   await openCanvas(page);
-  await expect(page.getByRole('button', { name: /Excalidraw board/i })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(page.getByRole('button', { name: /Mermaid diagram/i })).toBeVisible();
-  await page.getByRole('button', { name: /Excalidraw board/i }).click();
+  // Scenes are global and other (parallel) tests seed them. The hero is the
+  // empty state ONLY: with scenes, the page opens on one and "New scene" owns
+  // the format choice instead.
+  const heroCard = page.locator('.hero').getByRole('button', { name: /Excalidraw board/i });
+  const newScene = page.getByTestId('canvas-new-scene');
+  await expect(heroCard.or(newScene).first()).toBeVisible({ timeout: 30_000 });
+  if (await heroCard.isVisible()) {
+    await expect(page.locator('.hero').getByRole('button', { name: /Mermaid diagram/i })).toBeVisible();
+    await heroCard.click();
+  } else {
+    await expect(page.locator('.hero')).toHaveCount(0);
+    await newScene.click();
+    const menu = page.locator('.ctx-menu');
+    await expect(menu.getByRole('menuitem', { name: /Mermaid diagram/i })).toBeVisible();
+    await menu.getByRole('menuitem', { name: /Excalidraw board/i }).click();
+  }
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
 });
 
@@ -265,9 +276,10 @@ test('New scene: the menu offers D2 too — creates an empty D2 canvas', async (
 
   await openCanvas(page);
   await page.getByRole('button', { name: /New scene/i }).click();
-  const menu = page.locator('.scene-list .new-menu');
-  await expect(menu.getByRole('button', { name: /D2 diagram/i })).toBeVisible({ timeout: 10_000 });
-  await menu.getByRole('button', { name: /D2 diagram/i }).click();
+  // The header's New scene menu is the shared (viewport-clamped) ctxMenu.
+  const menu = page.locator('.ctx-menu');
+  await expect(menu.getByRole('menuitem', { name: /D2 diagram/i })).toBeVisible({ timeout: 10_000 });
+  await menu.getByRole('menuitem', { name: /D2 diagram/i }).click();
 
   // A fresh, empty D2 board mounts — its own empty-state hint (no source yet,
   // so the WASM renderer is never even invoked for a blank scene).
@@ -284,7 +296,7 @@ test('D2 mode: a seeded scene renders SVG', async ({ page }) => {
   await ctx.dispose();
 
   await openScene(page, 'D2 Seeded');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 });
 
 test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ page }) => {
@@ -294,7 +306,7 @@ test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ pag
   await ctx.dispose();
 
   await openScene(page, 'D2 CodeEdit');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 
   // Open the Code panel — the D2 source editor.
   await page.getByRole('button', { name: /^Code$/i }).click();
@@ -316,7 +328,7 @@ test('D2: the Code editor edits the SAME .d2 file + live-previews', async ({ pag
   expect(body).toContain('"format":"d2"');
   expect(body).toContain('User added');
   // The edit still renders — a live diagram, not a broken one.
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 });
 
 test('D2: Ask AI → the agent writes canvas.d2 (on disk) + renders the stub diagram', async ({
@@ -333,10 +345,10 @@ test('D2: Ask AI → the agent writes canvas.d2 (on disk) + renders the stub dia
   await askAi(page, 'order flow with a validation decision');
 
   await expect(page.getByText(/drawn on canvas/i).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
   // The E2E stub's canned D2 diagram (crates/otto-orchestrator/src/e2e_stub.rs)
   // draws start/valid/process/reject nodes — assert one lands in the rendered SVG.
-  await expect(page.locator('.content svg').first()).toContainText(/Process order/);
+  await expect(page.locator('.surface .content svg').first()).toContainText(/Process order/);
   await expect
     .poll(() => canvasFiles('canvas.d2').length, { timeout: 15_000 })
     .toBeGreaterThan(0);
@@ -351,7 +363,7 @@ test('D2: Sketch toggle → PUT carries sketch:true and persists on reload', asy
   await ctx.dispose();
 
   await openScene(page, 'D2 Sketch');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
 
   const saved = page.waitForResponse(
     (r) => r.request().method() === 'PUT' && /\/canvas\/scenes\//.test(r.url()),
@@ -376,7 +388,7 @@ test('D2: export buttons (PNG + SVG) render; Duplicate creates a "(copy)" scene'
   await ctx.dispose();
 
   await openScene(page, 'D2 Export');
-  await expect(page.locator('.content svg').first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
   await expect(page.getByRole('button', { name: 'Download SVG' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Download PNG' })).toBeVisible();
 
@@ -405,6 +417,26 @@ test('handles multiple scenes — list + switch', async ({ page }) => {
   await expect(page.locator('.board svg').first()).toBeVisible({ timeout: 25_000 });
   await page.locator('.scene-list .row', { hasText: 'Multi A' }).first().click();
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
+});
+
+test('deleting the OPEN scene opens another (no endless loading pane)', async ({ page }) => {
+  test.setTimeout(90_000);
+  const { ctx, base } = await apiCtx();
+  const title = `Doomed ${Date.now()}`;
+  await seedScene(ctx, base, title, 'mermaid', MERMAID.flowchart);
+  await seedScene(ctx, base, `Survivor ${Date.now()}`, 'mermaid', MERMAID.flowchart);
+  await ctx.dispose();
+
+  await openScene(page, title);
+  const row = page.locator('.scene-list .row.active', { hasText: title });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.hover();
+  await row.locator('button.del').click();
+  await page.locator('button.btn.danger', { hasText: 'Delete' }).click();
+  await expect(page.locator('.scene-list .row', { hasText: title })).toHaveCount(0, { timeout: 10_000 });
+  // The auto-pick re-opens a remaining scene instead of a skeleton forever.
+  await expect(page.locator('.editor-split')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.scene-list .row.active')).toHaveCount(1);
 });
 
 // ---------------------------------------------------------------------------
@@ -541,11 +573,11 @@ test('New scene: the format menu lets you pick Mermaid or Excalidraw', async ({ 
   await openCanvas(page);
   await page.getByRole('button', { name: /New scene/i }).click();
   // The menu (scoped, so it doesn't collide with the hero's mode cards).
-  const menu = page.locator('.scene-list .new-menu');
-  await expect(menu.getByRole('button', { name: /Excalidraw board/i })).toBeVisible({
+  const menu = page.locator('.ctx-menu');
+  await expect(menu.getByRole('menuitem', { name: /Excalidraw board/i })).toBeVisible({
     timeout: 10_000,
   });
-  await menu.getByRole('button', { name: /Mermaid diagram/i }).click();
+  await menu.getByRole('menuitem', { name: /Mermaid diagram/i }).click();
   // A fresh Mermaid board mounts.
   await expect(page.locator('.board').first()).toBeVisible({ timeout: 30_000 });
 });

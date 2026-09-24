@@ -84,9 +84,12 @@ async fn stream_ws(
             .into_response();
     }
     let actor = user.id.clone();
+    // A managed agent credential may open streams but can never confirm a
+    // new-host secret send (see `prepare_stream`).
+    let confirm_allowed = auth.managed_session_id.is_none();
     ws.max_message_size(1024 * 1024)
         .max_frame_size(1024 * 1024)
-        .on_upgrade(move |socket| serve(socket, ctx, q.workspace_id, actor))
+        .on_upgrade(move |socket| serve(socket, ctx, q.workspace_id, actor, confirm_allowed))
 }
 
 async fn send_json(socket: &mut WebSocket, v: Value) -> Result<(), axum::Error> {
@@ -104,7 +107,7 @@ fn is_close_action(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
+async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id, confirm_allowed: bool) {
     // First UI frame carries the open spec.
     let first = loop {
         match socket.recv().await {
@@ -134,8 +137,10 @@ async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
         return;
     }
     match spec.kind.as_str() {
-        "sse" => serve_sse(socket, spec, &ctx, &wid, &actor).await,
-        "websocket" | "ws" => serve_websocket(socket, spec, &ctx, &wid, &actor).await,
+        "sse" => serve_sse(socket, spec, &ctx, &wid, &actor, confirm_allowed).await,
+        "websocket" | "ws" => {
+            serve_websocket(socket, spec, &ctx, &wid, &actor, confirm_allowed).await
+        }
         other => {
             let _ = send_json(
                 &mut socket,
@@ -148,9 +153,18 @@ async fn serve(mut socket: WebSocket, ctx: ServerCtx, wid: Id, actor: Id) {
 
 // ── SSE upstream ────────────────────────────────────────────────────────────
 
-async fn serve_sse(mut socket: WebSocket, spec: OpenSpec, ctx: &ServerCtx, wid: &Id, actor: &Id) {
+async fn serve_sse(
+    mut socket: WebSocket,
+    spec: OpenSpec,
+    ctx: &ServerCtx,
+    wid: &Id,
+    actor: &Id,
+    confirm_allowed: bool,
+) {
     let connecting = async {
-        let req = super::api_client::prepare_stream(ctx, wid, &spec.request, actor).await?;
+        let req =
+            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
+                .await?;
         req.header("Accept", "text/event-stream")
             .send()
             .await
@@ -258,6 +272,7 @@ async fn serve_websocket(
     ctx: &ServerCtx,
     wid: &Id,
     actor: &Id,
+    confirm_allowed: bool,
 ) {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
@@ -273,7 +288,8 @@ async fn serve_websocket(
         {
             return Err("WebSocket supports GET headers, query and auth; TLS verification must be enabled, SSH and request bodies are unavailable".to_string());
         }
-        let prepared = super::api_client::prepare_stream(ctx, wid, &spec.request, actor)
+        let prepared =
+            super::api_client::prepare_stream(ctx, wid, &spec.request, actor, confirm_allowed)
             .await?
             .build()
             .map_err(|e| e.without_url().to_string())?;
@@ -293,7 +309,34 @@ async fn serve_websocket(
             max_frame_size: Some(1024 * 1024),
             ..Default::default()
         };
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
+        // SSRF guard, DNS-rebinding safe: resolve + vet the host ONCE and dial
+        // exactly the vetted address (tungstenite's own connect would resolve
+        // the name again, after `prepare_stream`'s pre-flight check). The
+        // workspace allow-local opt-in skips the vetting, as for HTTP.
+        let target = prepared.url().clone();
+        let port = target.port_or_known_default().unwrap_or(80);
+        let addrs: Vec<std::net::SocketAddr> =
+            if super::api_client::workspace_allows_local(ctx, wid).await {
+                let host = target
+                    .host_str()
+                    .unwrap_or("")
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string();
+                let resolved: Vec<std::net::SocketAddr> =
+                    tokio::net::lookup_host((host.as_str(), port))
+                        .await
+                        .map_err(|e| format!("dns resolution failed for {host}: {e}"))?
+                        .collect();
+                resolved
+            } else {
+                otto_netguard::resolve_checked(target.as_str()).await?.1
+            };
+        let socket = tokio::net::TcpStream::connect(addrs.as_slice())
+            .await
+            .map_err(|_| "WebSocket connection failed; check the server URL".to_string())?;
+        let _ = socket.set_nodelay(true);
+        tokio_tungstenite::client_async_tls_with_config(request, socket, Some(config), None).await.map_err(|_| "WebSocket handshake failed; check the server URL, TLS certificate and authorization".to_string())
     };
     let result = tokio::select! {
         result = tokio::time::timeout(Duration::from_millis(spec.request.timeout_ms.unwrap_or(60_000)), connecting) =>

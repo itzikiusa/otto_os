@@ -5,6 +5,8 @@
   // assignee, details, linked issues, comments, history, and attachments.
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { storyStage, STORY_STAGES } from '../../lib/status';
   import { product } from '../../lib/stores/product.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -14,6 +16,8 @@
   import type { ProductStoryVersion, IssueFull, JiraTransition, JiraUser, EditableField, FieldOption, DevStatus } from './types';
   import type { ProductAttachment } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
   import type { ProductTranscript } from './types';
@@ -51,14 +55,12 @@
   let transitionsLoading = $state(false);
   let transitionsLoaded = $state(false);
   let transitionWorking = $state(false);
-  let statusOpen = $state(false);
 
   // Assignee
   let assignables = $state<JiraUser[]>([]);
   let assignablesLoading = $state(false);
   let assignablesLoaded = $state(false);
   let assigneeWorking = $state(false);
-  let assigneeOpen = $state(false);
 
   // ── Development info (linked branches / commits / PRs via Jira dev-status) ──
   // Lazily fetched once the issue opens or the section is expanded.
@@ -215,8 +217,6 @@
     transitionsLoaded = false;
     assignables = [];
     assignablesLoaded = false;
-    statusOpen = false;
-    assigneeOpen = false;
     // Reset development info.
     devStatus = null;
     devLoaded = false;
@@ -298,9 +298,7 @@
   // Load swarms lazily so the discovery team picker is populated.
   $effect(() => {
     const wsId = ws.currentId;
-    if (wsId && swarm.swarms.length === 0) {
-      void swarm.loadSwarms(wsId);
-    }
+    if (wsId) void swarm.ensureSwarms(wsId);
   });
 
   /** Launch a discovery swarm run and switch to the Discovery tab. */
@@ -445,14 +443,72 @@
     }
   }
 
-  async function applyTransition(tid: string): Promise<void> {
+  // ── Live Jira writes ────────────────────────────────────────────────────
+  // Status, assignee and comments change the real issue that the whole team
+  // sees (and may fire Jira notifications / automations), so each one goes
+  // through `confirmOutward` naming the issue key and the new value. The
+  // pickers are global `ctxMenu` menus (viewport-clamped, height-capped, Esc
+  // to close) anchored under their button.
+
+  /** Destination line for a Jira write: "Jira GS-123 “Summary”". */
+  function jiraWhere(): string {
+    const key = story?.source_key ?? '';
+    const summary = issueFull?.summary ?? story?.title ?? '';
+    return summary ? `Jira ${key} “${summary}”` : `Jira ${key}`;
+  }
+
+  /** Open a ctxMenu directly under `el` (works for mouse and keyboard). */
+  function menuUnder(el: HTMLElement, items: MenuItem[], opts?: MenuOptions): void {
+    const r = el.getBoundingClientRect();
+    ctxMenu.show(new MouseEvent('click', { clientX: r.left, clientY: r.bottom + 4 }), items, opts);
+  }
+
+  async function openTransitionMenu(e: MouseEvent): Promise<void> {
+    const el = e.currentTarget as HTMLElement;
+    await loadTransitions();
+    if (!transitionsLoaded) return;
+    const items: MenuItem[] =
+      transitions.length === 0
+        ? [{ label: 'No transitions available', disabled: true }]
+        : transitions.map((t) => ({
+            label: t.name === t.to_status ? `${t.name}…` : `${t.name} → ${t.to_status}…`,
+            action: () => void applyTransition(t),
+          }));
+    menuUnder(el, items);
+  }
+
+  async function openAssigneeMenu(e: MouseEvent): Promise<void> {
+    const el = e.currentTarget as HTMLElement;
+    await loadAssignables();
+    if (!assignablesLoaded) return;
+    const items: MenuItem[] = [
+      { label: 'Unassign…', icon: 'x', pinned: true, disabled: !issueFull?.assignee, action: () => void assignUser(null) },
+      ...(assignables.length === 0
+        ? [{ label: 'No users found', disabled: true } as MenuItem]
+        : assignables.map((u) => ({ label: `${u.display_name}…`, action: () => void assignUser(u) }) as MenuItem)),
+    ];
+    menuUnder(el, items, { filter: assignables.length > 8, filterPlaceholder: 'Find a person…', maxVisible: 12 });
+  }
+
+  async function applyTransition(t: JiraTransition): Promise<void> {
     if (!story) return;
+    const key = story.source_key;
+    const ok = await confirmOutward({
+      verb: `Move to ${t.to_status}`,
+      title: `Move ${key} to ${t.to_status}?`,
+      where: jiraWhere(),
+      what: `Status: ${issueFull?.status ?? 'current'} → ${t.to_status}${t.name !== t.to_status ? ` (transition “${t.name}”)` : ''}`,
+      who: `Everyone with access to ${key} sees the change; watchers are notified and Jira workflow rules may run.`,
+    });
+    if (!ok) return;
     transitionWorking = true;
-    statusOpen = false;
     try {
       await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
-        transition_id: tid,
+        transition_id: t.id,
       });
+      // Available transitions depend on the status — refetch on next open, or
+      // the menu (and its confirm's "from → to") offers the old status's moves.
+      transitionsLoaded = false;
       toasts.info('Status updated');
       await loadIssueFull();
       await product.refresh();
@@ -478,13 +534,23 @@
     }
   }
 
-  async function assignUser(accountId: string): Promise<void> {
+  /** Assign `u`, or unassign when null — confirmed first (see Live Jira writes). */
+  async function assignUser(u: JiraUser | null): Promise<void> {
     if (!story) return;
+    const key = story.source_key;
+    const cur = issueFull?.assignee?.display_name ?? 'Unassigned';
+    const ok = await confirmOutward({
+      verb: u ? `Assign to ${u.display_name}` : 'Unassign',
+      title: u ? `Assign ${key}?` : `Unassign ${key}?`,
+      where: jiraWhere(),
+      what: `Assignee: ${cur} → ${u ? u.display_name : 'Unassigned'}`,
+      who: `Jira notifies the old and new assignee and ${key}'s watchers.`,
+    });
+    if (!ok) return;
     assigneeWorking = true;
-    assigneeOpen = false;
     try {
       await api.put(`/issue/${story.account_id}/${story.source_key}/assignee`, {
-        account_id: accountId,
+        account_id: u ? u.account_id : '',
       });
       toasts.info('Assignee updated');
       await loadIssueFull();
@@ -908,6 +974,15 @@
 
   async function addComment(): Promise<void> {
     if (!story || !newCommentBody.trim()) return;
+    const key = story.source_key;
+    const ok = await confirmOutward({
+      verb: 'Post comment',
+      title: `Post comment to ${key}?`,
+      where: jiraWhere(),
+      what: newCommentBody.trim(),
+      who: `Everyone with access to ${key} in Jira; watchers are notified.`,
+    });
+    if (!ok) return;
     postingComment = true;
     try {
       await api.post(`/issue/${story.account_id}/${story.source_key}/comment`, {
@@ -923,19 +998,21 @@
     }
   }
 
-  function stageColor(stage: string): string {
-    switch (stage) {
-      case 'draft': return 'stage-draft';
-      case 'review': return 'stage-review';
-      case 'approved': return 'stage-approved';
-      case 'done': return 'stage-done';
-      default: return 'stage-other';
-    }
-  }
-
   // Lifecycle gate: the operator advances the story through the stages. Approval
-  // is the gate before "Send to Swarm" (PlanTab warns when not approved).
-  const STAGES = ['draft', 'review', 'approved', 'done'];
+  // is the gate before "Send to Swarm" (PlanTab warns when not approved). The
+  // stage reads through the shared `storyStage` mapping (lib/status.ts); the
+  // picker is a ctxMenu of checkable rows. An agent-written stage (analyzed,
+  // planned…) stays listed while it is current.
+  function openStageMenu(e: MouseEvent): void {
+    if (!story) return;
+    const cur = story.stage;
+    const keys: string[] = [...STORY_STAGES];
+    if (!keys.includes(cur)) keys.unshift(cur);
+    ctxMenu.showAt(
+      e.currentTarget as HTMLElement,
+      keys.map((k) => ({ label: storyStage(k).label, checked: k === cur, action: () => void setStage(k) })),
+    );
+  }
   async function setStage(stage: string): Promise<void> {
     if (!story || stage === story.stage) return;
     try {
@@ -1036,10 +1113,10 @@
       {/if}
     {/if}
     <div class="field-editor-actions">
-      <button class="field-save-btn" onclick={() => saveField(ef)} disabled={fieldSaving}>
+      <button class="btn small primary" onclick={() => saveField(ef)} disabled={fieldSaving}>
         {fieldSaving ? 'Saving…' : 'Save'}
       </button>
-      <button class="field-cancel-btn" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
+      <button class="btn small" onclick={cancelEdit} disabled={fieldSaving}>Cancel</button>
     </div>
   </div>
 {/snippet}
@@ -1053,14 +1130,16 @@
     <!-- ── Story header (full width) ────────────────────────────── -->
     <div class="story-header">
       <div class="story-meta-row">
-        <select
-          class="stage-badge stage-select {stageColor(story.stage)}"
-          value={story.stage}
-          onchange={(e) => setStage((e.currentTarget as HTMLSelectElement).value)}
+        <button
+          class="ov-stage-btn"
+          onclick={openStageMenu}
+          aria-haspopup="menu"
+          aria-label="Lifecycle stage: {storyStage(story.stage).label}. Change stage"
           title="Lifecycle stage — advance to Approved before sending to a swarm"
         >
-          {#each STAGES as st (st)}<option value={st}>{st}</option>{/each}
-        </select>
+          <StatusBadge status={storyStage(story.stage)} title="" />
+          <Icon name="chevronDown" size={10} />
+        </button>
         {#if story.issue_type}
           <span class="chip">{story.issue_type}</span>
         {/if}
@@ -1085,10 +1164,10 @@
               else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
             }}
           />
-          <button class="field-save-btn" onclick={saveTitle} disabled={titleSaving}>
+          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving}>
             {titleSaving ? 'Saving…' : 'Save'}
           </button>
-          <button class="field-cancel-btn" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
+          <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
         </div>
       {:else}
         <div class="title-row">
@@ -1146,9 +1225,9 @@
     <div class="toolbar">
       <!-- Version picker -->
       <div class="version-sel">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label class="ver-label">Version</label>
+        <label class="ver-label" for="ov-version-select">Version</label>
         <select
+          id="ov-version-select"
           class="ver-select"
           onchange={onVersionChange}
           onfocus={loadVersions}
@@ -1170,8 +1249,8 @@
 
       <!-- Watch toggle -->
       <button
-        class="toolbar-btn"
-        class:active={story.watch_enabled}
+        class="btn small"
+        aria-pressed={story.watch_enabled}
         onclick={toggleWatch}
         disabled={watchWorking}
         title={story.watch_enabled ? 'Watching — click to disable' : 'Click to watch this story'}
@@ -1183,7 +1262,7 @@
 
       <!-- Refresh -->
       <button
-        class="toolbar-btn"
+        class="btn small"
         onclick={refresh}
         disabled={refreshing}
         title="Pull latest content from source"
@@ -1205,13 +1284,13 @@
         </select>
       {/if}
       <button
-        class="toolbar-btn"
+        class="btn small"
         onclick={runDiscovery}
         disabled={runningDiscovery}
         title="Launch a discovery swarm run — agents analyse the story and report findings"
         aria-label="Run Discovery"
       >
-        {runningDiscovery ? 'Starting…' : '⚡ Run Discovery'}
+        <Icon name="zap" size={12} /> {runningDiscovery ? 'Starting…' : 'Run Discovery'}
       </button>
     </div>
 
@@ -1252,7 +1331,7 @@
 
             <div class="draft-save-row">
               <button
-                class="toolbar-btn save-btn"
+                class="btn"
                 onclick={saveDraft}
                 disabled={draftSaving}
               >
@@ -1262,17 +1341,11 @@
 
             <!-- ── Publish bar ─────────────────────────────────────── -->
             <div class="publish-bar">
-              <button
-                class="publish-btn"
-                onclick={() => (publishDialogMode = 'story')}
-              >
-                Publish as Jira Story
+              <button class="btn" onclick={() => (publishDialogMode = 'rfc')}>
+                Publish as Confluence RFC…
               </button>
-              <button
-                class="publish-btn secondary"
-                onclick={() => (publishDialogMode = 'rfc')}
-              >
-                Publish as Confluence RFC
+              <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
+                Publish as Jira Story…
               </button>
             </div>
           </div>
@@ -1334,7 +1407,7 @@
                 spellcheck="false"
               ></textarea>
               <button
-                class="toolbar-btn"
+                class="btn small"
                 onclick={doAddTranscript}
                 disabled={addingTranscript || !newTranscriptBody.trim()}
               >
@@ -1389,10 +1462,10 @@
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
                 ></textarea>
                 <div class="desc-editor-actions">
-                  <button class="field-save-btn" onclick={saveDesc} disabled={descSaving}>
+                  <button class="btn small primary" onclick={saveDesc} disabled={descSaving}>
                     {descSaving ? 'Saving…' : 'Save'}
                   </button>
-                  <button class="field-cancel-btn" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
+                  <button class="btn small" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
                 </div>
               </div>
             {:else if renderedBody}
@@ -1449,11 +1522,11 @@
                     ></textarea>
                     <div class="add-comment-row">
                       <button
-                        class="toolbar-btn comment-submit-btn"
+                        class="btn small primary"
                         onclick={addComment}
                         disabled={postingComment || !newCommentBody.trim()}
                       >
-                        {postingComment ? 'Posting…' : 'Comment'}
+                        {postingComment ? 'Posting…' : `Post comment to ${story.source_key}…`}
                       </button>
                     </div>
                   </div>
@@ -1604,42 +1677,16 @@
                   <span class="jira-section-label">Status</span>
                   <div class="status-control">
                     <span class="status-badge">{issueFull.status}</span>
-                    <div class="transition-wrap">
-                      <button
-                        class="change-btn"
-                        onclick={async () => {
-                          if (!statusOpen) {
-                            await loadTransitions();
-                            statusOpen = true;
-                          } else {
-                            statusOpen = false;
-                          }
-                        }}
-                        disabled={transitionWorking}
-                        title="Change status"
-                      >
-                        {transitionWorking ? 'Working…' : 'Transition ▾'}
-                      </button>
-                      {#if statusOpen}
-                        <div class="dropdown-menu">
-                          {#if transitionsLoading}
-                            <div class="dropdown-loading">Loading…</div>
-                          {:else if transitions.length === 0}
-                            <div class="dropdown-empty">No transitions available</div>
-                          {:else}
-                            {#each transitions as t (t.id)}
-                              <button
-                                class="dropdown-item"
-                                onclick={() => applyTransition(t.id)}
-                              >
-                                {t.name}
-                                <span class="dropdown-item-sub">→ {t.to_status}</span>
-                              </button>
-                            {/each}
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
+                    <button
+                      class="change-btn"
+                      onclick={openTransitionMenu}
+                      disabled={transitionWorking || transitionsLoading}
+                      title="Change the status of {story.source_key} in Jira"
+                      aria-haspopup="menu"
+                      data-testid="ov-transition-btn"
+                    >
+                      {transitionWorking ? 'Working…' : transitionsLoading ? 'Loading…' : 'Transition ▾'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1661,44 +1708,16 @@
                     {:else}
                       <span class="unassigned">Unassigned</span>
                     {/if}
-                    <div class="transition-wrap">
-                      <button
-                        class="change-btn"
-                        onclick={async () => {
-                          if (!assigneeOpen) {
-                            await loadAssignables();
-                            assigneeOpen = true;
-                          } else {
-                            assigneeOpen = false;
-                          }
-                        }}
-                        disabled={assigneeWorking}
-                        title="Change assignee"
-                      >
-                        {assigneeWorking ? 'Working…' : 'Change ▾'}
-                      </button>
-                      {#if assigneeOpen}
-                        <div class="dropdown-menu">
-                          {#if assignablesLoading}
-                            <div class="dropdown-loading">Loading…</div>
-                          {:else if assignables.length === 0}
-                            <div class="dropdown-empty">No users found</div>
-                          {:else}
-                            <button class="dropdown-item" onclick={() => assignUser('')}>
-                              <span class="unassigned-opt">Unassign</span>
-                            </button>
-                            {#each assignables as u (u.account_id)}
-                              <button class="dropdown-item" onclick={() => assignUser(u.account_id)}>
-                                {#if u.avatar_url}
-                                  <img class="avatar-sm" src={u.avatar_url} alt={u.display_name} />
-                                {/if}
-                                {u.display_name}
-                              </button>
-                            {/each}
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
+                    <button
+                      class="change-btn"
+                      onclick={openAssigneeMenu}
+                      disabled={assigneeWorking || assignablesLoading}
+                      title="Change the assignee of {story.source_key} in Jira"
+                      aria-haspopup="menu"
+                      data-testid="ov-assignee-btn"
+                    >
+                      {assigneeWorking ? 'Working…' : assignablesLoading ? 'Loading…' : 'Change ▾'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1980,11 +1999,8 @@
 
       {#if isConfluence}
         <div class="publish-bar">
-          <button
-            class="publish-btn"
-            onclick={() => (publishDialogMode = 'story')}
-          >
-            Convert to Jira Story
+          <button class="btn primary" onclick={() => (publishDialogMode = 'story')}>
+            Convert to Jira Story…
           </button>
         </div>
       {/if}
@@ -2088,10 +2104,10 @@
     gap: 3px;
     padding: 2px 8px 2px 9px;
     border-radius: 999px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .tag-remove {
@@ -2101,7 +2117,7 @@
     cursor: pointer;
     font-size: 12px;
     line-height: 1;
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0.6;
     transition: opacity 100ms;
   }
@@ -2116,7 +2132,7 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 9px;
     width: 72px;
     outline: none;
@@ -2139,7 +2155,7 @@
     border-top: 1px solid var(--border);
   }
   .section-label-sm {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -2186,7 +2202,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
@@ -2195,6 +2211,22 @@
     padding-bottom: 16px;
     border-bottom: 1px solid var(--border);
     margin-bottom: 12px;
+  }
+  /* Stage picker: the shared StatusBadge + a caret, opening a ctxMenu. */
+  .ov-stage-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 4px 0 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ov-stage-btn:hover :global(.sbadge) {
+    border-color: var(--border-strong);
   }
   .story-meta-row {
     display: flex;
@@ -2268,43 +2300,8 @@
     outline: none;
     border-color: var(--accent);
   }
-  .stage-badge {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 2px 8px;
-    border-radius: 999px;
-    flex-shrink: 0;
-  }
-  .stage-select {
-    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-    cursor: pointer;
-    appearance: none;
-    padding-inline: 8px 8px;
-  }
-  .stage-draft {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .stage-review {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
-  }
-  .stage-approved {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .stage-done {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .stage-other {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
   .chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -2315,7 +2312,7 @@
     align-items: center;
     gap: 4px;
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .source-link:hover {
@@ -2345,6 +2342,8 @@
   /* Toolbar */
   .toolbar {
     display: flex;
+    /* Wraps on a phone instead of scrolling the whole Overview sideways. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding-bottom: 12px;
@@ -2365,7 +2364,7 @@
     white-space: nowrap;
   }
   .ver-select {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -2379,34 +2378,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 110ms, border-color 110ms, color 110ms;
-    white-space: nowrap;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .toolbar-btn.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
   .disc-swarm-pick {
@@ -2473,7 +2444,7 @@
     border-radius: 3px;
   }
   .md-body :global(pre) {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 12px 14px;
@@ -2493,7 +2464,7 @@
     font-style: italic;
   }
   .md-body :global(a) {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .md-body :global(a:hover) {
@@ -2522,7 +2493,7 @@
     padding: 8px 0;
   }
   .jira-error {
-    color: #b91c1c;
+    color: var(--danger);
     font-style: normal;
   }
 
@@ -2531,7 +2502,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 14px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
   }
   .collapsible-card {
     padding: 0;
@@ -2593,7 +2564,7 @@
     padding: 2px 10px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Assignee control ──────────────────────────────────────── */
@@ -2632,7 +2603,7 @@
     height: 24px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 700;
     display: flex;
@@ -2649,15 +2620,8 @@
     color: var(--text-dim);
     font-style: italic;
   }
-  .unassigned-opt {
-    color: var(--text-dim);
-    font-style: italic;
-  }
 
-  /* ── Dropdown ──────────────────────────────────────────────── */
-  .transition-wrap {
-    position: relative;
-  }
+  /* ── Status / assignee pickers (menus are the global ctxMenu) ── */
   .change-btn {
     height: 24px;
     padding: 0 9px;
@@ -2678,50 +2642,11 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .dropdown-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    inset-inline-end: 0;
-    z-index: 50;
-    background: var(--surface-raised, var(--surface));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    min-width: 180px;
-    max-height: 240px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-  }
-  .dropdown-loading,
-  .dropdown-empty {
+  .dropdown-loading {
     font-size: 12px;
     color: var(--text-dim);
     padding: 10px 12px;
     font-style: italic;
-  }
-  .dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 7px 12px;
-    background: none;
-    border: none;
-    text-align: start;
-    font-size: 12.5px;
-    color: var(--text);
-    cursor: pointer;
-    transition: background 80ms;
-    white-space: nowrap;
-  }
-  .dropdown-item:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
-  }
-  .dropdown-item-sub {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-inline-start: 4px;
   }
 
   /* ── Details grid ──────────────────────────────────────────── */
@@ -2753,7 +2678,7 @@
     gap: 4px;
   }
   .label-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -2834,7 +2759,7 @@
     cursor: pointer;
   }
   .field-raw-note {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -2842,38 +2767,6 @@
     display: flex;
     gap: 6px;
   }
-  .field-save-btn,
-  .field-cancel-btn {
-    height: 24px;
-    padding: 0 10px;
-    border-radius: var(--radius-s);
-    font-size: 11.5px;
-    cursor: pointer;
-    transition: background 100ms, color 100ms;
-  }
-  .field-save-btn {
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--bg, #fff);
-  }
-  .field-save-btn:hover:not(:disabled) {
-    filter: brightness(1.08);
-  }
-  .field-cancel-btn {
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-  }
-  .field-cancel-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .field-save-btn:disabled,
-  .field-cancel-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   /* ── Description edit (Jira-style inline editor) ───────────────── */
   .desc-header {
     display: flex;
@@ -2952,7 +2845,7 @@
     flex-wrap: wrap;
   }
   .link-rel {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
@@ -2961,11 +2854,11 @@
   }
   .link-key {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-family: var(--font-mono, monospace);
   }
   .chip-sm {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
@@ -2978,11 +2871,11 @@
     min-width: 120px;
   }
   .status-sm {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
@@ -3002,7 +2895,7 @@
     gap: 0;
   }
   .dev-group-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
@@ -3031,7 +2924,7 @@
   }
   .dev-branch-name,
   .dev-commit-id {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .dev-pr-status {
     text-transform: uppercase;
@@ -3093,17 +2986,6 @@
     display: flex;
     justify-content: flex-end;
   }
-  .comment-submit-btn {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .comment-submit-btn:hover:not(:disabled) {
-    opacity: 0.88;
-    background: var(--accent);
-    color: #fff;
-  }
-
   /* ── Estimate chip ─────────────────────────────────────────── */
   .estimate-chip {
     display: inline-block;
@@ -3111,9 +2993,9 @@
     font-weight: 600;
     padding: 2px 9px;
     border-radius: 999px;
-    background: color-mix(in srgb, #f59e0b 15%, transparent);
-    color: #b45309;
-    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
+    color: var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
   }
 
   /* ── History ────────────────────────────────────────────────── */
@@ -3227,7 +3109,7 @@
   }
   .att-load-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .att-load-btn:disabled {
@@ -3236,7 +3118,7 @@
   }
   .att-dl-link {
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .att-dl-link:hover {
@@ -3272,7 +3154,7 @@
     letter-spacing: 0.04em;
   }
   .input {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -3286,7 +3168,7 @@
     border-color: var(--accent);
   }
   .textarea {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
@@ -3306,14 +3188,8 @@
     display: flex;
     justify-content: flex-end;
   }
-  .save-btn {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .save-btn:hover:not(:disabled) {
-    opacity: 0.88;
-  }
+  /* Save is a quiet, neutral action; the publish bar below owns the one
+     filled button in this pane. */
 
   /* ── Transcripts (right column in draft mode) ──────────────── */
   .transcripts-section {
@@ -3395,8 +3271,8 @@
     border-radius: var(--radius-s);
   }
   .del-transcript-btn:hover {
-    color: #ef4444;
-    background: color-mix(in srgb, #ef4444 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .transcript-body {
     padding: 8px 12px 10px;
@@ -3427,29 +3303,5 @@
     padding-top: 14px;
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
-  }
-  .publish-btn {
-    height: 32px;
-    padding: 0 16px;
-    border-radius: var(--radius-s);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    transition: opacity 110ms;
-    white-space: nowrap;
-  }
-  .publish-btn:hover {
-    opacity: 0.88;
-  }
-  .publish-btn.secondary {
-    background: transparent;
-    color: var(--accent);
-  }
-  .publish-btn.secondary:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    opacity: 1;
   }
 </style>

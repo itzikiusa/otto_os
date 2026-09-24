@@ -73,7 +73,7 @@ connection library unusable for every non-root account.)
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` — `sign?: bool` — `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. |
 | 44 | POST /api/v1/repos/{id}/push | ws editor | `{branch?}` (optional; pushes THAT branch explicitly — Create-PR passes its source branch; absent = current branch) | RepoStatusResp |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | `{auto_stash?, mode?}` (both optional) | `{status: RepoStatusResp, note?}` — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `status.changes[].kind="conflicted"` (clients route to the conflict resolver). `auto_stash:true` wraps a dirty tree in stash → pull → pop (`note` says what happened to the stash: restored, kept because the pull conflicted, or pop conflicted); a refused auto-stash pull pops the stash back. Local refusals (dirty tree, no upstream, divergent branches, unfinished merge) are 409 with git's own line; only genuine network/auth failures are 502. Optional `mode?: "merge"\|"rebase"\|"ff_only"` (absent → the repo's `pull.rebase`/`pull.ff` config); `ff_only` on a diverged branch → 409 "Not possible to fast-forward". |
-| 46 | POST /api/v1/repos/{id}/checkout | ws editor | `CheckoutReq {branch, create?, auto_stash?}` | RepoStatusResp — **never pulls**. `auto_stash:true` = stash -u → checkout → pop; a conflicting pop returns 200 with `kind:"conflicted"` rows and no `op_in_progress`; a failed checkout restores the stash and returns git's 409; a failed (non-conflict) pop is 409 with the stash kept. Local git spawns are bounded (30 s local / 180 s remote, `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`); a timeout is 502 "git <verb> timed out after Ns". |
+| 46 | POST /api/v1/repos/{id}/checkout | ws editor | `CheckoutReq {branch, create?, auto_stash?}` | RepoStatusResp — **never pulls**. `branch` is always a REVISION (`checkout <b> --`): a name that is only a path (a directory `docs/`, no branch `docs`) is 409 "invalid reference" instead of silently restoring that path. `auto_stash:true` = stash -u → checkout → pop (the pop addresses the auto-stash by SHA); a conflicting pop returns 200 with `kind:"conflicted"` rows and no `op_in_progress`; a failed checkout restores the stash and returns git's 409; a failed (non-conflict) pop is 409 with the stash kept. Local git spawns are bounded (30 s local / 180 s remote, `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`); a timeout is 502 "git <verb> timed out after Ns". |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all&page=1&per_page=50 | ws viewer | — | `PrListResp {items: PrSummary[], has_more, page, per_page}` (`per_page` 1..=100) |
 | 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq (optional `draft` — GitHub native flag, GitLab `Draft:` title prefix, Bitbucket Cloud draft field; optional `reviewers: string[]` of provider-native handles) | PrSummary (`reviewer_warnings: string[]` — reviewer requests/lookups that failed after the PR opened; never fails the creation) |
@@ -159,7 +159,20 @@ Notes:
   Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
   agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
   the workspace cwd, the resolved git dir (so worktree commits still work), the
-  agent CLIs' own config/cache dirs and temp — while leaving reads global. `network`
+  agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
+  own data dir is write-denied even under those roots (only its agent work areas —
+  `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
+  `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize`,
+  the Design Hall working copies `design/<artifact>/work/**` (never
+  `design/blobs/`) — and the session's own `provider-accounts/<id>` home stay
+  writable), and its
+  `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
+  that make unsandboxed programs run agent-chosen code are write-denied
+  (`~/.claude/settings.json`, `~/.claude/settings.local.json`,
+  `~/.codex/config.toml`, `~/.config/git/`), `/bin/launchctl` cannot be executed,
+  and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
+  network configuration + DNS, TLS trust and the keychain) — LaunchServices and
+  AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
   defaults to `full` (agents still reach their model API; loopback always allowed);
   `loopback`/`none` are stricter postures suited to non-model shells. `providers`
   defaults to `["claude","codex","agy","shell"]`. Connection sessions are never
@@ -205,10 +218,10 @@ workspace from the row.
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |
 | 78 | DELETE /api/v1/swarm/tasks/{tid} | ws editor | — | 204 |
-| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun |
-| 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status= | ws viewer | — | `SwarmRun[]` |
+| 79 | POST /api/v1/swarm/tasks/{tid}/run | ws editor | — | SwarmRun. 409 when the task is not todo/blocked/backlog, the swarm is aborted or budget-paused/over budget, or the picked agent is busy (another turn / verification) |
+| 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status= | ws viewer | — | `SwarmRun[]` — this workspace's runs only (newest first, ≤ 500) |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
-| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun |
+| 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
 | 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph |
 | 84 | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/start\|pause\|abort\|resume | ws editor | — | Swarm |
 | 85 | GET /api/v1/swarm/swarms/{sid}/board?project_id=&task_id= | ws viewer | — | `SwarmMessage[]` |
@@ -308,7 +321,7 @@ Notes:
 - `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
   `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
 - `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at, session_id?, legacy_session_id?, session_exists?}`. `session_id` is durable ownership for credentials minted by the session manager. `legacy_session_id` only recognizes a historical `otto-mcp:<ULID>` label and is a cleanup candidate, not ownership proof. `session_exists` is null for personal tokens and otherwise indicates whether that session still exists for the same owner. Listing never revokes credentials; legacy cleanup uses the existing owner-scoped DELETE per selected token.
-- Managed session credentials are replaced on session spawn and revoked on deletion or failed spawn, using persisted session ownership across daemon restarts. They cannot authenticate after their originating session is deleted. Archiving keeps the existing lifecycle behavior; it does not revoke the token. Label-only legacy tokens are never automatically revoked merely because their name matches.
+- Managed session credentials are replaced on every spawn/resume and live only as long as that process: they are revoked when it is retired (exit, kill, idle suspend, archive, daemon shutdown), on deletion and on a failed spawn, using persisted session ownership across daemon restarts. At daemon boot every still-valid managed credential is marked revoked + expired (no agent process survives a restart; a resume mints a fresh one). They cannot authenticate after their originating session is deleted. Label-only legacy `otto-mcp:<ULID>` tokens (no `session_id`) created before 2026-09-23, when Otto stopped minting them, are also marked revoked + expired at boot unless the label names another user's existing session; a token created later is never revoked for its name. Boot sweeps keep the rows (they list with a past `expires_at`).
 - `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.
 - `DELETE` only revokes the caller's own API tokens (scoped by `user_id` + `kind='api'`).
@@ -717,9 +730,9 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
-| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
+| POST /connections/{id}/db/cancel | ws editor | `{query_id}` | `DbCancelOutcome` `{status}` — what the Stop achieved: `cancelled` (engine-native cancel issued and the run ended), `aborted` (Otto dropped the run: a mongosh child is killed and no further statement is sent, but a statement already on the server may still complete), `not_running` (unknown / already finished), `not_stoppable` (no native cancel and nothing Otto can drop — it runs until it ends or times out) |
 | POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
-| POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard; rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
+| POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard — statements are split with the engine's own lexer and, on MySQL/PostgreSQL, a `SELECT`/`WITH`/`EXPLAIN`/`DESCRIBE` must parse as a provable read (unparseable = refused). What passes then **executes in the engine's native read-only mode** (MySQL `START TRANSACTION READ ONLY`, PostgreSQL `BEGIN READ ONLY`, ClickHouse HTTP `readonly=2`); MongoDB and Redis run only allow-listed read operations. Rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
 | POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
@@ -796,7 +809,11 @@ database stops the heavy query and frees the cached connection, not just the
 client's HTTP wait. Cancel is gated at the same role as `query` (`ws editor`;
 global connections: `Database:Edit`). Cancelling an unknown / already-finished
 query, a query on a different connection, or one on an engine without a native
-per-query cancel (Redis) is a no-op success (`204`).
+per-query cancel is still a success (`200`): the body's `status` says whether
+anything actually stopped. Without a native handle (mongosh scripts, Mongo writes,
+Redis) the detached run is aborted instead (`aborted`); after a native cancel the
+run gets a short grace period to end on its own (`cancelled`) before it is
+aborted. A mongosh script also honours the request's `timeout_ms`.
 
 **MongoDB cancel.** A tracked run (`query_id` set) stamps its `find` /
 `aggregate` / `countDocuments` with `comment: "otto:<query_id>"` (a cursor's
@@ -806,9 +823,23 @@ and issues `{killOp: 1, op: <opid>}` per match, on a separate pooled connection.
 Best-effort by design: `allUsers: true` needs the `inprog` privilege — when
 refused, the lookup is retried scoped to the current user (no privilege needed;
 it is the user that ran the query); a refused `killOp` (`killop` privilege) is
-logged and answered `204`. Writes, index ops and `mongosh` scripts are never
-tagged (no server-side cancel path). A cancel that lands before the server has
-registered the op matches nothing and is a `204`.
+logged and the run is aborted (`aborted`). Writes, index ops and `mongosh`
+scripts have no server-side cancel path: their detached run is aborted (a script's
+`mongosh` child is killed). A cancel that lands before the server has registered
+the op matches nothing; the run is then aborted after the grace period.
+
+**Scope (`node`).** `RunQueryReq.node` (and the `node` of `mcp-query`, `query-plan`,
+export) names the scope a statement runs in: a plain database / schema name, a
+`db:<name>[/…]` tree path, or a Redis `kdb:<n>[/…]` keyspace. Only a value that
+starts with `db:` or `kdb:` is read as a path; anything else is a plain name taken
+verbatim (a database literally called `db` or `kdb`, or with `:` / `/` in its name,
+keeps its scope). Redis also accepts a bare index or the `db<n>` label and
+**refuses** any other scope rather than running on the default database. MongoDB:
+the scope wins over a profile `db`/`database` param (that is only the default).
+MySQL / PostgreSQL set the scope explicitly on every run (no scope → the profile's
+default database / the session's default `search_path`), never inheriting a
+pooled session's leftover. BIGINT values beyond ±(2^53 − 1) are sent as their
+exact decimal **string** (MySQL / PostgreSQL), since a JSON number would be rounded.
 
 `RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
 It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):
@@ -971,18 +1002,22 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /git/accounts/test | member | TestGitAccountReq `{provider, username, token, api_base_url?}` | GitAccountTestResp — same probe for a **not-yet-saved** form; the draft token travels in the body exactly once and is never persisted or logged |
 | GET /repos/{id}/collaborators?q= | ws viewer (+ bound-account owner, S4) | — | `Collaborator[] {name, display_name}` — provider-backed reviewer typeahead (GitHub repo collaborators / GitLab project members / Bitbucket workspace members), unfiltered list cached in-memory per repo for 30 s, `q` filters case-insensitively |
 | GET /git/repos | Git:View | — | `Repo[]` (each carries `forge`: `github`\|`bitbucket`\|`gitlab`\|`unrecognized`\|null — computed live from `remote_url`; `unrecognized` = remote exists but isn't a supported forge, null = no remote) across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
+| GET /git/repos/directory | Git:View | `?workspace_id=&prefer_workspace_id=` (both optional) | `RepoDirectory {repos: RepoDirectoryEntry[], current_workspace_id, workspace_count}` — the **agent-facing** repo directory behind `otto_list_repos` / `otto.list_repos`: every repo in every workspace the caller can read (Git:View + workspace Viewer, root → all), each `RepoDirectoryEntry {id, name, path, remote_url, provider, workspace_id, workspace_name, current}`, the caller's current workspace first (from `prefer_workspace_id`, else the calling session of an Otto-minted session token). `workspace_id` narrows to one workspace. A repo is registered in exactly one workspace (`repos.path` is unique), so an agent in workspace A finds a repo registered in B here |
+| GET /git/repos/resolve | Git:View | `?ref=&workspace_id=` (both optional) | `RepoResolveResp {repo: RepoDirectoryEntry, matched_by: "id"\|"path"\|"remote"\|"name"\|"session_cwd"}` — resolve a friendly repo reference across the same readable set: exact id → local path (the registered repo containing it; a path outside every registered root matches its checkout's `origin` remote) → remote (`owner/repo`, `host/owner/repo` or any URL spelling — https/ssh/scp-like normalized) → name (case-insensitive). Several hits in one tier are settled by the caller's current workspace when exactly one lives there, else **409** listing the candidates (id, name, workspace). No `ref` → the calling session's cwd (same path → remote fallback), else **404**. **404** lists near misses or what IS available (≤ 25 rows) so an agent can retry with an id in one step. A `kind='mcp'` token pinned to a workspace only ever sees that workspace (the governed path runs this in-process) |
+| GET /refs/directory | authenticated (exempt: every lookup is a self-call of the kind's own list route AS the caller, re-authorized there); share-link and MCP-restricted tokens → 403 | `?kind=&workspace_id=&prefer_workspace_id=` (`kind` required) | `AgentRefDirectory {kind, items, current_workspace_id, workspace_count}` — the **agent-facing** directory behind the cross-workspace `list_*` MCP tools: every object of `kind` in every workspace the caller can read (a `kind='mcp'` token's workspace pin applied), deduplicated by id, the caller's current workspace first (from `prefer_workspace_id`, else the calling session). Per-workspace kinds add `workspace_id`, `workspace_name`, `current`; heavy rows are projected (no workflow `graph`, no connection `params`/`secret_ref`). A workspace whose list call fails (no grant/role there) is skipped; if every call fails the first error is returned. `kind` ∈ `workspace`, `workflow`, `connection`, `broker_cluster`, `swarm`, `scheduled_task`, `goal_loop`, `agent_room`, `canvas_scene`, `product_story`, `vault`, `api_request`, `api_automation`, `api_environment`, `issue_account`, `aws_account`, `k8s_cluster`, `design_artifact`; unknown → 400 listing them |
+| GET /refs/resolve | as `/refs/directory` | `?kind=&ref=&arg=&workspace_id=&prefer_workspace_id=` | `AgentRefResolveResp {kind, id, label, workspace_id, workspace_name, matched_by, item}` — resolve one friendly reference over the same set: exact id first, then the kind's human fields in order, case-insensitive and exact (name; a story's Jira `source_key` then title; an issue account's label / email / base URL; a K8s cluster's name then context; a design artifact's / canvas scene's title). Several hits settled by the current workspace when exactly one lives there, else **409** listing the candidates (id, label, workspace). No match → **404** listing near misses or what IS available (≤ 25). No `ref` → the sole candidate for `issue_account` (`matched_by: "only_candidate"`), else 404 listing them. `arg` only names the argument in messages |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | PATCH /repos/{id} | ws editor (+ account owner, S4) | `UpdateRepoReq {git_account_id?}` | `Repo` — (re)bind the repo's hosting account; the field is authoritative (an id binds, `null` unbinds). Re-reads `origin` from disk first and persists any change to `remote_url`/`provider`, so a repo whose remote was added after registration becomes bindable. 400 when the account's provider differs from the remote's, or when the repo has no supported remote to bind against. Registration is the only other place an account is resolved, so this is how a repo registered BEFORE its account existed reaches a provider at all. Provider routes (PRs, collaborators, …) also self-heal: a repo with no recorded provider re-reads `origin` from disk before failing (the remote snapshot is taken once at registration, and a failed `git` spawn there is indistinguishable from "no remote"), and an unbound repo whose caller owns exactly ONE account for that provider is bound on first use — the same rule registration applies, and always the caller's own credential. With zero or several candidate accounts nothing is guessed; the call 400s asking for an explicit link. |
 | GET /repos/{id}/refs | ws viewer | — | `RefsResp` — branch/tag refs. Each `RefBranch` includes `ahead`/`behind` (unsigned commit counts against that local branch's configured upstream; zero for remote refs or missing/gone upstreams). Counts come from bulk `for-each-ref %(upstream:track,nobracket)`, without checkout or per-branch processes. Each `RefBranch` carries `merged_into_base` (tip already contained in the cleanup base branch → safe to delete; the base branch itself is never flagged); `base_branch` echoes the base merged-status was computed against (per-repo override, else detected default; `null` = no resolvable base). Merged sets come from two bulk `git branch --merged <base>` calls (local + remote), not a per-branch spawn. `RefBranch.sha` / `RefTag.sha` give the commit each ref points at, so a client can locate a ref whose commit isn't in the loaded page of history; annotated tags are dereferenced (`%(*objectname)`) so `RefTag.sha` is always a COMMIT. Tags are returned in full (newest-first), not truncated. |
 | GET /repos/{id}/cleanup-base | ws viewer | — | `CleanupBaseResp {base_branch, resolved}` — the per-repo cleanup base override (`base_branch`; `null` = follow the detected default) and what it currently resolves to (`resolved`). Drives the "safe to delete (merged)" indicators. |
 | PUT /repos/{id}/cleanup-base | ws editor | `SetCleanupBaseReq {base_branch?}` | `CleanupBaseResp` — set/clear (empty/null clears) the per-repo cleanup base override. Indicator-only: never deletes or moves any branch. |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
-| POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp |
-| POST /repos/{id}/stage-hunk | ws editor | `StageHunkReq {path, hunk_index, hunk_header, fingerprint, lines?, op:"stage"\|"unstage"\|"discard", confirm?}` | `StageHunkResp {status, diff, backup_stash?}` — the patch is rebuilt server-side from the server's own fresh `git diff` (byte-exact: CRLF and missing-trailing-newline round-trip); `fingerprint` must equal SHA-256 of the byte-exact rendered file diff (`FileDiff.fingerprint`), and `hunk_header` must equal the located hunk's `@@` line, or → 409 "the file changed since the diff was shown — refresh and retry" (nothing applied); 400 for renamed/binary ("stage the whole file"), `lines` out of range, or discard without `confirm:true`; discard records a backup stash `otto: backup before hunk discard`. 400 when a line selection would split a file's last line (no-newline marker) — stage the whole hunk. |
-| POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome). 409 when ANY operation (merge/rebase/cherry-pick/revert) is already in progress — resolve or abort it first. |
-| POST /repos/{id}/merge/preview | ws viewer | MergePreviewReq | MergePreview (dry-run via `git merge-tree`; no tree mutation) |
+| POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp — every path is a LITERAL file name (no pathspec magic: `app/[id]/page.tsx` never matches `app/d/page.tsx`; the same holds for stage/unstage, hunk ops, diff `?path=`, history `path` and conflict resolution). A renamed entry also restores its origin; a copied entry (reported as `added`) is removed without touching its source. 409 when none of the paths has a change any more (stale list) — never a silent "success". 400 for an empty or control-character path. |
+| POST /repos/{id}/stage-hunk | ws editor | `StageHunkReq {path, hunk_index, hunk_header, fingerprint, lines?, op:"stage"\|"unstage"\|"discard", confirm?}` | `StageHunkResp {status, diff, backup_stash?}` — the patch is rebuilt server-side from the server's own fresh `git diff` (byte-exact: CRLF and missing-trailing-newline round-trip); `fingerprint` must equal SHA-256 of the byte-exact rendered file diff (`FileDiff.fingerprint`), and `hunk_header` must equal the located hunk's `@@` line, or → 409 "the file changed since the diff was shown — refresh and retry" (nothing applied); 400 for renamed/binary ("stage the whole file"), `lines` out of range, or discard without `confirm:true`; discard records a backup stash `otto: backup before hunk discard`. The diff is carried as raw BYTES end to end (a non-UTF-8 line is staged/restored byte-exact; `FileDiff.fingerprint` hashes git's bytes) and a pending mode change (`old/new mode`) never rides along with a hunk. Parsed diffs are rendered with fixed flags (`--no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/`), so `diff.external`/`diff.noprefix`/textconv config can't change them. 400 when a line selection would split a file's last line (no-newline marker) — stage the whole hunk. |
+| POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome). The auto-stash is restored BY ITS SHA (never `stash@{0}`); on ANY failure after it was taken (e.g. `target` checked out in another worktree) the user is switched back to their original branch and the stash popped there — if that is impossible the error names the kept stash. 409 when ANY operation (merge/rebase/cherry-pick/revert) is already in progress — resolve or abort it first. |
+| POST /repos/{id}/merge/preview | ws viewer | MergePreviewReq | MergePreview (dry-run via `git merge-tree --name-only --no-messages -z`; no tree mutation; `conflicted_files` holds file names only) |
 | GET /repos/{id}/merge/status | ws viewer | — | `MergeConflictStatus` — in-progress RESOLVABLE state: `merging` is true for any op (merge/rebase/cherry-pick/revert, named in `op`) AND for conflicted files with no state file (`op` absent — a conflicting stash pop / squash); `conflicted_files` lists the unmerged paths. |
-| POST /repos/{id}/merge/abort | ws editor | — | RepoStatusResp — aborts with the op's own verb (`merge/rebase/cherry-pick/revert --abort`); a staged squash (SQUASH_MSG present) is discarded with `reset --hard`. With NOTHING in progress → 409 (never a fallback hard-reset: a stale Abort must not destroy uncommitted work). |
+| POST /repos/{id}/merge/abort | ws editor | — | RepoStatusResp — aborts with the op's own verb (`merge/rebase/cherry-pick/revert --abort`); a staged squash (SQUASH_MSG present) is discarded with `reset --merge` (unrelated uncommitted edits survive). With NOTHING in progress → 409 (never a fallback hard-reset: a stale Abort must not destroy uncommitted work). |
 | POST /repos/{id}/merge/commit | ws editor | MergeCommitReq | MergeResult — concludes the in-progress op: commits a merge/squash, `--continue`s a rebase/cherry-pick/revert. 409 while conflicts remain, and when there is nothing to conclude. |
 | POST /repos/{id}/rebase | ws editor | `{onto, auto_stash?}` | RepoStatusResp — replay the current branch onto `onto` (`rebase [--autostash] --end-of-options <onto>`). A CONFLICTING rebase is a normal 200: the status carries `op_in_progress:"rebase"` + the unmerged paths (continue via merge/commit, abort via merge/abort). 409 when another operation is already in progress, and for git's own local refusals. |
 | GET /repos/{id}/rebase-preview?onto= | ws viewer | — | `{commits, onto_sha}` — how many commits a rebase onto `onto` would replay (`rev-list --count <onto>..HEAD`) and the sha it would land on. Read-only; nothing is moved. |
@@ -992,7 +1027,7 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | GET /repos/{id}/commit-config | ws viewer | — | `{gpgsign, format, signing_key}` — the repo's signing configuration (`commit.gpgsign`, `gpg.format` limited to `openpgp\|ssh\|x509`, `user.signingkey`); unset keys are `null`. Drives the WIP composer's sign toggle. |
 | GET /repos/{id}/blame?path=&rev=HEAD | ws viewer | — | `BlameResp {path, rev, lines: BlameLine[]}` — `git blame --porcelain <rev> -- <path>` grouped into RUNS: one `BlameLine {sha, short_sha, author, at, orig_line, line_start, count, summary}` per consecutive run of lines from the same commit. `rev` is `guard_ref`'d, `path` rides after `--` (a leading `-` is a legal filename). |
 | GET /repos/{id}/conflict | ws viewer | — | conflict listing |
-| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp |
+| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp — `content` is written ONLY to a path that is conflicted right now (exact index match; else 409) and only inside the working tree: 400 for `.git` components (any case), `..`, absolute paths, a symlink as the final component, or a parent that resolves (symlinks followed) outside the tree or into the git dir. `GET /conflict` never reads through such a path (it reports `is_binary:true`; resolve by taking a side). |
 | POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp — a CONFLICTING pick is a normal 200: CHERRY_PICK_HEAD is left in place and the status carries `op_in_progress:"cherry_pick"` + the conflicted paths (finish via merge/commit, abort via merge/abort) |
 | POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp — a conflicting revert is a normal 200 (see cherry-pick; `op_in_progress:"revert"`) |
 | POST /repos/{id}/branch | ws editor | `{name, start_point?, checkout?}` | RepoStatusResp (create a branch, optionally from `start_point` and checking it out) |
@@ -1020,8 +1055,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /repos/{id}/local-review | ws editor | LocalReviewReq | Review (review the working diff) |
 | GET /repos/{id}/local-review | ws viewer | — | latest local Review |
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
-| POST /pr-review-comments/{cid}/approve | ws editor | — | post a draft review comment to the PR |
-| POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
+| POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
+| POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
@@ -1079,7 +1114,7 @@ viewer/editor.
 | POST /findings/{id}/jira | ws editor (Git) | `{project_key, issue_type?, account_id?}` | `Finding` (creates a Jira issue, stores `jira_key`/`jira_url`). **400 `{code:"invalid"}`** when no Jira account is configured. |
 | POST /findings/{id}/repo-rule | ws editor (Context) | `{title?, body?, glob?}` | `RepoRule` (generalizes the finding into a durable rule fed into the Context Engine; links `repo_rule_id`) |
 | POST /findings/{id}/fix | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns a fix agent; open\|accepted → accepted, then async → fixed on commit) |
-| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (verifies resolution; accepted\|fixed\|verified → verified on pass) |
+| POST /findings/{id}/verify | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?, note?}` (verifies resolution; accepted\|fixed\|verified → verified on pass). Evidence-based: passes only when the finding's `linked_test` (a Rust test name or `.rs` file; `file.rs::name` accepted) runs in the fix worktree and executes ≥1 passing test. No linked test, zero tests run, a non-Rust test, or a failure leave the status unchanged. `note` = the evidence ("N tests passed") or why it was not verified |
 | POST /findings/{id}/regression-test | ws editor (Git) | — | `FindingActionResp` `{finding, session_id?}` (spawns an agent to add a guard test; sets `linked_test`) |
 | GET /workspaces/{ws}/repo-rules | ws viewer (Context) | — | `RepoRule[]` (the workspace's repo rules) |
 | POST /repo-rules/{id}/toggle | ws editor (Context) | `{enabled}` | `RepoRule` (enable/disable; re-materializes the workspace's rules block) |
@@ -1164,7 +1199,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | POST /product/stories/{sid}/refresh | ws editor | — | re-pull the source story |
 | GET /product/stories/{sid}/versions | ws viewer | — | `Version[]` |
 | GET /product/versions/{vid} | ws viewer | — | Version |
-| POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source |
+| POST /product/versions/{vid}/publish | ws editor | — | publish a version back to the source. **409** (Confluence) when the page changed since Otto last synced it (refresh the story first), or when the page holds content the Markdown round-trip would delete (images, links, mentions, task lists, unsupported macros); **409** (Jira) under the description rule above |
 | GET /product/stories/{sid}/analyses | ws viewer | — | `Analysis[]` |
 | GET /product/stories/{sid}/linked-canvases | ws viewer | — | `CanvasSceneSummary[]` — Canvas scenes linked to this story (via `story_id`) |
 | GET /product/analyses/{aid} | ws viewer | — | Analysis (with per-agent state) |
@@ -1242,7 +1277,11 @@ export of a validated `scene3d` document (§ Blender bridge), never an upload.
 The upload allow-list gains the four design mimes; `sniff_ok` checks the `glTF`
 magic header and a `{`-after-whitespace JSON case; a `scene3d` payload is also
 schema-validated (`design_scene3d::validate`: known `type`s only, finite
-numbers, ≤ 2 000 objects, `attachment_id` a safe id component).
+numbers, ≤ 2 000 objects, `attachment_id` a safe id component; `version` 1 or
+2 — v2 adds material presets, `token:color.<name>` colours (v2 only), a
+`brand` / gltf `src` `otto://design` URI, `environment`, `cameras` ≤ 32,
+`states` ≤ 32 with overrides of known objects, `turntable`, box `radius`; see
+`docs/features/design-hall.md` §10.1).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -1338,7 +1377,7 @@ configured Jira/Confluence account.
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
 | POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |
-| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq (`body_md` **or** `body_html`; version resolved server-side) | `ConfluencePageResp` (updated) |
+| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq (`body_md` **or** `body_html`; optional `base_version` = the page `version` the edit was based on) | `ConfluencePageResp` (updated). **409** when `base_version` is given and the page has moved on since, or when Confluence reports a racing write — re-read and re-apply. Without `base_version` the write goes on top of the current version (last writer wins). |
 | GET /issue/confluence/pages/{page_id}/comments?account_id= | member | — | `PageComment[]` |
 | POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq (`body_md` **or** `body_html`) | `CommentRef` |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
@@ -1352,7 +1391,7 @@ configured Jira/Confluence account.
 | POST /issue/{account_id}/{key}/comment | member | AddCommentReq | add a comment |
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
 | PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
-| PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update) |
+| PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update). **409** when the current description holds content the Markdown round-trip can't carry (media/screenshots, mentions, smart links, status, dates, emoji, extensions) — the save would delete it, so it is refused. |
 | GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project |
 
 Fields body shape: `{ "fields": { <jiraFieldId>: <jiraShapedValue>, … } }` — values are sent
@@ -1382,6 +1421,15 @@ optional allowed caller ids (matched against the request's `user`).
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
 
+PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
+workspace) when the integration's inbound listener token — the Slack **app** token, or
+the Telegram bot token (the request's value, else the stored one) — is already used by
+another workspace's **enabled** integration of the same channel. One Slack app / Telegram
+bot can feed only one workspace: Slack delivers each event to just one Socket Mode
+connection, and two Telegram pollers fight over `getUpdates`. The refusal happens before
+any token is stored. (The daemon also skips a duplicate listener at runtime if such
+state already exists, logging a warning.)
+
 ### Inbound webhook trigger
 
 Public-by-key endpoint that turns an external HTTP `POST` into an agent session
@@ -1398,13 +1446,19 @@ the CRUD endpoints above first.
 | POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
 
 `SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
-start?: bool (default true) }`. An external trigger that starts a swarm fully
+goals?: [{ title, description?, metric?, comparator?, target_value?, block_value?,
+max_retries?, blocking? }], callback_url?: string, start?: bool (default true) }`.
+`repo_path` must name a repo **registered in the workspace** (its path, name or id;
+it is resolved to the registered path) — any other directory is refused with 400. A
+goal's `verify_cmd` is **not accepted** over the webhook (400): it is a shell command
+the verifying agent runs, so it may only be configured on the swarm's goals through the
+authenticated API/UI. An external trigger that starts a swarm fully
 automatically: it creates a project (goal = `goal`), runs the planner to seed tasks, sets
 the swarm active, and starts the coordinator (agents run in git **worktrees** for parallel
 isolation). `start=false` plans only. Auth reuses the **same per-workspace webhook key** as
 the channel webhook above (keychain `chan-bot-{ws}-webhook`), via `X-Otto-Webhook-Key` or
 `Authorization: Bearer <key>`. Errors: 401 (bad/missing key), 404 (swarm not in workspace),
-400 (empty `goal`).
+400 (empty `goal`, unregistered `repo_path`, or any `goals[].verify_cmd`).
 
 `WebhookInboundReq`: `{ text: string (required), conversation?: string, thread?: string,
 user?: string, callback_url?: string }`. The **conversation key** drives session reuse:
@@ -1699,7 +1753,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
-| POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
+| POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active; `400` on a bad target |
 | GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
@@ -1794,6 +1848,10 @@ trigger, chat, scheduled task) shares the gate. A run beyond the cap stays
 `workflow_runs` row **is** the queue entry, so the queue is persistent: on
 daemon restart, queued runs re-enqueue in creation order. `POST
 /workflow-runs/{id}/cancel` on a queued run is honored — it never starts.
+A run parked at a `human_approval` step gives its slot back while it waits
+and re-queues (FIFO) for one after the decision. The run's 10-hour budget is
+per execution (a retry or restart resume starts a fresh one) and excludes
+time parked at an approval.
 
 **Restart resume (0108).** A daemon restart no longer hard-fails executing
 runs. On startup a reconciler classifies every run left in flight
@@ -1978,12 +2036,12 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
-| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request |
+| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
-| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token |
+| POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only) |
 | GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
 | DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
@@ -2032,13 +2090,38 @@ SQLite: on save the daemon moves a plaintext member to the macOS Keychain
 touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
 `secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
 write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
-holds non-secret pairs only and GET never returns a secret value. Markers resolve in-memory
+holds non-secret pairs only and GET never returns a secret value. On update an OMITTED
+(`null`/absent) `secret_keys` keeps the stored set and values — only an explicit list
+replaces it (a key dropped from the list loses its Keychain value). `UpdateEnvironmentReq`
+also accepts `secret_renames:{old_name:new_name}`: a renamed secret's stored value moves to
+the new name (a `secret_values` entry for the new name still wins). Markers resolve in-memory
 only at execute/automation time — the ref must point at a request in the same workspace
 (else 400) — and every export path (OpenAPI, git-sync, history) sees markers or `***`, never
 values. History snapshots redact secret members to `"***"`. `secure-all` additionally marks
 environment variables with secret-shaped NAMES (token/secret/passw/api-key/authorization/
 credential) as secret; it is idempotent and requires ws editor. The `oauth2/token` endpoint
 accepts `client_secret`/`password`/`refresh_token` as plain strings or `$secret` markers.
+
+**Secret host binding (caller-built requests).** On the routes where the CALLER chooses
+the URL — ad-hoc `execute`, the SSE/WebSocket stream (`/ws/api-client/stream`) and
+`oauth2/token` — a stored secret may only travel to the host it belongs to: a
+`{"$secret":"otto.api.request.<id>"}` marker to the host of that saved request's URL
+(after `{{var}}` substitution; for `oauth2/token`, the request's saved `token_url`), and a
+Keychain-backed environment variable (referenced directly, nested through another
+variable, or via a runtime override) to the hosts of the workspace's human-authored saved
+requests. Anything else is refused with `409 needs_confirm=new_host` before any secret is
+resolved. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
+(boolean, default false) confirm it, and are honoured only for a person's credential —
+never for an agent (bridge/MCP headers, a managed-session token or an MCP token).
+
+**History retention (opt-in).** After every recorded run (execute, saved run, automation
+step) the daemon trims the workspace's history: rows older than
+`settings.api_client.history_max_days` are deleted, then only the newest
+`settings.api_client.history_max_rows` are kept. Both default to `0` = **no limit**, so
+nothing is ever deleted until an admin picks a limit (History list → retention control, or
+`PATCH /workspaces/{id}` settings JSON). Once set, pre-existing rows beyond the limits are
+trimmed on the workspace's next run. A history row keeps at most 64 KB of the response `body`
+(`truncated: true` when cut) — the live response is unaffected. No migration.
 
 **Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
 captured executing in one workspace are never replayed for another. The cookies endpoints
@@ -2764,7 +2847,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
-| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status |
+| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
 product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
@@ -2962,6 +3045,323 @@ GOVERNED WRITE tools — `canvas_create_scene` (posts to #103, then best-effort
 the only two mutating tools in an otherwise read-only MCP surface; both run as
 the session owner through the same `WorkspaceRole::Editor` gate a human hits.
 
+## Design Hall — the artifact graph (`/design/*`)
+
+One typed graph behind every design studio (Frames, Graphics, Site, 3D,
+Whiteboard, Brand Kit, Spatial Hall): **projects** group **artifacts**; every
+content save commits an immutable **version** (bytes in the content-addressed
+blob store `<data>/design/blobs/<sha256>`, dedup'd); **links** are extracted
+from each document's `otto://design/<id>[@approved|@latest|@v<n>][#node]`
+references on every save, plus explicit links; **signals** capture design
+decisions (the suggest-only Learning v1 below turns repeated ones into team-rule proposals). Crate
+`otto-design` (router + service + store); tables from the `design_graph`
+migration; the FTS5 index `design_search_fts` is created at runtime (LIKE
+fallback). Feature guide: `docs/features/design-hall.md`.
+
+**RBAC.** `Feature::Design` — every `GET` = `design:View`, every other method
+= `design:Edit`, and `/design/admin/*` = `design:Admin` (the migration grants
+`design` wherever `canvas` was granted). On top, handlers apply the workspace
+axis from the row (or the body's `workspace_id` on creates): reads = Viewer,
+writes = Editor, hard deletes = Admin. List/search results are filtered to the
+workspaces the caller can view (root: all). The library is global — a
+`workspace_id` query param only narrows it.
+
+**Never destructive by default.** `DELETE` archives (status `archived`,
+every version kept); `?hard=true` (workspace Admin) removes the graph rows but
+never a blob. Retention is opt-in (`/design/admin/prune`, dry run unless
+`apply`). The legacy import mirrors — it never moves or edits
+`product_attachments` / `canvas_scenes` rows or files.
+
+Types: `crates/otto-design/src/types.rs` ↔ `ui/src/lib/api/types.ts`
+("Design Hall"). Timestamps are RFC 3339.
+
+**Resolved on read** (joined in by the store on every artifact / version
+read — list, detail, search, links, save results; never written, no schema
+column): `DesignArtifact.created_by_name` (the creator's `display_name`, else
+`username`; `null` for a system author such as the legacy import),
+`last_editor_id` / `last_editor_kind` / `last_editor_name` (the head
+version's `author_id` / `author_kind` / its user's name — `null` before the
+first version or for a system author) and `DesignVersion.author_name` (same
+rule for `author_id`). An agent version's `author_id` is the user who
+launched the agent, so its name is that user's with `author_kind: "agent"`.
+`DesignArtifact.story_ids` lists the product stories the artifact is linked
+to (`dst_kind: "story"` — `implements` — links), sorted;
+`created_session_title` is the title of the `created_session_id` session
+(`null` when unset or the session row is gone).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/design/projects | design view | `?workspace_id=&include_archived=` | `DesignProject[]` (newest-updated first; `artifact_count` = non-archived) |
+| POST /api/v1/design/projects | design edit + ws editor | `CreateDesignProjectReq {workspace_id, name, description?, epic_story_id?, swarm_project_id?, brand_kit_id?, meta?}` | 201 `DesignProject` (404 unknown epic story) |
+| GET /api/v1/design/projects/{id} | ws viewer | — | `DesignProject` |
+| PATCH /api/v1/design/projects/{id} | ws editor | `UpdateDesignProjectReq` (omitted = unchanged, `""` clears an id, `meta` shallow-merged, `null` values delete keys) | `DesignProject` |
+| DELETE /api/v1/design/projects/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives; `?hard=true` deletes an EMPTY project (409 while it files artifacts). Artifacts are never deleted with a project |
+| GET /api/v1/design/artifacts | design view | `?workspace_id=&project_id=&studio=&format=&status=&story_id=&include_children=&author_kind=&since=&until=&include_archived=&limit=&offset=&cursor=` | `DesignArtifact[]` (newest-updated first, ties by id; archived hidden unless `include_archived`/`status=archived`; `story_id` matches `implements` links, `include_children=true` also the story's direct children — an epic's Design tab; every row carries its `story_ids`). `limit` default 100, cap 500. **Keyset paging:** a full page answers `X-Next-Cursor: <updated_at>\|<id>` (the last row's); pass it back as `cursor=` for the next page (`offset` is then ignored). Clients may build the same cursor from the last row's JSON (`updated_at + "\|" + id`, URL-encoded); a malformed cursor is 400 |
+| POST /api/v1/design/artifacts | design edit + ws editor | `CreateDesignArtifactReq {workspace_id, format, title, project_id?, studio?, tags?, meta?, content? \| content_b64?, story_id?, derived_from?: {artifact_id, version_id?}, author_kind?, session_id?, message?}` | 201 `DesignSaveResult` — v1 (`kind:"named"`); no content → the format's empty document (binary formats need content); `derived_from` forks the source's version (default approved, else head; caller needs viewer on the source) + a pinned `derived_from` link; `story_id` adds an `implements` link (404 unknown story). 40 MB body cap |
+| GET /api/v1/design/artifacts/{id} | ws viewer | `?content=true&version=v3` (optional) | `DesignArtifactDetail {artifact, head, approved, links_out, links_in, work_path, thumbnail_path, content, content_version_id, content_truncated}` — `content` (text formats, ≤ 256 KiB) only with `content=true` or `version=` |
+| PATCH /api/v1/design/artifacts/{id} | ws editor | `UpdateDesignArtifactReq {title?, project_id? ("" unfiles), studio?, status?, tags?, meta?, thumb_b64? (PNG ≤ 2 MB)}` | `DesignArtifact`. `status:"approved"` needs an approved version (use approve). A status change records a `status_change` signal (`shipped` → `shipped` signal) |
+| DELETE /api/v1/design/artifacts/{id} | ws editor (`?hard=true`: ws admin) | — | 204 — archives (every version kept). `?hard=true` deletes the artifact, its versions, outgoing links and search row; incoming links are kept and flagged `broken`; blobs are never removed here |
+| GET /api/v1/design/artifacts/{id}/content | ws viewer | — | raw bytes of the head, `Content-Type` = artifact mime, `X-Design-Version`, `X-Design-Seq`, `ETag: "<sha256>"`, `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`; 404 when no version |
+| PUT /api/v1/design/artifacts/{id}/content | ws editor | `DesignContentPutReq {content? \| content_b64?, base_version?, message?, author_kind? (user\|agent), session_id?, provenance?}` | `DesignSaveResult`. **`base_version` ≠ current head → 409** (`""` = expects no head; omitted = unconditional). Byte-identical to the head → `created:false`, no version. Validated (UTF-8 / JSON object / magic bytes, 25 MB raw; `scene3d` schema via the server hook) → 400/413. Version kind `autosave` (user) / `agent`. A user save within 2 h of an agent version records `edit_after_draft`. Mirrors the working copy, rebuilds links + search, emits `design_artifact_updated` (+ `design_link_updated` to `follow_latest` consumers). 40 MB body cap |
+| GET /api/v1/design/artifacts/{id}/thumbnail | ws viewer | — | the thumbnail blob (404 when none); `Content-Type` sniffed: `image/png` or `image/webp` |
+| PUT /api/v1/design/artifacts/{id}/thumbnail | ws editor | raw image bytes as the body (any `Content-Type`) — a PNG or WebP the UI renderer produced, ≤ 2 MB | `DesignArtifact` with the new `thumb_blob` (a content-addressed blob). The bytes are magic-byte sniffed: 415 anything else, 400 empty, 413 over 2 MB. A thumbnail is a cache, not an edit: no version, `updated_at` unchanged; the same image again is a no-op, a new one emits `design_artifact_updated {change:"thumbnail"}`. The previous blob stays until the opt-in prune GC. Agents are only handed PNG thumbnails (`render/current.png`, `refs/R<n>.png`) |
+| GET /api/v1/design/artifacts/{id}/versions | ws viewer | `?kind=&limit=&offset=` | `DesignVersion[]` (newest `seq` first; default limit 200) |
+| POST /api/v1/design/artifacts/{id}/versions | ws editor | `DesignCommitReq {message, content? \| content_b64?, base_version?, author_kind?, session_id?, provenance?}` | 201 `DesignSaveResult` — a NAMED commit (`kind:"named"`, `agent` for agents): the given bytes, else the working copy `<data>/design/<id>/work/<file>` (what an agent edited in place), else the head re-labelled; empty message → 400 |
+| GET /api/v1/design/artifacts/{id}/versions/{v}/content | ws viewer | `{v}` = version id, `v12` or `12` | raw bytes of that version (same headers as `/content`) |
+| POST /api/v1/design/artifacts/{id}/approve | ws editor | `{version_id?}` (default head; id / `v12` / `12`) | `DesignArtifact` (status `approved`, `approved_version_id` moved). Records `status_change`; emits `design_artifact_updated {change:"approved"}` and `design_link_updated {reason:"target_approved"}` to every `follow_approved` consumer. Humans only — no MCP tool approves |
+| GET /api/v1/design/artifacts/{id}/links | ws viewer | `?dir=out\|in\|both` (default both) | `DesignLinksResp {links, artifacts}` — `artifacts` = the other ends the caller may view |
+| POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy or non-http(s) url; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
+| DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
+| GET /api/v1/design/links | design view (+ ws viewer per artifact) | `?artifact_ids=a,b,c&dir=out\|in\|both` (default both; 1–100 comma-separated ids) | `DesignLinksResp {links, artifacts}` — the links FROM (`out`) and/or TO (`in`) any of the ids in one call (Product's design strip), each link once even when both ends were requested, ordered by source (≤ 10 000 rows); ids that don't exist or whose workspace the caller can't view are skipped (never an error); `artifacts` = the OTHER ends the caller may view (not the requested ones). 400 no ids / > 100 ids / bad `dir` |
+| GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing. Powers the References drawer |
+| GET /api/v1/design/signals | design view | `?workspace_id=&artifact_id=&kind=&since=&limit=` | `DesignSignal[]` (newest first) |
+| POST /api/v1/design/signals | design edit + ws editor on the artifact | `DesignSignalReq {artifact_id, kind, version_id?, actor_kind?, session_id?, payload?}` | 201 `DesignSignal`; kinds `variant_chosen`, `variant_accepted`, `variant_rejected`, `agent_draft`, `edit_after_draft`, `review_comment`, `critique_finding`, `a11y_fix`, `brand_correction`, `rule_feedback`, `status_change`, `shipped`, `restored`, `reference_added`, `forked` (`variant_accepted` / `agent_draft` are normally server-recorded — see Design assist). The last three are client-recorded and need a payload key (400 otherwise): `restored` — `version_id` = the new head, `payload.from_version_id` = the version restored; `reference_added` — `payload.target_artifact_id` (the artifact added as a reference); `forked` — recorded on the NEW artifact, `payload.source_artifact_id` (+ optional `source_version_id`). Payload a JSON object ≤ 8 KB, ≤ 8 levels (400/413); emits `design_learning_update` |
+| POST /api/v1/design/admin/import | design admin | — | `DesignImportReport {attachments_scanned, scenes_scanned, created, synced, unchanged, skipped, links_created, errors}` — re-runs the idempotent legacy import (also runs at daemon start) |
+| POST /api/v1/design/admin/prune | design admin (+ ws admin on `artifact_id`; whole library = root) | `DesignPruneReq {artifact_id?, apply? (default false), window_secs? (default 600)}` | `DesignPruneReport {applied, artifacts_scanned, versions, blobs}` — squashes `autosave` versions to the last per window; never head, approved, link-pinned/extracted-from, published or signal-referenced versions, nor any non-autosave kind; unreferenced blobs GC'd on apply |
+
+**Link extraction** (every commit; `crates/otto-design/src/extract.rs`): html/svg
+`src=`/`data=`/`poster=` → `embeds`, other attributes → `references`
+(`src_node` = the tag's `id`); mermaid/d2 → `describes` (node from
+`click Node …` / `node.link:`); scene3d `gltf.attachment_id` → `embeds`
+(resolved to the artifact imported from that attachment, else kept as a
+`dst_kind:"attachment"` edge), scene3d v2 `gltf.src` → `embeds` and `brand` →
+`uses_tokens` (a scene3d `#node` may also be `view:<camera id>` or
+`state:<state id>`; `token:color.<name>` names are indexed for search); JSON formats (excalidraw, otto-canvas incl. its
+inner source, otto-site/-layout/-brand/-exhibit, gltf) → rel by key (`src`
+embeds, `component` uses_component, `brand`/`tokens` uses_tokens,
+`derived_from` …, whiteboards default `describes`, others `references`),
+`src_node` = the nearest enclosing object's `id`. Malformed references and
+missing artifact/version/node targets are reported in `DesignLinkReport.broken`
+and stored with `broken:true` (never a crash); render links that would close a
+cycle are reported in `cycles` and not stored; chains deeper than 4 are
+reported in `depth_exceeded`.
+
+### Design assist — agent turns, variants, learned rules
+
+One agent-turn pipeline for every studio and format
+(`crates/otto-server/src/design_assist.rs`; building blocks in
+`otto_design::{variants, cite, learn}` and `otto_improve::design`). Same RBAC
+as above (`/design/*`: GET = design View, else design Edit) plus the workspace
+role from the artifact (or the `workspace_id`). Types: `DesignAssist*`,
+`DesignVariant*`, `DesignLearned*`, `DesignRuleCandidate` in
+`ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/assist | ws editor | `DesignAssistReq {prompt, mode? (generate\|refine (default)\|critique\|a11y), selection? (≤ 4 KB JSON), references? (≤ 8 × `<id>` / `<id>@v12` / `otto://design/<id>[@v12]`), provider?, model?}` | **202** `DesignAssistTurn` once the agent session is live (≤ 20 s; `session_id` may still be `null`). The turn runs on the working copy `<data>/design/<id>/work/` (materialized from the head; a diverging, never-committed working copy is renamed `*.pre-assist-<turn>.bak` first) with `CONTEXT.md`, `refs/R<n>.json` (+ `.png` thumbnails) and `render/current.png`; each valid mid-turn save emits `design_artifact_updated {change:"live"}`; the result is validated per format (UTF-8 / JSON object / `scene3d` schema; an `otto-canvas` whiteboard edits its inner `source.mmd` / `source.d2` / `source.excalidraw.json`) and committed as ONE version (`kind:"agent"`, `author_kind:"agent"`, `session_id`, the agent's one-line summary as `message`, `provenance` below). Completion: `design_assist_updated`. 400 empty prompt / bad mode / binary format / > 8 references; 403/404 on a reference; **409 while another turn or variants run holds the artifact**; `a11y` fixes in place, `critique` never edits (findings in the turn) |
+| GET /api/v1/design/artifacts/{id}/assist | ws viewer | — | `DesignAssistTurn[]` — recent turns (in memory, ≤ 20, newest first; empty after a daemon restart) |
+| POST /api/v1/design/artifacts/{id}/variants | ws editor | `DesignVariantsReq {prompt, n? (1..=4, default 3), references?, selection?, provider?, providers? (cycled per variant), model?, directions? (cycled; default `defaults` · `explore` · `calm` · `story`)}` | **202** `DesignVariantRun {run_id, status:"running", turns}` — n parallel FRESH turns in `<data>/design/<id>/variants/<run>/<k>/`, each committed on branch `variant/<run>/<k>` (`parent_version_id` = the head it started from) WITHOUT moving the head or touching the working copy. `design_variants_ready` fires when all finished. 400 `n` out of range; 409 busy |
+| GET /api/v1/design/artifacts/{id}/variants | ws viewer | — | `DesignVariantRun[]` (≤ 10 runs, newest first) — `versions` (persisted), `accepted_version_id`, `status` `running`\|`ready`\|`accepted`, live `turns` |
+| POST /api/v1/design/artifacts/{id}/variants/{version}/accept | ws editor | `{force?}` (body optional); `{version}` = variant version id / `v12` / `12` | `DesignVariantAcceptResp {artifact, version, run_id, accepted_version_id, rejected_version_ids}` — **fast-forwards main**: a new main version (`kind:"agent"`, `provenance.accepted_variant`) carrying the variant's bytes, guarded on the head the run started from (**409** when main moved — pass `force` to apply on top — when a variant of the run was already accepted, or while an agent still works on the artifact); records `variant_accepted` (payload `run_id, k, direction, main_version_id, rejected_version_ids`) and one `variant_rejected` per sibling, then runs a learning pass in the background. 400 when the version is not a variant |
+| GET /api/v1/design/learned | ws viewer | `?workspace_id=` (required) | `DesignLearnedResp {workspace_id, mode (suggest\|off), skill:"design-team-style", skill_path, active, pending, history, candidates}` — `active` = the rule lines of the skill (with the applied edit + evidence), `pending` / `history` = the improvement edits of that skill, `candidates` = what the extractor sees now (read-only) |
+| POST /api/v1/design/learned/extract | ws editor | `{workspace_id}` | `DesignLearnExtractResp {mode, run_id, proposed, skipped, candidates}` — proposes every READY candidate as a **pending** improvement edit (never auto-applied; no-op when the workspace setting `design_learning` is `"off"`); emits `design_learning_update {kind:"rule_proposed"}` when anything was proposed |
+
+**Turn lifecycle.** `starting` → `running` (session live) → `done` (committed)
+\| `unchanged` (no change / critique) \| `conflict` (a human saved while the
+agent worked: the head is never clobbered — the draft is committed as the side
+version `variant/<turn_id>/1`, acceptable via `…/variants/{v}/accept` with
+`force`) \| `failed` (agent error, invalid document — nothing committed, the
+working copy is restored to the head). Caps: one run per artifact, 20 min per
+turn (the session is killed past it), ≤ 4 variants. A main turn resumes the
+artifact's assist session (`meta.assist = {session_id, provider}`) when the
+provider matches; variants always start fresh sessions
+(`meta.source = "design_assist"`).
+
+**Context brief** (`CONTEXT.md`, deterministic, ≤ 16 KB): the artifact, the
+story it `implements` (key, title, source/AC excerpt ≤ 2.5 K chars), Uses /
+Used-in links (≤ 12 each, only artifacts the caller can view), the brand kit
+(the project's `brand_kit_id`, else a `uses_tokens` link; tokens ≤ 3 K chars),
+the references `[R1..Rn]` (≤ 8: the request's `references` first, then
+explicit `references`/`derived_from` links, then library search in the
+artifact's workspace — the title, then the prompt's 3 most salient terms;
+each at the named version, else approved, else head), the approved team rules
+(the `design-team-style` skill's rule lines, ≤ 20) and ≤ 6 memories from the
+`design` collection of `otto-memory`. The prompt repeats the reference list and
+the rules and inlines the bundled `otto-design-2d` / `otto-design-3d` skill
+(never modified).
+
+**Provenance** (`version.provenance`, ≤ 16 KB): `assist {turn_id, mode,
+branch, direction, provider, session_id}`, `prompt_summary` (≤ 280 chars),
+`references_offered [{label, artifact_id, version_id, seq, title, source}]`,
+`references_cited [{label, artifact_id, version_id, seq}]` — only citations
+VERIFIED against the offered set (inline `[R1]` / `[R1, R3]` markers in the
+reply, plus `refs` of an optional `provenance.json` the agent writes:
+`"R2"`, `"<id>@v12"`, `"otto://design/<id>@v3"`; a never-offered label, an
+unknown artifact or a different version is dropped) —
+`citations_unverified`, `why`, `brand_kit {artifact_id, version_id, seq}`,
+`team_rules` (keys), `selection` (≤ 1 K chars). Each committed turn records an
+`agent_draft` signal, and each verified citation on main becomes an explicit
+`references` link (pinned to the cited version).
+
+**Learning v1 (suggest-only).** `otto_design::learn::extract` groups the last
+90 days of the workspace's signals: a variant `direction` chosen
+(`variant_accepted`/`variant_chosen`) more often than rejected, a reject
+`reason` chip (`variant_rejected`, `other` ignored), the same property changed
+right after agent drafts (`edit_after_draft` changed paths, last two segments,
+per format), an accepted `a11y_fix` rule. Ready = ≥ 3 signals across ≥ 2
+artifacts. Ready candidates go to otto-improve's `design` evidence source
+(`learning_checkpoints` source `design:<workspace>:<key>`): each becomes a
+PENDING edit of the workspace skill `design-team-style` (one
+`- [rule:<key>] <text>` line; resolved like every skill edit — the library
+entry when present, else `<root>/.claude/skills/design-team-style/SKILL.md`).
+Approve / reject / rollback stay human-only through `POST
+/improvement/edits/{id}/approve|reject|rollback`; a decided rule is never
+re-proposed, a `conflict` one is (against the current file).
+
+**MCP.** Reads (agents find + cite earlier work) — governed catalog
+(`otto_server::mcp_outward`, default-enabled): `otto.design_list`,
+`otto.design_get`, `otto.design_links`, `otto.design_search` → the GET routes
+above (`design_get` → `GET /design/artifacts/{id}?content=true[&version=]`).
+The per-session stdio server (`ottod mcp-tools`) serves the same four natively
+as `design_list` / `design_get` / `design_links` / `design_search` (aliased so
+the governed twins are not advertised twice). Writes — `otto.design_assist`
+(→ `POST /design/artifacts/{id}/assist`) and `otto.design_link` (→ `POST
+/design/artifacts/{id}/links`): mutating + DANGEROUS (off by default,
+approval-gated unless the operator exempts that tool via
+`approval_exempt_tools`), scoped to the TARGET artifact's workspace (the
+server overwrites any `workspace_id` before the token-pin check, audit and
+approval), exposed on stdio only through the governed bridge as
+`otto_design_assist` / `otto_design_link`. No tool approves a version.
+
+### Brand Kit — `otto-brand/1` tokens, exports, impact preview
+
+A brand kit is an artifact of format `otto-brand` (studio `brand`), saved,
+versioned and approved like any other (`PUT …/content`, `POST …/approve`).
+Code: `crates/otto-design/src/brand/` (validator, extractor, exporters,
+contrast, impact). Types: `BrandDoc`, `BrandImpactResp`, `BrandConsumer`,
+`BrandTokenChange`, `BrandContrastReport` … in `ui/src/lib/api/types.ts`
+("Brand Kit"); shared UI helpers `brandCssVars(doc)` / `resolveToken(doc,
+ref)` in `ui/src/modules/design-hall/brand/tokens.ts`.
+
+**Document** (DTCG-flavoured; every group optional, unknown top-level keys
+kept):
+
+```json
+{ "$schema": "otto-brand/1", "name": "Acme Brand Kit",
+  "color":  { "<name>": { "$value": "#5B3DF5", "$description": "…" } },
+  "font":   { "display|body|mono": { "$value": "\"Inter\", system-ui, sans-serif", "weights": [700, 800] } },
+  "type":   { "<style>": { "size": 64, "line": 72, "weight": 800 } },
+  "radius": { "<name>": { "$value": 14 } },
+  "space":  { "<name>": { "$value": 16 } },
+  "logos":  [ { "name": "Acme", "kind": "full|mark|mono", "asset": "otto://design/<id>" | "blob:<sha256>" } ],
+  "imagery": { "summary": "…", "do": ["…"], "dont": ["…"] },
+  "voice":   { "summary": "…", "do": ["…"], "dont": ["…"] } }
+```
+
+**Validation** (every create / save / agent result, via `format::validate`;
+400 `invalid otto-brand document: <path>: <problem>; …`): `$schema` when
+present is `otto-brand/1`; token names `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`,
+≤ 64 per group; colours `#RGB` / `#RRGGBB` / `#RRGGBBAA`; font roles
+`display` / `body` / `mono`, stacks ≤ 300 chars with no `; { } < > \` or line
+breaks, `weights` 1–1000 (≤ 9); type styles need positive `size` / `line` px
+and an integer `weight` 1–1000; radius / space `$value` a px number 0–10 000;
+≤ 16 logos, each with a name, a kind and an optional `asset` (an
+`otto://design/…` reference or `blob:<sha256>`; empty = placeholder); voice /
+imagery `summary` ≤ 2 000 chars and `do` / `dont` ≤ 20 strings. The Phase 0
+scaffold markers `"type": "otto-brand"` and `"version": 1` stay accepted. A
+kit created without content starts from a default kit.
+
+**References.** Other artifacts name a token as `token:<group>.<name>` (a
+type style's sub-property `token:type.display.size` counts as `type.display`)
+or through its CSS custom property `--brand-<group>-<name>` (type styles:
+`--brand-type-<name>-size|-line|-weight`; names are kebab-cased, `surfaceAlt`
+→ `surface-alt`), and link the kit with rel `uses_tokens` (a JSON document's
+`brand` / `brand_kit` / `tokens` / `theme` key, or an explicit link). The kit
+itself `embeds` each logo asset (`src_node` `logos.<kind>`). Consumers follow
+the kit's **approved** version by default: approving a kit version fans out
+`design_link_updated {reason: "target_approved"}` to them (`follow_latest`
+consumers hear every save; `pinned` ones never move).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/brand/impact | design edit + ws viewer | `BrandImpactReq {content?}` — the PROPOSED kit (object or JSON text), validated as above (400); omitted = the head, unvalidated (a plain "used in" listing) | `BrandImpactResp {kit_id, base (approved\|head\|none), base_version_id, base_seq, changes: BrandTokenChange[] {token, change (changed\|added\|removed), before, after}, artifact_count, studio_count, by_studio, affected_count, affected_studio_count, affected_by_studio, consumers: BrandConsumer[] {artifact, policy, pinned_version_id, tokens, whole_kit, affected, scanned}, hidden_count, contrast, warnings}`. Compares the proposal with what consumers follow (the approved version, else the head). Consumers = non-archived artifacts with a `uses_tokens` link into the kit that the caller can view (others counted in `hidden_count`); each consumer's head (text formats ≤ 4 MB, first 300 consumers) is scanned for token references — a consumer naming no token (or not scannable) is `whole_kit` and sees every change. `contrast` = WCAG ratios of the proposed colours vs white, vs the kit's ink (`ink`, else `text`, else the darkest colour) and every pair (`AAA` ≥ 7, `AA` ≥ 4.5, `AA-large` ≥ 3, `fail`); `warnings` flag colours below 3:1 on both white and ink. Read-only — nothing is saved. 400 when the artifact isn't an `otto-brand` kit |
+| GET /api/v1/design/artifacts/{id}/brand/export | design view + ws viewer | `?format=css\|tailwind\|dtcg` (default `css`; `json` = `dtcg`) `&version=` (id / `v12` / `12` / `approved`; default the head) | the export as text: `css` → `:root { --brand-<group>-<name>: …; }` (`text/css`); `tailwind` → a Tailwind v4 `@theme { --color-* --font-* --text-* (+ --line-height / --font-weight) --radius-* --spacing-* }` block (`text/css`); `dtcg` → W3C Design Tokens JSON (typed groups `color` / `fontFamily` / `typography` / `dimension` as `{value, unit}`; logos, voice and imagery under `$extensions["dev.otto.brand"]`) (`application/json`). `Content-Disposition: attachment; filename="<kit-slug>.tokens.css\|.theme.css\|.tokens.json"`, `X-Design-Version`, `X-Design-Seq`. 400 unknown format / not a kit; 404 no content or no approved version |
+
+### Site Studio — `otto-site` v1: export, local preview, publishes
+
+A site is an artifact of format `otto-site` (studio `site`), saved, versioned
+and approved like any other (`PUT …/content` with `base_version`). Code:
+`crates/otto-design/src/site/` (schema, validator, indexer, theme, renderer,
+exporter, ZIP writer, routes) and `ui/src/modules/design-hall/site/` (the
+editor; `engine/` renders the canvas with the same markup and the same
+`site.css` — byte-identical copies, a unit test checks). Types: `DesignPublish`,
+`DesignPinnedRef`, `DesignSiteExportReq`, `DesignSiteLocalResp`,
+`DesignSitePage` in `ui/src/lib/api/types.ts` ("Site Studio"); the document
+itself is typed in `site/engine/types.ts`.
+
+**Document** (pages → sections → blocks; unknown top-level keys kept):
+
+```json
+{ "type": "otto-site", "version": 1, "title": "Rewards+ landing page",
+  "brand": "otto://design/<brand kit>",
+  "settings": { "domain": "rewardsplus.acme.example", "lang": "en", "description": "…" },
+  "pages": [ { "id": "home", "title": "Home", "slug": "", "description": "…",
+    "sections": [ {
+      "id": "hero", "block": "hero/split", "name": "Hero",
+      "props": { "eyebrow": "New · Rewards+", "headline": "Every purchase moves you up.",
+                 "primary_label": "Join free", "primary_href": "page:join" },
+      "style": { "background": "token:color.surface-alt", "spacing": "l", "align": "left",
+                 "motion": "fade-up", "min_height": "auto" },
+      "responsive": { "hide": ["mobile"], "stack": "media-first", "mobile_align": "center" },
+      "blocks": [ { "id": "card", "block": "embed/3d",
+                    "props": { "src": "otto://design/<3d artifact>@approved", "alt": "…" } } ],
+      "derived_from": "otto://design/<other site>@v12#faq",
+      "hidden": false } ] } ] }
+```
+
+- **Section blocks** (`<family>/<variant>`, 27): `nav/bar`; `hero/split`,
+  `hero/centered`, `hero/fullbleed`, `hero/stacked`; `features/grid`,
+  `features/alternating`, `features/bento`, `features/steps`,
+  `features/stats`; `social/logos`, `social/testimonials`, `social/quote`;
+  `pricing/tiers`, `pricing/compare`, `pricing/single`; `faq/accordion`,
+  `faq/grid`; `cta/band`, `cta/split`, `cta/card`; `content/text`;
+  `media/3d-embed`, `media/video`, `media/gallery`; `footer/columns`,
+  `footer/simple`. **Child blocks**: `item/link|feature|step|stat|logo|
+  testimonial|tier|faq|column`, `embed/3d`, `embed/image`.
+- **Style**: `background` = `token:color.<name>` (a brand-kit colour),
+  `gradient:soft|primary|ink|sunset`, or a raw `#hex` (allowed; the editor
+  flags it off-brand); `spacing` `s|m|l|xl`; `align` `left|center`; `motion`
+  `none|fade-up|scroll-reveal|parallax|tilt-hover` (pure CSS, off under
+  `prefers-reduced-motion`); `min_height` `auto|80vh|100vh`.
+- **Links**: `page:<page id>` (another page of the site), `http(s):`,
+  `mailto:`, `tel:`, relative paths and `#anchors`; anything else renders `#`.
+  Images: `otto://design/<image>` (a library image, exported into `assets/`),
+  `https:` or `data:image/(png|jpeg|gif|webp);base64,…`.
+
+**Validation** (every create / save / agent result, via `format::validate`;
+400 `otto-site: <path>: <problem>; …`, ≤ 20 problems): `type` is `otto-site`;
+`version`, when present, is `1`; page and node ids `[A-Za-z0-9_-]{1,64}`,
+unique (section + block ids share one namespace); slugs lower-case words
+joined by `-`, unique, never `index`; a `block` that is present must be one of
+the names above; style / responsive values from their enums; props are
+strings (≤ 20 000 chars), numbers, booleans or lists (≤ 100 strings or
+`{label, href}` links); `*href` / `form_action` / `image` / `poster` / `src`
+values may not use another scheme (`javascript:`, `data:` other than images,
+protocol-relative …); ≤ 50 pages, ≤ 200 sections per page, ≤ 100 blocks per
+section, ≤ 5 000 nodes.
+
+**Links extracted on save**: `brand` → `uses_tokens`; `src` / `image` /
+`poster` → `embeds` (a 3D embed's `@approved` / `@latest` / `@vN` is its
+version policy: follow approved (default), follow latest, pinned);
+`derived_from` → `derived_from` ("From your library" provenance); other
+`otto://` strings → `references`. `src_node` = the enclosing section / block
+id. Searchable text = titles, headlines, copy, questions and answers, tier
+names and perks, captions, alt text.
+
+**Theme.** The brand kit is the project's `brand_kit_id`, else the document's
+`brand`, else a `uses_tokens` link — at its approved version (else head). Its
+tokens become `--brand-<group>-<name>` custom properties (the Brand Kit's own
+names), bound to the stylesheet's slots (`--os-primary`, `--os-accent`,
+`--os-ink`, `--os-surface`, `--os-surface-alt`, fonts, radius); no kit → the
+default palette.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/design/artifacts/{id}/export | design edit + ws editor | `DesignSiteExportReq {target: "zip"\|"local", version?}` (version id / `v12` / `12`; default the head) | **`zip`** → `application/zip` (`Content-Disposition: attachment; filename="<site-slug>-v<seq>.zip"`, `X-Design-Version`, `X-Design-Seq`, `X-Design-Publish`): `index.html` + `<slug>.html` per page (a page without a slug: `<id>.html`; hidden and unknown sections are omitted), ONE `site.css` (the brand-token `.os-site { --brand-…; --os-…; }` block first, then the shared stylesheet), `assets/` (library images `<id>-v<seq>.<ext>`, 3D posters from the artifact's thumbnail `<id>-v<seq>-poster.<ext>`), and `otto-publish.json` (the pinned set). No script anywhere; 3D embeds ship as a poster (or a CSS stand-in card) — no 3D runtime yet. **`local`** → `DesignSiteLocalResp {publish, url, pages: DesignSitePage[] {id, title, slug, file, url}, pinned, warnings}` — `url` = `/api/v1/design/artifacts/{id}/preview?publish=<publish id>` (loopback, bearer-authenticated). Both record a `design_publishes` row (`target` `zip` / `local`; `local` stores `url` = `…/preview?version=<version id>`) whose `pinned_set` is `DesignPinnedRef[] {role (site\|brand\|embed\|image), uri, artifact_id, version_id, seq, title, policy, missing}` — the site version first, then its kit, then every rendered 3D embed and image at the ONE version it rendered (a follow-approved embed pins the approved version at export time). The array shape keeps every pinned version out of the retention prune. References the caller can't view, missing ones and non-image "images" render as stand-ins / placeholders and are listed in `warnings` (`missing: true` in the set). 400 other targets (nothing is published outside this Mac), not a site, no pages; 404 no version; 413 an archive over 150 MB |
+| GET /api/v1/design/artifacts/{id}/preview | design view + ws viewer | `?version=` (id / `v12` / `12`) or `?publish=<publish id>` (re-renders exactly that publish's pinned set) | the home page as ONE self-contained `text/html` document: inline CSS, library images / posters as data URIs (≤ 12 MB per page), page links rewritten to `/api/v1/design/artifacts/{id}/preview/<slug or id>` with the same query. Headers `Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; media-src https:; font-src https: data:; base-uri 'none'; form-action 'none'`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `X-Design-Version`, `X-Design-Seq`. 404 unknown publish / version |
+| GET /api/v1/design/artifacts/{id}/preview/{page} | design view + ws viewer | `{page}` = a page's slug or id; same query | that page (same as above); 404 unknown page |
+| GET /api/v1/design/artifacts/{id}/publishes | design view + ws viewer | — | `DesignPublish[] {id, artifact_id, version_id, target, url, pinned_set, created_by, created_at}` (newest first; any format) |
+
 ## Discovery Chat
 
 A lightweight, interactive conversation with an agent attached to a product
@@ -3029,7 +3429,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 126 | POST /api/v1/proof-packs/{id}/snapshot | ws editor · ProofPack Edit | CreateSnapshotReq `{note?}` | ProofSnapshotResp `{…meta, bundle, report_md, report_html}` (immutable) |
 | 127 | GET /api/v1/proof-packs/{id}/snapshots | ws viewer · ProofPack View | — | `ProofSnapshotMeta[]` (newest first) |
 | 128 | GET /api/v1/proof-snapshots/{id} | ws viewer · ProofPack View | — | ProofSnapshotResp |
-| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB |
+| 129 | POST /api/v1/proof-packs/{id}/media | ws editor · ProofPack Edit | AttachMediaReq `{kind:screenshot\|video, title, mime, data_base64, metadata?}` (≤25 MiB) | ProofPackResp — `415` if `mime` not in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` if the decoded blob exceeds 25 MiB. 40 MB body cap (base64 inflation) |
 | 130 | GET /api/v1/proof-artifacts/{id}/blob | ws viewer · ProofPack View | — | raw bytes (`Content-Type` = blob mime, `Content-Disposition: inline`) |
 | 131 | POST /api/v1/proof-packs/{id}/evidence/api | ws editor · ProofPack Edit | ApiEvidenceReq `{title, method, url, status, duration_ms?, request?, response?, metadata?}` | ProofPackResp |
 | 132 | POST /api/v1/proof-packs/{id}/evidence/db | ws editor · ProofPack Edit | DbEvidenceReq `{title, engine?, query?, columns?, row_count?, sample?, error?, metadata?}` | ProofPackResp |
@@ -3119,14 +3519,14 @@ enforce the entity's workspace role.
 
 | # | Method + Path | Role | Body | Response |
 |---|---|---|---|---|
-| CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?}` |
-| CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, rotate_token?}` | status + `token?` (shown once) |
+| CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?, require_approval_dangerous, approval_exempt_tools}` — each tool `{name, description, mutating, category, enabled, approval_exempt}` |
+| CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, approval_exempt_tools?, rotate_token?}` | status + `token?` (shown once) |
 | CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
 | CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated}` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
-| CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle |
+| CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle — `repo_id` must be registered in `{wid}` (else 404) and a `goal_loop_id` from another workspace is ignored |
 | CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202` |
 | CP33 | GET /api/v1/mcp/http | the scoped mcp token (or mcp:view) | — | `405` (no standalone SSE stream — POST requests instead) |
 | CP34 | GET /api/v1/mcp/tokens | mcp:admin | — | `{tokens: McpTokenInfo[]}` (all users, no secrets) |
@@ -3135,6 +3535,18 @@ enforce the entity's workspace role.
 | CP37 | POST /api/v1/mcp/tokens/{id}/rotate | mcp:admin (in-handler) | — | `{token, info: McpTokenInfo, revoked_id}` (raw token shown once; 404 unknown id) |
 | CP38 | GET /api/v1/workspaces/{wid}/mcp/session-attach | mcp:view + ws viewer | — | `{workspace_id, attached}` |
 | CP39 | PATCH /api/v1/workspaces/{wid}/mcp/session-attach | mcp:admin (in-handler) + ws editor | `{enabled}` | `{workspace_id, attached}` — writes the per-workspace map form of `otto_mcp_enabled` |
+
+**Per-tool approval exemption (CP24/CP25).** A mutating (`DANGEROUS`) `otto.*` tool asks a human before each call by default. `approval_exempt_tools` (bare or `otto.`-prefixed names; stored bare in the `mcp_approval_exempt_tools` setting) is the COMPLETE set of mutating tools that skip that prompt — the MCP → Otto server "Ask before each call" toggle. The PATCH replaces the list; a non-mutating or unknown name is a 400 (validated before anything is written); the stored list is always pruned to the enabled tool set, so disabling a tool drops its exemption and re-enabling it starts gated again. A change is recorded in the audit log (`mcp.otto_server.approval_exempt`, `{from, to}`). Exempted calls still run every other gate (per-token scope, enable, RBAC) and are audited (`allowed`). `require_approval_dangerous` echoes the global `mcp_require_approval_dangerous` switch (read-only here): when false, nothing asks regardless. `mcp_policies` and per-tool `require_approval` (CP10) govern registered external servers only and never apply to `otto.*` tools.
+
+**Git tools take a friendly repo reference (CP26).** For `otto.git_status`, `otto.list_prs`, `otto.get_pr`, `otto.create_pr`, `otto.comment_pr`, `otto.start_pr_review` and `otto.open_pr_draft`, `repo_id` is optional and may be an id, name, local path or remote; the choke point resolves it with the `GET /git/repos/resolve` rules (omitted → the calling session's repo) **after** the per-token scope + enable gates, then rewrites the arguments to the canonical `repo_id` plus the repo's own `workspace_id`. Audit, the approval's workspace, the approval args-hash (a name and the id reuse one approval) and execution all see the resolved arguments, and the token's workspace pin is re-checked against the resolved repo's workspace. An unknown/ambiguous reference returns `{decision:"error", executed:false, is_error:true, content:{error}}` (audited `error`) listing the candidates. `otto.list_repos` takes an optional `workspace_id` and returns the `RepoDirectory` shape; a pinned token without one is narrowed to its pin.
+
+**Every other id is a friendly reference too (CP26).** The same resolution covers every non-git id argument of the `otto.*` tools, through `GET /refs/resolve`'s rules run in-process as the caller: a workflow / connection / broker cluster / swarm / scheduled task / goal loop / agent room / vault / design artifact / AWS account / K8s cluster may be passed by id OR name (a product story by its Jira key, an issue account by label / email / base URL, a saved API request / automation / environment by name within the call's `workspace_id`), and every `workspace_id` accepts a workspace NAME. `account_id` may be omitted on every Issues tool when the caller has exactly one Jira/Confluence account. A Confluence `page_id` / `parent_id` may be the page URL; `otto.transition_issue`'s `transition_id` may be the transition's name or target status. `pr_number` / `number` are accepted interchangeably on the PR tools, and numeric arguments may arrive as numeric strings. A per-workspace object resolved across workspaces adds its own `workspace_id` to the arguments, so audit, the approval scope + args-hash and the token pin all see where it lives. Unknown / ambiguous → the same `{decision:"error", executed:false, …}` envelope listing candidates.
+
+**Cross-workspace list tools (CP26).** `otto.list_workspaces`, `list_workflows`, `list_connections`, `list_broker_clusters`, `list_swarms`, `list_scheduled_tasks`, `list_goal_loops`, `list_agent_rooms`, `list_issue_accounts` and `list_product_stories` answer the `AgentRefDirectory` shape (`{kind, items, current_workspace_id, workspace_count}`) — every workspace the caller can read unless `workspace_id` narrows it. (Breaking for callers of the previous single-workspace bare arrays: read `items`.) `list_connections` rows carry no connection params or secret refs.
+
+**The workspace pin is enforced on the resolved object (CP26).** A `kind='mcp'` token's `workspace_id` pin is re-checked after resolution against the workspace the target actually lives in: a named object's own workspace, a repo's, a design artifact's, or — for id-only objects — the workspace read back from the object (`get_workflow_run`, `cancel_workflow_run`, `get_session`, `wait_session`, `send_message`, `get_improvement_run`). Tools that address no workspace-owned object (AWS / K8s console rows, the caller's own issue accounts, the product-story library, usage, the skill catalogue, the directory list tools which the pin itself narrows) run without one. A pinned token is DENIED any other tool whose workspace Otto cannot establish (`create_work_item`, `list_swarm_tasks`, `list_findings`, `get_finding`, `approve|reject|rollback_improvement_edit`) — previously an id-keyed call bypassed the pin.
+
+**New tools (CP26).** Reads (default on): `list_workspaces`, `list_goal_loops`, `list_agent_rooms`, `list_issue_accounts`, `list_issue_transitions`, `get_scheduled_task`, `list_swarm_projects`, `list_swarm_tasks`, `list_design_projects`, `list_pr_reviews` (the `review_id` for `list_findings`), `get_pr_checks`. Opt-in read: `get_pr_diff`. Mutating (DANGEROUS, off by default): `merge_pr`, `vault_write_file`. Existing installs keep their saved `mcp_otto_server_tools` list — tick the new tools under MCP → Otto server. Other fixes: `list_prs` pages (`page`, `per_page`); `create_pr` forwards `draft`, `reviewers`, `proof_pack_id`; `start_pr_review` forwards `context`, `issue_key`, `issue_account_id`; `list_workflow_runs` defaults to summary rows (`summary`); `list_improvement_edits` takes `status`; `get_swarm_board` / `list_swarm_runs` take their filters; `search_issues` pages with `start_at` (its `query` is free text, not JQL); `k8s_describe` omits `namespace` for cluster-scoped kinds; `update_scheduled_task` exposes `model` / `cwd` and clears `workflow_id` / `skill` with `null`; `api_upsert_request` on update keeps every omitted field (the stored request fills them — the PATCH route replaces the row) and returns the masked agent shape; `api_execute` forwards `decode_jwt`. A self-call error now carries the daemon's whole message (≤ 4000 chars) and a 204 answers `{"ok":true}`; self-calls that legitimately run long (an API request up to its `timeout_ms`, automations, pod logs, Athena) get a longer budget than the default 30 s.
 
 **Per-token rotation (CP37)** replaces exactly one token (same owner, label, scope) and revokes only the old id. **CP25 `rotate_token`** now revokes only the caller's legacy `otto-mcp-server`-labelled tokens before minting; scoped tokens (CP35) are never touched. CP24's `has_token`/`token_prefix` describe that legacy token only. **Session attach (CP38/39)** reads/writes the per-workspace map form of `otto_mcp_enabled` (never the scalar), so other workspaces keep their setting.
 
@@ -3205,7 +3617,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun (the manual run; poll for status) |
+| 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
 | 144 | POST /api/v1/scheduled-tasks/{id}/convert-to-workflow | scheduled_tasks edit + ws editor | `ConvertTaskReq {disable_task?}` | `ConvertTaskResp {workflow_id, trigger_id?}` |
@@ -3246,10 +3658,10 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
-| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks) | PersonalAgentSchedule |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun (manual fire; poll runs) |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent is already in progress |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
 | POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
@@ -3310,6 +3722,179 @@ without `session_id` is a user post. Posts are capped at 16 KB.
 | DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `limit?`, `session_id?` | `AgentRoomMessage[]` (agent reads via `session_id` are membership-checked) |
 | POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
+
+## Otto Assistant (`/assistant/*`)
+
+The personal assistant: ONE front door that chats in threads, remembers the
+user, runs tasks and reminders, delegates to Personal Agents, and asks before
+anything outward. Everything under `/assistant/*` is **per user**: every row
+carries the caller's `owner_user_id`, lists return only the caller's rows, and a
+by-id route on another user's row answers **404** (root included — the assistant
+is personal, not an admin surface). Feature axis: `Agents` (`View` for GET,
+`Edit` for every write). There is no workspace axis: threads run as sessions in
+the caller's system-owned **scratch** workspace (row #16a), cwd
+`<data_dir>/personal/assistant/<user_id>/` (attachments land in its `inbox/`).
+
+**Threads.** A thread is one resumable CLI session (claude / codex) with
+`meta.assistant_thread = <thread_id>`, `meta.source = "assistant"`. Threads are
+**resumed on demand, not kept alive**: sending a turn resumes the backing session
+(`--resume` / codex rollout) when it was suspended or reaped, pastes the text with
+the bracketed-paste path, and returns. The reply streams over the existing
+session-family WS events for `thread.session_id` (`transcript_live` /
+`transcript_appended`); once the reply turn lands the daemon indexes it and emits
+`assistant_turn` (see ws.md). `space_slot` 1–4 pins a thread to a floating-bar
+space (unique per user; assigning a taken slot moves it). Up to 4 slotted threads,
+unlimited unslotted ones.
+
+**Routing** (no LLM call). Each user turn is routed at the turn boundary:
+explicit **pin** on the thread (`POST …/route`) wins; else a leading `@claude` /
+`@codex` mention routes that ONE turn (the mention is stripped before pasting);
+else local keyword rules classify the text as `chat | code | hard | voice` and the
+user's `targets[kind]` picks provider + model + account. A provider change starts
+a NEW backing session seeded with a hand-off packet (thread summary + last turns +
+profile), so the visible history stays one thread; each assistant turn carries
+its provider badge. The router **never switches silently**: when the provider's
+usage limit is detected (PTY / transcript text), the daemon emits
+`assistant_limit` and opens a `limit` needs-you task ("continue on Codex?");
+only with `auto_failover: true` (default **false**) does it switch by itself, and
+it then posts a `route` system turn saying so.
+
+**Needs you.** One queue for approvals, clarifying questions, takeover requests,
+limit choices and memory reviews: every item is an `AssistantTask` in state
+`needs_you` with a `needs_you` payload. Outward actions (send, post, publish,
+purchase, delete, submit, prod) open an `approval` item in the guideline shape —
+**where** it goes, **what** is sent, **who sees it**, and the agent's **reason**.
+"Always allow" is recorded per destination + tool only (listed as an
+`agent_grants` row of the user's assistant principal) and is refused for
+`purchase` / `prod` categories.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/assistant/threads | agents view | — | `AssistantThread[]` — slotted threads first (by slot), then `updated_at` desc |
+| POST /api/v1/assistant/threads | agents edit | `{title?, space_slot?, provider?, model?, account_id?, incognito?}` — `provider` given ⇒ the thread starts **pinned** | `AssistantThread` (no session yet — the first turn starts it) |
+| GET /api/v1/assistant/threads/{id} | agents view | — | `AssistantThread` |
+| PATCH /api/v1/assistant/threads/{id} | agents edit | `{title?, space_slot?}` (`space_slot: null` unslots) | `AssistantThread` |
+| DELETE /api/v1/assistant/threads/{id} | agents edit | — | `{ok:true}` — drops the thread, its turn index, attachments rows and tasks, and removes its current backing Otto session (PTY killed, row deleted). Provider transcripts on disk are NOT deleted |
+| GET /api/v1/assistant/threads/{id}/turns | agents view | query `before?` (turn id), `limit?` (default 100, max 500) | `AssistantTurn[]`, oldest first |
+| POST /api/v1/assistant/threads/{id}/turns | agents edit | `AssistantSendReq {text, attachment_ids?, origin?, voice?}` — `text` 1..32 KiB | `AssistantSendResp {turn, route, thread}`. 409 while the backing session is still answering the previous turn (`thread.status == "working"`) |
+| POST /api/v1/assistant/threads/{id}/attachments | agents edit | `{name, content_base64, mime?}` — ≤ 20 MiB decoded; `name` is sanitised to one path segment | `AssistantAttachment` (written to `<cwd>/inbox/`, referenced by path in the next turn) |
+| POST /api/v1/assistant/threads/{id}/route | agents edit | `{provider: string \| null, model?, account_id?}` — `provider: null` clears the pin (back to rules) | `AssistantThread` (+ a `route` system turn) |
+| POST /api/v1/assistant/threads/{id}/delegate | agents edit + scheduled_tasks edit on the agent's workspace (editor) | `{agent_id, directive}` | `AssistantTask` (`kind:"delegation"`, `state:"running"`) + a `delegation` turn ("Asked *Daily Recap*…"); the run's summary is posted back into the thread when it settles |
+| POST /api/v1/assistant/route/preview | agents view | `{text, thread_id?}` | `AssistantRouteDecision` — what a send would pick right now (the bar's badge) |
+| GET /api/v1/assistant/needs-you | agents view | — | `AssistantTask[]` in state `needs_you`, oldest first |
+| GET /api/v1/assistant/tasks | agents view | query `state?`, `thread_id?`, `limit?` (default 100, max 500) | `AssistantTask[]`, newest first |
+| POST /api/v1/assistant/tasks | agents edit | `AssistantCreateTaskReq {kind: "task" \| "reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}` — a reminder needs `run_at` | `AssistantTask` (reminder: `queued` until `run_at`) |
+| GET /api/v1/assistant/tasks/{id} | agents view | — | `AssistantTask` |
+| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body (optional) `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item: an **approval** settles `done` either way (`result.decision`; `always_allow` records a tool+destination grant — 400 for `purchase`/`prod` or without a tool+destination; the linked MCP approvals row is decided too); a **question** on an agent task resumes it (`running`, the `answer` is sent into the thread as the next turn) or cancels it on deny; a **limit** item's approve (`provider`, default the suggestion) re-sends the thread's last message there and remembers "switch" for the thread, deny remembers "stay"; a **memory** item accepts or forgets the memory. `takeover` interrupts the agent (Esc) and parks the task as a `takeover` item until `handback` (which sends "continue" into the thread); `cancel` ends a queued/running/needs-you task. Unknown action → 404; an action that does not fit the task's state → 409 |
+| GET /api/v1/assistant/memory | agents view | query `q?` (FTS recall), `limit?` (default 200) | `AssistantMemoryView {profile, memories, pending, memory_approval}` |
+| PUT /api/v1/assistant/memory | agents edit | `{profile: {content, version}}` — `profile.md`, ≤ 256 KiB | `AssistantProfileDoc`; 409 on a stale `version` |
+| POST /api/v1/assistant/memory | agents edit | `{text, kind?, tags?}` — the user adds a memory by hand (accepted at once) | `AssistantMemory` |
+| DELETE /api/v1/assistant/memory/{id} | agents edit | — | `{ok:true, undo_token}` — soft-forget (the chip's Undo of a "Remembered", or rejecting a pending one) |
+| POST /api/v1/assistant/memory/{id}/accept | agents edit | — | `AssistantMemory` — a `pending` memory (approval queue / Hermes import) becomes `accepted` |
+| POST /api/v1/assistant/memory/undo | agents edit | `{undo_token}` | `AssistantMemory` — restores a forgotten memory |
+| POST /api/v1/assistant/forget | agents edit | `{query, thread_id?}` — "forget X": every accepted/pending memory matching `query` | `AssistantForgetResp {forgotten, undo_tokens}` (+ a `memory` turn in `thread_id` when given) |
+| GET /api/v1/assistant/memory/import/hermes | agents view | — | `AssistantHermesPreview` — READ-ONLY scan of `~/.hermes/memories/*.md` split on `§`; nothing is written |
+| POST /api/v1/assistant/memory/import/hermes | agents edit | — | `AssistantHermesImportResp {queued, duplicates, files}` — each entry becomes a `pending` memory for review (never auto-accepted). One-time: a second call only queues entries not already imported. The daemon never writes to `~/.hermes` |
+| GET /api/v1/assistant/routing | agents view | — | `AssistantRoutingSettings` (defaults when never saved) |
+| PUT /api/v1/assistant/routing | agents edit | any subset of `AssistantRoutingSettings` (minus `updated_at`) | `AssistantRoutingSettings` |
+| GET /api/v1/assistant/limits | agents view | — | `AssistantLimitState[]` — the last detected limit per provider/account (empty = none seen) |
+| POST /api/v1/assistant/agent/{tool} | agents edit (the calling session's per-session token ⇒ its owner) | `{session_id, …tool args}` — see below | per tool |
+
+**Agent tools** (`POST /assistant/agent/{tool}`) are the back-ends of the
+assistant's MCP tools: the native stdio tools of `ottod mcp-tools` (advertised
+ONLY to `meta.source == "assistant"` sessions) and, for the three memory tools,
+the governed `otto.assistant_remember` / `otto.assistant_forget` (DANGEROUS,
+approval-gated, off by default) and `otto.assistant_recall` (opt-in read). The
+calling session decides the thread: an Otto-issued per-session token's own
+session binding OVERRIDES any `session_id` in the body; otherwise `session_id`
+may name one of the caller's own sessions. That session must be owned by the
+caller and carry `meta.assistant_thread` naming one of the caller's threads
+(else 403; unknown session → 400). Without any session (an outward MCP client)
+only user-level effects happen (no chip, no thread on tasks). An **incognito**
+thread refuses `remember` / `recall` / `forget` (400). Unknown `{tool}` → 404.
+
+| `{tool}` | MCP tool | Args (besides `session_id`) | Response |
+|---|---|---|---|
+| `remember` | `assistant_remember` | `{text, kind?, tags?}` | `{memory: AssistantMemory, pending: bool}` — `pending` when `memory_approval` is on; a `memory` chip turn (with Undo) is posted |
+| `forget` | `assistant_forget` | `{query}` | `AssistantForgetResp` (+ a `memory` chip turn) |
+| `recall` | `assistant_recall` | `{query?, k?}` (k ≤ 20) | `{profile: string, memories: AssistantMemory[]}` — accepted only |
+| `reminder` | `assistant_create_reminder` | `{text, run_at, timezone?}` — `run_at` RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone` (default the user's) | `AssistantTask` (`kind:"reminder"`, delivered to the thread + a notification at `run_at`) |
+| `task` | `assistant_create_task` | `{title, detail?}` | `AssistantTask` (`state:"running"`) |
+| `task_update` | `assistant_update_task` | `{task_id, state, result?, question?, options?}` — `state` ∈ `running \| needs_you \| done \| failed`; `needs_you` needs `question` | `AssistantTask` |
+| `delegate` | `assistant_delegate` | `{agent, directive}` — `agent` = Personal Agent id or exact name the owner can edit | `AssistantTask` (`kind:"delegation"`) |
+| `approval` | `assistant_request_approval` | `{where, what, who_sees, reason, tool?, destination?, category?, wait_seconds?}` — `category` ∈ `send \| post \| publish \| purchase \| delete \| submit \| prod \| other`; `wait_seconds` ≤ 30 | `{task: AssistantTask, decision: "approved" \| "denied" \| "pending", reason?}` — an existing always-allow grant for `tool`+`destination` answers `approved` at once (never for `purchase`/`prod`) |
+
+**Reminders and `once`.** Reminders fire from the assistant tick (30 s) using the
+shared cadence engine's new `once` kind (`{cadence:"once", run_at}` — an RFC3339
+instant or a local wall-clock time in the schedule's `timezone`, DST-safe: a time
+in the spring-forward gap fires at the first valid instant after it, an ambiguous
+fall-back time fires at the earlier one). `once` is also accepted by Personal
+Agent schedules (`POST /personal-agents/{id}/schedules`): it fires one run and the
+scheduler then disables the schedule. (The cadence validator is shared, so a
+Scheduled Task may also use `once`; it fires once and then has no next run.) Delivery goes to the origin: a `reminder`
+turn in the thread plus a user-targeted `notification` (macOS / phone).
+
+**Memory.** Three layers: `profile.md` (the user's own facts, edited here; the
+agent only proposes), atomic memories in `otto-memory` (collection `assistant`,
+workspace `scratch`, `visibility: private`, `created_by` = the user — FTS5
+recall), and each Personal Agent's own `memory/notes.md` (unchanged). With
+`memory_approval: true` agent writes land `pending` (state `suggested`) and need
+`accept`; otherwise they are `accepted` and shown as a chip with Undo.
+
+**DTOs** (Rust: stored rows in `crates/otto-state/src/assistant.rs`, request/response
+shapes in `crates/otto-server/src/assistant/{types,router,limits}.rs`; TS:
+`ui/src/lib/api/types.ts` `// ── Otto Assistant`):
+
+```text
+AssistantThread   {id, space_slot: 1..4|null, title, provider, model|null, account_id|null,
+                   route_pinned: bool, session_id|null, incognito: bool,
+                   failover_choice: "ask"|"switch"|"stay", status: "asleep"|"idle"|"working",
+                   last_turn_at|null, created_at, updated_at}
+AssistantTurn     {id, thread_id, role: "user"|"assistant"|"system",
+                   kind: "message"|"memory"|"delegation"|"task"|"reminder"|"route"|"limit"|"approval",
+                   text, provider|null, model|null, route_reason|null, session_id|null,
+                   attachments: AssistantAttachment[], data: object|null, created_at}
+                   // memory chip data: {action:"remembered"|"forgot"|"pending", memory_ids:[…],
+                   //   undo: {kind:"delete", memory_id} | {kind:"restore", undo_tokens:[…]} | null}
+AssistantAttachment {id, name, path, mime, size}
+AssistantSendReq  {text, attachment_ids?: string[], origin?: AssistantOrigin, voice?: bool}
+AssistantSendResp {turn: AssistantTurn, route: AssistantRouteDecision, thread: AssistantThread}
+AssistantRouteDecision {provider, model|null, account_id|null, kind: "chat"|"code"|"hard"|"voice",
+                   reason: "pin"|"mention"|"rule"|"default"|"failover", matched: string[], text}
+AssistantRouteTarget {provider, model|null, account_id|null}
+AssistantRoutingSettings {targets: {chat, code, hard, voice: AssistantRouteTarget},
+                   extra_keywords: {code: string[], hard: string[]},
+                   auto_failover: bool (default false), memory_approval: bool (default false),
+                   updated_at|null}
+AssistantLimitState {provider, account_id|null, limited: bool, until|null, message,
+                   source: "pty"|"transcript"|"probe", detected_at}
+AssistantTask     {id, thread_id|null, kind: "task"|"reminder"|"approval"|"question"|"takeover"
+                   |"limit"|"delegation"|"memory_review",
+                   state: "queued"|"running"|"needs_you"|"done"|"failed"|"cancelled",
+                   title, detail, origin: AssistantOrigin, run_at|null, timezone,
+                   schedule_id|null, agent_id|null, agent_run_id|null,
+                   needs_you: AssistantNeedsYou|null, result: object|null,
+                   created_at, updated_at, finished_at|null}
+AssistantOrigin   "app"|"thread"|"bar"|"phone"|"channel"
+AssistantNeedsYou {kind: "approval"|"question"|"takeover"|"limit"|"memory", prompt,
+                   approval?: AssistantApprovalCard, options?: string[],
+                   limit?: AssistantLimitState, suggestion?: AssistantRouteTarget,
+                   memory_id?: string}
+AssistantApprovalCard {where, what, who_sees, reason, tool|null, destination|null,
+                   category, always_allow_allowed: bool}
+AssistantDecisionReq {reason?, answer?, always_allow?: bool, provider?}
+AssistantCreateTaskReq {kind: "task"|"reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}
+AssistantMemory   {id, text, kind, tags: string[], state: "accepted"|"pending",
+                   source: {kind: "agent"|"user"|"hermes", thread_id|null, file|null},
+                   created_at, updated_at}
+AssistantProfileDoc {content, version, exists: bool}
+AssistantMemoryView {profile: AssistantProfileDoc, memories: AssistantMemory[],
+                   pending: AssistantMemory[], memory_approval: bool}
+AssistantForgetResp {forgotten: AssistantMemory[], undo_tokens: string[]}
+AssistantHermesPreview {available: bool, files: {name, entries}[],
+                   entries: {file, text, duplicate: bool}[]}
+AssistantHermesImportResp {queued, duplicates, files: string[]}
+```
 
 ## Model catalog
 
@@ -3593,6 +4178,142 @@ from `/summarize`), passing it here skips the extra fetch and uses it
 verbatim, but `url` is then validated as a well-formed URL (`400` otherwise)
 since that path never reaches the netguard-checked fetch.
 
+## Browser — remote live view (daemon-owned Chromium)
+
+A **live** tab (`BrowserTab.mode == "live"`) runs on one of two engines. The
+engine is a property of the tab's *live session*, not of the tab row (no
+migration: `browser_tabs.mode` stays `reader|live`):
+
+- `native` — the desktop app's per-tab WKWebView (`apps/desktop/src-tauri/src/browser.rs`).
+  No daemon state; desktop-only.
+- `remote` — a **daemon-owned Chromium** (`otto_browser::live`). The page is
+  rendered by the daemon and streamed to the viewer as a CDP screencast over
+  `WS /ws/browser/{tab_id}/live` (`docs/contracts/ws.md` §1b); the viewer's
+  mouse/keyboard/IME/paste input is sent back and dispatched with CDP
+  `Input.*`. Works in the desktop app, the PWA and remote web sessions alike.
+
+**Engine binary (pluggable, downloaded on first use — never bundled).** Two
+Chrome for Testing builds are pinned in code (`otto_browser::live::install::PINS`:
+version, URL and sha256 per build, matching Playwright's pinned CfT version):
+
+| `build` | What | Download |
+|---|---|---|
+| `chrome` (**default**) | full Chrome for Testing, run in Chrome's new headless mode (`--headless=new`) — full fidelity (codecs, fewer headless-detection breakages) | ~180 MB (179 277 110 bytes for 149.0.7827.55) |
+| `chrome-headless-shell` | the lighter headless-only shell | ~98 MB (98 043 456 bytes) |
+
+Nothing is downloaded until a user explicitly calls `POST /browser/live/install`
+(the Browser page's "Enable remote live view" flow). The archive is streamed to
+`<data>/browser/chromium/<version>/<build>.zip.part` (netguarded client, 400 MB
+cap), its **sha256 verified against the pinned value** (mismatch → deleted,
+`failed`), then extracted (`ditto -x -k`) into
+`<data>/browser/chromium/<version>/<build>/`. A build whose checksum is not
+pinned in this daemon build refuses to install (fail closed;
+`OTTO_CHROME_SHA256_CHROME` / `OTTO_CHROME_SHA256_HEADLESS_SHELL` may supply the
+64-hex pin for a build that ships without one). `OTTO_CHROME_BIN` points the
+runtime at an existing binary instead (dev/test escape hatch, like
+`OTTO_LIGHTPANDA_BIN`). Progress is broadcast as
+`browser_engine_install_updated` (ws.md). mac-arm64 only for now
+(`platform_supported:false` elsewhere).
+
+**Headed mode** (`settings.headed`, off by default — "Show the window on this
+Mac"): the same `chrome` build launched with a visible window on the daemon's
+Mac; it is still screencast-streamed. Requires `build == "chrome"`.
+
+**Process + isolation model.** Chromium is launched by the daemon with
+`--remote-debugging-pipe` (CDP over fds 3/4 — **no TCP debugging port** is ever
+opened), a private `--user-data-dir`, no first-run/sync/extensions/background
+networking, and downloads denied or redirected to a quarantine folder. Each
+**ephemeral** live session (the default `profile:"ephemeral"`) gets its own
+CDP `browserContext` (`Target.createBrowserContext`, disposed on close — cookies
+never outlive the session or cross sessions). A **named profile** (`profile:
+"<name>"`, `[a-z0-9_-]{1,40}`) is a persistent cookie jar scoped to
+`(workspace, owner, name)`: its own Chromium process with
+`--user-data-dir=<data>/browser/profiles/<workspace>/<owner>/<name>/`, so two
+users (or two workspaces) never share cookies. Resource caps: at most
+`settings.max_sessions` live sessions daemon-wide (429 beyond), at most 4
+Chromium processes; a session with no viewer and no activity for
+`settings.idle_timeout_secs` is closed; a process with no sessions exits after
+60 s; a crashed process is restarted on next use (its sessions report
+`state:"crashed"`).
+
+**SSRF guard for the whole session.** Every request the page makes — each
+navigation, redirect hop, subresource, XHR/fetch, WebSocket and service-worker
+fetch — is paused with CDP `Fetch` interception and vetted through
+`otto-netguard` (same `request_allowed` rule as the reader engine: http(s)/ws(s)
+only, no loopback/private/link-local/metadata; `data:`/`blob:`/`about:` pass)
+for as long as the session lives, not just until `load`. A refused document
+request surfaces as a WS `blocked` frame; a refused subresource simply fails.
+Residual: Chromium resolves names itself, so a request is vetted on the
+daemon's resolution of the host (DNS-rebinding window documented, as for
+Lightpanda).
+
+**Outward actions.** While the **agent** drives (see control below), a
+state-changing document request (a form submit / any non-GET navigation) is held
+at the `Fetch` stage, a **viewport screenshot is captured before it proceeds**,
+and an approval (`kind:"browser_action"`, `requested_by_kind:"agent"`) is filed
+in the MCP approvals queue (`/mcp/approvals`) with the origin, method, target
+host and the screenshot's path. The request continues only when approved
+(denied/expired → failed, WS `approval` frame either way). Human-driven input is
+the human's own action and is never gated.
+
+**Control lock (take over / hand back).** `controller ∈ none|human|agent`. A human
+viewer's first input while `none` makes them the driver; `take_over` always
+succeeds for an editor (the agent is preempted and its actions pause);
+`hand_back` returns control to a waiting agent (else `none`). Human input while
+the agent drives is refused (`not_driver`) until the viewer takes over. When the
+last human-driving viewer disconnects, control is released.
+
+**Downloads.** Blocked (`settings.downloads == "block"`) or saved into the
+per-profile quarantine folder `<data>/browser/downloads/<profile-key>/` (never
+opened or executed; `com.apple.quarantine` set) — WS `download` frame either
+way.
+
+**Audit.** Every main-frame navigation the session commits is written to the
+audit log (`action:"browser.live.navigate"`, target = tab id, detail `{host,
+workspace_id, profile, driver}` — host only, never the path/query); session
+open/close, take-over/hand-back and engine installs are audited too
+(`browser.live.open|close|control`, `browser.engine.install`).
+
+**Auth.** Feature-gated by `Feature::Browser`; the tab's workspace role is
+checked on every route (IDOR guard: by-id routes load the tab first). A live
+session is private to its **owner** (the user who opened it) — only the owner,
+a workspace Admin, or root may see, attach to or drive it; everyone else gets
+404. Share-scoped and MCP-only tokens are refused on the WS.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/browser/live/status | Browser View | — | `BrowserLiveStatus` — per-build install state (+ approximate download size), current settings, the running install job, process/session counts |
+| PUT /api/v1/browser/live/settings | Browser Admin | `BrowserLiveSettings` (partial) | `BrowserLiveSettings` — 400 on `headed:true` with `build:"chrome-headless-shell"`, unknown build, or out-of-range caps. Stored in the settings KV under `browser_live`. Applies to newly started Chromium processes |
+| POST /api/v1/browser/live/install | Browser Admin | `{build?}` (default: the configured build) | 202 `BrowserEngineInstallJob` — starts the one-time download (409 while another install runs; 200 with `state:"installed"` when already present; 400 when the build's checksum isn't pinned or the platform is unsupported) |
+| GET /api/v1/workspaces/{wid}/browser/live | ws viewer · Browser View | — | `BrowserLiveSession[]` — the caller's own live sessions in `wid` (all of them for a ws Admin/root) |
+| POST /api/v1/browser/tabs/{id}/live | ws editor · Browser Edit | `BrowserLiveCreateReq` `{engine?:"remote", viewport?, profile?, url?}` | `BrowserLiveSession` — opens (or re-attaches to the caller's existing) remote session for the tab and sets the tab's `mode` to `live`. Navigates to `url` (default: the tab's `url`; netguard-checked → 400). 409 `engine_not_installed` when no Chromium build is installed, 409 when another user owns the tab's live session, 429 at the session cap, 502 when Chromium fails to launch. `engine:"native"` → 400 (a native tab needs no daemon session) |
+| GET /api/v1/browser/tabs/{id}/live | ws viewer · Browser View | — | `BrowserLiveSession` (404 when none, or not visible to the caller) |
+| DELETE /api/v1/browser/tabs/{id}/live | ws editor · Browser Edit | — | 204 — closes the session; an ephemeral context (and its cookies) is disposed |
+| POST /api/v1/browser/tabs/{id}/live/nav | ws editor · Browser Edit | `BrowserLiveNavReq` `{action:"goto"\|"back"\|"forward"\|"reload"\|"stop", url?}` | `BrowserLiveSession` — `goto` requires `url` (netguard-checked → 400) |
+| POST /api/v1/browser/tabs/{id}/live/control | ws editor · Browser Edit | `{action:"take_over"\|"hand_back"}` | `BrowserLiveSession` |
+| POST /api/v1/browser/tabs/{id}/live/screenshot | ws editor · Browser Edit | `BrowserScreenshotReq` `{mode?:"viewport"\|"full_page"\|"element", selector?, format?:"png"\|"jpeg", quality?}` | the image bytes (`image/png` / `image/jpeg`); `X-Otto-Page-Url` header carries the page URL. `element` requires `selector` (404 when it matches nothing). Full-page captures are capped at 16 384 px tall |
+| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (or `?token=`) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
+
+`BrowserLiveSession {tab_id, workspace_id, owner_id, engine:"remote", build,
+version, profile, headed, state:"starting"|"ready"|"crashed"|"closed", url,
+title, loading, can_go_back, can_go_forward, viewport:{width, height,
+device_scale_factor}, controller:"none"|"human"|"agent", controller_user_id,
+viewers, created_at, last_activity_at}`.
+
+The screenshot + navigation surface is also exposed in-process
+(`otto_browser::live::LiveRuntime::session(tab)` → `LiveSession::{screenshot,
+navigate, agent_acquire, agent_input, agent_release}`, with the host's
+`LiveHooks` — audit, events, MCP approvals) for Design Hall renders and the
+browser MCP tools, which reuse the same session, guard, lock and approval gate.
+
+**Residuals (as built).** Chromium's own sandbox is kept and the process is
+not additionally wrapped in `otto-sandbox`'s Seatbelt profile (nesting breaks
+Chrome's renderer sandbox). File uploads are not supported yet (the file
+chooser is intercepted and refused). Page-initiated popups are closed and
+reported as a `popup` frame instead of opening. Only main-frame *document*
+POST/PUT/PATCH/DELETE requests are held for approval while an agent drives —
+XHR/fetch posts are not.
+
 ## AWS console (`/aws/*`)
 
 Browse and operate AWS from Otto through the **`aws` CLI v2** (no SDK): S3
@@ -3872,7 +4593,7 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
 | GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
-| GET /k8s/clusters/{id}/monitor/health?window=1h | View | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
 `window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
 and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
@@ -4103,7 +4824,7 @@ mutations require workspace Editor and use the existing per-repository operation
 | `GET /repos/{id}/reflog?limit=50&skip=0` | `limit` clamped to 1–200 | `GitRecoveryEntry[] {sha, selector, subject}` from HEAD reflog, newest first. Page via `skip`. Recover using existing `POST /branch {name,start_point:sha,checkout:false}`; never rewrites or checks out the existing branch. |
 | `GET /repos/{id}/rebase/plan?onto=<rev>` | revision | `GitInteractivePlan {head_sha,onto_sha,base_sha,commits:[{sha,subject,action:"pick"}]}` oldest first. Preview performs no mutation. Merge-containing ranges return 400; the planner currently supports linear history. |
 | `POST /repos/{id}/rebase/plan` | same plan with reordered commits and `action:"pick"\|"squash"\|"edit"` | `RepoStatusResp`. Requires a clean, idle worktree; 409 if HEAD/base changed since preview. Target is pinned to the previewed `onto_sha`. Every previewed commit must appear exactly once; 400 for omissions/duplicates/unknown commits or first-position squash. Only validated actions and SHAs enter Git's sequence editor. Conflicts return normal status with `op_in_progress:"rebase"`. Edit pauses keep the operation active. Request cancellation does not remove the pending editor input. |
-| `POST /repos/{id}/rebase/skip` | empty | `RepoStatusResp`. Requires a rebase in progress; skips its current commit and discards uncommitted work, so UI explicitly confirms. Next conflicts return normal status. Continue and abort use existing `/merge/commit` and `/merge/abort`. |
+| `POST /repos/{id}/rebase/skip` | empty | `RepoStatusResp`. Requires a rebase in progress; skips its current commit and discards uncommitted work, so UI explicitly confirms; at a conflict-free stop (`edit`/`break`) tracked edits are first saved as a listed stash `otto: backup before rebase skip`. Next conflicts return normal status. Continue and abort use existing `/merge/commit` and `/merge/abort`. |
 | `GET /repos/{id}/bisect` | — | `GitBisectState {active,current_sha,current_subject,finished,first_bad?,remaining?,log,output}`. State is read from the repository's Git directory and survives application restarts; remaining is the reachable candidate count. |
 | `POST /repos/{id}/bisect` | `{op:"start"\|"good"\|"bad"\|"skip"\|"reset",good?,bad?,expected_head?}` | `GitBisectState`. Start requires idle/clean state and distinct good/bad commits with good an ancestor of bad. Marks require `expected_head` equal the current candidate (409 otherwise) and clean worktree. Reset requires active bisect and clean worktree, then restores the original branch/revision. An all-skipped result preserves Git's inconclusive diagnostic in `output`. No command execution/run-script option is exposed. |
 
@@ -4186,7 +4907,13 @@ archive carries explicit `excluded` and `reconnect` lists.
   inactive and imported users cannot authenticate until configured explicitly.
 
 Encoded archives are bounded to 256 MiB and individual files to 64 MiB. An
-oversize export/import fails explicitly; it is not silently truncated. A
+oversize export/import fails explicitly; it is not silently truncated — with
+one exception: the Design Hall blob root `data-design/blobs`
+(`owner_id: "design/blobs"`, files named by their sha256) is filled last and
+best-effort with only the blobs the saved `design_*` rows reference; blobs
+that don't fit the remaining budget (or are missing/corrupt) are skipped and
+summarized in `excluded`. On restore an existing blob of the same name is
+identical by construction and is kept without a conflict. A
 format/schema mismatch, invalid path/hash, stale preview, or incompatible
 references prevents restore. Use legacy settings import/restore for format 1
 files; its workspace-name manifest does not contain workspace data.

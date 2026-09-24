@@ -28,20 +28,27 @@
   let loading = $state(false);
   let copiedRow: string | null = $state(null);
 
+  // Request token: switching dimension/window while a query is in flight must
+  // not let the older (often slower) response land under the new labels.
+  let seq = 0;
+
   async function load(): Promise<void> {
+    const mine = ++seq;
     loading = true;
     try {
-      rows = await api.get<AttributionRow[]>(
+      const next = await api.get<AttributionRow[]>(
         `/usage/attribution?by=${selectedDim}&days=${days}`,
       );
+      if (mine === seq) rows = next;
     } catch (e) {
+      if (mine !== seq) return;
       toasts.error(
         'Could not load attribution',
         e instanceof Error ? e.message : String(e),
       );
       rows = [];
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
@@ -186,12 +193,13 @@
 </div>
 
 <style>
+  /* Same card + heading treatment as the other Usage panels (it used to be
+     the one grey, title-cased card on the page). */
   .attribution-panel {
-    border: 1px solid var(--border, #30363d);
-    border-radius: 8px;
-    padding: 16px;
-    background: var(--surface-2, #161b22);
-    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    padding: 14px;
+    background: var(--surface);
   }
 
   .attr-header {
@@ -203,13 +211,15 @@
   }
   .attr-title {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-s);
     font-weight: 600;
-    color: var(--fg, #e6edf3);
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
   .attr-subtitle {
-    font-size: 12px;
-    color: var(--fg-muted, #8b949e);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
     flex: 1;
   }
   .attr-controls {
@@ -219,34 +229,34 @@
   }
   .dim-label {
     font-size: 12px;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
   }
   .dim-select {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 3px 6px;
-    background: var(--surface-3, #0d1117);
-    color: var(--fg, #e6edf3);
-    border: 1px solid var(--border, #30363d);
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
     border-radius: 4px;
   }
   .export-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
-    background: var(--surface-3, #0d1117);
-    color: var(--fg-muted, #8b949e);
-    border: 1px solid var(--border, #30363d);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     cursor: pointer;
   }
   .export-btn:hover {
-    color: var(--fg, #e6edf3);
-    border-color: var(--fg-muted, #8b949e);
+    color: var(--text);
+    border-color: var(--text-dim);
   }
 
   .attr-loading,
   .attr-empty {
     font-size: 12px;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     padding: 24px 0;
     text-align: center;
   }
@@ -262,15 +272,15 @@
   .attr-table thead th {
     text-align: start;
     font-weight: 600;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     padding: 4px 8px 6px;
-    border-bottom: 1px solid var(--border, #30363d);
+    border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
   .attr-row td {
     padding: 5px 8px;
-    border-bottom: 1px solid var(--border-subtle, #21262d);
-    color: var(--fg, #e6edf3);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
     vertical-align: middle;
   }
   .attr-row:last-child td {
@@ -278,9 +288,9 @@
   }
   .attr-total td {
     padding: 5px 8px;
-    border-top: 1px solid var(--border, #30363d);
+    border-top: 1px solid var(--border);
     font-weight: 600;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
   }
 
   .col-key { max-width: 200px; }
@@ -288,34 +298,34 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
   }
   .col-bar { width: 120px; }
   .bar-track {
     height: 6px;
-    background: var(--surface-3, #0d1117);
+    background: var(--surface-3);
     border-radius: 3px;
     overflow: hidden;
   }
   .bar-fill {
     height: 100%;
-    background: var(--accent, #388bfd);
+    background: var(--accent);
     border-radius: 3px;
     transition: width 0.2s;
   }
   .col-cost, .col-pct, .col-tokens, .col-sessions { text-align: end; }
-  .dim-pct { color: var(--fg-muted, #8b949e); }
+  .dim-pct { color: var(--text-dim); }
   .col-copy { width: 32px; text-align: center; }
   .copy-btn {
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     font-size: 13px;
     padding: 2px 4px;
     border-radius: 3px;
     line-height: 1;
   }
-  .copy-btn:hover { color: var(--fg, #e6edf3); background: var(--surface-3, #0d1117); }
+  .copy-btn:hover { color: var(--text); background: var(--surface-3); }
 </style>

@@ -50,6 +50,8 @@ otto-usage.workspace = true
 otto-transcript.workspace = true
 otto-product.workspace = true
 otto-canvas.workspace = true
+# Design Hall — the artifact graph (projects / artifacts / versions / links).
+otto-design.workspace = true
 otto-swarm.workspace = true
 otto-workgraph.workspace = true
 otto-memory.workspace = true
@@ -86,3 +88,6 @@ otto-keychain.workspace = true
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true
+# The gRPC endpoint test builds a TLS config, which needs the process-level
+# rustls provider `ottod` installs at startup. Same version/feature ottod pins.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

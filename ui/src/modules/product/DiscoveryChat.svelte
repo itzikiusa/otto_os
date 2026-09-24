@@ -12,6 +12,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { renderMarkdown } from '../../lib/md';
+  import AgentByline from '../../lib/components/AgentByline.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ActionCard from './ActionCard.svelte';
   import type { DiscoveryChatMessage, DiscoveryAction } from './types';
@@ -149,22 +151,6 @@
     }
   }
 
-  function relDate(iso: string): string {
-    try {
-      const diff = Date.now() - new Date(iso).getTime();
-      const s = Math.floor(diff / 1000);
-      if (s < 60) return 'just now';
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h ago`;
-      const d = Math.floor(h / 24);
-      if (d < 30) return `${d}d ago`;
-      return new Date(iso).toLocaleDateString();
-    } catch {
-      return iso;
-    }
-  }
 </script>
 
 <div class="discovery-chat">
@@ -197,8 +183,13 @@
         <div class="bubble-row" class:row-user={m.role === 'user'} class:row-agent={m.role === 'agent'}>
           <div class="bubble" class:bubble-user={m.role === 'user'} class:bubble-agent={m.role === 'agent'}>
             <div class="bubble-header">
-              <span class="bubble-role">{m.role === 'user' ? 'PO' : 'Agent'}</span>
-              <span class="bubble-time">{relDate(m.created_at)}</span>
+              {#if m.role === 'agent'}
+                <!-- Agent turn: attributed (patterns.md §2). -->
+                <AgentByline at={m.created_at} />
+              {:else}
+                <span class="bubble-role">PO</span>
+                <RelTime iso={m.created_at} class="bubble-time" />
+              {/if}
             </div>
             {#if m.role === 'agent'}
               <div class="bubble-body md-body">{@html renderMarkdown(m.body)}</div>
@@ -289,7 +280,7 @@
     padding: 24px 0;
   }
   .error-msg {
-    color: #ef4444;
+    color: var(--danger);
     font-size: 13px;
     padding: 8px 0;
   }
@@ -380,14 +371,14 @@
     gap: 6px;
   }
   .bubble-role {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
-  .bubble-time {
-    font-size: 10px;
+  .bubble-header :global(.bubble-time) {
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 

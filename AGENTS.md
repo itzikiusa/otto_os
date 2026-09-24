@@ -57,6 +57,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
+| `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
@@ -74,7 +75,8 @@ Otto.app (Tauri / otto-desktop)
 ### UI module areas (`ui/src/modules/`)
 
 `agents`, `api` (REST client), `brokers` (Kafka viewer), `browser`, `canvas`,
-`connections`, `database` (Database Explorer), `git`, `help`, `home` (personal
+`connections`, `database` (Database Explorer), `design-hall` (Design Hall:
+lobby, artifact view, brand kit, learning log), `git`, `help`, `home` (personal
 dashboard of live boxes), `insights`,
 `loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
 `plugins`, `product`, `proof` (proof packs), `run-with-otto`,
@@ -148,6 +150,56 @@ macOS-only.
   hand-rolled popup. E2E: assert with `expectFullyInViewport` from
   `ui/e2e/helpers.ts`, seeding ENOUGH items to overflow the window (see
   `ui/e2e/desktop-git-add-menu.spec.ts`).
+
+### Design guidelines (UI)
+
+Any change under `ui/` follows **[docs/design/guidelines/](./docs/design/guidelines/README.md)**.
+It covers foundations, layout, components, agent-facing patterns, copy,
+accessibility, and the PR review checklist. The rules below are the ones you
+must not break:
+
+- **macOS-native, one product.**
+  - Every module page renders the shared `PageHeader` (a single unified
+    toolbar row with one title and at most one `.primary` action; the rest
+    overflow into ⋯) and `PageBody`.
+  - A new module is one `SIDEBAR_MODULES` entry (`ui/src/lib/sidebar.ts`) with
+    a unique icon and a group. ⌘K "Go to" commands are generated from it.
+  - No in-app windows or docks.
+- **Tokens only.**
+  - Colours come from `ui/src/lib/tokens.css`: semantic `--danger`,
+    `--warning`, `--success`, `--info` (plus `-soft`), and `--accent-text` /
+    `-solid` / `-soft`.
+  - No hex values in module styles, and no `var(--x)` for a token that doesn't
+    exist (`npm run check` fails).
+  - Type uses the `--fs-*` scale. Nothing a user must read is below 11 px.
+- **Use the shared components.**
+  - `Modal` for dialogs.
+  - `confirmer.ask()` / `promptText()` / `choose()`. Never native
+    `confirm()` / `prompt()` / `alert()`: they are no-ops in the Tauri webview,
+    and `npm run check` fails on them.
+  - `ctxMenu` for menus, `toasts` for action results, `EmptyState` for empty
+    pages, and `Icon` with a typed `IconName`.
+- **Design every state.**
+  - Loading, empty, error and loaded.
+  - List/detail pages open on an item, never on an empty "pick one" pane.
+  - A failed load shows inline with Retry, not as a raw exception in a toast.
+- **Vibrancy on chrome only** (sidebar, toolbar, the floating command bar), never behind
+  tables, editors, logs or forms. Animations respect `prefers-reduced-motion`.
+- **Agents are visible and ask first.**
+  - Agent output is attributed and stays a draft until a person applies it.
+  - Anything outward-facing (PR, Jira/Confluence, Slack/Telegram, publish,
+    prod) confirms where it goes, what is sent and who sees it.
+- **Accessible and responsive.**
+  - Real `<button>` controls, and `aria-label` + `title` on icon-only buttons.
+  - Visible focus, logical CSS properties for RTL, and no horizontal page
+    scroll on phone or tablet.
+  - Check light and dark before review.
+- **Verify.**
+  - `npm run check` passes (its `scripts/ui-guards.mjs` ratchets style debt per
+    file against `scripts/ui-guards-baseline.json` — fix new hits; after paying
+    debt down run `node scripts/ui-guards.mjs --update-baseline`).
+  - Run the [review checklist](./docs/design/guidelines/review-checklist.md).
+  - Attach light and dark screenshots to UI PRs.
 
 ## Do NOT damage user work
 

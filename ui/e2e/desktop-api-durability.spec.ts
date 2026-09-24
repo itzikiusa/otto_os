@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { openPage } from './helpers';
+import { openApiEditor, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API client — durability & secrets (2026-07-04 design):
@@ -48,7 +48,7 @@ async function typeInEditor(scope: ReturnType<Page['locator']>, text: string): P
 }
 
 test('scripts/docs/settings persist with the saved request (server-side)', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   const name = `durability-${Date.now()}`;
 
   await urlInput(page).fill('https://example.com/durable');
@@ -113,12 +113,12 @@ test('scripts/docs/settings persist with the saved request (server-side)', async
 });
 
 test('saved bearer token is Keychain-migrated and rendered masked', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
   const name = `secret-${Date.now()}`;
 
   await urlInput(page).fill('https://example.com/secret');
-  await builderTab(page, 'Authorization').click();
-  await page.getByRole('button', { name: 'bearer' }).click();
+  await builderTab(page, 'Auth').click();
+  await page.getByLabel('Auth type').selectOption('bearer');
   await page.locator('#auth-token').fill('super-secret-token');
 
   await page.getByRole('button', { name: 'Save', exact: true }).click();
@@ -147,26 +147,24 @@ test('saved bearer token is Keychain-migrated and rendered masked', async ({ pag
 });
 
 test('environment secret lock: value is write-only', async ({ page }) => {
-  await openPage(page, 'api');
+  await openApiEditor(page);
 
-  // Create an environment via the Env sidebar tab.
-  await page.getByRole('tab', { name: 'Env' }).click();
-  await page.getByRole('button', { name: 'New environment' }).click();
+  // Create an environment from the header's environment switcher.
+  await page.getByRole('button', { name: /^Environment:/ }).click();
+  await page.getByRole('menuitem', { name: 'New environment…' }).click();
   const dlg = page.getByRole('dialog');
   await dlg.getByRole('textbox').fill('e2e-secrets');
   await dlg.getByRole('button', { name: 'Create', exact: true }).click();
-  await expect(page.getByText('e2e-secrets')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'e2e-secrets' })).toBeVisible();
 
-  // Edit variables: one plain, one locked secret.
-  await page.getByRole('button', { name: 'Edit variables' }).click();
-  await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await page.locator('.var-row .var-key').last().fill('base');
-  await page.locator('.var-row .var-val').last().fill('https://x');
-  await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await page.locator('.var-row .var-key').last().fill('api_token');
-  await page.locator('.var-row .var-val').last().fill('hush-hush');
-  await page.locator('.var-row').last().getByRole('button', { name: 'Toggle secret' }).click();
-  await page.getByRole('button', { name: 'Save vars' }).click();
+  // Variables table: typing into the trailing blank row adds a new one.
+  const rows = page.locator('.var-row');
+  await rows.last().locator('.var-key').fill('base');
+  await rows.nth(-2).locator('.var-val').fill('https://x');
+  await rows.last().locator('.var-key').fill('api_token');
+  await rows.nth(-2).locator('.var-val').fill('hush-hush');
+  await rows.nth(-2).getByRole('button', { name: 'Toggle secret' }).click();
+  await page.getByRole('button', { name: 'Save changes' }).click();
 
   // GET returns the key name only — never the value.
   await expect.poll(async () =>
@@ -185,10 +183,10 @@ test('environment secret lock: value is write-only', async ({ page }) => {
     ),
   ).toEqual({ keys: ['api_token'], hasValue: false, base: 'https://x' });
 
-  // Re-opening the editor renders the secret masked (empty value + lock on).
-  // (Saving already closed it, so one click reopens.)
-  await page.getByRole('button', { name: 'Edit variables' }).click();
-  const secretRow = page.locator('.var-row').filter({ has: page.locator('.var-key') }).last();
+  // After saving, the secret renders masked (empty value + lock on); secrets
+  // are listed after plain variables, before the trailing blank row.
+  const secretRow = rows.nth(-2);
+  await expect(secretRow.locator('.var-key')).toHaveValue('api_token');
   await expect(secretRow.locator('.var-val')).toHaveValue('');
   await expect(secretRow.locator('.var-val')).toHaveAttribute('placeholder', /stored in Keychain/);
 });

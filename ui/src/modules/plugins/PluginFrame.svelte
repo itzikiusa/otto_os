@@ -7,14 +7,59 @@
   // shortcuts (⌘⇧←, ⌘K …) die inside plugin pages. Plugins forward
   // modifier-chords back as `otto:keydown` messages; we re-dispatch them as
   // synthetic window keydowns so the shell's shortcut handlers fire normally.
+  //
+  // Load states: the UI entry is probed before the iframe mounts, so a
+  // disabled/uninstalled plugin (404) or an unreachable daemon renders an
+  // inline "Couldn't load" + Retry instead of an empty/raw daemon page in the
+  // frame; a skeleton covers the frame until it fires `load`.
+  import { untrack } from 'svelte';
   import { baseUrl, getToken } from '../../lib/api/client';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { agentProviders } from '../../lib/providers';
+  import { plugins } from '../../lib/stores/plugins.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
 
   let { slug }: { slug: string } = $props();
 
   const origin = new URL(baseUrl()).origin;
   const src = $derived(`${origin}/plugins/${slug}/ui/`);
   let frame = $state<HTMLIFrameElement | undefined>();
+
+  let probe = $state<'loading' | 'ok' | 'error'>('loading');
+  let probeError = $state<string | null>(null);
+  let frameLoaded = $state(false);
+  let probeSeq = 0;
+
+  async function check(): Promise<void> {
+    const seq = ++probeSeq;
+    const url = src;
+    probe = 'loading';
+    frameLoaded = false;
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (seq !== probeSeq) return;
+      if (r.ok) {
+        probeError = null;
+        probe = 'ok';
+        return;
+      }
+      probeError =
+        r.status === 404
+          ? 'The plugin is disabled, uninstalled, or ships no UI. Check Settings → Plugins.'
+          : `The daemon answered ${r.status}.`;
+      probe = 'error';
+    } catch (e) {
+      if (seq !== probeSeq) return;
+      probeError = loadErrorText(e);
+      probe = 'error';
+    }
+  }
+
+  $effect(() => {
+    void src;
+    untrack(() => void check());
+  });
 
   function themeVars(): Record<string, string> {
     const cs = getComputedStyle(document.documentElement);
@@ -25,6 +70,7 @@
   }
 
   function onload() {
+    frameLoaded = true;
     frame?.contentWindow?.postMessage(
       {
         type: 'otto:init',
@@ -69,20 +115,59 @@
 
 <svelte:window onmessage={onMessage} />
 
-<iframe
-  bind:this={frame}
-  title={slug}
-  {src}
-  onload={onload}
-  allow="clipboard-write"
-></iframe>
+<!-- Same chrome as every built-in module: the plugin's name in the shared
+     header bar, its own UI below. -->
+<div class="plugin-page">
+  <PageHeader title={plugins.get(slug)?.name ?? slug} />
+  {#if probe === 'ok'}
+    <div class="pf-host">
+      <iframe
+        bind:this={frame}
+        title={slug}
+        {src}
+        onload={onload}
+        allow="clipboard-write"
+      ></iframe>
+      {#if !frameLoaded}
+        <div class="pf-loading"><LoadState what={plugins.get(slug)?.name ?? slug} variant="page" loading empty /></div>
+      {/if}
+    </div>
+  {:else}
+    <LoadState
+      what={plugins.get(slug)?.name ?? `the ${slug} plugin`}
+      variant="page"
+      loading={probe === 'loading'}
+      error={probeError}
+      empty
+      onretry={() => void check()}
+    />
+  {/if}
+</div>
 
 <style>
-  iframe {
-    width: 100%;
+  .plugin-page {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .pf-host {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  iframe {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
     border: 0;
     display: block;
+    background: var(--bg);
+  }
+  .pf-loading {
+    position: absolute;
+    inset: 0;
     background: var(--bg);
   }
 </style>

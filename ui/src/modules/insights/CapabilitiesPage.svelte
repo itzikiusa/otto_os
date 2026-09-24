@@ -3,12 +3,11 @@
   // right now, what's degraded, and how do I fix it?". Root-only: backed by
   // GET /capabilities (5 s cached on the server) and GET /support-bundle.
   import { capabilitiesApi, featureLabel, settingsRoute, statusClass, statusLabel } from './capabilities';
-  import type { ModuleCapability, SupportBundle } from './capabilities';
+  import type { ModuleCapability } from './capabilities';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { downloadJson } from '../../lib/components/exporters';
   import { toasts } from '../../lib/toast.svelte';
 
   // ---------------------------------------------------------------------------
@@ -17,7 +16,6 @@
 
   let caps: ModuleCapability[] = $state([]);
   let loading = $state(true);
-  let bundleLoading = $state(false);
   /** Which feature is expanded (showing dep breakdown). */
   let expanded = $state<Set<string>>(new Set());
 
@@ -40,28 +38,6 @@
       toasts.error('Could not load capabilities', e instanceof Error ? e.message : String(e));
     } finally {
       loading = false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Support bundle download
-  // ---------------------------------------------------------------------------
-
-  async function downloadBundle(): Promise<void> {
-    if (bundleLoading) return;
-    bundleLoading = true;
-    try {
-      const bundle: SupportBundle = await capabilitiesApi.bundle();
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      downloadJson(bundle, `otto-support-bundle-${ts}.json`);
-      toasts.success(
-        'Support bundle downloaded',
-        `${bundle.redaction_hits} secret value${bundle.redaction_hits !== 1 ? 's' : ''} redacted.`,
-      );
-    } catch (e) {
-      toasts.error('Bundle download failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      bundleLoading = false;
     }
   }
 
@@ -92,20 +68,9 @@
   );
 </script>
 
-<div class="page">
-  <div class="page-header head-row">
-    <div>
-      <h1>Capability & Health</h1>
-      <div class="sub">
-        What Otto can do right now — aggregated from config, PATH detection, and
-        stored accounts. Results are cached for a few seconds; reload to refresh.
-      </div>
-    </div>
-    <button class="btn" onclick={downloadBundle} disabled={bundleLoading} title="Download a redacted support bundle (secrets stripped)">
-      <Icon name="fetch" size={13} />
-      {bundleLoading ? 'Preparing…' : 'Download support bundle'}
-    </button>
-  </div>
+<!-- Body of Insights → Health; the page header (title, support-bundle
+     action) lives in InsightsPage. -->
+<div class="caps">
 
   {#if !loading && caps.length > 0}
     <!-- Summary chips -->
@@ -127,6 +92,7 @@
   {:else if caps.length === 0}
     <EmptyState
       icon="gauge"
+      variant="page"
       title="No capability data"
       body="Could not load capability information. Make sure you are logged in as root."
       actionLabel="Retry"
@@ -202,26 +168,20 @@
 </div>
 
 <style>
-  .page { padding: 24px; max-width: 900px; }
-
-  .page-header { margin-bottom: 20px; }
-  .head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-
-  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
-  .sub { color: var(--text-muted); font-size: 13px; max-width: 560px; }
+  .caps { max-width: 900px; }
 
   /* summary chips */
   .summary-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
   .chip { padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 500; }
-  .chip-green  { background: var(--color-success-bg, #d1fae5); color: var(--color-success, #065f46); }
-  .chip-yellow { background: var(--color-warn-bg, #fef3c7);    color: var(--color-warn,    #92400e); }
-  .chip-gray   { background: var(--bg-muted, #f1f5f9);         color: var(--text-muted);             }
+  .chip-green  { background: var(--success-soft); color: var(--success); }
+  .chip-yellow { background: var(--warning-soft);    color: var(--warning); }
+  .chip-gray   { background: var(--surface-2);         color: var(--text-dim);             }
 
   /* capability list */
   .cap-list { display: flex; flex-direction: column; gap: 8px; }
 
   .cap-card { border-radius: 8px; overflow: hidden; }
-  .cap-card.has-issues { border-inline-start: 3px solid var(--color-warn, #f59e0b); }
+  .cap-card.has-issues { border-inline-start: 3px solid var(--warning); }
 
   .cap-head {
     display: flex;
@@ -231,7 +191,7 @@
     cursor: pointer;
     user-select: none;
   }
-  .cap-head:hover { background: var(--bg-hover, rgba(0,0,0,.04)); }
+  .cap-head:hover { background: var(--hover); }
 
   .feature-label { font-weight: 500; font-size: 14px; flex: 1; }
   .dep-count { font-size: 12px; }
@@ -240,24 +200,24 @@
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   }
-  .status-dot.green  { background: var(--color-success, #10b981); }
-  .status-dot.yellow { background: var(--color-warn, #f59e0b); }
-  .status-dot.gray   { background: var(--text-muted); }
+  .status-dot.green  { background: var(--success); }
+  .status-dot.yellow { background: var(--warning); }
+  .status-dot.gray   { background: var(--text-dim); }
 
   /* status badge */
   .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; }
-  .badge-green  { background: var(--color-success-bg, #d1fae5); color: var(--color-success, #065f46); }
-  .badge-yellow { background: var(--color-warn-bg, #fef3c7);    color: var(--color-warn,    #92400e); }
-  .badge-gray   { background: var(--bg-muted, #f1f5f9);         color: var(--text-muted); }
+  .badge-green  { background: var(--success-soft); color: var(--success); }
+  .badge-yellow { background: var(--warning-soft);    color: var(--warning); }
+  .badge-gray   { background: var(--surface-2);         color: var(--text-dim); }
 
   /* quick-fix button */
   .btn-sm {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 2px 8px; border-radius: 4px; font-size: 12px;
-    background: transparent; border: 1px solid var(--border, #e2e8f0);
-    cursor: pointer; color: var(--text-muted);
+    background: transparent; border: 1px solid var(--border);
+    cursor: pointer; color: var(--text-dim);
   }
-  .btn-sm:hover { background: var(--bg-hover, rgba(0,0,0,.04)); }
+  .btn-sm:hover { background: var(--hover); }
 
   /* issues (reasons + fixes) */
   .cap-issues { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 6px; }
@@ -266,15 +226,15 @@
   .issue-fix  { font-size: 12px; }
 
   /* dep breakdown */
-  .dep-list { border-top: 1px solid var(--border, #e2e8f0); padding: 8px 14px; }
+  .dep-list { border-top: 1px solid var(--border); padding: 8px 14px; }
   .dep-row  {
     display: flex; align-items: center; gap: 8px;
     padding: 3px 0; font-size: 12px;
   }
   .dep-ok  { display: flex; align-items: center; flex-shrink: 0; }
-  .dep-kind  { text-transform: uppercase; font-size: 10px; letter-spacing: .04em; width: 56px; flex-shrink: 0; }
+  .dep-kind  { text-transform: uppercase; font-size: var(--fs-xs); letter-spacing: .04em; width: 56px; flex-shrink: 0; }
   .dep-name  { font-weight: 500; }
   .dep-detail { font-size: 11px; }
 
-  .dim { color: var(--text-muted); }
+  .dim { color: var(--text-dim); }
 </style>

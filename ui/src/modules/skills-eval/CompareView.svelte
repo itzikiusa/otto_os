@@ -151,7 +151,7 @@
     font-weight: 600;
   }
   .col-cli {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .score {
@@ -162,16 +162,16 @@
     font-weight: 700;
   }
   .score.good {
-    background: color-mix(in srgb, var(--status-idle, #6bbf6b) 20%, transparent);
-    color: var(--status-idle, #3a8c3a);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .score.ok {
-    background: color-mix(in srgb, #e0a000 22%, transparent);
-    color: #b07d00;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .score.bad {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .score.winner {
     outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);

@@ -1,11 +1,14 @@
-// Home dashboard state: up to MAX_VIEWS views, each holding up to MAX_BOXES
-// boxes on a 12-column grid, with an optional 30-second auto-rotation between
-// views. Persisted per device in localStorage (same idiom as the sidebar
-// personalization in ui.svelte.ts) — the layout is a personal preference, not
-// workspace data, so it never goes through the daemon.
+// Home desktop state: up to MAX_VIEWS views — shown to the user as spaces
+// 01–04 — each holding up to MAX_BOXES widgets on a 12-column grid, with an
+// optional 30-second auto-rotation between spaces. Persisted per device in
+// localStorage (same idiom as the sidebar personalization in ui.svelte.ts) —
+// the layout is a personal preference, not workspace data, so it never goes
+// through the daemon. WHICH space is active lives in the shared spaces store
+// (lib/stores/spaces.svelte.ts) so the floating bar's 01–04 and Home agree.
 
 import { HOME_KINDS, isHomeKind, kindDef, type HomeBoxKind } from './kinds';
 import type { Feature } from '../../lib/api/types';
+import { spaces } from '../../lib/stores/spaces.svelte';
 
 export const MAX_VIEWS = 4;
 export const MAX_BOXES = 8;
@@ -39,7 +42,6 @@ export interface HomeView {
 
 const LS = {
   views: 'otto_home_views',
-  active: 'otto_home_active',
   rotate: 'otto_home_rotate',
 };
 
@@ -106,7 +108,14 @@ function loadViews(): HomeView[] {
 
 class HomeStore {
   views: HomeView[] = $state(loadViews());
-  activeIndex = $state(clamp(Number(lsGet(LS.active)) || 0, 0, MAX_VIEWS - 1));
+  /** The active view = the active space (shared with the floating bar),
+   *  clamped to the views that exist. Writes go through the spaces store. */
+  get activeIndex(): number {
+    return clamp(spaces.active, 0, Math.max(0, this.views.length - 1));
+  }
+  set activeIndex(n: number) {
+    spaces.select(n);
+  }
   /** Auto-slide between views every ROTATE_MS. Default ON (the ask). */
   autoRotate = $state(lsGet(LS.rotate) !== '0');
   /** Box currently zoomed to fill the page (null = normal grid). */
@@ -131,9 +140,13 @@ class HomeStore {
     return null;
   });
 
+  constructor() {
+    spaces.setNames(this.views.map((v) => v.name));
+  }
+
   private persist(): void {
     lsSet(LS.views, JSON.stringify(this.views));
-    lsSet(LS.active, String(this.activeIndex));
+    spaces.setNames(this.views.map((v) => v.name));
   }
 
   /** First visit: seed one view with the kinds this user can actually see so the
@@ -179,12 +192,13 @@ class HomeStore {
   goTo(i: number): void {
     if (this.views.length === 0) return;
     const n = ((i % this.views.length) + this.views.length) % this.views.length;
-    if (n === this.activeIndex) return;
+    // Compare with the RAW shared index: the bar may sit on a space past
+    // Home's last view (shown clamped); picking that view re-syncs the bar.
+    if (n === spaces.active) return;
     this.slideDir = n > this.activeIndex ? 1 : -1;
     this.activeIndex = n;
     this.zoomedId = null;
     this.rotationEpoch += 1;
-    lsSet(LS.active, String(n));
   }
   next(): void {
     if (this.views.length < 2) return;
@@ -192,7 +206,6 @@ class HomeStore {
     this.activeIndex = (this.activeIndex + 1) % this.views.length;
     this.zoomedId = null;
     this.rotationEpoch += 1;
-    lsSet(LS.active, String(this.activeIndex));
   }
   prev(): void {
     if (this.views.length < 2) return;
@@ -200,7 +213,6 @@ class HomeStore {
     this.activeIndex = (this.activeIndex - 1 + this.views.length) % this.views.length;
     this.zoomedId = null;
     this.rotationEpoch += 1;
-    lsSet(LS.active, String(this.activeIndex));
   }
 
   setAutoRotate(on: boolean): void {

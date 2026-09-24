@@ -22,6 +22,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
 
   // Route awareness is now limited to PR detail + deep-links into a repo tab.
   const routeRepoId = $derived(router.parts[1] ?? null);
@@ -248,7 +249,28 @@
   <PrDetail repoId={prRepo.id} number={Number(router.parts[3])} />
 {:else}
   <div class="gitpage">
-    <GitTabs onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+    <!-- Unified toolbar: the open-repo tabs sit inline in the page header
+         (like a document window's tab strip), so an open repo costs no extra
+         chrome row. -->
+    <PageHeader
+      title={landingFocus && !activeRepo ? 'Focus' : 'Git'}
+      crumbs={landingFocus && !activeRepo ? [{ label: 'Git', onclick: () => (landingFocus = false) }] : []}
+      class="git-header"
+    >
+      {#snippet tabs()}
+        <GitTabs embedded onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+      {/snippet}
+      {#snippet actions()}
+        {#if !activeRepo && !landingFocus && git.allRepos.length > 0}
+          <button class="btn ghost" onclick={() => (landingFocus = true)} title="My pull requests + my Jira work">
+            <Icon name="zap" size={12} /> Focus
+          </button>
+          <button class="btn primary" onclick={() => (addOpen = true)}>
+            <Icon name="plus" size={12} /> Add Repository
+          </button>
+        {/if}
+      {/snippet}
+    </PageHeader>
 
     {#if activeRepo}
       {#key activeRepo.id}
@@ -263,10 +285,6 @@
       {/key}
     {:else if landingFocus}
       <div class="landing-focus">
-        <div class="landing-focus-head">
-          <button class="btn ghost small" onclick={() => (landingFocus = false)}>← Repos</button>
-          <span class="landing-focus-title">Focus</span>
-        </div>
         <FocusView />
       </div>
     {:else}
@@ -277,30 +295,19 @@
           <Skeleton rows={3} height={56} />
         {:else if git.allRepos.length === 0}
           <EmptyState
+            variant="page"
             icon="branch"
             title="No repositories yet"
             body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
             actionLabel="Add Repository"
+            actionIcon="plus"
             onaction={() => (addOpen = true)}
           />
         {:else}
           <div class="landing-inner">
-            <div class="landing-head">
-              <div>
-                <h2 class="landing-title">No repository open</h2>
-                <div class="landing-hint">
-                  Open one below, or use the <strong>+</strong> tab — you can also add a
-                  new repository there.
-                </div>
-              </div>
-              <div class="landing-actions">
-                <button class="btn ghost" onclick={() => (landingFocus = true)} title="My pull requests + my Jira work">
-                  <Icon name="zap" size={12} /> Focus
-                </button>
-                <button class="btn primary" onclick={() => (addOpen = true)}>
-                  <Icon name="plus" size={12} /> Add Repository
-                </button>
-              </div>
+            <div class="landing-hint">
+              No repository open — pick one below, or use the <strong>+</strong> tab (you can
+              also add a new repository there).
             </div>
             <div class="repo-search">
               <Icon name="search" size={13} />
@@ -543,7 +550,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 28px 24px 40px;
+    padding: 18px 20px 40px;
   }
   /* Focus view opened from the landing (no repo tab): slim header + the view. */
   .landing-focus {
@@ -552,48 +559,15 @@
     display: flex;
     flex-direction: column;
   }
-  .landing-focus-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .landing-focus-title {
-    font-size: 13px;
-    font-weight: 700;
-  }
-  .landing-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-  /* Centered, constrained hub so the no-tab state isn't a sprawling near-empty
-     page — the + tab is the primary add/open entry point. */
+  /* The repo hub follows the one page-width rule: full width, left-aligned
+     with the header title. */
   .landing-inner {
-    max-width: 880px;
-    margin: 0 auto;
     width: 100%;
-  }
-  .landing-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-  .landing-title {
-    font-size: 16px;
-    font-weight: 650;
-    margin: 0;
   }
   .landing-hint {
     font-size: 12px;
     color: var(--text-dim);
-    margin-top: 3px;
-    max-width: 520px;
+    margin-bottom: 12px;
   }
   .path-row {
     display: flex;
@@ -635,7 +609,7 @@
     margin-top: 1px;
   }
   .remote-full {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     margin-top: 1px;
   }
   .pad {
@@ -726,7 +700,7 @@
     white-space: nowrap;
   }
   .repo-remote {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     margin-top: 2px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -767,14 +741,6 @@
   @media (max-width: 1024px) {
     .landing {
       padding: 16px 12px 32px;
-    }
-    .landing-head {
-      flex-direction: column;
-      align-items: stretch;
-    }
-    .landing-head .btn {
-      align-self: flex-start;
-      min-height: 38px;
     }
     /* One column on phone — minmax(320px) would otherwise force a track wider
        than the content box on a 375px screen. */

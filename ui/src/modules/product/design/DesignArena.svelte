@@ -796,15 +796,15 @@
         <span class="pane-title">Assets</span>
       {/if}
       <div class="list-actions">
-        <button class="p-btn" onclick={newMenu} title="New artifact (blank or from a template)">
+        <button class="btn small" onclick={newMenu} title="New artifact (blank or from a template)">
           <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={10} />
         </button>
-        <label class="p-btn" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
+        <label class="btn small" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
           <Icon name="arrowUp" size={12} />
           {importing ? 'Importing…' : 'Import'}
           <input type="file" multiple accept={IMPORT_ACCEPT} style="display:none" onchange={importFiles} disabled={importing} />
         </label>
-        <button class="act-btn p-btn primary" onclick={aiMenu} title="Generate an artifact with AI">
+        <button class="act-btn btn small primary" onclick={aiMenu} title="Generate an artifact with AI">
           <Icon name="zap" size={12} /> Create with AI
         </button>
       </div>
@@ -1049,15 +1049,15 @@
             {:else if blender.installed}
               <p class="insp-hint">Blender {blender.version ?? ''} <span class="mono">{blender.path}</span></p>
               <div class="insp-actions">
-                <button class="p-btn primary" onclick={renderInBlender} disabled={rendering}>
+                <button class="btn small" onclick={renderInBlender} disabled={rendering}>
                   {rendering ? `Rendering… ${renderJob?.status ?? ''}` : 'Render + export GLB'}
                 </button>
-                <button class="p-btn" onclick={downloadBlenderScript}>Download script</button>
+                <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {:else}
               <p class="insp-hint">Blender isn't installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
               <div class="insp-actions">
-                <button class="p-btn" onclick={downloadBlenderScript}>Download script</button>
+                <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {/if}
           </section>
@@ -1065,7 +1065,7 @@
 
         {#if !assistDocked && isText}
           <section class="insp-sec">
-            <button class="p-btn primary wide" onclick={() => att && refine(att)}>
+            <button class="btn small" onclick={() => att && refine(att)}>
               <Icon name="zap" size={12} /> Refine with AI
             </button>
           </section>
@@ -1118,7 +1118,7 @@
     flex-shrink: 0;
   }
   .pane-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1138,13 +1138,13 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .ss.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .list-actions {
     display: flex;
@@ -1189,7 +1189,7 @@
     line-height: 1.5;
   }
   .list-empty.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .group-head {
     display: flex;
@@ -1200,7 +1200,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1237,7 +1237,7 @@
   }
   .mockup-row.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .refine-btn,
   .row-more {
@@ -1263,7 +1263,7 @@
   .refine-btn:hover,
   .row-more:hover {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mockup-type {
     flex-shrink: 0;
@@ -1278,7 +1278,7 @@
   }
   .mockup-row.active .mockup-type {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mockup-name {
     flex: 1;
@@ -1338,7 +1338,7 @@
     max-width: 40%;
   }
   .st-type {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1368,7 +1368,7 @@
   }
   .seg.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn {
     display: inline-flex;
@@ -1390,11 +1390,11 @@
   }
   .tb-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn.on {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 36%, transparent);
   }
   .stage-body {
@@ -1461,7 +1461,7 @@
     flex: none;
   }
   .stage-msg.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .stage-msg p {
     margin: 0 0 8px;
@@ -1487,13 +1487,13 @@
     flex-shrink: 0;
   }
   .stage-status .save.warn {
-    color: #f59e0b;
+    color: var(--warning);
     font-weight: 600;
   }
   .stage-status .link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0;
@@ -1536,7 +1536,7 @@
   }
   .insp-head {
     padding: 8px 12px 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1583,7 +1583,7 @@
   }
   .insp-row small {
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .insp-check {
     display: flex;
@@ -1608,9 +1608,6 @@
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
-  }
-  .wide {
-    justify-content: center;
   }
   .insp-assist {
     flex: 1 1 55%;

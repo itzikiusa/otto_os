@@ -26,6 +26,8 @@
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
@@ -205,6 +207,10 @@
   // ── Commits / graph ───────────────────────────────────────────────────────
   let commits: CommitInfo[] = $state([]);
   let commitsLoading = $state(true);
+  /** The history load failed with nothing on screen — rendered inline with
+   *  Retry, never as "No commits found." (a later-page failure keeps the rows
+   *  and just retries on the next scroll). */
+  let commitsError = $state<string | null>(null);
 
   // ── History paging ────────────────────────────────────────────────────────
   // There is no ceiling on how far back the graph can reach. The page is big
@@ -252,6 +258,13 @@
     return p;
   }
 
+  /** Retry a failed first page (the inline error's Retry). */
+  function retryCommits(): void {
+    commitsLoading = true;
+    hasMore = true;
+    void loadMore().finally(() => (commitsLoading = false));
+  }
+
   async function loadPage(): Promise<boolean> {
     const gen = loadGen;
     try {
@@ -259,6 +272,7 @@
         `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}`,
       );
       if (gen !== loadGen) return false; // repo changed under us — drop it
+      commitsError = null;
       skipCursor += page.length;
       if (page.length < PAGE) hasMore = false;
       if (page.length > 0) {
@@ -269,9 +283,10 @@
         if (fresh.length > 0) commits = [...commits, ...fresh];
       }
       return page.length > 0;
-    } catch {
+    } catch (e) {
       // Leave `hasMore` alone: a transient failure shouldn't permanently declare
       // the end of history — the next scroll retries.
+      if (gen === loadGen && commits.length === 0) commitsError = loadErrorText(e);
       return false;
     }
   }
@@ -389,6 +404,7 @@
     const id = repoId;
     refsLoading = true;
     commitsLoading = true;
+    commitsError = null;
     refs = null;
     commits = [];
     stashes = [];
@@ -527,10 +543,13 @@
         .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${want}`)
         .then((c) => {
           commits = c;
+          commitsError = null;
           skipCursor = c.length;
           hasMore = c.length >= want;
         })
-        .catch(() => {}),
+        .catch((e) => {
+          if (commits.length === 0) commitsError = loadErrorText(e);
+        }),
       api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
       api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
     ]);
@@ -2737,7 +2756,9 @@
     bind:this={graphPanelEl}
     onscroll={onGraphScroll}
   >
-    {#if commitsLoading}
+    {#if commitsError && commits.length === 0}
+      <LoadState what="commits" error={commitsError} empty loading={commitsLoading} onretry={retryCommits} />
+    {:else if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
     {:else if commits.length === 0}
       <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>
@@ -2748,7 +2769,9 @@
              commit text. Sticky so it survives scrolling a long history. -->
         <div class="graph-head" aria-hidden="true">
           <span class="gh-branch">BRANCH / TAG</span>
-          <span class="gh-graph" style="width: {gutterWidth}px">GRAPH</span>
+          <!-- The label is hidden (not clipped to "GRA") when a 1-lane gutter is
+               too narrow to hold it at the readable size. -->
+          <span class="gh-graph" class:gh-label-hidden={gutterWidth < 40} style="width: {gutterWidth}px" title="Graph">GRAPH</span>
           <span class="gh-msg">COMMIT MESSAGE</span>
         </div>
         <!-- WIP row (GitKraken-style): uncommitted changes pinned above the
@@ -3309,7 +3332,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     cursor: pointer;
@@ -3324,7 +3347,7 @@
     margin-inline-start: auto;
     background: var(--surface-2);
     border-radius: 999px;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     font-weight: 600;
     letter-spacing: 0;
@@ -3351,7 +3374,7 @@
   }
   /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
   .ref-folder :global(svg:nth-of-type(2)) {
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0.8;
   }
   .folder-name {
@@ -3421,14 +3444,14 @@
   /* The checked-out branch: accent text + a leading accent rail and faint wash so
      the row itself is unmistakable, not just the check pip. */
   .ref-row.current {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     background: color-mix(in srgb, var(--accent) 11%, transparent);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   .ref-row.current:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   :global([dir='rtl']) .ref-row.current {
     box-shadow: inset -2px 0 0 0 var(--accent);
@@ -3484,24 +3507,24 @@
   }
   /* Worktree pip: violet folder so it never reads as "checked out here". */
   .cur-pip.wt-pip {
-    background: color-mix(in srgb, #a78bfa 55%, transparent);
-    color: #c4b5fd;
-    border: 1px solid color-mix(in srgb, #a78bfa 50%, transparent);
+    background: color-mix(in srgb, var(--worktree) 55%, transparent);
+    color: var(--worktree-text);
+    border: 1px solid color-mix(in srgb, var(--worktree) 50%, transparent);
   }
   /* Branch held by another worktree — distinct from a regular local branch. */
   .ref-row.is-worktree {
-    color: #c4b5fd;
+    color: var(--worktree-text);
   }
   .ref-row.is-worktree:hover:not(:disabled) {
-    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    background: color-mix(in srgb, var(--worktree) 12%, transparent);
   }
   /* Inline "open worktree" affordance next to the branch / worktree name. */
   .wt-open-hint {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.02em;
-    color: #a78bfa;
+    color: var(--worktree-text);
     opacity: 0.85;
     white-space: nowrap;
   }
@@ -3512,13 +3535,13 @@
     display: inline-flex;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
   .ref-upstream {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     max-width: 90px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3579,9 +3602,9 @@
     padding-inline-end: 12px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     color: var(--text-dim);
     user-select: none;
   }
@@ -3597,6 +3620,10 @@
     flex-shrink: 0;
     overflow: hidden;
     white-space: nowrap;
+    text-align: center;
+  }
+  .graph-head .gh-label-hidden {
+    visibility: hidden;
   }
   .graph-head .gh-msg {
     flex: 1;
@@ -3634,7 +3661,7 @@
     box-shadow: inset -2px 0 0 0 var(--accent);
   }
   .graph-row-selected .ci-subject {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   /* Jump-to-ref landing flash: after scrolling hundreds of rows the selection
@@ -3697,7 +3724,7 @@
     background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
   .wip-row .wip-subject {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     font-style: italic;
   }
@@ -3705,19 +3732,19 @@
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 5px;
     border-radius: 3px;
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   /* Conflicted-files chip on the WIP row — conflicts must be visible from the
      graph itself, not only after opening the WIP panel. */
   .wip-conflicts {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 0 5px;
     border-radius: 3px;
@@ -3738,7 +3765,7 @@
      branch chip so the HEAD commit is unmistakable. */
   .head-badge {
     flex-shrink: 0;
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     font-weight: 800;
     letter-spacing: 0.06em;
     line-height: 1;
@@ -3783,7 +3810,7 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 3px;
@@ -3802,12 +3829,12 @@
   /* Local branch — subtle, neutral. */
   .ref-chip.kind-local {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
   .ref-chip.kind-remote {
     background: color-mix(in srgb, #56b6c2 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Tag — amber. */
   .ref-chip.kind-tag {
@@ -3828,9 +3855,9 @@
   }
   /* Branch checked out in another worktree — violet, not local-branch blue. */
   .ref-chip.is-worktree {
-    background: color-mix(in srgb, #a78bfa 18%, transparent);
-    color: #c4b5fd;
-    border-color: color-mix(in srgb, #a78bfa 35%, transparent);
+    background: color-mix(in srgb, var(--worktree) 18%, transparent);
+    color: var(--worktree-text);
+    border-color: color-mix(in srgb, var(--worktree) 35%, transparent);
   }
   .chip-ab {
     display: inline-flex;
@@ -3856,11 +3883,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .ci-sha {
-    color: var(--accent);
-    font-size: 10px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
   }
   .ci-author {
     max-width: 140px;
@@ -3869,7 +3896,7 @@
     white-space: nowrap;
   }
   .ci-date {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
 
@@ -3905,7 +3932,7 @@
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     line-height: 1;
     padding: 2px 5px;
@@ -3918,10 +3945,10 @@
     user-select: none;
   }
   .ref-expander:hover {
-    /* High-contrast active highlight (light-green + black), readable on dark. */
-    background: #7ee787;
-    color: #000;
-    border-color: #7ee787;
+    /* Active highlight: the accent tint every selection uses. */
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   /* Full-screen click-catcher: any outside click closes the popover. */
   .ref-pop-backdrop {
@@ -3947,7 +3974,7 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   }
   .ref-pop-group {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -3970,8 +3997,8 @@
   }
   .ref-pop-row:hover,
   .ref-pop-row:focus-visible {
-    background: #7ee787;
-    color: #000;
+    background: var(--accent-soft);
+    color: var(--accent-text);
     outline: none;
   }
   .ref-pop-label {
@@ -3983,26 +4010,27 @@
   }
   .ref-pop-tag {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ref-pop-row.is-worktree {
-    color: #c4b5fd;
+    color: var(--worktree-text);
   }
   .ref-pop-row.is-worktree .ref-pop-tag {
-    color: #a78bfa;
-    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: var(--worktree-text);
+    border-color: color-mix(in srgb, var(--worktree) 40%, transparent);
   }
   .ref-pop-row:hover .ref-pop-tag,
   .ref-pop-row:focus-visible .ref-pop-tag {
-    background: rgba(0, 0, 0, 0.18);
-    color: #000;
+    background: var(--surface);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────
@@ -4028,7 +4056,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 1px 7px;
@@ -4051,7 +4079,7 @@
   }
   .stash-branch {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     max-width: 80px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -4060,17 +4088,17 @@
   /* worktree/submodule row accents (share the stash-row base) */
   .wt-dirty {
     flex-shrink: 0;
-    color: #febc2e;
-    font-size: 8px;
+    color: var(--warning);
+    font-size: var(--fs-xs);
     line-height: 1;
   }
   .wt-flag {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .wt-flag.sub-warn {
-    color: #febc2e;
+    color: var(--warning);
   }
   .wt-prune {
     width: 100%;
@@ -4111,7 +4139,7 @@
     gap: 6px;
   }
   .detail-empty-label {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.1em;
     color: var(--text-dim);
@@ -4141,7 +4169,7 @@
   }
   .detail-sha {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     letter-spacing: 0.04em;
   }
@@ -4167,7 +4195,7 @@
     min-width: 0;
   }
   .detail-dot {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
   }
   .detail-date {
@@ -4311,8 +4339,8 @@
   /* Hunk header */
   .hunk-header {
     padding: 2px 10px;
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
@@ -4332,7 +4360,7 @@
     padding: 0 5px 0 3px;
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     user-select: none;
     vertical-align: top;
     border-inline-end: 1px solid var(--border);
@@ -4425,7 +4453,7 @@
   }
   .mob-diff-title {
     font-size: 13px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
   }
   .mob-close {

@@ -1,5 +1,7 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpTokensApi } from '../../lib/api/mcp';
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -31,12 +33,16 @@
   let createdToken = $state<{ secret: string; info: McpTokenInfo } | null>(null);
   let rotatedToken = $state<{ secret: string; info: McpTokenInfo } | null>(null);
 
+  /** Failed token-list load — inline with Retry, never "No MCP tokens yet.". */
+  let tokensError = $state<string | null>(null);
+
   async function loadTokens(): Promise<void> {
     try {
       const result = await mcpTokensApi.list();
       tokens = result.tokens;
+      tokensError = null;
     } catch (e) {
-      toasts.error('Could not load MCP tokens', e instanceof Error ? e.message : String(e));
+      tokensError = loadErrorText(e);
     } finally {
       tokensLoaded = true;
     }
@@ -266,7 +272,9 @@
   {/if}
 
   <div class="tok-list" data-testid="mcp-tokens">
-    {#if !tokens.length}
+    {#if tokensError && !tokens.length}
+      <LoadState what="MCP tokens" variant="compact" error={tokensError} empty onretry={() => void loadTokens()} />
+    {:else if !tokens.length}
       <p class="muted small pad">{tokensLoaded ? 'No MCP tokens yet.' : 'Loading…'}</p>
     {:else}
       {#each tokens as tokenInfo (tokenInfo.id)}
@@ -385,10 +393,10 @@
   }
   .mut {
     margin-inline-start: 8px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -397,8 +405,8 @@
     justify-content: flex-end;
   }
   .token-once {
-    border: 1px solid color-mix(in srgb, #e0a000 45%, transparent);
-    background: color-mix(in srgb, #e0a000 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
     border-radius: var(--radius-m, 8px);
     padding: 10px 12px;
     display: flex;
@@ -483,7 +491,7 @@
     padding: 3px 8px;
   }
   .btn.danger {
-    color: var(--danger, #c0392b);
+    color: var(--danger);
   }
 
   @media (max-width: 640px) {

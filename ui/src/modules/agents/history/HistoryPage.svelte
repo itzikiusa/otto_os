@@ -18,6 +18,8 @@
   import { winKey } from '../../../lib/win';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../../lib/components/PageHeader.svelte';
+  import { recallSelection, rememberSelection } from '../../../lib/lastSelection';
   import { ConversationView } from '../conversation';
   import OutputsPanel from '../../panels/OutputsPanel.svelte';
   import {
@@ -65,14 +67,36 @@
 
   function pick(e: HistoryEntry): void {
     history.select(e);
+    rememberSelection('history', entryKey(e));
     if (e.session_id) router.replace(`history/${e.session_id}`);
     else if (router.parts[1]) router.replace('history');
   }
 
   function clearSelection(): void {
     history.select(null);
+    rememberSelection('history', null);
     if (router.parts[1]) router.replace('history');
   }
+
+  // List/detail never opens onto an empty "pick one" pane: once the list is in
+  // (and no deep link asked for a row), restore the last conversation read here
+  // or fall back to the newest one. Once per workspace scope, so "Back" to the
+  // list is respected. Skipped at the narrow list-OR-detail breakpoint, where
+  // selecting would hide the list the user came to see.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const w = wsId;
+    if (!w || autoPickedFor === w || history.loading || history.entries.length === 0) return;
+    untrack(() => {
+      autoPickedFor = w;
+      if (router.parts[1] || history.selectedKey) return;
+      if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches) return;
+      const visible = history.groups.flatMap((g) => g.entries);
+      if (visible.length === 0) return;
+      const last = recallSelection('history');
+      pick(visible.find((e) => entryKey(e) === last) ?? visible[0]);
+    });
+  });
 
   // ── Rescan progress (WS `history_index_progress` via the activity store) ─────
   let rescanning = $state(false);
@@ -277,9 +301,28 @@
   ];
 
   const shown = $derived(history.groups.reduce((n, g) => n + g.entries.length, 0));
+  /** Nothing at all to list (not a filter miss) — the page's one empty state. */
+  const isEmpty = $derived(
+    !history.error && !history.loading && !history.hasMore && history.entries.length === 0,
+  );
 </script>
 
-<div class="history" class:has-sel={!!sel} data-testid="history-page">
+<div class="history-page">
+<PageHeader title="History" subtitle="Every past Claude and Codex conversation — Otto sessions and transcripts found on disk.">
+  {#snippet actions()}
+    <button
+      class="btn small"
+      onclick={() => void rescan()}
+      disabled={rescanning}
+      title={rescanning ? 'Rescanning transcripts on disk…' : 'Rescan ~/.claude/projects and ~/.codex/sessions'}
+      aria-label="Rescan transcripts"
+      data-testid="history-rescan"
+    >
+      <Icon name="refresh" size={13} /> {rescanning ? 'Rescanning…' : 'Rescan'}
+    </button>
+  {/snippet}
+</PageHeader>
+<div class="history" class:has-sel={!!sel} class:is-empty={isEmpty} data-testid="history-page">
   <!-- ── Left: search, filters, grouped list ─────────────────────────────── -->
   <aside class="hlist">
     <div class="toolbar">
@@ -295,16 +338,6 @@
           data-testid="history-search"
         />
       </div>
-      <button
-        class="icon-btn"
-        onclick={() => void rescan()}
-        disabled={rescanning}
-        title={rescanning ? 'Rescanning transcripts on disk…' : 'Rescan ~/.claude/projects and ~/.codex/sessions'}
-        aria-label="Rescan transcripts"
-        data-testid="history-rescan"
-      >
-        <Icon name="refresh" size={13} />
-      </button>
     </div>
     <div class="filters">
       <select class="sel" bind:value={scope} aria-label="History workspace">
@@ -341,7 +374,10 @@
       {:else if history.loading && history.entries.length === 0}
         <p class="empty-line dim">Loading…</p>
       {:else if shown === 0}
-        <p class="empty-line dim">
+        <!-- A wholly empty history is said ONCE, by the page EmptyState on the
+             right; this line only covers filter misses (and the narrow
+             list-only layout, where the right pane is hidden). -->
+        <p class="empty-line dim" class:narrow-only={isEmpty}>
           {history.hasMore
             ? 'No matches in this part of history. Load more to keep looking.'
             : history.entries.length === 0
@@ -412,11 +448,22 @@
 
   <!-- ── Right: read-only conversation + outputs ─────────────────────────── -->
   <section class="hdetail">
-    {#if !sel}
+    {#if isEmpty}
       <EmptyState
+        variant="page"
+        icon="clock"
+        title="No conversations yet"
+        body="Run claude or codex in this workspace, or rescan to pick up transcripts already on disk."
+        actionLabel={rescanning ? 'Rescanning…' : 'Rescan transcripts'}
+        actionIcon="refresh"
+        onaction={() => void rescan()}
+      />
+    {:else if !sel}
+      <EmptyState
+        variant="page"
         icon="clock"
         title="Pick a conversation"
-        body="Every Claude and Codex session in this workspace — and the transcripts already on disk — listed on the left. Select one to read it here; resume it to keep going."
+        body="Select one on the left to read it here; resume it to keep going."
       />
     {:else if wsId}
       <header class="dhead">
@@ -494,11 +541,18 @@
     {/if}
   </section>
 </div>
+</div>
 
 <style>
+  .history-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .history {
     display: flex;
-    height: 100%;
+    flex: 1;
     min-height: 0;
     background: var(--bg);
     color: var(--text);
@@ -510,7 +564,7 @@
     font-family: var(--font-mono);
   }
   .small {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 400;
   }
   .err {
@@ -520,6 +574,9 @@
     font-size: 12px;
     line-height: 1.45;
     margin: 8px 12px;
+  }
+  .empty-line.narrow-only {
+    display: none;
   }
 
   /* ── list ──────────────────────────────────────────────────────────────── */
@@ -564,27 +621,6 @@
     font-size: 12px;
     outline: none;
   }
-  .icon-btn {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-  .icon-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
   .filters {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -608,7 +644,7 @@
     align-items: center;
     gap: 6px;
     padding: 4px 10px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border-bottom: 1px solid var(--border);
   }
   .ptrack {
@@ -640,7 +676,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -658,7 +694,7 @@
     font-size: 11.5px;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     background: var(--surface-2);
     border-radius: 999px;
@@ -689,7 +725,7 @@
     width: 18px;
     height: 18px;
     border-radius: 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     line-height: 1;
     margin-top: 1px;
@@ -720,7 +756,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .on-disk {
@@ -790,7 +826,7 @@
     cursor: pointer;
   }
   .more:hover:not(:disabled) {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
 
@@ -944,6 +980,9 @@
     }
     .back {
       display: inline-flex;
+    }
+    .empty-line.narrow-only {
+      display: block;
     }
     .dmeta .mono {
       display: none;

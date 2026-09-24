@@ -70,10 +70,13 @@ function pin(isolation: boolean) {
 async function openSessionList(page: import('@playwright/test').Page) {
   await page.goto('/#/agents');
   const openNav = page.getByRole('button', { name: 'Open navigator' });
-  if (await openNav.isVisible().catch(() => false)) {
+  const list = page.locator('.nested-row .nav-item.nested-item');
+  // isVisible() doesn't wait: settle on the first paint (hamburger on phone,
+  // the inline list elsewhere) before deciding whether to open the drawer.
+  await expect(openNav.or(list).first()).toBeVisible({ timeout: 30_000 });
+  if (await openNav.isVisible()) {
     await openNav.click();
   }
-  const list = page.locator('.nested-row .nav-item.nested-item');
   // The Agents group is the default and should render at least the rows we seeded.
   await expect.poll(() => list.count(), { timeout: 30_000 }).toBeGreaterThan(0);
   return list;
@@ -96,8 +99,10 @@ test('isolation OFF: both this-device and other-device sessions show', async ({ 
   await pin(false)({ page });
   const list = await openSessionList(page);
 
-  await expect(page.getByText(MINE_TITLE)).toBeVisible();
-  await expect(page.getByText(OTHER_TITLE)).toBeVisible();
+  // Scoped to the Navigator rows: Agents opens the latest session, so its title
+  // also shows in the top bar, tab and pane header.
+  await expect(list.filter({ hasText: MINE_TITLE })).toBeVisible();
+  await expect(list.filter({ hasText: OTHER_TITLE })).toBeVisible();
 
   // Exactly the two seeded sessions (the seeded workspace is otherwise empty).
   await expect.poll(() => list.count()).toBe(2);
@@ -107,7 +112,7 @@ test('isolation ON: only the this-device session shows', async ({ page }) => {
   await pin(true)({ page });
   const list = await openSessionList(page);
 
-  await expect(page.getByText(MINE_TITLE)).toBeVisible();
+  await expect(list.filter({ hasText: MINE_TITLE })).toBeVisible();
   await expect(page.getByText(OTHER_TITLE)).toHaveCount(0);
 
   // The other-device session is filtered out client-side; only ours remains.
@@ -138,7 +143,7 @@ test('toggle in Settings flips isolation live (other-device session disappears)'
 
   // Back to the agents list — only the this-device session should remain.
   const list2 = await openSessionList(page);
-  await expect(page.getByText(MINE_TITLE)).toBeVisible();
+  await expect(list2.filter({ hasText: MINE_TITLE })).toBeVisible();
   await expect(page.getByText(OTHER_TITLE)).toHaveCount(0);
   await expect.poll(() => list2.count()).toBe(1);
 });

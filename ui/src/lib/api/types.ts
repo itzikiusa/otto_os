@@ -510,6 +510,10 @@ export interface McpOttoToolInfo {
   /** Feature group (e.g. "Workflows", "Message Brokers") for UI grouping. Optional
    * for forward-compat with daemons that predate the categorised catalog. */
   category?: string | null;
+  /** True when an admin turned "Ask before each call" OFF for this (mutating)
+   *  tool: its calls skip the human approval (still audited). Optional for
+   *  forward-compat with daemons that predate the per-tool exemption. */
+  approval_exempt?: boolean;
 }
 
 /** `GET /mcp/otto-server` (+ `PATCH` reply, which may also carry `token` once). */
@@ -520,12 +524,22 @@ export interface McpOttoServerStatus {
   token_prefix?: string | null;
   /** The freshly-minted token — returned ONCE on a mint/rotate, never again. */
   token?: string | null;
+  /** Global `mcp_require_approval_dangerous` (default true). When false no
+   *  otto.* call asks for approval, whatever the per-tool setting says. */
+  require_approval_dangerous?: boolean;
+  /** Bare names of the mutating tools that skip the per-call approval. */
+  approval_exempt_tools?: string[];
 }
 
 /** `PATCH /mcp/otto-server`. */
 export interface UpdateMcpOttoServerReq {
   enabled?: boolean;
   tools?: string[];
+  /** The COMPLETE set of mutating tools that skip the per-call approval
+   *  (replaces the stored list; bare or `otto.`-prefixed names; a read or
+   *  unknown name is a 400). Pruned to the enabled set — disabling a tool
+   *  also drops its exemption. */
+  approval_exempt_tools?: string[];
   rotate_token?: boolean;
 }
 
@@ -632,6 +646,87 @@ export interface Repo {
    *  'unrecognized' (remote exists but isn't GitHub/Bitbucket Cloud/GitLab —
    *  e.g. Bitbucket Server), or null when the repo has no remote. */
   forge?: GitProviderKind | 'unrecognized' | null;
+}
+
+/** One row of the agent-facing repo directory (`GET /git/repos/directory`,
+ *  `GET /git/repos/resolve`): a repo plus the workspace it is registered in.
+ *  `current` marks the caller's own workspace (the session's, or the hint). */
+export interface RepoDirectoryEntry {
+  id: Id;
+  name: string;
+  path: string;
+  remote_url: string | null;
+  provider: GitProviderKind | null;
+  workspace_id: Id;
+  workspace_name: string;
+  current: boolean;
+}
+
+/** `GET /git/repos/directory` — every repo in every workspace the caller can
+ *  read, current workspace first. */
+export interface RepoDirectory {
+  repos: RepoDirectoryEntry[];
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** How `GET /git/repos/resolve` matched a friendly repo reference. */
+export type RepoMatchedBy = 'id' | 'path' | 'remote' | 'name' | 'session_cwd';
+
+/** `GET /git/repos/resolve?ref=&workspace_id=` — 404 lists what IS available,
+ *  409 lists the ambiguous candidates (both in the Problem `message`). */
+export interface RepoResolveResp {
+  repo: RepoDirectoryEntry;
+  matched_by: RepoMatchedBy;
+}
+
+/** Kinds the agent discovery routes (`GET /refs/directory`, `GET /refs/resolve`)
+ *  know — the same set every agent tool's friendly id argument resolves. */
+export type AgentRefKind =
+  | 'workspace'
+  | 'workflow'
+  | 'connection'
+  | 'broker_cluster'
+  | 'swarm'
+  | 'scheduled_task'
+  | 'goal_loop'
+  | 'agent_room'
+  | 'canvas_scene'
+  | 'product_story'
+  | 'vault'
+  | 'api_request'
+  | 'api_automation'
+  | 'api_environment'
+  | 'issue_account'
+  | 'aws_account'
+  | 'k8s_cluster'
+  | 'design_artifact';
+
+/** `GET /refs/directory?kind=&workspace_id=&prefer_workspace_id=` — every
+ *  object of `kind` across the workspaces the caller can read (a token's
+ *  workspace pin applied). Rows are the kind's own list rows (projected for
+ *  heavy kinds — no workflow graph, no connection params); per-workspace kinds
+ *  add `workspace_id`, `workspace_name` and `current`, current workspace first. */
+export interface AgentRefDirectory {
+  kind: AgentRefKind;
+  items: Array<Record<string, unknown>>;
+  current_workspace_id: Id | null;
+  workspace_count: number;
+}
+
+/** `GET /refs/resolve?kind=&ref=&arg=&workspace_id=&prefer_workspace_id=` —
+ *  one reference (id, or name / title / Jira key / label) resolved. 404 lists
+ *  near misses or what IS available, 409 the ambiguous candidates (both in the
+ *  Problem `message`). `matched_by` is `id`, the matched field name, or
+ *  `only_candidate` (an omitted issue account with exactly one account). */
+export interface AgentRefResolveResp {
+  kind: AgentRefKind;
+  id: string;
+  label: string;
+  workspace_id: Id | null;
+  workspace_name: string | null;
+  matched_by: string;
+  item: Record<string, unknown>;
 }
 
 /** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
@@ -1178,6 +1273,42 @@ export type OttoEvent =
       doc: unknown;
     }
   | {
+      /** Otto Assistant: a turn was indexed (user send echo, landed reply,
+       *  memory chip, delegation, reminder, route/limit notice). Owner-only.
+       *  Clients append/replace by `turn.id`; `thread` is the row after the
+       *  change, or null when unchanged. */
+      type: 'assistant_turn';
+      user_id: Id;
+      thread_id: Id;
+      turn: AssistantTurn;
+      thread: AssistantThread | null;
+    }
+  | {
+      /** Otto Assistant: a task was created or changed state. Owner-only. */
+      type: 'assistant_task_update';
+      user_id: Id;
+      task: AssistantTask;
+    }
+  | {
+      /** Otto Assistant: an item entered or left the needs-you queue.
+       *  `open_count` = queue size after the change (menu-bar dot, phone badge). */
+      type: 'assistant_needs_you';
+      user_id: Id;
+      task: AssistantTask;
+      open_count: number;
+    }
+  | {
+      /** Otto Assistant: a provider usage limit was detected on a thread's
+       *  route. Nothing switches unless `auto_switched` (auto-failover on). */
+      type: 'assistant_limit';
+      user_id: Id;
+      thread_id: Id | null;
+      limit: AssistantLimitState;
+      suggestion: AssistantRouteTarget | null;
+      task_id: Id | null;
+      auto_switched: boolean;
+    }
+  | {
       /** The canvas Ask-AI agent session became live (turn start) — the Canvas
        *  Assistant panel attaches its shell immediately for the matching scene. */
       type: 'canvas_session_started';
@@ -1206,6 +1337,69 @@ export type OttoEvent =
       story_id: Id;
       attachment_id: Id;
       session_id: Id;
+    }
+  | {
+      /** Design Hall: an artifact changed — a new committed version (save,
+       *  named commit, legacy import/sync) or a metadata-only change. Text
+       *  content ≤ 4 MB rides along; `null` → re-fetch
+       *  `GET /design/artifacts/{id}/content`. */
+      type: 'design_artifact_updated';
+      workspace_id: Id;
+      artifact_id: Id;
+      format: string;
+      change: DesignArtifactChange;
+      version_id: Id | null;
+      content: string | null;
+    }
+  | {
+      /** Design Hall: a link touching `artifact_id` (the consumer) changed —
+       *  explicit create/delete, re-extraction on save, or its target moved
+       *  (new approved version / new head / deleted). Re-fetch
+       *  `GET /design/artifacts/{artifact_id}/links`. */
+      type: 'design_link_updated';
+      workspace_id: Id;
+      artifact_id: Id;
+      link_id: Id | null;
+      target_artifact_id: Id | null;
+      target_version_id: Id | null;
+      reason: DesignLinkUpdateReason;
+    }
+  | {
+      /** Design Hall learning loop: a design signal was captured, or
+       *  (`kind: 'rule_proposed'`) new team rules await approval. */
+      type: 'design_learning_update';
+      workspace_id: Id;
+      kind: DesignSignalKind | 'rule_proposed';
+      signal_id: Id | null;
+      artifact_id: Id | null;
+    }
+  | {
+      /** Design Hall: a design-assist turn changed state (`running` once its
+       *  session is live — attach the shell — then one terminal state). A
+       *  committed main turn also emits `design_artifact_updated`. Fetch the
+       *  full turn from `GET /design/artifacts/{artifact_id}/assist`. */
+      type: 'design_assist_updated';
+      workspace_id: Id;
+      artifact_id: Id;
+      turn_id: Id;
+      status: DesignAssistStatus;
+      mode: DesignAssistMode | 'variant';
+      /** `main` or `variant/<run>/<k>`. */
+      branch: string;
+      session_id: Id | null;
+      version_id: Id | null;
+      error: string | null;
+    }
+  | {
+      /** Design Hall: every turn of a variants run finished; `version_ids` are
+       *  the committed variant versions (head untouched). */
+      type: 'design_variants_ready';
+      workspace_id: Id;
+      artifact_id: Id;
+      run_id: Id;
+      base_version_id: Id | null;
+      version_ids: Id[];
+      failed: number;
     }
   | {
       /** The DB Assistant agent session became live (turn start) — the embedded
@@ -1280,6 +1474,27 @@ export type OttoEvent =
       type: 'browser_annotation_added';
       workspace_id: Id;
       annotation: unknown;
+    }
+  | {
+      /** A tab's remote live session opened / became ready / crashed / closed.
+       *  Carries no URL/title (sessions are owner-private) — fetch
+       *  `GET /browser/tabs/{id}/live` for details. Workspace-scoped. */
+      type: 'browser_live_session_updated';
+      workspace_id: Id;
+      tab_id: Id;
+      owner_id: Id;
+      state: BrowserLiveSessionState;
+    }
+  | {
+      /** The Chromium download job changed state (machine-wide). Progress
+       *  ticks ≤ 4/s while downloading. */
+      type: 'browser_engine_install_updated';
+      build: BrowserChromeBuild;
+      version: string;
+      state: BrowserEngineInstallState;
+      received_bytes: number;
+      total_bytes: number | null;
+      error: string | null;
     }
   | {
       /** New turns folded from a live session's provider transcript on disk
@@ -1401,6 +1616,8 @@ export type Feature =
   | 'settings'
   | 'users'
   | 'canvas'
+  /** Design Hall — the artifact graph (granted wherever `canvas` was). */
+  | 'design'
   | 'proof_pack'
   | 'mcp'
   | 'mission_control'
@@ -2265,6 +2482,9 @@ export interface UpdateConfluencePageReq {
   body_md?: string | null;
   /** Replacement body in Confluence storage XHTML. Wins over body_md. */
   body_html?: string | null;
+  /** The page `version` this edit was based on; the server answers 409 when
+   *  the page has changed since (instead of overwriting the newer edit). */
+  base_version?: number | null;
 }
 
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
@@ -3446,6 +3666,9 @@ export interface FindingDetail {
 export interface FindingActionResp {
   finding: Finding;
   session_id?: Id | null;
+  /** Verify only: the evidence behind a pass ("3 tests passed") or why the
+   *  finding was NOT verified (no linked test, zero tests ran, …). */
+  note?: string | null;
 }
 
 /** A repo rule generalized from a finding, fed into the Context Engine. */
@@ -4311,10 +4534,14 @@ export interface UpsertApiEnvironmentReq {
   name: string;
   /** Non-secret variables (keys listed in secret_keys are stripped server-side). */
   variables?: Record<string, string>;
-  /** Names of variables whose values are Keychain-backed. */
-  secret_keys?: string[];
+  /** Names of variables whose values are Keychain-backed. On update, omitted
+   *  keeps the stored set + values; an explicit list replaces it. */
+  secret_keys?: string[] | null;
   /** WRITE-ONLY: new/changed secret values; absent keys keep stored values. */
   secret_values?: Record<string, string>;
+  /** Update only: `{old_name: new_name}` — a renamed secret keeps its stored
+   *  Keychain value (a value in secret_values for the new name still wins). */
+  secret_renames?: Record<string, string>;
 }
 
 export interface ExecuteApiReq {
@@ -4332,6 +4559,12 @@ export interface ExecuteApiReq {
   vars?: Record<string, string> | null;
   /** Route the request through this `ssh`-kind connection (SOCKS5 over SSH). */
   ssh_connection_id?: Id | null;
+  /**
+   * Confirms sending a stored secret (a `$secret` marker or Keychain env
+   * variable) to a host it isn't bound to. Without it the daemon answers
+   * `409 needs_confirm=new_host`. Honoured for a person's credential only.
+   */
+  confirm_new_host?: boolean;
 }
 
 export interface ApiResponse {
@@ -5222,6 +5455,16 @@ export interface QueryStats {
   duration_ms: number;
   row_count: number;
   bytes_read?: number | null;
+}
+
+/** Response of `POST /connections/{id}/db/cancel` — mirrors `CancelOutcome` /
+ *  `CancelStatus` in `crates/otto-dbviewer/src/service.rs`. Only `cancelled`
+ *  means the database stopped the work; `aborted` means Otto dropped its side
+ *  (mongosh killed, no further statement sent) while a statement already on
+ *  the server may still complete; `not_stoppable` means it keeps running. */
+export type DbCancelStatus = 'cancelled' | 'aborted' | 'not_running' | 'not_stoppable';
+export interface DbCancelOutcome {
+  status: DbCancelStatus;
 }
 
 /** Body of `POST /connections/{id}/db/query` — mirrors `QueryRequest` in
@@ -6923,8 +7166,10 @@ export interface BrowserTab {
   workspace_id: Id;
   url: string;
   title: string;
-  /** `"reader"` (fetched + rendered as markdown/HTML) or `"live"` (embedded
-   *  iframe; the daemon never fetches it). */
+  /** `"reader"` (fetched + rendered as markdown/HTML) or `"live"` (a real
+   *  browser: the desktop WKWebView — engine `native` — or a daemon-owned
+   *  Chromium streamed over WS — engine `remote`, see `BrowserLiveSession`).
+   *  The engine is not stored on the tab row. */
   mode: 'reader' | 'live';
   created_at: string;
 }
@@ -7092,6 +7337,254 @@ export interface BrowserLoginResp {
   engine: string;
 }
 
+// ── Browser — remote live view (daemon-owned Chromium) ──────────────────────
+// Contract: docs/contracts/api.md "Browser — remote live view" + ws.md §1b.
+
+/** Which engine renders a `mode:"live"` tab. `native` = the desktop app's
+ *  WKWebView (desktop-only, no daemon state); `remote` = a daemon-owned
+ *  Chromium streamed over `WS /ws/browser/{tab_id}/live` (desktop, PWA and
+ *  remote web sessions). A property of the live session, not the tab row. */
+export type BrowserLiveEngine = 'native' | 'remote';
+
+/** The pluggable Chromium binary. `chrome` (default) = full Chrome for
+ *  Testing in new headless mode (~180 MB download); `chrome-headless-shell` =
+ *  the lighter headless-only shell (~98 MB). */
+export type BrowserChromeBuild = 'chrome' | 'chrome-headless-shell';
+
+export type BrowserEngineInstallState =
+  | 'downloading'
+  | 'verifying'
+  | 'extracting'
+  | 'installed'
+  | 'failed';
+
+export type BrowserLiveSessionState = 'starting' | 'ready' | 'crashed' | 'closed';
+
+/** Who drives a live session. Agent actions pause while a human drives. */
+export type BrowserLiveController = 'none' | 'human' | 'agent';
+
+/** Daemon-wide remote-live settings (settings KV key `browser_live`).
+ *  `PUT /browser/live/settings` takes a partial of this. */
+export interface BrowserLiveSettings {
+  /** Default `'chrome'`. */
+  build: BrowserChromeBuild;
+  /** "Show the window on this Mac" — launch Chrome with a visible window on
+   *  the daemon host (still screencast-streamed). Default `false`; requires
+   *  `build === 'chrome'`. */
+  headed: boolean;
+  /** Live sessions daemon-wide (1..=16, default 6). */
+  max_sessions: number;
+  /** Close a session with no viewer and no activity after this long
+   *  (60..=86400, default 900). */
+  idle_timeout_secs: number;
+  /** Page-initiated downloads: refused, or saved (never opened) into the
+   *  per-profile quarantine folder. Default `'quarantine'`. */
+  downloads: 'block' | 'quarantine';
+}
+
+/** One pinned Chromium build as seen by `GET /browser/live/status`. */
+export interface BrowserEngineBuildStatus {
+  build: BrowserChromeBuild;
+  /** Pinned Chrome for Testing version, e.g. `"149.0.7827.55"`. */
+  version: string;
+  platform: string;
+  installed: boolean;
+  /** Approximate download size in bytes (for the enable/download copy). */
+  download_bytes: number;
+  /** Human copy, e.g. `"Chrome for Testing — full browser (~180 MB)"`. */
+  label: string;
+  /** `false` when this daemon build ships no sha256 pin for it — install is
+   *  refused (fail closed). */
+  sha256_pinned: boolean;
+  /** Where the binary lives when installed (or the `OTTO_CHROME_BIN` path). */
+  path: string | null;
+  /** `managed` = downloaded into the data dir; `env` = `OTTO_CHROME_BIN`. */
+  source: 'managed' | 'env' | null;
+}
+
+/** The (single, daemon-wide) Chromium download job. */
+export interface BrowserEngineInstallJob {
+  build: BrowserChromeBuild;
+  version: string;
+  state: BrowserEngineInstallState;
+  received_bytes: number;
+  total_bytes: number | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** `GET /browser/live/status`. */
+export interface BrowserLiveStatus {
+  /** `false` off mac-arm64 — the remote engine can't be installed here. */
+  platform_supported: boolean;
+  builds: BrowserEngineBuildStatus[];
+  settings: BrowserLiveSettings;
+  /** The current/last install job this daemon run, if any. */
+  install: BrowserEngineInstallJob | null;
+  /** Running Chromium processes. */
+  processes: number;
+  /** Open live sessions (daemon-wide). */
+  sessions: number;
+}
+
+/** `POST /browser/live/install` body. */
+export interface BrowserEngineInstallReq {
+  build?: BrowserChromeBuild;
+}
+
+/** Viewport in CSS px. */
+export interface BrowserViewport {
+  width: number;
+  height: number;
+  device_scale_factor?: number;
+}
+
+/** A tab's remote live session. Private to `owner_id` (plus ws Admin/root). */
+export interface BrowserLiveSession {
+  tab_id: Id;
+  workspace_id: Id;
+  owner_id: Id;
+  engine: 'remote';
+  build: BrowserChromeBuild;
+  version: string;
+  /** `'ephemeral'` (own incognito-like context, wiped on close) or a named
+   *  persistent profile scoped to (workspace, owner, name). */
+  profile: string;
+  headed: boolean;
+  state: BrowserLiveSessionState;
+  url: string;
+  title: string;
+  loading: boolean;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+  viewport: Required<BrowserViewport>;
+  controller: BrowserLiveController;
+  controller_user_id: Id | null;
+  /** Attached WS viewers. */
+  viewers: number;
+  created_at: string;
+  last_activity_at: string;
+}
+
+/** `POST /browser/tabs/{id}/live` body. `engine` must be `'remote'` (a
+ *  native tab needs no daemon session). `profile` matches `[a-z0-9_-]{1,40}`
+ *  (default `'ephemeral'`). `url` defaults to the tab's url. */
+export interface BrowserLiveCreateReq {
+  engine?: 'remote';
+  viewport?: BrowserViewport;
+  profile?: string;
+  url?: string;
+}
+
+export type BrowserLiveNavAction = 'goto' | 'back' | 'forward' | 'reload' | 'stop';
+
+/** `POST /browser/tabs/{id}/live/nav` body — `url` required for `goto`. */
+export interface BrowserLiveNavReq {
+  action: BrowserLiveNavAction;
+  url?: string;
+}
+
+/** `POST /browser/tabs/{id}/live/control` body. */
+export interface BrowserLiveControlReq {
+  action: 'take_over' | 'hand_back';
+}
+
+/** `POST /browser/tabs/{id}/live/screenshot` body — responds with the image
+ *  bytes (`image/png` | `image/jpeg`), not JSON. */
+export interface BrowserScreenshotReq {
+  mode?: 'viewport' | 'full_page' | 'element';
+  /** Required for `mode: 'element'`. */
+  selector?: string;
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 1..100. */
+  quality?: number;
+}
+
+/** Header of a binary screencast frame on `WS /ws/browser/{tab_id}/live`:
+ *  `[u8 version=1][u32 BE header length N][N bytes JSON header][image bytes]`. */
+export interface BrowserLiveFrameHeader {
+  seq: number;
+  mime: 'image/jpeg';
+  /** Image pixel size. */
+  width: number;
+  height: number;
+  /** Viewport in CSS px — map pointer coords with these. */
+  device_width: number;
+  device_height: number;
+  page_scale_factor: number;
+  offset_top: number;
+  scroll_x: number;
+  scroll_y: number;
+  timestamp: number;
+}
+
+/** CDP modifier bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8. */
+export type BrowserLiveModifiers = number;
+
+/** Client → daemon frames on `WS /ws/browser/{tab_id}/live`. */
+export type BrowserLiveClientMsg =
+  | { type: 'ack'; seq: number }
+  | {
+      type: 'mouse';
+      action: 'move' | 'down' | 'up' | 'wheel';
+      x: number;
+      y: number;
+      button?: 'left' | 'middle' | 'right' | 'back' | 'forward' | 'none';
+      buttons?: number;
+      click_count?: number;
+      delta_x?: number;
+      delta_y?: number;
+      modifiers?: BrowserLiveModifiers;
+    }
+  | {
+      type: 'key';
+      action: 'down' | 'up';
+      key: string;
+      code: string;
+      text?: string;
+      key_code?: number;
+      location?: number;
+      repeat?: boolean;
+      modifiers?: BrowserLiveModifiers;
+    }
+  | { type: 'text'; text: string }
+  | { type: 'ime'; text: string; selection_start: number; selection_end: number }
+  | { type: 'paste'; text: string }
+  | { type: 'nav'; action: BrowserLiveNavAction; url?: string }
+  | { type: 'resize'; width: number; height: number; device_scale_factor?: number }
+  | { type: 'control'; action: 'take_over' | 'hand_back' }
+  | { type: 'dialog'; accept: boolean; prompt_text?: string };
+
+/** Daemon → client JSON frames on `WS /ws/browser/{tab_id}/live` (binary
+ *  frames are screencast images — see `BrowserLiveFrameHeader`). */
+export type BrowserLiveServerMsg =
+  | { type: 'state'; session: BrowserLiveSession }
+  | { type: 'cursor'; cursor: string }
+  | {
+      type: 'dialog';
+      dialog_type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+      message: string;
+      default_prompt: string;
+      url: string;
+    }
+  | { type: 'blocked'; host: string; reason: 'ssrf' }
+  | { type: 'popup'; url: string }
+  | { type: 'download'; status: 'blocked' | 'quarantined'; filename: string; bytes: number | null }
+  | { type: 'approval'; approval_id: Id; status: 'pending' | 'approved' | 'denied'; title: string }
+  | {
+      type: 'error';
+      code:
+        | 'forbidden'
+        | 'not_driver'
+        | 'bad_frame'
+        | 'nav_failed'
+        | 'input_failed'
+        | 'engine_unavailable';
+      message: string;
+    }
+  | { type: 'closed'; reason: 'closed' | 'idle' | 'crashed' | 'revoked' | 'replaced' };
+
 // ---------------------------------------------------------------------------
 // Personal Agents (mirror of otto_state::personal_agents — keep in lockstep)
 // ---------------------------------------------------------------------------
@@ -7129,7 +7622,9 @@ export interface PersonalAgent {
 export interface PersonalAgentSchedule {
   id: Id;
   agent_id: Id;
-  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`. */
+  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`,
+   *  or the one-shot `{cadence:'once', run_at}` (RFC3339 or local
+   *  `YYYY-MM-DDTHH:MM` in `timezone`; the schedule disables itself after its run). */
   schedule: Record<string, unknown>;
   timezone: string;
   /** The run's task prompt for this schedule. */
@@ -8697,4 +9192,1093 @@ export interface SessionNetwork {
   status: 'connected' | 'error' | 'stopped' | 'disabled';
   error: string | null;
   endpoints: (NetworkEndpoint & {host: string; port: number})[];
+}
+
+// ---------------------------------------------------------------------------
+// Design Hall — the artifact graph (mirrors crates/otto-design/src/types.rs;
+// contract: docs/contracts/api.md § Design Hall, ws.md design_* events).
+// ---------------------------------------------------------------------------
+
+export type DesignStudio =
+  | 'frames'
+  | 'graphics'
+  | 'site'
+  | '3d'
+  | 'whiteboard'
+  | 'brand'
+  | 'spatial';
+
+/** Stored artifact formats (`otto-site`/`-layout`/`-brand`/`-exhibit` are Phase 1+). */
+export type DesignArtifactFormat =
+  | 'html'
+  | 'mermaid'
+  | 'd2'
+  | 'excalidraw'
+  | 'scene3d'
+  | 'otto-canvas'
+  | 'otto-site'
+  | 'otto-layout'
+  | 'otto-brand'
+  | 'otto-exhibit'
+  | 'svg'
+  | 'png'
+  | 'jpeg'
+  | 'gif'
+  | 'webp'
+  | 'pdf'
+  | 'glb'
+  | 'gltf';
+
+export type DesignStatus = 'draft' | 'review' | 'approved' | 'shipped' | 'archived';
+export type DesignAuthorKind = 'user' | 'agent' | 'system';
+export type DesignVersionKind = 'autosave' | 'named' | 'agent' | 'import' | 'sync' | 'restore';
+export type DesignLinkRel =
+  | 'embeds'
+  | 'uses_component'
+  | 'uses_tokens'
+  | 'describes'
+  | 'derived_from'
+  | 'references'
+  | 'implements'
+  | 'variant_of'
+  | 'resized_from'
+  | 'published_as'
+  | 'exported_to'
+  | 'created_in';
+export type DesignLinkDstKind =
+  | 'artifact'
+  | 'story'
+  | 'session'
+  | 'swarm_project'
+  | 'vault_note'
+  | 'pr'
+  | 'url'
+  | 'attachment'
+  | 'publish';
+export type DesignLinkPolicy = 'follow_approved' | 'follow_latest' | 'pinned';
+export type DesignSignalKind =
+  | 'variant_chosen'
+  /** Server-recorded when `POST …/variants/{v}/accept` fast-forwards main. */
+  | 'variant_accepted'
+  | 'variant_rejected'
+  /** A design-assist turn committed a version (main or a variant branch). */
+  | 'agent_draft'
+  | 'edit_after_draft'
+  | 'review_comment'
+  | 'critique_finding'
+  | 'a11y_fix'
+  | 'brand_correction'
+  | 'rule_feedback'
+  | 'status_change'
+  | 'shipped'
+  /** An older version saved again as the new head — `version_id` = the new
+   *  head, `payload.from_version_id` (required) = the version restored. */
+  | 'restored'
+  /** A library artifact added as a reference — `payload.target_artifact_id`
+   *  (required). */
+  | 'reference_added'
+  /** "Start from this": recorded on the NEW artifact, `payload.source_artifact_id`
+   *  (required; `source_version_id` optional). */
+  | 'forked';
+export type DesignArtifactChange =
+  | 'created'
+  | 'content'
+  | 'meta'
+  | 'approved'
+  | 'archived'
+  | 'deleted'
+  /** An UNCOMMITTED, validated mid-turn edit by a design-assist agent
+   *  (`version_id: null`); the turn's commit follows as `content`. */
+  | 'live'
+  /** A new rendered thumbnail was stored (`PUT …/thumbnail`) — refresh the
+   *  image only (not an edit; never re-render in response). */
+  | 'thumbnail';
+export type DesignLinkUpdateReason =
+  | 'created'
+  | 'deleted'
+  | 'extracted'
+  | 'target_approved'
+  | 'target_updated'
+  | 'target_deleted';
+
+export interface DesignProject {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  description: string;
+  epic_story_id: Id | null;
+  swarm_project_id: Id | null;
+  brand_kit_id: Id | null;
+  cover_artifact_id: Id | null;
+  archived: boolean;
+  meta: Record<string, unknown>;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  /** Non-archived artifacts filed in this project. */
+  artifact_count: number;
+}
+
+export interface DesignArtifact {
+  id: Id;
+  /** `null` = unfiled (e.g. freshly imported legacy rows). */
+  project_id: Id | null;
+  workspace_id: Id;
+  studio: DesignStudio;
+  format: DesignArtifactFormat | string;
+  mime: string;
+  title: string;
+  status: DesignStatus;
+  head_version_id: Id | null;
+  /** `seq` of the head version (the "v12" badge). */
+  head_seq: number | null;
+  approved_version_id: Id | null;
+  tags: string[];
+  /** sha256 of the thumbnail blob — PNG or WebP (`GET …/thumbnail` serves
+   *  it; `PUT …/thumbnail` stores a UI-rendered one). */
+  thumb_blob: string | null;
+  /** Imported rows carry `meta.imported_from = {kind, id, story_id?, …}`. */
+  meta: Record<string, unknown>;
+  source_kind: 'product_attachment' | 'canvas_scene' | null;
+  source_id: Id | null;
+  created_by: Id;
+  created_by_kind: DesignAuthorKind;
+  created_session_id: Id | null;
+  created_at: string;
+  updated_at: string;
+  // Resolved on read (never written):
+  /** Display name of `created_by` (display name, else username); `null` for
+   *  a system author such as the legacy import. */
+  created_by_name: string | null;
+  /** `author_id` / `author_kind` of the head version — who saved last. */
+  last_editor_id: string | null;
+  last_editor_kind: DesignAuthorKind | null;
+  /** Display name of `last_editor_id` (`null` when it is not a user). */
+  last_editor_name: string | null;
+  /** Product stories this artifact is linked to (`implements`), sorted. */
+  story_ids: Id[];
+  /** Title of the `created_session_id` session (`null`: unset or gone). */
+  created_session_title: string | null;
+}
+
+export interface DesignVersion {
+  id: Id;
+  artifact_id: Id;
+  seq: number;
+  parent_version_id: Id | null;
+  branch: string;
+  blob_sha256: string;
+  size_bytes: number;
+  kind: DesignVersionKind;
+  author_kind: DesignAuthorKind;
+  author_id: string;
+  session_id: Id | null;
+  message: string;
+  provenance: Record<string, unknown>;
+  created_at: string;
+  /** Display name of `author_id`, resolved on read (`null`: not a user). */
+  author_name: string | null;
+}
+
+export interface DesignLink {
+  id: Id;
+  src_artifact_id: Id;
+  src_version_id: Id | null;
+  src_node: string | null;
+  dst_kind: DesignLinkDstKind;
+  dst_id: string;
+  dst_node: string | null;
+  rel: DesignLinkRel;
+  policy: DesignLinkPolicy;
+  pinned_version_id: Id | null;
+  origin: 'explicit' | 'extracted';
+  /** Dangling target (missing artifact / version / node) — show a badge. */
+  broken: boolean;
+  meta: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+}
+
+export interface DesignSignal {
+  id: Id;
+  workspace_id: Id;
+  artifact_id: Id;
+  version_id: Id | null;
+  kind: DesignSignalKind;
+  actor_kind: DesignAuthorKind;
+  actor_id: string;
+  session_id: Id | null;
+  /** Bounded summary (≤ 8 KB) — never raw document content. */
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+/** `GET /design/artifacts/{id}` (`?content=true[&version=v3]` inlines the source). */
+export interface DesignArtifactDetail {
+  artifact: DesignArtifact;
+  head: DesignVersion | null;
+  approved: DesignVersion | null;
+  links_out: number;
+  links_in: number;
+  /** Editable working copy on disk (text formats only). */
+  work_path: string | null;
+  thumbnail_path: string | null;
+  content: string | null;
+  content_version_id: Id | null;
+  content_truncated: boolean;
+}
+
+export interface DesignBrokenRef {
+  uri: string;
+  src_node: string | null;
+  reason: 'missing_artifact' | 'missing_version' | 'missing_node' | 'malformed';
+}
+
+export interface DesignLinkReport {
+  extracted: number;
+  broken: DesignBrokenRef[];
+  /** Render links NOT stored because they would close a cycle. */
+  cycles: string[];
+  /** Render chains deeper than 4 (stored; rendering stops at depth 4). */
+  depth_exceeded: string[];
+}
+
+/** Result of create / content save / named commit. */
+export interface DesignSaveResult {
+  artifact: DesignArtifact;
+  version: DesignVersion;
+  /** `false` when the bytes equalled the head (no new version written). */
+  created: boolean;
+  links: DesignLinkReport;
+}
+
+export interface DesignLinksResp {
+  links: DesignLink[];
+  /** The artifacts on the other end that the caller may view. */
+  artifacts: DesignArtifact[];
+}
+
+export interface DesignSearchHit {
+  artifact: DesignArtifact;
+  snippet: string;
+  score: number;
+  reference_count: number;
+  story_ids: Id[];
+}
+
+export interface DesignImportReport {
+  attachments_scanned: number;
+  scenes_scanned: number;
+  created: number;
+  synced: number;
+  unchanged: number;
+  skipped: number;
+  links_created: number;
+  errors: string[];
+}
+
+export interface DesignPruneReport {
+  applied: boolean;
+  artifacts_scanned: number;
+  versions: Id[];
+  blobs: string[];
+}
+
+export interface CreateDesignProjectReq {
+  workspace_id: Id;
+  name: string;
+  description?: string;
+  epic_story_id?: Id;
+  swarm_project_id?: Id;
+  brand_kit_id?: Id;
+  meta?: Record<string, unknown>;
+}
+
+/** `""` clears an optional id; omitted fields are unchanged. */
+export interface UpdateDesignProjectReq {
+  name?: string;
+  description?: string;
+  epic_story_id?: string;
+  swarm_project_id?: string;
+  brand_kit_id?: string;
+  cover_artifact_id?: string;
+  archived?: boolean;
+  meta?: Record<string, unknown>;
+}
+
+export interface CreateDesignArtifactReq {
+  workspace_id: Id;
+  project_id?: Id;
+  studio?: DesignStudio;
+  format: DesignArtifactFormat;
+  title: string;
+  tags?: string[];
+  meta?: Record<string, unknown>;
+  /** UTF-8 source (text formats) — or `content_b64` for any format. */
+  content?: string;
+  content_b64?: string;
+  /** Link to a product story (`implements`). */
+  story_id?: Id;
+  /** Fork (`derived_from`, pinned); omitted version → approved, else head. */
+  derived_from?: { artifact_id: Id; version_id?: Id };
+  author_kind?: 'user' | 'agent';
+  session_id?: Id;
+  message?: string;
+}
+
+export interface UpdateDesignArtifactReq {
+  title?: string;
+  /** `""` unfiles the artifact. */
+  project_id?: string;
+  studio?: DesignStudio;
+  status?: DesignStatus;
+  tags?: string[];
+  meta?: Record<string, unknown>;
+  /** PNG thumbnail, base64, ≤ 2 MB. */
+  thumb_b64?: string;
+}
+
+export interface DesignContentPutReq {
+  content?: string;
+  content_b64?: string;
+  /** The head version id the editor loaded (`""` = none yet); mismatch → 409. */
+  base_version?: string;
+  message?: string;
+  author_kind?: 'user' | 'agent';
+  session_id?: Id;
+  provenance?: Record<string, unknown>;
+}
+
+/** `POST /design/artifacts/{id}/versions` — without content it snapshots the working copy. */
+export interface DesignCommitReq {
+  message: string;
+  content?: string;
+  content_b64?: string;
+  base_version?: string;
+  author_kind?: 'user' | 'agent';
+  session_id?: Id;
+  provenance?: Record<string, unknown>;
+}
+
+export interface CreateDesignLinkReq {
+  rel: DesignLinkRel;
+  dst_kind: DesignLinkDstKind;
+  dst_id: string;
+  dst_node?: string;
+  src_node?: string;
+  policy?: DesignLinkPolicy;
+  pinned_version_id?: Id;
+  meta?: Record<string, unknown>;
+}
+
+export interface DesignSignalReq {
+  artifact_id: Id;
+  kind: DesignSignalKind;
+  version_id?: Id;
+  actor_kind?: DesignAuthorKind;
+  session_id?: Id;
+  /** Bounded JSON object (≤ 8 KB, ≤ 8 levels). */
+  payload?: Record<string, unknown>;
+}
+
+export interface DesignPruneReq {
+  artifact_id?: Id;
+  /** Dry run unless true. */
+  apply?: boolean;
+  window_secs?: number;
+}
+
+// ---- Design assist (the unified agent turn, variants, learned rules) ------
+// Mirrors crates/otto-server/src/design_assist.rs + otto-design cite/learn.
+
+/** `POST /design/artifacts/{id}/assist` modes (`variant` is `/variants` only). */
+export type DesignAssistMode = 'generate' | 'refine' | 'critique' | 'a11y';
+export type DesignAssistStatus =
+  | 'starting'
+  | 'running'
+  /** A version was committed. */
+  | 'done'
+  /** The agent changed nothing (always for a critique). */
+  | 'unchanged'
+  /** The head moved while the agent worked: its draft was kept as the side
+   *  version `variant/<turn_id>/1` (accept it via `…/variants/{v}/accept`). */
+  | 'conflict'
+  | 'failed';
+
+/** A reference offered to a turn as `[R<n>]`. */
+export interface DesignOfferedRef {
+  /** `R1`, `R2`, … */
+  label: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+  title: string;
+  studio: DesignStudio | string;
+  format: string;
+  status: DesignStatus | string;
+  /** Why it was offered. */
+  source: 'explicit' | 'link' | 'search';
+}
+
+/** A citation the server verified against the offered set. */
+export interface DesignCitedRef {
+  label: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+}
+
+export interface DesignAssistReq {
+  prompt: string;
+  /** Default `refine`. */
+  mode?: DesignAssistMode;
+  /** The focused node/section, e.g. `{node_id: 'hero'}` (≤ 4 KB JSON). */
+  selection?: Record<string, unknown>;
+  /** `<artifact_id>`, `<artifact_id>@v12` or `otto://design/<id>[@v12]` (≤ 8). */
+  references?: string[];
+  /** Provider for a NEW assist session (a resumed one keeps its own). */
+  provider?: string;
+  model?: string;
+}
+
+/** One design-assist agent turn (main or one variant). */
+export interface DesignAssistTurn {
+  turn_id: Id;
+  artifact_id: Id;
+  workspace_id: Id;
+  mode: DesignAssistMode | 'variant';
+  status: DesignAssistStatus;
+  /** `main` or `variant/<run>/<k>`. */
+  branch: string;
+  /** Variant direction label (`defaults`, `explore`, `calm`, `story`, or custom). */
+  direction: string | null;
+  provider: string;
+  session_id: Id | null;
+  base_version_id: Id | null;
+  version_id: Id | null;
+  references: DesignOfferedRef[];
+  cited: DesignCitedRef[];
+  /** Citations the agent made that could not be verified (not in provenance). */
+  unverified_citations: string[];
+  /** Keys of the approved team rules the turn was given. */
+  team_rules: string[];
+  /** Critique / a11y findings (`{severity?, rule?, message?, node_id?, fix?, fixed?}`). */
+  findings: Record<string, unknown>[];
+  /** The agent's one-line summary. */
+  message: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface DesignVariantsReq {
+  prompt: string;
+  /** 1..=4 (default 3). */
+  n?: number;
+  references?: string[];
+  selection?: Record<string, unknown>;
+  provider?: string;
+  /** Per-variant providers, cycled (overrides `provider`). */
+  providers?: string[];
+  model?: string;
+  /** Custom direction per variant, cycled; default defaults/explore/calm/story. */
+  directions?: string[];
+}
+
+export interface DesignVariantRun {
+  run_id: Id;
+  artifact_id: Id;
+  base_version_id: Id | null;
+  status: 'running' | 'ready' | 'accepted';
+  /** Committed variant versions (branch `variant/<run_id>/<k>`), k ascending. */
+  versions: DesignVersion[];
+  /** The accepted VARIANT version, once one was. */
+  accepted_version_id: Id | null;
+  /** Live turn states (in memory; empty after a daemon restart). */
+  turns: DesignAssistTurn[];
+}
+
+export interface DesignVariantAcceptReq {
+  /** Accept even though main moved since the variants were drawn. */
+  force?: boolean;
+}
+
+export interface DesignVariantAcceptResp {
+  artifact: DesignArtifact;
+  /** The new main version (head) carrying the variant's bytes. */
+  version: DesignVersion;
+  run_id: Id;
+  accepted_version_id: Id;
+  rejected_version_ids: Id[];
+}
+
+/** A candidate team rule from the deterministic signal extractor. */
+export interface DesignRuleCandidate {
+  /** e.g. `variant_direction:bold`, `edit_property:scene3d:material.color`. */
+  key: string;
+  kind: 'variant_preference' | 'reject_reason' | 'edit_after_draft' | 'a11y';
+  rule: string;
+  rationale: string;
+  /** Evidence: design signal ids. */
+  signal_ids: Id[];
+  signal_count: number;
+  artifact_count: number;
+  /** Meets the thresholds (≥ 3 signals across ≥ 2 artifacts) → proposed. */
+  ready: boolean;
+}
+
+export interface DesignRuleLine {
+  key: string;
+  rule: string;
+}
+
+/** An active learned rule (a line of the `design-team-style` skill). */
+export interface DesignLearnedRule {
+  key: string;
+  rule: string;
+  /** The applied improvement edit that added it (roll back via
+   *  `POST /improvement/edits/{edit_id}/rollback`). */
+  edit_id: Id | null;
+  evidence: Id[];
+  applied_at: string | null;
+}
+
+/** One improvement edit of the design skill (approve / reject via
+ *  `POST /improvement/edits/{edit_id}/approve|reject`). */
+export interface DesignLearnedEdit {
+  edit_id: Id;
+  status: 'pending' | 'applied' | 'rejected' | 'rolled_back' | 'conflict';
+  rules: DesignRuleLine[];
+  rationale: string;
+  evidence: Id[];
+  created_at: string;
+  applied_at: string | null;
+  actor: string | null;
+}
+
+export interface DesignLearnedResp {
+  workspace_id: Id;
+  /** Workspace setting `design_learning` (`off`) — default `suggest`. */
+  mode: 'suggest' | 'off';
+  skill: string;
+  skill_path: string;
+  active: DesignLearnedRule[];
+  pending: DesignLearnedEdit[];
+  history: DesignLearnedEdit[];
+  candidates: DesignRuleCandidate[];
+}
+
+export interface DesignLearnExtractReq {
+  workspace_id: Id;
+}
+
+export interface DesignLearnExtractResp {
+  mode: 'suggest' | 'off';
+  run_id: Id | null;
+  /** Newly proposed (pending) improvement edit ids. */
+  proposed: Id[];
+  skipped: number;
+  candidates: DesignRuleCandidate[];
+}
+
+// ── Site Studio (otto-site v1): static export, local preview, publishes ─────
+// Mirrors crates/otto-design/src/site/{export,http}.rs; contract:
+// docs/contracts/api.md § "Site Studio". The document schema itself is typed in
+// ui/src/modules/design-hall/site/engine/types.ts (it is content, not wire DTOs).
+
+/** One row of `design_publishes`: a publish of ONE version, with the exact
+ *  versions of everything it rendered (brand kit, 3D embeds, images). */
+export interface DesignPublish {
+  id: Id;
+  artifact_id: Id;
+  version_id: Id;
+  /** `zip` | `local` today; `artifact` / `gh_pages` / `netlify` / `cloudflare` are reserved. */
+  target: string;
+  url: string | null;
+  /** The pinned set: the site version first (`role: "site"`), then its brand
+   *  kit, then every rendered 3D embed / image. */
+  pinned_set: DesignPinnedRef[];
+  created_by: Id;
+  created_at: string;
+}
+
+/** One entry of a publish's pinned set (a reference resolved to one version). */
+export interface DesignPinnedRef {
+  /** `site` | `brand` | `embed` | `image`. */
+  role: string;
+  /** The reference as the document wrote it (`otto://design/<id>@approved`; the site: `…@v<seq>`). */
+  uri: string;
+  artifact_id: Id;
+  version_id: Id | null;
+  seq: number | null;
+  title: string;
+  /** What the document asked for: `follow_approved` | `follow_latest` | `pinned`. */
+  policy: string;
+  /** Unresolvable (missing artifact/version, no access) — rendered as a stand-in. */
+  missing: boolean;
+}
+
+/** `POST /design/artifacts/{id}/export`. */
+export interface DesignSiteExportReq {
+  /** `zip` → the static site as a download; `local` → a loopback preview URL. */
+  target: 'zip' | 'local';
+  /** Version id / `v12` / `12`; default the head. */
+  version?: string;
+}
+
+export interface DesignSitePage {
+  id: string;
+  title: string;
+  slug: string;
+  /** File name in the zip (`index.html`, `tiers.html`). */
+  file: string;
+  /** Loopback preview path of this page (bearer-authenticated). */
+  url: string;
+}
+
+/** `POST …/export {target:"local"}` (the zip target answers with the archive). */
+export interface DesignSiteLocalResp {
+  publish: DesignPublish;
+  /** `/api/v1/design/artifacts/{id}/preview?publish=<id>`. */
+  url: string;
+  pages: DesignSitePage[];
+  pinned: DesignPinnedRef[];
+  /** Non-fatal problems (a missing embed rendered as a stand-in, …). */
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Design Hall — Brand Kit (`otto-brand/1`; mirrors crates/otto-design/src/brand;
+// contract: docs/contracts/api.md § Brand Kit). Other studios reference tokens
+// as `token:<group>.<name>` (or `var(--brand-<group>-<name>)`) and link to the
+// kit with rel `uses_tokens`; helpers: ui/src/modules/design-hall/brand/tokens.ts.
+// ---------------------------------------------------------------------------
+
+export type BrandTokenGroup = 'color' | 'font' | 'type' | 'radius' | 'space';
+export type BrandFontRole = 'display' | 'body' | 'mono';
+export type BrandLogoKind = 'full' | 'mark' | 'mono';
+
+export interface BrandColorToken {
+  /** `#RGB` / `#RRGGBB` / `#RRGGBBAA`. */
+  $value: string;
+  $description?: string;
+}
+
+export interface BrandFontToken {
+  /** A CSS family stack (`"Inter", system-ui, sans-serif`); no `; { } < > \`. */
+  $value: string;
+  /** 1–1000, at most 9. */
+  weights?: number[];
+}
+
+/** A text style: size and line height in px, weight 1–1000. */
+export interface BrandTypeStyle {
+  size: number;
+  line: number;
+  weight: number;
+}
+
+/** A radius / space token in px (0–10 000). */
+export interface BrandPxToken {
+  $value: number;
+  $description?: string;
+}
+
+export interface BrandLogo {
+  name: string;
+  kind: BrandLogoKind;
+  /** `otto://design/<id>` (an image artifact) or `blob:<sha256>`; empty = a
+   *  placeholder slot, not uploaded yet. */
+  asset?: string;
+}
+
+/** `voice` / `imagery`: a summary and do / don't examples (≤ 20 each). */
+export interface BrandProse {
+  summary?: string;
+  do?: string[];
+  dont?: string[];
+}
+
+/** The `otto-brand/1` document (DTCG-flavoured). Every group is optional on
+ *  the wire; token names are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`, ≤ 64 per group. */
+export interface BrandDoc {
+  $schema: 'otto-brand/1';
+  name: string;
+  color: Record<string, BrandColorToken>;
+  font: Partial<Record<BrandFontRole, BrandFontToken>>;
+  type?: Record<string, BrandTypeStyle>;
+  radius: Record<string, BrandPxToken>;
+  space: Record<string, BrandPxToken>;
+  logos: BrandLogo[];
+  imagery?: BrandProse;
+  voice?: BrandProse;
+}
+
+export type BrandExportFormat = 'css' | 'tailwind' | 'dtcg';
+
+export interface BrandImpactReq {
+  /** The proposed kit (object or JSON text); omitted = the head (a plain
+   *  "used in" listing with no changes). */
+  content?: BrandDoc | string;
+}
+
+export interface BrandTokenChange {
+  /** `group.name`, e.g. `color.primary`. */
+  token: string;
+  change: 'changed' | 'added' | 'removed';
+  /** Canonical values: `#5B3DF5`, `14px`, `64/72/800` (size/line/weight) … */
+  before: string | null;
+  after: string | null;
+}
+
+export interface BrandStudioCount {
+  studio: DesignStudio;
+  count: number;
+}
+
+export interface BrandConsumer {
+  artifact: DesignArtifact;
+  /** `follow_approved` moves when a kit version is approved; `follow_latest`
+   *  on every save; `pinned` stays until updated. */
+  policy: DesignLinkPolicy;
+  pinned_version_id: Id | null;
+  /** Tokens the consumer's head names (sorted). */
+  tokens: string[];
+  /** Names no single token → the whole kit applies (a site theme). */
+  whole_kit: boolean;
+  /** The changed tokens it would see. */
+  affected: string[];
+  /** false = the head isn't readable text (counted as whole-kit). */
+  scanned: boolean;
+}
+
+export type BrandContrastLevel = 'AAA' | 'AA' | 'AA-large' | 'fail';
+
+export interface BrandContrastColor {
+  name: string;
+  hex: string;
+  on_white: number;
+  on_ink: number;
+  white_level: BrandContrastLevel;
+  ink_level: BrandContrastLevel;
+}
+
+export interface BrandContrastPair {
+  a: string;
+  b: string;
+  ratio: number;
+  level: BrandContrastLevel;
+}
+
+export interface BrandContrastReport {
+  /** The `ink` token, else `text`, else the darkest colour (null name = black). */
+  ink: { name: string | null; hex: string };
+  colors: BrandContrastColor[];
+  /** Every unordered pair of colour tokens. */
+  pairs: BrandContrastPair[];
+}
+
+export interface BrandImpactResp {
+  kit_id: Id;
+  /** What the proposal is compared with. */
+  base: 'approved' | 'head' | 'none';
+  base_version_id: Id | null;
+  base_seq: number | null;
+  changes: BrandTokenChange[];
+  artifact_count: number;
+  studio_count: number;
+  by_studio: BrandStudioCount[];
+  affected_count: number;
+  affected_studio_count: number;
+  affected_by_studio: BrandStudioCount[];
+  /** Affected first, then newest. */
+  consumers: BrandConsumer[];
+  /** Consumers in workspaces the caller can't view. */
+  hidden_count: number;
+  contrast: BrandContrastReport;
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// ── Otto Assistant (mirror of crates/otto-server/src/assistant/types.rs —
+// docs/contracts/api.md "Otto Assistant"; keep in lockstep)
+// ---------------------------------------------------------------------------
+
+/** Where a request came from — reminders and replies are delivered back there. */
+export type AssistantOrigin = 'app' | 'thread' | 'bar' | 'phone' | 'channel';
+
+/** The router's request classes (local keyword rules, no LLM call). */
+export type AssistantRouteKind = 'chat' | 'code' | 'hard' | 'voice';
+
+/** Why a turn went to its provider: thread pin, `@claude`/`@codex` mention,
+ *  a keyword rule, the chat default, or a (confirmed / auto) failover. */
+export type AssistantRouteReason = 'pin' | 'mention' | 'rule' | 'default' | 'failover';
+
+/** One assistant thread = one resumable CLI session (resumed on demand). */
+export interface AssistantThread {
+  id: Id;
+  /** Floating-bar space 1–4 (unique per user), or null when unslotted. */
+  space_slot: 1 | 2 | 3 | 4 | null;
+  title: string;
+  /** The provider of the CURRENT backing session ('claude' | 'codex' | …). */
+  provider: string;
+  model: string | null;
+  account_id: string | null;
+  /** True when the user pinned provider/model (the model chip); rules are off. */
+  route_pinned: boolean;
+  /** The current backing session (null until the first turn). */
+  session_id: Id | null;
+  /** No memory reads/writes; deleted 24 h after the last turn. */
+  incognito: boolean;
+  /** The per-thread answer to "continue on X?" when a limit hits. */
+  failover_choice: 'ask' | 'switch' | 'stay';
+  /** asleep = no live session (resumed on the next send). */
+  status: 'asleep' | 'idle' | 'working';
+  last_turn_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantAttachment {
+  id: Id;
+  name: string;
+  /** Absolute path under the assistant's `inbox/`. */
+  path: string;
+  mime: string;
+  size: number;
+}
+
+/** `data` of a `kind:'memory'` turn — the memory chip. */
+export interface AssistantMemoryChip {
+  action: 'remembered' | 'forgot' | 'pending';
+  memory_ids: Id[];
+  undo:
+    | { kind: 'delete'; memory_id: Id }
+    | { kind: 'restore'; undo_tokens: string[] }
+    | null;
+}
+
+/** One indexed turn. The canonical text of a reply stays in the provider
+ *  transcript; `text` here is the indexed copy (search, hand-offs, phone). */
+export interface AssistantTurn {
+  id: Id;
+  thread_id: Id;
+  role: 'user' | 'assistant' | 'system';
+  kind: 'message' | 'memory' | 'delegation' | 'task' | 'reminder' | 'route' | 'limit' | 'approval';
+  text: string;
+  /** Provider badge (assistant turns; the routed provider on user turns). */
+  provider: string | null;
+  model: string | null;
+  route_reason: AssistantRouteReason | null;
+  session_id: Id | null;
+  attachments: AssistantAttachment[];
+  /** Kind-specific payload: AssistantMemoryChip for 'memory', `{task_id}` for
+   *  'task' / 'reminder' / 'delegation' / 'approval', `{from, to}` for 'route'. */
+  data: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface AssistantSendReq {
+  text: string;
+  attachment_ids?: Id[];
+  origin?: AssistantOrigin;
+  voice?: boolean;
+}
+
+export interface AssistantRouteTarget {
+  provider: string;
+  model: string | null;
+  account_id: string | null;
+}
+
+export interface AssistantRouteDecision extends AssistantRouteTarget {
+  kind: AssistantRouteKind;
+  reason: AssistantRouteReason;
+  /** Keywords / mention that decided it (for the badge tooltip). */
+  matched: string[];
+  /** The text that will be pasted (a leading @mention stripped). */
+  text: string;
+}
+
+export interface AssistantSendResp {
+  turn: AssistantTurn;
+  route: AssistantRouteDecision;
+  thread: AssistantThread;
+}
+
+export interface CreateAssistantThreadReq {
+  title?: string;
+  space_slot?: 1 | 2 | 3 | 4 | null;
+  /** Given ⇒ the thread starts pinned to it. */
+  provider?: string;
+  model?: string | null;
+  account_id?: string | null;
+  incognito?: boolean;
+}
+
+export interface UpdateAssistantThreadReq {
+  title?: string;
+  space_slot?: 1 | 2 | 3 | 4 | null;
+}
+
+/** `POST …/route` — `provider: null` clears the pin. */
+export interface AssistantRouteReq {
+  provider: string | null;
+  model?: string | null;
+  account_id?: string | null;
+}
+
+export interface AssistantRoutingSettings {
+  targets: Record<AssistantRouteKind, AssistantRouteTarget>;
+  /** User keywords added to the built-in rules. */
+  extra_keywords: { code: string[]; hard: string[] };
+  /** Switch provider by itself when a limit hits (default false). */
+  auto_failover: boolean;
+  /** Agent memory writes queue for review (default false). */
+  memory_approval: boolean;
+  updated_at: string | null;
+}
+
+export interface AssistantLimitState {
+  provider: string;
+  account_id: string | null;
+  limited: boolean;
+  /** When the provider said the limit resets, if it said. */
+  until: string | null;
+  message: string;
+  source: 'pty' | 'transcript' | 'probe';
+  detected_at: string;
+}
+
+/** The guideline approval shape: where / what / who sees it / reason. */
+export interface AssistantApprovalCard {
+  where: string;
+  what: string;
+  who_sees: string;
+  reason: string;
+  tool: string | null;
+  destination: string | null;
+  category: 'send' | 'post' | 'publish' | 'purchase' | 'delete' | 'submit' | 'prod' | 'other';
+  /** False for purchase / prod — "always allow" is never offered. */
+  always_allow_allowed: boolean;
+}
+
+export interface AssistantNeedsYou {
+  kind: 'approval' | 'question' | 'takeover' | 'limit' | 'memory';
+  prompt: string;
+  approval?: AssistantApprovalCard;
+  options?: string[];
+  limit?: AssistantLimitState;
+  suggestion?: AssistantRouteTarget;
+  memory_id?: Id;
+}
+
+export type AssistantTaskState =
+  | 'queued'
+  | 'running'
+  | 'needs_you'
+  | 'done'
+  | 'failed'
+  | 'cancelled';
+
+export interface AssistantTask {
+  id: Id;
+  thread_id: Id | null;
+  kind:
+    | 'task'
+    | 'reminder'
+    | 'approval'
+    | 'question'
+    | 'takeover'
+    | 'limit'
+    | 'delegation'
+    | 'memory_review';
+  state: AssistantTaskState;
+  title: string;
+  detail: string;
+  origin: AssistantOrigin;
+  /** Reminders: when it fires (UTC RFC3339). */
+  run_at: string | null;
+  timezone: string;
+  /** A `once` Personal Agent schedule backing this task, if any. */
+  schedule_id: Id | null;
+  /** Delegation: the Personal Agent + its run. */
+  agent_id: Id | null;
+  agent_run_id: Id | null;
+  needs_you: AssistantNeedsYou | null;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface AssistantCreateTaskReq {
+  kind: 'task' | 'reminder';
+  title: string;
+  detail?: string;
+  thread_id?: Id;
+  /** RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone`. Required for reminders. */
+  run_at?: string;
+  timezone?: string;
+  origin?: AssistantOrigin;
+}
+
+export type AssistantTaskAction = 'approve' | 'deny' | 'takeover' | 'handback' | 'cancel';
+
+export interface AssistantDecisionReq {
+  reason?: string;
+  /** Answer to a `question` item. */
+  answer?: string;
+  /** Approval: remember for this destination + tool (refused for purchase/prod). */
+  always_allow?: boolean;
+  /** Limit item: the provider to continue on. */
+  provider?: string;
+}
+
+export interface AssistantDelegateReq {
+  agent_id: Id;
+  directive: string;
+}
+
+export interface AssistantMemory {
+  id: Id;
+  text: string;
+  kind: string;
+  tags: string[];
+  state: 'accepted' | 'pending';
+  source: { kind: 'agent' | 'user' | 'hermes'; thread_id: Id | null; file: string | null };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantProfileDoc {
+  content: string;
+  /** Opaque; send back with a save (409 when stale). */
+  version: string;
+  exists: boolean;
+}
+
+export interface AssistantMemoryView {
+  profile: AssistantProfileDoc;
+  memories: AssistantMemory[];
+  /** Awaiting review (memory approval on, or a Hermes import). */
+  pending: AssistantMemory[];
+  memory_approval: boolean;
+}
+
+export interface AssistantForgetResp {
+  forgotten: AssistantMemory[];
+  undo_tokens: string[];
+}
+
+export interface AssistantHermesPreview {
+  available: boolean;
+  files: { name: string; entries: number }[];
+  entries: { file: string; text: string; duplicate: boolean }[];
+}
+
+export interface AssistantHermesImportResp {
+  queued: number;
+  duplicates: number;
+  files: string[];
 }

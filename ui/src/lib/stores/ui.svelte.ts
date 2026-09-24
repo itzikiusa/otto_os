@@ -1,6 +1,16 @@
 // Shell UI state: rail, right panel, palette, theme, zoom. Persisted bits go
 // to localStorage.
 
+import { accentFill } from '../accent';
+import { ambientImage, isAmbientMode, type AmbientMode } from '../ambient';
+import {
+  autoVerticalFor,
+  clampAutoVertical,
+  resolveAutoVertical,
+  type AutoVerticalEngine,
+  type AutoVerticalPrefs,
+} from '../db-view-prefs';
+
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
@@ -48,6 +58,9 @@ const LS = {
   scheme: 'otto_scheme',
   direction: 'otto_direction',
   accent: 'otto_accent',
+  ambient: 'otto_ambient',
+  ambientPhoto: 'otto_ambient_photo',
+  reduceTransparency: 'otto_reduce_transparency',
   zoom: 'otto_zoom',
   termFont: 'otto_term_font',
   termFontFamily: 'otto_term_font_family',
@@ -60,7 +73,9 @@ const LS = {
   browserAgentOpen: 'otto_browser_agent_open',
   browserAgentH: 'otto_browser_agent_h',
   dbDockWidth: 'otto_db_dock_width',
+  /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
+  dbAutoVertical: 'otto_db_auto_vertical_by_engine',
   wfCtx: 'otto_wf_ctx_open',
   wfCtxWidth: 'otto_wf_ctx_width',
   wfCtxTab: 'otto_wf_ctx_tab',
@@ -72,6 +87,7 @@ const LS = {
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
   sidebarHidden: 'otto_sidebar_hidden',
+  sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
   gitSideWidth: 'otto_git_side_width',
   gitGraphListWidth: 'otto_git_graph_list_width',
   gitGraphSideWidth: 'otto_git_graph_side_width',
@@ -150,9 +166,6 @@ function clampRail(px: number): number {
 }
 /** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
  *  a typo can't disable the feature by accident; NaN → the default (10). */
-function clampCols(n: number): number {
-  return Number.isNaN(n) ? 10 : Math.max(0, Math.min(500, Math.round(n)));
-}
 function clampWfCtx(px: number): number {
   return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
 }
@@ -293,6 +306,22 @@ class UiStore {
   scheme: SchemePref = $state((lsGet(LS.scheme) as SchemePref) ?? 'auto');
   direction: Direction = $state((lsGet(LS.direction) as Direction) ?? 'ltr');
   accent: string = $state(lsGet(LS.accent) ?? '');
+  /** Ambient backdrop behind the chrome + the Home desktop (lib/ambient.ts).
+   *  Per device; defaults to the subtle accent wash. */
+  ambient: AmbientMode = $state(
+    ((v) => (isAmbientMode(v) ? v : 'subtle'))(lsGet(LS.ambient)),
+  );
+  /** The user's own wallpaper, already blurred + luminance-clamped per scheme
+   *  (lib/wallpaper.ts) — stored on this device only, never uploaded. */
+  ambientPhoto: { light: string; dark: string } | null = $state(
+    ((v) =>
+      v && typeof v === 'object' && typeof (v as { light?: unknown }).light === 'string' && typeof (v as { dark?: unknown }).dark === 'string'
+        ? (v as { light: string; dark: string })
+        : null)(lsGetJson<unknown>(LS.ambientPhoto, null)),
+  );
+  /** Opaque chrome, no ambient backdrop (also follows the system's
+   *  prefers-reduced-transparency in CSS). */
+  reduceTransparency = $state(lsGet(LS.reduceTransparency) === '1');
 
   /** app-level zoom, 1 = 100% */
   zoom = $state(Number(lsGet(LS.zoom) ?? '1') || 1);
@@ -321,16 +350,34 @@ class UiStore {
     })(),
   );
 
-  /** DB Explorer: a result with MORE than this many columns opens in Vertical
-   *  view unless the tab has an explicit view pick (0 = never). Default 10 —
-   *  past that a grid needs horizontal scrolling to read one record. Per device
-   *  (localStorage), like the other appearance preferences. */
-  dbAutoVerticalCols = $state(
-    ((): number => {
-      const raw = lsGet(LS.dbAutoVerticalCols);
-      return raw === null ? 10 : clampCols(Number(raw));
+  /** DB Explorer: per ENGINE, a result with MORE than N columns opens in the
+   *  Vertical view unless the tab has an explicit pick (0 = never). MongoDB is
+   *  on (10) by default — nested, ragged documents read best one record at a
+   *  time — while the SQL engines and Redis stay on the grid however wide the
+   *  result is. Per device (localStorage). The first read migrates the old
+   *  single-threshold key (see `resolveAutoVertical`). */
+  dbAutoVertical = $state<AutoVerticalPrefs>(
+    ((): AutoVerticalPrefs => {
+      const { value, migrated } = resolveAutoVertical(
+        lsGet(LS.dbAutoVertical),
+        lsGet(LS.dbAutoVerticalCols),
+      );
+      if (migrated) {
+        lsSet(LS.dbAutoVertical, JSON.stringify(value));
+        try {
+          localStorage.removeItem(LS.dbAutoVerticalCols);
+        } catch {
+          /* private mode */
+        }
+      }
+      return value;
     })(),
   );
+
+  /** The auto-Vertical threshold for one engine (0 = never). */
+  dbAutoVerticalFor(engine: string | null | undefined): number {
+    return autoVerticalFor(this.dbAutoVertical, engine);
+  }
 
   /** Resolved CSS font-family stack for the terminal, per the current choice. */
   get termFontStack(): string {
@@ -353,6 +400,30 @@ class UiStore {
   sidebarOrder: string[] = $state(lsGetJson<string[]>(LS.sidebarOrder, []));
   sidebarHidden: string[] = $state(lsGetJson<string[]>(LS.sidebarHidden, []));
   sidebarEditMode = $state(false);
+  /** Navigator sections (SidebarGroupId) the user has folded shut. Per device;
+   *  the section holding the current page is re-opened on navigation. */
+  sidebarCollapsedGroups: string[] = $state(
+    ((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []))(
+      lsGetJson<unknown>(LS.sidebarCollapsedGroups, []),
+    ),
+  );
+  /** Phone-only: the off-canvas Navigator drawer. Deliberately NOT persisted
+   *  and NOT `railExpanded` (the desktop sidebar preference) — a phone always
+   *  boots onto the page, never under the drawer. */
+  navDrawerOpen = $state(false);
+
+  /** Fold / unfold one Navigator section. */
+  toggleSidebarGroup(id: string): void {
+    this.setSidebarGroupCollapsed(id, !this.sidebarCollapsedGroups.includes(id));
+  }
+
+  setSidebarGroupCollapsed(id: string, collapsed: boolean): void {
+    if (collapsed === this.sidebarCollapsedGroups.includes(id)) return;
+    this.sidebarCollapsedGroups = collapsed
+      ? [...this.sidebarCollapsedGroups, id]
+      : this.sidebarCollapsedGroups.filter((x) => x !== id);
+    lsSet(LS.sidebarCollapsedGroups, JSON.stringify(this.sidebarCollapsedGroups));
+  }
 
   /** Replace the full module order (the complete resolved id list, incl. hidden). */
   setSidebarOrder(ids: string[]): void {
@@ -390,12 +461,14 @@ class UiStore {
     lsSet(LS.sidebarHidden, JSON.stringify(this.sidebarHidden));
   }
 
-  /** Restore the shipped default order with everything visible. */
+  /** Restore the shipped default order with everything visible and unfolded. */
   resetSidebar(): void {
     this.sidebarOrder = [];
     this.sidebarHidden = [];
+    this.sidebarCollapsedGroups = [];
     lsSet(LS.sidebarOrder, '[]');
     lsSet(LS.sidebarHidden, '[]');
+    lsSet(LS.sidebarCollapsedGroups, '[]');
   }
 
   toggleSidebarEdit(): void {
@@ -562,6 +635,33 @@ class UiStore {
     this.applyTheme();
   }
 
+  setAmbient(mode: AmbientMode): void {
+    this.ambient = mode;
+    lsSet(LS.ambient, mode);
+    this.applyTheme();
+  }
+
+  /** Store (or clear) the processed wallpaper photo. Returns false when the
+   *  browser refused to store it (quota) — the caller says so. */
+  setAmbientPhoto(photo: { light: string; dark: string } | null): boolean {
+    try {
+      if (photo) localStorage.setItem(LS.ambientPhoto, JSON.stringify(photo));
+      else localStorage.removeItem(LS.ambientPhoto);
+    } catch {
+      return false;
+    }
+    this.ambientPhoto = photo;
+    if (photo) this.setAmbient('wallpaper');
+    else this.applyTheme();
+    return true;
+  }
+
+  setReduceTransparency(on: boolean): void {
+    this.reduceTransparency = on;
+    lsSet(LS.reduceTransparency, on ? '1' : '0');
+    this.applyTheme();
+  }
+
   setDirection(direction: Direction): void {
     this.direction = direction;
     lsSet(LS.direction, direction);
@@ -640,9 +740,9 @@ class UiStore {
     lsSet(LS.closeTabPref, pref);
   }
 
-  setDbAutoVerticalCols(n: number): void {
-    this.dbAutoVerticalCols = clampCols(n);
-    lsSet(LS.dbAutoVerticalCols, String(this.dbAutoVerticalCols));
+  setDbAutoVertical(engine: AutoVerticalEngine, n: number): void {
+    this.dbAutoVertical = { ...this.dbAutoVertical, [engine]: clampAutoVertical(n) };
+    lsSet(LS.dbAutoVertical, JSON.stringify(this.dbAutoVertical));
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */
@@ -652,8 +752,16 @@ class UiStore {
       this.media = window.matchMedia('(prefers-color-scheme: dark)');
       this.media.addEventListener('change', () => this.applyTheme());
     }
+    // Pro Dark is always dark: resolve it that way so scheme-aware consumers
+    // (terminal palette, CodeMirror, D2/Excalidraw, [data-scheme] CSS) match.
     const resolved: 'light' | 'dark' =
-      this.scheme === 'auto' ? (this.media.matches ? 'dark' : 'light') : this.scheme;
+      this.theme === 'pro-dark'
+        ? 'dark'
+        : this.scheme === 'auto'
+          ? this.media.matches
+            ? 'dark'
+            : 'light'
+          : this.scheme;
     this.resolvedScheme = resolved;
     const el = document.documentElement;
     el.setAttribute('data-theme', this.theme);
@@ -661,8 +769,26 @@ class UiStore {
     // Document direction (RTL support). CSS uses logical properties so the
     // layout mirrors automatically when this flips to 'rtl'.
     el.dir = this.direction;
+    const fill = this.accent ? accentFill(this.accent) : null;
     if (this.accent) el.style.setProperty('--accent', this.accent);
     else el.style.removeProperty('--accent');
+    // A custom accent carries its own contrast-checked button fill/text pair.
+    for (const [prop, v] of [
+      ['--accent-solid', fill?.solid],
+      ['--accent-contrast', fill?.contrast],
+    ] as const) {
+      if (v) el.style.setProperty(prop, v);
+      else el.style.removeProperty(prop);
+    }
+    // Ambient backdrop: generated from the accent actually in effect (a custom
+    // one, else the theme's own) and the resolved scheme. `--ambient-art` feeds
+    // the `--ambient-image` token, which reduced transparency turns off.
+    const accent = this.accent || getComputedStyle(el).getPropertyValue('--accent').trim();
+    const photo = this.ambientPhoto ? this.ambientPhoto[resolved] : null;
+    el.style.setProperty('--ambient-art', ambientImage(this.ambient, accent, resolved, photo));
+    el.setAttribute('data-ambient', this.ambient);
+    if (this.reduceTransparency) el.setAttribute('data-transparency', 'reduced');
+    else el.removeAttribute('data-transparency');
   }
 }
 

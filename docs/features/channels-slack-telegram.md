@@ -140,6 +140,12 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
      formatted code block under a `💻 terminal` label — a readable preview of the
      call (a ``` fenced block on Slack; indented lines on Telegram, whose
      in-place edits carry no parse mode), capped to ~8 lines / 500 chars.
+   - **Secrets redacted.** Commands and step summaries are scrubbed before they
+     are posted (`secrets_redact.rs`): sensitive `KEY=value` assignments,
+     `--password`/`--token` values, `Authorization`/`Bearer`/`Basic` header
+     values, mysql `-p<pw>`, `-u user:pass`, URL userinfo, PEM blocks, JWTs,
+     AWS keys and e-mails become `[redacted]`. The final reply gets the same
+     pass except that e-mail addresses are kept.
 8. **Final reply.** On the agent's final message the feed is frozen to
    `🧠 done — N steps` (the liveness rotation stops), and the reply is posted:
    - **Short reply** → posted inline (with channel-native formatting:
@@ -446,6 +452,15 @@ Either way, **the agent never posts to the chat itself and never touches tokens*
   raw bytes and uploads them to the thread (Slack external-upload flow / Telegram
   `sendDocument`). The directive markup is stripped from the posted text. A long
   inline reply is auto-attached as `investigation.md`.
+  The path is confined (it is agent output, so prompt-injectable, and the upload
+  is the daemon's own egress): after resolving symlinks it must live under the
+  session's working directory (unless that is `/` or `$HOME`), `/tmp`, the
+  daemon's `$TMPDIR`, or Otto's artifact dirs (`insights`, `snips`,
+  `workflow-runs`, `otto-runs`, `canvas` under the data dir). Credential
+  locations (`~/.ssh`, `~/.aws`, keychains, Otto's `secrets.json` / `otto.db` /
+  `bin` / provider accounts…), `.git` internals, credential-looking names
+  (`.env*`, `*.pem`, `*.key`, `id_rsa`…), hard-linked files and files over
+  20 MB are refused; the refusal is logged and noted in the thread.
 - **Chat → agent (Slack only):** attached files are downloaded to temp paths and
   the agent is told where to read them. (Telegram inbound files are not relayed.)
 
@@ -472,10 +487,10 @@ Send these as a message in the chat/thread:
 | Command | Effect |
 |---|---|
 | `/help` | Show the command list. |
-| `/sessions` | List this workspace's agent sessions + status. |
-| `/who` | Show which session this conversation is mapped to. |
+| `/sessions` | List the live agent sessions **this chat** started + status (never other sessions' titles). |
+| `/who` | Show which session this conversation is mapped to (same map-then-meta lookup as routing, so it survives a daemon restart). |
 | `/stop` | Kill the session bound to this chat/thread and drop the mapping. |
-| `/new` | Drop the mapping so the **next** message starts a fresh session. |
+| `/new` | Detach the bound session (`meta.channel_detached = true`, it keeps running in the app and is reaped later) so the **next** message starts a fresh session. |
 | `/restart` | Same as `/new` (next message starts fresh). |
 
 ---

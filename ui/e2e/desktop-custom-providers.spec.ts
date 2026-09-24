@@ -131,17 +131,18 @@ test('Workflow agent node offers provider + model from the registry', async ({ p
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Open the node palette and add an Agent node.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await expect(nodeBtn).toBeVisible({ timeout: 10_000 });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
   // The new node is auto-selected → its inspector shows the Provider select +
-  // Model input (agent_prompt was Model-only before, no provider).
+  // the shared catalog-backed ModelPicker ("Model (optional)", shown for the
+  // default provider) — agent_prompt was Model-only before, no provider.
   const providerSelect = page.locator('#np-provider');
   await expect(providerSelect).toBeVisible({ timeout: 10_000 });
   await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
-  await expect(page.locator('#np-model')).toBeVisible();
+  await expect(page.getByLabel('Model (optional)')).toBeVisible();
 });
 
 test('Workflow node inspector docks to a resizable side panel', async ({ page }) => {
@@ -149,7 +150,7 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Add + select a node so the inspector shows.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
@@ -158,8 +159,16 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   // Bottom dock by default (no .side).
   await expect(inspector).not.toHaveClass(/\bside\b/);
 
-  // Toggle to the side dock → the inspector becomes a right column.
-  await page.getByRole('button', { name: 'Dock' }).click();
+  // Toggle to the side dock → the inspector becomes a right column. "Dock" is
+  // a low-priority header action: at this width (with a node selected) it may
+  // sit in the header's ⋯ overflow menu instead of the bar.
+  const clickDock = async (): Promise<void> => {
+    const dock = page.locator('[data-testid="page-header"] .ph-actions button', { hasText: 'Dock' });
+    if (await dock.isVisible()) return dock.click();
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /^Dock/ }).click();
+  };
+  await clickDock();
   await expect(inspector).toHaveClass(/\bside\b/);
   const box = await inspector.boundingBox();
   const vw = page.viewportSize()!.width;
@@ -178,7 +187,7 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   expect(after).toBeGreaterThan(before + 80);
 
   // Toggle back to the bottom dock.
-  await page.getByRole('button', { name: 'Dock' }).click();
+  await clickDock();
   await expect(inspector).not.toHaveClass(/\bside\b/);
 });
 
@@ -187,7 +196,7 @@ test('Provider "default" option reads claude (the daemon fallback), not agy', as
   await page.getByRole('button', { name: 'Start blank' }).click();
 
   // Add + select an Agent node → its Provider select renders.
-  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
   await nodeBtn.click();
   await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
 
@@ -204,7 +213,7 @@ test('Provider "default" option reads claude (the daemon fallback), not agy', as
 async function addWfNode(page: import('@playwright/test').Page, label: string): Promise<void> {
   await openPage(page, 'workflows');
   await page.getByRole('button', { name: 'Start blank' }).click();
-  await page.locator('.menu-wrap button', { hasText: 'Node' }).click();
+  await page.locator('[data-testid="page-header"] button', { hasText: 'Node' }).click();
   await page.locator('.pal-item', { hasText: label }).first().click();
 }
 
@@ -279,21 +288,19 @@ test('Dock opens a persistent side panel with a working close button', async ({ 
   await expect(inspector).toBeVisible({ timeout: 10_000 });
   await expect(inspector.locator('.insp-blank')).toContainText(/select a node/i);
 
-  // The panel header hosts the notification bell (the shell's floating bell is
-  // hidden in this layout) + the close (×).
-  await expect(inspector.locator('.insp-side-head .bell-wrap')).toBeVisible();
-  await expect(page.locator('.bell-anchor')).toHaveCount(0);
+  // The panel header holds only the title + close (×): the notification bell
+  // lives in the sidebar on every page, so nothing floats over the dock.
+  await expect(inspector.locator('.insp-side-head .bell-wrap')).toHaveCount(0);
+  await expect(page.locator('.sidebar').getByRole('button', { name: 'Notifications' })).toBeVisible();
 
   // The panel reaches the right edge of the viewport — no gutter black-strip.
   const box = (await inspector.boundingBox())!;
   const vw = page.viewportSize()!.width;
   expect(box.x + box.width).toBeGreaterThan(vw - 4);
 
-  // The × close button in the side header dismisses the dock; the floating shell
-  // bell returns.
+  // The × close button in the side header dismisses the dock.
   await inspector.getByRole('button', { name: 'Close panel' }).click();
   await expect(page.locator('.inspector.side')).toHaveCount(0);
-  await expect(page.locator('.bell-anchor')).toBeVisible();
   // Dock button returns to inactive (bottom mode).
   await expect(page.getByRole('button', { name: 'Dock' })).not.toHaveClass(/\bactive\b/);
 });

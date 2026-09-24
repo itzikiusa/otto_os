@@ -114,7 +114,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: 200;
+    z-index: var(--z-modal);
     background: rgba(0, 0, 0, 0.35);
     display: grid;
     place-items: center;
@@ -130,10 +130,13 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* The sheet holds forms, so it is OPAQUE (never glass — foundations §7);
+       it shares the floating-glass edge + elevation tokens so every floating
+       layer reads as one family. */
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     animation: sheet-in 160ms ease-out;
   }
   header {
@@ -158,7 +161,7 @@
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--separator);
   }
   @keyframes fade-in {
     from {

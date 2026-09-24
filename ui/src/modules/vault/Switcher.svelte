@@ -3,6 +3,7 @@
   // title/aliases/path; Enter opens, Shift+Enter creates a note by that name.
   import type { VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
 
   let query = $state('');
   let hits = $state<VaultSwitchHit[]>([]);
@@ -65,13 +66,14 @@
 </script>
 
 {#if vault.switcherOpen}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={close}>
-    <div class="panel" role="dialog" tabindex="-1" aria-label="Quick switcher" onclick={(e) => e.stopPropagation()}>
+  <Modal title="Quick switcher" width={620} onclose={close}>
+    <div class="vs-body">
       <input
         bind:this={input}
         bind:value={query}
+        class="vs-input"
         placeholder="Open note… (Shift+Enter creates)"
+        aria-label="Open note"
         oninput={() => void refresh(query)}
         onkeydown={onKey}
       />
@@ -88,44 +90,29 @@
         {/if}
       </div>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    z-index: 90;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-    padding-top: 12vh;
-  }
-  .panel {
-    width: min(620px, 92vw);
-    max-height: 60vh;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  .vs-body {
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    min-height: 0;
   }
-  input {
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--border);
+  .vs-input {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     color: var(--text);
-    font-size: 14px;
-    padding: 12px 14px;
+    font-size: var(--fs-l);
+    padding: 8px 10px;
     outline: none;
   }
+  .vs-input:focus {
+    border-color: var(--accent);
+  }
   .hits {
-    overflow-y: auto;
-    min-height: 0;
-    padding: 6px;
+    padding: 6px 0 0;
   }
   .hit {
     display: flex;
@@ -140,9 +127,11 @@
     cursor: pointer;
     color: var(--text);
   }
-  .hit.sel,
-  .hit:hover {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  .hit.sel {
+    background: var(--accent-soft);
+  }
+  .hit:hover:not(.sel) {
+    background: var(--hover);
   }
   .t {
     font-size: 13px;
@@ -157,7 +146,7 @@
   }
   .p {
     margin-inline-start: auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;

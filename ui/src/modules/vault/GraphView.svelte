@@ -1569,7 +1569,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2, #323238);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .chip.warn {
     color: var(--status-warn, #e0a000);
@@ -1579,7 +1579,7 @@
     color: var(--accent, #0a84ff);
   }
   .mini {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: var(--radius-s, 5px);
@@ -1710,7 +1710,7 @@
   }
   .hint {
     color: var(--text-dim, #98989f);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 1.35;
   }
 
@@ -1740,7 +1740,7 @@
     flex: 0 0 auto;
     color: var(--text-dim, #98989f);
     font-variant-numeric: tabular-nums;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
 
   .chips {
@@ -1755,7 +1755,7 @@
     border-radius: 999px;
     background: var(--surface-2, #323238);
     color: var(--text, #f2f2f5);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;

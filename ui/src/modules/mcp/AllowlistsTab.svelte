@@ -4,6 +4,8 @@
   // match the server's `default_tool_access` applies. Edited as a grid, saved in
   // one bulk PUT (the server replaces the whole workspace allowlist).
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import type { McpServerDetail, McpToolAccess } from '../../lib/api/types';
@@ -21,6 +23,8 @@
   }
   let rows = $state<Row[]>([]);
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
   let saving = $state(false);
 
   async function load(): Promise<void> {
@@ -32,8 +36,9 @@
         tool_name: e.tool_name ?? '',
         mode: e.mode,
       }));
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load allowlist', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -89,6 +94,8 @@
 
   {#if servers.length === 0}
     <p class="muted pad">Add a server first — the allowlist scopes its tools.</p>
+  {:else if loadError && rows.length === 0}
+    <LoadState what="the allowlist" {loading} error={loadError} empty onretry={() => void load()} />
   {:else if loading && rows.length === 0}
     <p class="muted pad">Loading…</p>
   {:else if rows.length === 0}

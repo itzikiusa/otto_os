@@ -4,7 +4,7 @@
   // queued/artifact/notice chips), with the per-turn system chip and the
   // Codex "N reasoning steps (not recorded)" footer.
   import { getContext } from 'svelte';
-  import Icon from '../../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import Markdown from './Markdown.svelte';
   import WorkSteps from './WorkSteps.svelte';
   import ImageBlock from './ImageBlock.svelte';
@@ -69,7 +69,7 @@
     if (a.url) return a.url;
     return null;
   }
-  function artifactIcon(a: Artifact): string {
+  function artifactIcon(a: Artifact): IconName {
     return a.kind === 'pr' ? 'pr' : a.kind === 'image' ? 'image' : a.kind === 'url' ? 'link' : a.kind === 'report' ? 'note' : 'file';
   }
 </script>
@@ -250,7 +250,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
   }
@@ -258,7 +258,7 @@
     justify-content: flex-end;
   }
   .model {
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .sys-chip {
     display: inline-flex;
@@ -268,7 +268,7 @@
     border: 1px solid var(--border);
     border-radius: 99px;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0 7px;
     height: 16px;
     cursor: pointer;
@@ -304,7 +304,7 @@
     white-space: nowrap;
   }
   .sys-kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     opacity: 0.8;
   }
   .sys-note pre {
@@ -344,7 +344,7 @@
   }
   .pending-label {
     font-weight: 600;
-    color: var(--status-warn, #e0a000);
+    color: var(--warning);
     white-space: nowrap;
   }
   .pending-text {

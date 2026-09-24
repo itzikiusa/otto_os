@@ -1,6 +1,8 @@
 // Shared label / colour / formatting helpers for the Mission Control module.
 
+import type { IconName } from '../../lib/components/Icon.svelte';
 import type { WorkKind, WorkStatus, RiskLevel, WorkActor, ArtifactKind } from '../../lib/api/types';
+import { runStatus, type StatusInfo, type Tone } from '../../lib/status';
 
 export const KIND_LABEL: Record<WorkKind, string> = {
   session: 'Session',
@@ -13,7 +15,7 @@ export const KIND_LABEL: Record<WorkKind, string> = {
   external_trigger: 'External Trigger',
 };
 
-export const KIND_ICON: Record<WorkKind, string> = {
+export const KIND_ICON: Record<WorkKind, IconName> = {
   session: 'terminal',
   swarm: 'grid',
   goal_loop: 'refresh',
@@ -24,15 +26,23 @@ export const KIND_ICON: Record<WorkKind, string> = {
   external_trigger: 'bell',
 };
 
+/** A work status in the shared run vocabulary (lib/status.ts): pending →
+ *  Queued, done → Succeeded, running is info (never the succeeded green).
+ *  `blocked` is Mission Control's own: stuck on a dependency/policy — danger. */
+export function workStatus(s: WorkStatus): StatusInfo {
+  if (s === 'blocked') return { key: 'blocked', label: 'Blocked', tone: 'danger' };
+  return runStatus(s);
+}
+
 export const STATUS_LABEL: Record<WorkStatus, string> = {
-  pending: 'Pending',
-  running: 'Running',
-  waiting: 'Waiting',
-  blocked: 'Blocked',
-  succeeded: 'Succeeded',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-  done: 'Done',
+  pending: workStatus('pending').label,
+  running: workStatus('running').label,
+  waiting: workStatus('waiting').label,
+  blocked: workStatus('blocked').label,
+  succeeded: workStatus('succeeded').label,
+  failed: workStatus('failed').label,
+  cancelled: workStatus('cancelled').label,
+  done: workStatus('done').label,
 };
 
 export const RISK_LABEL: Record<RiskLevel, string> = {
@@ -83,38 +93,32 @@ export const WORK_STATUSES: WorkStatus[] = [
 ];
 export const RISK_LEVELS: RiskLevel[] = ['low', 'medium', 'high', 'critical'];
 
-/** A colour (CSS value) for a normalized status — drives chips and graph nodes. */
+const TONE_COLOR: Record<Tone, string> = {
+  neutral: 'var(--text-dim)',
+  info: 'var(--info)',
+  success: 'var(--success)',
+  warning: 'var(--warning)',
+  danger: 'var(--danger)',
+};
+
+/** A colour (CSS value) for a normalized status — drives chips, labels and
+ *  graph nodes. Tone tokens (text-safe in every theme), never raw hex; the
+ *  tone comes from the shared vocabulary via {@link workStatus}. */
 export function statusColor(s: WorkStatus): string {
-  switch (s) {
-    case 'running':
-      return 'var(--status-working, #28c840)';
-    case 'succeeded':
-    case 'done':
-      return '#2ea043';
-    case 'waiting':
-    case 'pending':
-      return 'var(--status-warn, #e0a000)';
-    case 'blocked':
-    case 'failed':
-      return 'var(--status-exited, #ff5f57)';
-    case 'cancelled':
-      return 'var(--text-dim, #98989f)';
-    default:
-      return 'var(--text-dim, #98989f)';
-  }
+  return TONE_COLOR[workStatus(s).tone];
 }
 
 /** A colour for a risk level (the "policy" axis). */
 export function riskColor(r: RiskLevel): string {
   switch (r) {
     case 'critical':
-      return '#ff5f57';
+      return 'var(--danger)';
     case 'high':
-      return '#ff8c00';
-    case 'medium':
-      return 'var(--status-warn, #e0a000)';
+      return 'var(--warning)';
+    // medium is the everyday default — neutral, so the chip isn't an amber
+    // alarm on every row.
     default:
-      return 'var(--text-dim, #98989f)';
+      return 'var(--text-dim)';
   }
 }
 

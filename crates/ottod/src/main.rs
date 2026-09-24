@@ -951,6 +951,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         ctx.clone(),
     ));
 
+    // --- Design Hall: FTS index + idempotent legacy import (background) ---
+    // Mirrors Product-arena design attachments and Canvas scenes into the
+    // design graph (graph rows only; the legacy rows/files are never touched)
+    // and re-syncs a `sync` version when a legacy source changed.
+    otto_server::design_hall::spawn_startup_import(&ctx);
+
     // --- Vault docs-runs recovery: this restart killed any in-flight run ---
     // Flip still-non-terminal persisted runs to 'interrupted' and soft-trash
     // their orphaned `_drafts/docs-run-*` dirs (multi-writer runs only).
@@ -1049,6 +1055,13 @@ async fn run(cfg: Config) -> Result<(), String> {
     let _personal_agents_handle = otto_server::personal_agents_scheduler::start(ctx.clone());
     tracing::info!("personal agents scheduler started");
 
+    // --- Otto Assistant ---
+    // 30 s tick: fires due reminders (`once`), reports finished delegations
+    // into their thread, syncs approvals decided in the MCP queue, and deletes
+    // incognito threads 24 h after their last turn.
+    let _assistant_handle = otto_server::assistant::start(ctx.clone());
+    tracing::info!("assistant supervisor started");
+
     // --- Run with Otto ---
     // Boot reaper (fail interrupted runs, re-drive resumable ones) + a 30 s tick
     // that re-drives still-active runs. The engine drives the stage machine.
@@ -1119,6 +1132,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     let (api_extras, root_extras) = module_routers(&ctx);
+    // Kept past `build_router` (which takes the ctx) so shutdown can stop the
+    // remote live browser's Chromium processes.
+    let browser_handle = ctx.browser.clone();
     let router = build_router(ctx, api_extras, root_extras);
 
     // Graceful shutdown signal (ctrl_c or SIGTERM) fanned out via watch.
@@ -1212,6 +1228,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     // Terminate every live PTY so a daemon stop / system shutdown never leaves
     // orphaned agent processes behind.
     let killed = manager.shutdown_all().await;
+    // Close remote live sessions and stop their Chromium processes (no-op when
+    // the remote live view was never used this run).
+    browser_handle.shutdown_live().await;
     if killed > 0 {
         tracing::info!("terminated {killed} live session(s) on shutdown");
     }

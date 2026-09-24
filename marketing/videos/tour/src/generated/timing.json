@@ -1,0 +1,344 @@
+{
+  "fps": 30,
+  "voice": "Samantha",
+  "rate": 182,
+  "totalFrames": 5311,
+  "totalSeconds": 177.03333333333333,
+  "chapters": [
+    {
+      "id": "intro",
+      "section": "getting-started",
+      "title": "Meet Otto",
+      "startFrame": 0,
+      "frames": 225,
+      "voOffset": 1.2,
+      "voDuration": 4.078396,
+      "lines": [
+        {
+          "text": "This is Otto.",
+          "start": 0,
+          "end": 0.800375
+        },
+        {
+          "text": "Every coding agent you run, in one native Mac app.",
+          "start": 1.080375,
+          "end": 4.078396
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "home",
+      "section": "home",
+      "title": "Home",
+      "startFrame": 225,
+      "frames": 324,
+      "voOffset": 0.5,
+      "voDuration": 9.6085,
+      "lines": [
+        {
+          "text": "Otto feels at home on macOS: a grouped sidebar, one clean header per page, and Home as your desktop, showing what needs you, what's running, and what's next.",
+          "start": 0,
+          "end": 9.6085
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "command-bar",
+      "section": "command-bar",
+      "title": "The command bar",
+      "startFrame": 549,
+      "frames": 508,
+      "voOffset": 0.5,
+      "voDuration": 15.731917000000001,
+      "lines": [
+        {
+          "text": "The floating bar is the front door.",
+          "start": 0,
+          "end": 1.592354
+        },
+        {
+          "text": "Press ⌘K, type or speak, and Otto runs the command, or answers in one of four spaces.",
+          "start": 1.872354,
+          "end": 7.7105
+        },
+        {
+          "text": "It docks into the status bar while you work, and ⌥Space calls it from anywhere on your Mac, with the menu bar and pop-out windows close by.",
+          "start": 7.990500000000001,
+          "end": 15.731917000000001
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "assistant",
+      "section": "assistant",
+      "title": "Assistant",
+      "startFrame": 1057,
+      "frames": 289,
+      "voOffset": 0.5,
+      "voDuration": 8.438834000000002,
+      "lines": [
+        {
+          "text": "The Assistant is your personal agent.",
+          "start": 0,
+          "end": 1.787396
+        },
+        {
+          "text": "It keeps threads, remembers what matters, tracks tasks and reminders, and asks before anything leaves your Mac.",
+          "start": 2.067396,
+          "end": 8.438834
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "agents",
+      "section": "agents",
+      "title": "Agents and History",
+      "startFrame": 1346,
+      "frames": 442,
+      "voOffset": 0.5,
+      "voDuration": 13.518876,
+      "lines": [
+        {
+          "text": "Agents run Claude Code, Codex or a shell as real sessions.",
+          "start": 0,
+          "end": 3.503542
+        },
+        {
+          "text": "Keep them in tabs, tile them side by side, or work through a queue of what needs you.",
+          "start": 3.7835419999999997,
+          "end": 8.426313
+        },
+        {
+          "text": "Broadcast one prompt to many agents, and pick up any past conversation from History.",
+          "start": 8.706313,
+          "end": 13.518875999999999
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "mission-control",
+      "section": "mission-control",
+      "title": "Run with Otto and Mission Control",
+      "startFrame": 1788,
+      "frames": 321,
+      "voOffset": 0.5,
+      "voDuration": 9.516438,
+      "lines": [
+        {
+          "text": "Run with Otto turns a ticket or a message into a finished branch with one click, and Mission Control shows the whole work graph: what's running, what's waiting, approvals and spend.",
+          "start": 0,
+          "end": 9.516438
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "swarm",
+      "section": "swarm",
+      "title": "Swarms and Goal Loops",
+      "startFrame": 2109,
+      "frames": 304,
+      "voOffset": 0.5,
+      "voDuration": 8.931500000000002,
+      "lines": [
+        {
+          "text": "Then automate.",
+          "start": 0,
+          "end": 0.729979
+        },
+        {
+          "text": "A swarm gives agents roles, an org chart and a shared board.",
+          "start": 1.009979,
+          "end": 4.409167
+        },
+        {
+          "text": "Goal loops plan, execute and evaluate until every acceptance check passes.",
+          "start": 4.689166999999999,
+          "end": 8.9315
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "workflows",
+      "section": "workflows",
+      "title": "Workflows and schedules",
+      "startFrame": 2413,
+      "frames": 316,
+      "voOffset": 0.5,
+      "voDuration": 9.330083,
+      "lines": [
+        {
+          "text": "Workflows chain agents, approvals and tools into pipelines.",
+          "start": 0,
+          "end": 3.590354
+        },
+        {
+          "text": "Scheduled tasks run on a cadence, and personal agents keep their own soul, schedule and memory.",
+          "start": 3.870354,
+          "end": 9.330083
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "git",
+      "section": "git",
+      "title": "Git, reviews and proof",
+      "startFrame": 2729,
+      "frames": 374,
+      "voOffset": 0.5,
+      "voDuration": 11.266833,
+      "lines": [
+        {
+          "text": "Git is built in: a commit graph with your work in progress, branches, pull requests, and multi-agent AI review with findings you can act on.",
+          "start": 0,
+          "end": 8.352125
+        },
+        {
+          "text": "Proof packs keep the evidence behind every change.",
+          "start": 8.632124999999998,
+          "end": 11.266832999999998
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "vault",
+      "section": "vault",
+      "title": "Product and Vault",
+      "startFrame": 3103,
+      "frames": 232,
+      "voOffset": 0.5,
+      "voDuration": 6.537563,
+      "lines": [
+        {
+          "text": "Product turns stories into analysis and drafts, and the Vault keeps your docs as linked markdown with a live knowledge graph.",
+          "start": 0,
+          "end": 6.537563
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "design",
+      "section": "design",
+      "title": "Design Hall and Skills Lab",
+      "startFrame": 3335,
+      "frames": 453,
+      "voOffset": 0.5,
+      "voDuration": 13.899917,
+      "lines": [
+        {
+          "text": "Design Hall brings every studio under one roof: frames, templates, Site Studio, brand kits and 3D, with references to earlier work and a log of what Otto learned from your team.",
+          "start": 0,
+          "end": 10.620688
+        },
+        {
+          "text": "Skills Lab evaluates and sharpens your agent skills.",
+          "start": 10.900687999999999,
+          "end": 13.899916999999999
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "database",
+      "section": "database",
+      "title": "Database Explorer",
+      "startFrame": 3788,
+      "frames": 511,
+      "voOffset": 0.5,
+      "voDuration": 15.839293,
+      "lines": [
+        {
+          "text": "Your infrastructure lives here too.",
+          "start": 0,
+          "end": 1.874063
+        },
+        {
+          "text": "The Database Explorer speaks MySQL, Postgres, MongoDB, Redis and ClickHouse.",
+          "start": 2.154063,
+          "end": 7.937605
+        },
+        {
+          "text": "Build a query visually, with GROUP BY, HAVING and ORDER BY, then read the results in a grid, or one record at a time in the vertical view.",
+          "start": 8.217604999999999,
+          "end": 15.839292999999998
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "infra",
+      "section": "connections",
+      "title": "Connections and cloud",
+      "startFrame": 4299,
+      "frames": 433,
+      "voOffset": 0.5,
+      "voDuration": 13.232458,
+      "lines": [
+        {
+          "text": "Connections hold SSH terminals and SFTP.",
+          "start": 0,
+          "end": 3.054708
+        },
+        {
+          "text": "Browse Kafka topics, AWS and Kubernetes, call APIs, read the web in the built-in browser, and govern every agent tool call through the MCP control plane.",
+          "start": 3.334708,
+          "end": 13.232458000000001
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "insights",
+      "section": "insights",
+      "title": "Insights and Usage",
+      "startFrame": 4732,
+      "frames": 224,
+      "voOffset": 0.5,
+      "voDuration": 6.278458,
+      "lines": [
+        {
+          "text": "Insights turns your activity into reports with key findings, and Usage tracks tokens, cost and machine load.",
+          "start": 0,
+          "end": 6.278458
+        }
+      ],
+      "hasVo": true
+    },
+    {
+      "id": "outro",
+      "section": "phone-and-remote",
+      "title": "Everywhere",
+      "startFrame": 4956,
+      "frames": 355,
+      "voOffset": 0.5,
+      "voDuration": 8.131688,
+      "lines": [
+        {
+          "text": "Snip anything on screen, bridge your agents to Slack and Telegram, and reach Otto from your phone.",
+          "start": 0,
+          "end": 5.35525
+        },
+        {
+          "text": "Otto.",
+          "start": 5.63525,
+          "end": 6.06025
+        },
+        {
+          "text": "All your agents, one home.",
+          "start": 6.34025,
+          "end": 8.131688
+        }
+      ],
+      "hasVo": true
+    }
+  ]
+}

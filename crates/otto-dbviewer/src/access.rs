@@ -10,7 +10,7 @@ use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
-use crate::types::{Engine, NodePath};
+use crate::types::{Engine, Scope};
 
 pub(crate) fn target(conn: &Id, child: Option<&str>) -> ResourceRef {
     ResourceRef {
@@ -20,14 +20,20 @@ pub(crate) fn target(conn: &Id, child: Option<&str>) -> ResourceRef {
     }
 }
 
+/// The resource-access child a node names: the bare database / schema name or
+/// Redis keyspace index. Parsed through [`Scope`] so this, the canonical node
+/// the drivers receive ([`canonical_node`]) and the drivers themselves agree.
 pub(crate) fn child(node: Option<&str>) -> Option<String> {
-    node.filter(|n| !n.is_empty()).map(|n| {
-        let path = NodePath::parse(n);
-        path.get("db")
-            .or_else(|| path.get("kdb"))
-            .unwrap_or(n)
-            .to_owned()
-    })
+    Scope::parse(node).map(|s| s.child())
+}
+
+/// The node a driver receives: the request's [`Scope`] in canonical form
+/// (`kdb:<n>` for a Redis keyspace, the plain name otherwise). It must NOT be
+/// the access [`child`]: a bare `3` is how access rules name a keyspace, but
+/// rewriting the node to it made the Redis driver fall back to its default
+/// database, so a command run with db3 selected read and wrote db0.
+pub(crate) fn canonical_node(node: Option<&str>) -> Option<String> {
+    Scope::parse(node).map(|s| s.to_node())
 }
 
 pub(crate) async fn policy(pool: &SqlitePool, id: &Id) -> Result<AccessPolicy> {
@@ -270,6 +276,59 @@ impl Visitor for SafeExpressions {
     }
 }
 
+/// True when `sql` provably only READS: it parses with the engine's sqlparser
+/// dialect into queries whose body and CTEs are all reads (no `SELECT … INTO`,
+/// no data-changing CTE), `EXPLAIN`s without an executing `ANALYZE` of such a
+/// query, or `DESCRIBE <table>`. Used by the legacy write-guard and the MCP
+/// read-only gate in addition to their keyword checks: a first keyword cannot
+/// reveal a write nested inside a read-looking statement.
+///
+/// Unlike [`operations`] this does NOT restrict functions or catalogs — that
+/// is the enforced-mode boundary; the legacy paths rely on native privileges
+/// and, for MCP, a native read-only transaction behind this check. A parse
+/// failure is unproven and returns `false` (the callers treat it as a write).
+/// Engines other than MySQL / PostgreSQL are not parsed and return `true`.
+pub(crate) fn read_is_provable(engine: Engine, sql: &str) -> bool {
+    let parsed = match engine {
+        Engine::Mysql => Parser::parse_sql(&MySqlDialect {}, sql),
+        Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        _ => return true,
+    };
+    let Ok(statements) = parsed else {
+        return false;
+    };
+    !statements.is_empty() && statements.iter().all(statement_is_pure_read)
+}
+
+fn statement_is_pure_read(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(query) => query_is_read(query),
+        Statement::ExplainTable { .. } => true,
+        Statement::Explain {
+            analyze,
+            statement,
+            options,
+            ..
+        } => {
+            let executes = *analyze
+                || options.as_ref().is_some_and(|opts| {
+                    opts.iter()
+                        .any(|o| o.name.value.eq_ignore_ascii_case("analyze"))
+                });
+            !executes && matches!(statement.as_ref(), Statement::Query(q) if query_is_read(q))
+        }
+        _ => false,
+    }
+}
+
+fn query_is_read(query: &sqlparser::ast::Query) -> bool {
+    query_body_is_read(&query.body)
+        && query
+            .with
+            .as_ref()
+            .is_none_or(|w| w.cte_tables.iter().all(|cte| query_is_read(&cte.query)))
+}
+
 fn query_body_is_read(body: &sqlparser::ast::SetExpr) -> bool {
     use sqlparser::ast::SetExpr;
     match body {
@@ -362,6 +421,31 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run` authorizes with the bare child but hands drivers the canonical
+    /// node. They differ exactly for Redis: the child `3` names the keyspace
+    /// for access rules, the driver needs `kdb:3` (rewriting the node to the
+    /// child ran every Redis command on db0).
+    #[test]
+    fn child_and_canonical_node_split_authorization_from_execution() {
+        assert_eq!(child(Some("kdb:3")).as_deref(), Some("3"));
+        assert_eq!(canonical_node(Some("kdb:3")).as_deref(), Some("kdb:3"));
+        assert_eq!(
+            canonical_node(Some("kdb:3/key:session:42")).as_deref(),
+            Some("kdb:3")
+        );
+        assert_eq!(child(Some("db:shop/table:orders")).as_deref(), Some("shop"));
+        assert_eq!(canonical_node(Some("db:shop")).as_deref(), Some("shop"));
+        assert_eq!(canonical_node(Some("shop")).as_deref(), Some("shop"));
+        // Databases named like a path tag keep their scope (was "" before).
+        for name in ["db", "kdb", "a:b", "a/b"] {
+            assert_eq!(child(Some(name)).as_deref(), Some(name));
+            assert_eq!(canonical_node(Some(name)).as_deref(), Some(name));
+        }
+        assert_eq!(child(None), None);
+        assert_eq!(canonical_node(Some("")), None);
+    }
+
     #[test]
     fn governed_sql_accounts_for_nested_writes_and_rejects_session_commands() {
         assert!(operations(

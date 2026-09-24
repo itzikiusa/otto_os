@@ -2,12 +2,14 @@
 // daemon (GET /plugins) — plugins are installed/removed at runtime, not bundled.
 
 import { api } from '../api/client';
+import { asIcon, type IconName } from '../components/Icon.svelte';
 
 /** Enabled-plugin nav info (GET /plugins). */
 export interface PluginNav {
   slug: string;
   name: string;
-  icon: string;
+  /** Normalized on load: a manifest icon we don't ship falls back to 'box'. */
+  icon: IconName;
   has_ui: boolean;
 }
 
@@ -33,7 +35,8 @@ class PluginsStore {
   /** Refresh the enabled-plugin list (non-fatal on error). */
   async load(): Promise<void> {
     try {
-      this.list = await api.get<PluginNav[]>('/plugins');
+      const raw = await api.get<(Omit<PluginNav, 'icon'> & { icon: string })[]>('/plugins');
+      this.list = raw.map((p) => ({ ...p, icon: asIcon(p.icon, 'box') }));
     } catch {
       // non-fatal: keep the previous list (or empty)
     }

@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Root-only defaults for the Skills Evaluator: the validations, improver
   // agent, iterations, and validation passes pre-filled into the start form.
   import { auth } from '../../lib/stores/auth.svelte';
@@ -75,12 +79,14 @@
   }
 </script>
 
-<div class="page">
-  <h2>Skills Evaluator</h2>
-  <p class="lede">
-    Defaults pre-filled into the start form. Each validation runs as its own agent (one per CLI
-    selected); the improver edits the skill between iterations.
-  </p>
+<div class="settings-section">
+  <PageHeader
+    title={sectionLabel('skill-eval')}
+    subtitle="Defaults pre-filled into the start form"
+  />
+  <PageBody width="readable">
+  <SectionIntro>Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations.</SectionIntro>
+  <div class="eval-body">
 
   {#if loading || !cfg}
     <p class="muted">Loading…</p>
@@ -140,20 +146,23 @@
       <button class="btn primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
     </div>
   {/if}
+  </div>
+  </PageBody>
 </div>
 
 <style>
-  .page {
-    max-width: min(720px, 92vw);
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .eval-body {
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
-  h2 {
-    margin: 0;
-    font-size: 16px;
-  }
-  .lede,
   .muted {
     margin: 0;
     font-size: 12.5px;
@@ -215,7 +224,7 @@
   .chip-toggle.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip-toggle input {
     display: none;

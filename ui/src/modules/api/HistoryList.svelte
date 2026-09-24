@@ -1,31 +1,26 @@
 <script lang="ts">
-  // Recent executions: method + url + status + time. Click a row to reload it
-  // into the builder; clear-all empties the workspace history.
+  // Everything sent from this workspace, newest first: method + path, host,
+  // status and when. Opening a row loads its request into a tab (it is NOT
+  // re-sent; masked credentials are never sent back — see loadHistoryIntoDraft).
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
+  import MethodTag from './MethodTag.svelte';
+  import StatusChip from './StatusChip.svelte';
+  import RetentionDialog from './RetentionDialog.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import VirtualList from '../../lib/components/VirtualList.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { splitUrl } from '../../lib/api/apiVars';
   import type { ApiHistorySummary } from '../../lib/api/types';
 
-  function statusClass(status: number | null): string {
-    if (status == null) return 'none';
-    if (status >= 200 && status < 300) return 'ok';
-    if (status >= 300 && status < 400) return 'redirect';
-    if (status >= 400 && status < 500) return 'client';
-    if (status >= 500) return 'server';
-    return 'none';
-  }
+  interface Props { onopen?: () => void }
+  let { onopen }: Props = $props();
 
-  function fmtTime(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
+  const canEdit = $derived(ws.myRole !== 'viewer');
+  let retentionOpen = $state(false);
 
   // Search: every whitespace-separated token must match method/url/status —
   // the url covers domain, path and query string, so "api.foo 404 get" works.
@@ -43,76 +38,89 @@
     ),
   );
 
-  function reload(h: ApiHistorySummary): void {
+  function open(h: ApiHistorySummary): void {
     void apiClient.selectHistory(h.id);
+    onopen?.();
   }
 
   async function clear(): Promise<void> {
-    if (!(await confirmer.ask('Clear all request history for this workspace?', { title: 'Clear history', confirmLabel: 'Clear' }))) return;
+    if (!(await confirmer.ask(
+      `Delete all ${apiClient.history.length} history entries in this workspace, including their stored responses? Saved requests are not affected.`,
+      { title: 'Clear history', confirmLabel: 'Clear history' },
+    ))) return;
     await apiClient.clearHistory();
+  }
+
+  const retention = $derived(ws.apiHistoryRetention);
+  const retentionText = $derived(
+    retention.rows || retention.days
+      ? `Keeping ${retention.rows ? `the newest ${retention.rows}` : 'all'}${retention.days ? ` for up to ${retention.days} days` : ''}`
+      : 'Keeping every request',
+  );
+
+  function menu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Retention…', icon: 'clock', action: () => (retentionOpen = true), disabled: !canEdit },
+      { separator: true },
+      { label: 'Clear history…', icon: 'trash', danger: true, disabled: !canEdit || apiClient.history.length === 0, action: () => void clear() },
+    ]);
   }
 </script>
 
 <div class="hist-wrap">
-  <div class="hist-head">
-    <span class="hist-title">History</span>
-    <div class="hist-actions">
-      <button
-        class="icon-btn"
-        class:on={apiClient.historyAgentOnly}
-        aria-label="Show only agent runs"
-        title="Agent runs"
-        aria-pressed={apiClient.historyAgentOnly}
-        onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
-      ><Icon name="zap" size={13} /></button>
-      {#if apiClient.history.length > 0}
-        <button class="icon-btn" title="Clear history" aria-label="Clear history" onclick={clear}><Icon name="trash" size={13} /></button>
+  <div class="tools">
+    <label class="search">
+      <Icon name="search" size={12} />
+      <input placeholder="Search URL, method or status" bind:value={search} aria-label="Search request history" />
+      {#if search}
+        <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}
-    </div>
+    </label>
+    <button class="icon-btn" onclick={menu} aria-label="History options" title="History options"><Icon name="more" size={14} /></button>
+  </div>
+  <div class="filters">
+    <button
+      class="pill-toggle small"
+      class:on={apiClient.historyAgentOnly}
+      aria-pressed={apiClient.historyAgentOnly}
+      aria-label="Show only agent runs"
+      title="Show only requests that agents sent through Otto’s tools"
+      onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
+    >Agent runs only</button>
+    <span class="ret" title="History retention (workspace setting)">{retentionText}</span>
   </div>
 
-  {#if apiClient.historyLoadingId}<div class="empty-mini" role="status">Loading request…</div>{/if}
-
-  {#if apiClient.history.length > 0}
-    <div class="list-search">
-      <Icon name="search" size={12} />
-      <input
-        class="list-search-input"
-        placeholder="Search by URL, method, status…"
-        bind:value={search}
-        aria-label="Search request history"
-      />
-      {#if search}
-        <button class="icon-btn" onclick={() => (search = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
-      {/if}
-    </div>
-  {/if}
+  {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
 
   {#if apiClient.history.length === 0}
-    <div class="empty-mini">{apiClient.historyAgentOnly ? 'No agent runs yet.' : 'No requests yet.'}</div>
+    <EmptyState icon="clock" title="Nothing sent yet" body="Every request you send appears here, so you can open it again later." />
   {:else if filtered.length === 0}
-    <div class="empty-mini">
-      {apiClient.historyAgentOnly ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
+    <div class="state">
+      {apiClient.historyAgentOnly && !tokens.length ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
     </div>
   {:else}
-    <VirtualList items={filtered} estimateHeight={28} class="hist-vlist">
+    <VirtualList items={filtered} estimateHeight={44} class="hist-vlist">
       {#snippet row(h: ApiHistorySummary)}
         {@const src = apiClient.historySource(h)}
-        <button class="hist-row" onclick={() => reload(h)} title={h.url}>
-          <span class="rm rm-{h.method.toLowerCase()}">{h.method}</span>
-          <span class="hurl mono ellipsis grow">{h.url}</span>
-          {#if h.status != null}
-            <span class="status-dot {statusClass(h.status)}">{h.status}</span>
-          {/if}
-          {#if src?.kind === 'agent'}
-            <span class="src-chip agent" title={`Run by agent session ${src.session_id ?? ''}`}>agent</span>
-          {/if}
-          <span class="htime">{fmtTime(h.executed_at)}</span>
+        {@const u = splitUrl(h.url)}
+        <button class="hist-row" data-url={h.url} onclick={() => open(h)} title="{h.method} {h.url}&#10;{new Date(h.executed_at).toLocaleString()}">
+          <span class="l1">
+            <MethodTag method={h.method} fixed />
+            <span class="path mono" dir="ltr">{u.path}</span>
+          </span>
+          <span class="l2">
+            <span class="host" dir="ltr">{u.host || '—'}</span>
+            {#if src?.kind === 'agent'}<span class="chip agent src-chip" title="Sent by an agent session">Agent</span>{/if}
+            <StatusChip status={h.status} small />
+            <span class="when">{rel(h.executed_at)}</span>
+          </span>
         </button>
       {/snippet}
     </VirtualList>
   {/if}
 </div>
+
+{#if retentionOpen}<RetentionDialog onclose={() => (retentionOpen = false)} />{/if}
 
 <style>
   .hist-wrap {
@@ -120,64 +128,81 @@
     flex-direction: column;
     min-height: 0;
     min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
     flex: 1;
+    gap: 8px;
   }
-  .hist-head {
+  .tools {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 2px 6px;
+    gap: 4px;
   }
-  .hist-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-  }
-  .hist-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .icon-btn.on {
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .list-search {
+  .search {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 0 2px 6px;
+    height: 27px;
+    padding: 0 4px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
     color: var(--text-dim);
   }
-  .list-search-input {
+  .search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .search input {
     flex: 1;
     min-width: 0;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
+    border: none;
+    background: transparent;
     color: var(--text);
-    border-radius: var(--radius-s);
-    padding: 4px 7px;
-    font-size: 11.5px;
-  }
-  .list-search-input:focus {
+    font-size: var(--fs-m);
     outline: none;
-    border-color: var(--accent);
   }
-  /* VirtualList container replaces .hist-list direct flex; keep for fallback reference */
+  .search input::placeholder {
+    color: var(--text-dim);
+  }
+  .clear {
+    width: 20px;
+    height: 20px;
+  }
+  .filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .pill-toggle.small {
+    height: 22px;
+    font-size: var(--fs-xs);
+    flex-shrink: 0;
+  }
+  .ret {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .state {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    padding: 4px;
+  }
   :global(.hist-vlist) {
     flex: 1;
     min-height: 0;
-    max-height: 100%;
   }
   .hist-row {
     display: flex;
-    align-items: center;
-    gap: 7px;
-    height: 28px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    width: 100%;
+    height: 44px;
     padding: 0 6px;
     border: none;
     background: transparent;
@@ -187,64 +212,39 @@
     border-radius: var(--radius-s);
   }
   .hist-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
   }
-  .rm {
-    font-size: 9.5px;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--text-dim);
-    width: 40px;
-    flex-shrink: 0;
-  }
-  .rm-get { color: var(--status-working); }
-  .rm-post { color: var(--accent); }
-  .rm-put,
-  .rm-patch { color: #d2691e; }
-  .rm-delete { color: var(--status-exited); }
-  .hurl {
-    font-size: 11.5px;
+  .l1,
+  .l2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
   }
-  .status-dot {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 0 6px;
-    height: 16px;
-    line-height: 16px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .status-dot.ok { color: var(--status-working); background: color-mix(in srgb, var(--status-working) 16%, transparent); }
-  .status-dot.redirect { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  .status-dot.client { color: #d2691e; background: color-mix(in srgb, #d2691e 18%, transparent); }
-  .status-dot.server { color: var(--status-exited); background: color-mix(in srgb, var(--status-exited) 16%, transparent); }
-  .src-chip {
-    height: 16px;
-    padding: 0 6px;
-    border-radius: 999px;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    font-size: 9px;
-    font-weight: 700;
-    line-height: 16px;
-    flex-shrink: 0;
-  }
-  .htime {
-    font-size: 10px;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .empty-mini {
-    font-size: 12px;
-    color: var(--text-dim);
-    padding: 8px 2px;
-  }
-  .ellipsis {
+  .path {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--text);
+  }
+  .l2 {
+    padding-inline-start: 42px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .host {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .when {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .chip.agent {
+    height: 18px;
   }
 </style>

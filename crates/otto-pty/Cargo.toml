@@ -8,6 +8,8 @@ license.workspace = true
 vt100.workspace = true
 otto-core = { workspace = true }
 portable-pty = { workspace = true }
+# Process-group signalling + non-reaping exit wait (kill escalation, pid-reuse guard).
+libc = "0.2"
 tokio = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }

@@ -22,7 +22,7 @@ test('root creates reusable access group', async ({ page }) => {
     route.fulfill({ json: [] }),
   );
   await page.goto('/#/settings/access-groups');
-  await expect(page.getByRole('heading', { name: 'Groups & access roles' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Groups & access', exact: true })).toBeVisible();
   await page.getByLabel('Group name').fill('Database readers');
   await page.getByRole('button', { name: 'Create group', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Database readers', exact: true })).toBeVisible();

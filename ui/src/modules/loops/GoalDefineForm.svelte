@@ -4,6 +4,9 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
@@ -134,11 +137,19 @@
   }
 </script>
 
-<div class="form">
-  <header class="head">
-    <h1>New goal loop</h1>
+<div class="form-page">
+<PageHeader title="New goal loop">
+  {#snippet leading()}
+    <button class="icon-btn" title="Back to Goal Loops" aria-label="Back" onclick={oncancel}>
+      <Icon name="chevronLeft" size={15} />
+    </button>
+  {/snippet}
+  {#snippet actions()}
     <button class="btn ghost" onclick={oncancel}>Cancel</button>
-  </header>
+  {/snippet}
+</PageHeader>
+<PageBody width="readable">
+<div class="form">
 
   <section class="block">
     <label class="lbl" for="gl-mode">Mode</label>
@@ -260,6 +271,8 @@
     </div>
   {/if}
 </div>
+</PageBody>
+</div>
 
 {#if picking}
   <FolderPicker
@@ -274,21 +287,14 @@
 {/if}
 
 <style>
-  .form {
-    padding: 18px 22px;
-    max-width: 760px;
-    overflow-y: auto;
-    height: 100%;
-  }
-  .head {
+  .form-page {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 14px;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-  h1 {
-    font-size: 18px;
-    margin: 0;
+  .form {
+    max-width: 760px;
   }
   .block {
     border: 1px solid var(--border);

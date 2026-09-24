@@ -4,24 +4,35 @@
 
 import { scheduledTasksApi, type ScheduledTaskInput } from '../api/scheduledTasks';
 import type { OttoEvent, ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun } from '../api/types';
+import { loadErrorText } from '../loadError';
 
 class ScheduledTasksStore {
   list: ScheduledTask[] = $state([]);
   loadingList = $state(false);
+  /** Last list-load failure (human text) — rendered inline with Retry, never as "no tasks". */
+  listError = $state<string | null>(null);
   presets: ScheduledTaskPreset[] = $state([]);
   /** task_id → its recent runs (loaded on demand when a task is expanded). */
   runsByTask: Record<string, ScheduledTaskRun[]> = $state({});
+  /** task_id → why its run history failed to load (absent = ok). */
+  runsError: Record<string, string> = $state({});
   private wsId = '';
 
   async loadList(workspaceId: string): Promise<void> {
+    // Another workspace's tasks are not "stale data" for this one.
+    if (this.wsId !== workspaceId) this.list = [];
     this.wsId = workspaceId;
     this.loadingList = true;
     try {
-      this.list = await scheduledTasksApi.list(workspaceId);
-    } catch {
-      this.list = [];
+      const list = await scheduledTasksApi.list(workspaceId);
+      // A slower load for a workspace we've since left must not land here.
+      if (this.wsId !== workspaceId) return;
+      this.list = list;
+      this.listError = null;
+    } catch (e) {
+      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
     } finally {
-      this.loadingList = false;
+      if (this.wsId === workspaceId) this.loadingList = false;
     }
   }
 
@@ -37,8 +48,10 @@ class ScheduledTasksStore {
   async loadRuns(taskId: string): Promise<void> {
     try {
       this.runsByTask = { ...this.runsByTask, [taskId]: await scheduledTasksApi.runs(taskId) };
-    } catch {
-      this.runsByTask = { ...this.runsByTask, [taskId]: [] };
+      const { [taskId]: _drop, ...rest } = this.runsError;
+      this.runsError = rest;
+    } catch (e) {
+      this.runsError = { ...this.runsError, [taskId]: loadErrorText(e) };
     }
   }
 

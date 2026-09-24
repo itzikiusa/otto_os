@@ -133,25 +133,38 @@ test('⌘I: "open shell session" spawns even when a title contains "open" (regre
 
 test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ page }) => {
   await page.keyboard.press('Meta+t');
-  const group = page.locator('[role="radiogroup"]');
+  // The sheet has two radiogroups (Workspace, Provider); drive the provider one.
+  const group = page.getByRole('radiogroup', { name: /^Provider/ });
   await expect(group).toBeVisible({ timeout: 10_000 });
 
   // Focus the currently-selected provider radio.
-  const checked = page.locator('[role="radio"][aria-checked="true"]');
+  const checked = group.locator('[role="radio"][aria-checked="true"]');
   await checked.focus();
   const before = await checked.getAttribute('aria-label').catch(() => null);
   const beforeText = (await checked.textContent())?.trim();
 
   // ArrowRight moves the selection to a different provider.
   await page.keyboard.press('ArrowRight');
-  const checkedAfter = page.locator('[role="radio"][aria-checked="true"]');
+  const checkedAfter = group.locator('[role="radio"][aria-checked="true"]');
   await expect(checkedAfter).toHaveCount(1);
   const afterText = (await checkedAfter.textContent())?.trim();
   expect(afterText).not.toBe(beforeText);
   void before;
 
-  // Tab leaves the radiogroup and lands on the Title field (roving tabindex).
-  await page.keyboard.press('Tab');
+  // Tab leaves the radio set (roving tabindex: no other provider radio is a
+  // Tab stop) and walks forward to the Title field. The selected card's batch
+  // −/+ buttons and the account/model/network pickers sit in between, so walk
+  // the Tab order instead of assuming Title is the very next stop.
+  let reachedTitle = false;
+  for (let i = 0; i < 20 && !reachedTitle; i++) {
+    await page.keyboard.press('Tab');
+    const stop = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return { id: el?.id ?? '', role: el?.getAttribute('role') ?? '' };
+    });
+    expect(stop.role, 'Tab must not land on another provider radio').not.toBe('radio');
+    reachedTitle = stop.id === 'ns-title';
+  }
   await expect(page.locator('#ns-title')).toBeFocused();
 
   await page.keyboard.press('Escape');

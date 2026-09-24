@@ -20,7 +20,7 @@
   const node = $derived(data.node);
   const variant = $derived<ShapeVariant>(node.shape?.variant ?? 'rect');
   const fill = $derived(node.shape?.fill ?? 'var(--surface)');
-  const stroke = $derived(node.shape?.stroke ?? 'var(--border-strong, var(--text-dim))');
+  const stroke = $derived(node.shape?.stroke ?? 'var(--border-strong)');
   // Box dimensions (xyflow passes width/height; fall back to the model).
   const w = $derived(width ?? node.w ?? 160);
   const h = $derived(height ?? node.h ?? 90);

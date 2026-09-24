@@ -149,7 +149,9 @@ async function runRead(page: Page, sql: string): Promise<void> {
 
 /** Open the export dialog and point it at our isolated temp dir + a unique name. */
 async function openExportDialog(page: Page, fileName: string): Promise<void> {
-  await page.locator('.tb-btn', { hasText: 'Export all rows' }).first().click();
+  // "Export all rows…" lives in the results toolbar's Export menu.
+  await page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' }).first().click();
+  await page.locator('.ctx-item', { hasText: 'Export all rows' }).click();
   await expect(page.locator('.exp-form')).toBeVisible({ timeout: 10_000 });
   await page.locator('.exp-input[placeholder="~/Downloads"]').fill(exportDir);
   await page.locator('.exp-input[placeholder="result.csv"]').fill(fileName);
@@ -176,8 +178,10 @@ test.describe('DB Explorer · export', () => {
     await runRead(page, 'SELECT * FROM customers ORDER BY id');
 
     // Fix #1: one clear full-export control; the misleading "Full Export" is gone.
-    await expect(page.locator('.grid-toolbar')).toContainText('Export all rows');
-    await expect(page.locator('.grid-toolbar .tb-btn', { hasText: 'Full Export' })).toHaveCount(0);
+    await page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' }).first().click();
+    await expect(page.locator('.ctx-menu')).toContainText('Export all rows');
+    await expect(page.locator('.ctx-item', { hasText: 'Full Export' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
 
     const fileName = `customers-${info.project.name}.csv`;
     await openExportDialog(page, fileName);

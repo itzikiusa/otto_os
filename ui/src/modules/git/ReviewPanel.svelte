@@ -28,7 +28,12 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import FindingsBoard from './FindingsBoard.svelte';
   // Subscribe to the WS review_changed bus (populated by events.svelte.ts) to
   // re-fetch when the running review for this PR completes/errors, replacing the
@@ -466,7 +471,29 @@
     return { ...r, comments: r.comments.map((x) => (x.id === updated.id ? updated : x)) };
   }
 
-  async function approveComment(c: ReviewComment): Promise<void> {
+  // "Approving" a draft comment POSTS it to the PR on the provider under the
+  // user's git account — outward-facing, so it confirms where / what / who.
+  // The bulk "Post N drafts" path confirms ONCE for the batch.
+  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+  const prWhere = $derived(`${repoLabel} · PR #${prNumber}`);
+  const PR_WHO = "The PR author and reviewers see it, posted under your git account.";
+
+  function commentPreview(c: ReviewComment): string {
+    const loc = c.path !== null ? `${c.path}${c.line !== null ? `:${c.line}` : ''} — ` : '';
+    return `${loc}${c.body}`;
+  }
+
+  async function postComment(c: ReviewComment, confirmed = false): Promise<boolean> {
+    if (!confirmed) {
+      const ok = await confirmOutward({
+        verb: 'Post to PR',
+        title: `Post comment to PR #${prNumber}?`,
+        where: prWhere,
+        what: commentPreview(c),
+        who: PR_WHO,
+      });
+      if (!ok) return false;
+    }
     actionBusy = { ...actionBusy, [c.id]: 'approve' };
     try {
       const updated = await api.post<ReviewComment>(`/pr-review-comments/${c.id}/approve`);
@@ -474,14 +501,45 @@
         review = patchCommentInReview(review, updated);
         if (history.length > 0) history = [review, ...history.slice(1)];
       }
-      toasts.success('Comment posted');
+      // The daemon answers 200 even when the forge refused the comment (auth,
+      // network, 5xx — never retried, a 5xx may have created it): the comment
+      // is approved in Otto but `posted` stays false. Never report that as sent.
+      if (!updated.posted) {
+        toasts.error("Couldn't post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        return false;
+      }
+      if (!confirmed) toasts.success('Comment posted', prWhere);
+      return true;
     } catch (e) {
-      toasts.error('Could not approve comment', e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't post the comment", e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       const next = { ...actionBusy };
       delete next[c.id];
       actionBusy = next;
     }
+  }
+
+  let postingAll = $state(false);
+  async function postAllDrafts(): Promise<void> {
+    const drafts = (review?.comments ?? []).filter((c) => c.state === 'draft');
+    if (drafts.length === 0) return;
+    const ok = await confirmOutward({
+      verb: `Post ${drafts.length} comments`,
+      title: `Post ${drafts.length} comments to PR #${prNumber}?`,
+      where: prWhere,
+      what: drafts.map((c) => `• ${commentPreview(c).split('\n')[0]}`).join('\n'),
+      who: PR_WHO,
+    });
+    if (!ok) return;
+    postingAll = true;
+    let posted = 0;
+    try {
+      for (const c of drafts) if (await postComment(c, true)) posted++;
+    } finally {
+      postingAll = false;
+    }
+    if (posted > 0) toasts.success(`${posted} comment${posted === 1 ? '' : 's'} posted`, prWhere);
   }
 
   async function declineComment(c: ReviewComment): Promise<void> {
@@ -843,13 +901,23 @@
 
   const approvedCount = $derived.by(() => {
     const cs = review?.comments ?? [];
-    return cs.filter((c: ReviewComment) => c.state === 'approved').length;
+    return cs.filter((c: ReviewComment) => c.state === 'approved' && c.posted).length;
   });
   const draftCount = $derived.by(() => {
     const cs = review?.comments ?? [];
     return cs.filter((c: ReviewComment) => c.state === 'draft').length;
   });
   const totalCount = $derived.by(() => review?.comments?.length ?? 0);
+  /** Who drafted the comments: the summarizer (last agent row) plus the lenses
+   *  it merged. Null for reviews without agent rows. */
+  const draftedBy = $derived.by(() => {
+    const ag = review?.agents ?? [];
+    if (ag.length === 0) return null;
+    const summ = ag[ag.length - 1];
+    const reviewers = ag.length > 1 ? ag.slice(0, -1) : ag;
+    const lenses = [...new Set(reviewers.map((a) => a.lens ?? a.name).filter((n) => n.trim() !== ''))];
+    return { provider: summ.provider, model: summ.model, lenses };
+  });
   const blockerCount = $derived.by(() => review?.blocker_count ?? 0);
   const mergeReady = $derived.by(() => {
     const r = review;
@@ -986,12 +1054,17 @@
           </span>
         {/if}
         {#if approvedCount > 0}
-          <span class="chip ok">{approvedCount} approved</span>
+          <span class="chip ok">{approvedCount} posted</span>
         {/if}
         {#if draftCount > 0}
           <span class="chip">{draftCount} draft</span>
         {/if}
       </span>
+      {#if draftCount > 1}
+        <button class="btn small" disabled={postingAll} data-testid="rp-post-all" onclick={() => void postAllDrafts()}>
+          {postingAll ? 'Posting…' : `Post ${draftCount} drafts to PR…`}
+        </button>
+      {/if}
       <button class="btn small ghost" onclick={openConfig}>
         &#9881; Configure
         {#if repoCfgBadge !== ''}
@@ -1062,7 +1135,7 @@
             <!-- Unresolved findings -->
             {@const unresolved = mergeReadiness.unresolved_total}
             {#if unresolved > 0}
-              <span class="chip rp-readiness-chip" style="background:color-mix(in srgb,var(--status-exited)12%,transparent);color:var(--status-exited)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
+              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
             {:else}
               <span class="chip ok rp-readiness-chip">No open findings</span>
             {/if}
@@ -1071,7 +1144,7 @@
             {#if mergeable === true}
               <span class="chip ok rp-readiness-chip">Mergeable</span>
             {:else if mergeable === false}
-              <span class="chip rp-readiness-chip" style="color:var(--status-exited)">Conflicts</span>
+              <span class="chip rp-readiness-chip" style="color:var(--danger)">Conflicts</span>
             {/if}
           {/if}
         </div>
@@ -1096,6 +1169,17 @@
     {#if review.comments.length === 0}
       <p class="dim" style="font-size: 12.5px; padding: 16px 0">No comments generated.</p>
     {:else}
+      {#if draftedBy}
+        <!-- Attribution: the comments are the summarizer's merge of every
+             lens (per-comment origin isn't recorded), and stay drafts here
+             until a person posts them. -->
+        <p class="rp-attrib" data-testid="rp-attrib">
+          <ProviderIcon provider={draftedBy.provider} size={12} />
+          <span>
+            Drafted by Otto's review ({draftedBy.provider}{draftedBy.model ? ` · ${draftedBy.model}` : ''}){draftedBy.lenses.length > 0 ? ` from ${draftedBy.lenses.join(', ')}` : ''}. Nothing reaches the PR until you post it.
+          </span>
+        </p>
+      {/if}
       <div class="rp-list">
         {#each review.comments as c (c.id)}
           {@const snippetLines = getSnippetLines(c)}
@@ -1110,11 +1194,13 @@
               <span class="grow"></span>
               {#if c.state === 'draft'}
                 <button
-                  class="btn small primary"
-                  disabled={!!actionBusy[c.id]}
-                  onclick={() => approveComment(c)}
+                  class="btn small"
+                  disabled={!!actionBusy[c.id] || postingAll}
+                  data-testid="rp-post-comment"
+                  title="Post this comment to {prWhere}"
+                  onclick={() => void postComment(c)}
                 >
-                  {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Approve'}
+                  {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Post to PR…'}
                 </button>
                 <button
                   class="btn small ghost"
@@ -1123,10 +1209,12 @@
                 >
                   {actionBusy[c.id] === 'decline' ? 'Declining…' : 'Decline'}
                 </button>
-              {:else if c.state === 'approved'}
+              {:else if c.state === 'approved' && c.posted}
                 <span class="chip ok rp-badge">
                   <Icon name="check" size={10} /> posted
                 </span>
+              {:else if c.state === 'approved'}
+                <span class="chip rp-badge dim" title="Approved in Otto, but the provider refused the post">not posted</span>
               {:else}
                 <span class="chip rp-badge dim">declined</span>
               {/if}
@@ -1189,7 +1277,7 @@
                 aria-expanded={isOpen}
               >
                 <span class="dim" style="font-size:11px">{timeAgo(run.created_at)}</span>
-                <span class="chip rp-status-{run.status}" style="font-size:10px;padding:1px 5px">{run.status}</span>
+                <StatusBadge status={runStatus(run.status)} />
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:10.5px">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
@@ -1210,8 +1298,10 @@
                             <span class="mono rp-loc">{c.path}{c.line !== null ? `:${c.line}` : ''}</span>
                           {/if}
                           <span class="grow"></span>
-                          {#if c.state === 'approved'}
+                          {#if c.state === 'approved' && c.posted}
                             <span class="chip ok rp-badge"><Icon name="check" size={10} /> posted</span>
+                          {:else if c.state === 'approved'}
+                            <span class="chip rp-badge dim">not posted</span>
                           {:else if c.state === 'declined'}
                             <span class="chip rp-badge dim">declined</span>
                           {:else}
@@ -1449,14 +1539,14 @@
     flex-wrap: wrap;
   }
   .rp-merge-ok {
-    background: color-mix(in srgb, var(--status-working) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-working) 40%, var(--border));
-    color: var(--status-working);
+    background: var(--success-soft);
+    border: 1px solid color-mix(in srgb, var(--success) 40%, var(--border));
+    color: var(--success);
   }
   .rp-merge-blocked {
-    background: color-mix(in srgb, var(--status-exited) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 35%, var(--border));
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+    color: var(--danger);
   }
   .rp-verdict {
     margin-inline-start: auto;
@@ -1483,13 +1573,13 @@
     white-space: nowrap;
   }
   .rp-readiness-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
   }
   /* CI status pill colours */
-  .rp-ci-success { background: color-mix(in srgb, var(--status-working) 12%, transparent); color: var(--status-working); }
-  .rp-ci-failure { background: color-mix(in srgb, var(--status-exited) 12%, transparent); color: var(--status-exited); }
-  .rp-ci-pending { background: color-mix(in srgb, var(--status-warn) 12%, transparent); color: var(--status-warn); }
+  .rp-ci-success { background: var(--success-soft); color: var(--success); }
+  .rp-ci-failure { background: var(--danger-soft); color: var(--danger); }
+  .rp-ci-pending { background: var(--warning-soft); color: var(--warning); }
   .rp-ci-none    { background: var(--surface-2); color: var(--text-dim); }
 
   /* Pre-check banner: missing / outdated review skills */
@@ -1499,15 +1589,15 @@
     gap: 8px;
     padding: 7px 10px;
     margin: 0 0 10px;
-    border: 1px solid color-mix(in srgb, var(--status-warn) 35%, var(--border));
-    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+    background: var(--warning-soft);
     border-radius: var(--radius-s, 4px);
     font-size: 11.5px;
     line-height: 1.4;
     flex-wrap: wrap;
   }
   .rp-precheck-icon {
-    color: var(--status-warn);
+    color: var(--warning);
     flex-shrink: 0;
   }
   .rp-precheck-msg {
@@ -1606,7 +1696,7 @@
     font-weight: 600;
   }
   .rp-agent-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .rp-agent-note {
     margin: 4px 0 0;
@@ -1620,49 +1710,13 @@
     margin-top: 3px;
   }
 
-  /* Status pills */
-  .rp-status-pill {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .rp-status-pending {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-running {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-  }
-  .rp-status-done {
-    background: color-mix(in srgb, var(--status-working) 15%, transparent);
-    color: var(--status-working);
-  }
-  .rp-status-error {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
-  }
-  .rp-status-cancelled {
-    background: color-mix(in srgb, var(--text-dim) 15%, transparent);
-    color: var(--text-dim);
-  }
-  .rp-status-waiting {
-    background: var(--status-warn-soft);
-    color: var(--status-warn);
-  }
 
   /* Per-agent: "waiting for input" callout + expandable findings */
   .rp-agent-waiting {
     margin: 6px 0 0;
     font-size: 11.5px;
     line-height: 1.45;
-    color: var(--status-warn);
+    color: var(--warning);
   }
   .rp-term {
     height: min(360px, 65vh);
@@ -1699,7 +1753,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
-    color: var(--status-exited);
+    color: var(--danger);
     margin-top: 8px;
   }
   .rp-error-msg {
@@ -1731,6 +1785,14 @@
   }
 
   /* Comment list */
+  .rp-attrib {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 8px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
   .rp-list {
     display: flex;
     flex-direction: column;
@@ -1772,22 +1834,22 @@
     display: inline-block;
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .sev-info {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-warn {
-    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
-    color: var(--status-warn);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
   .sev-bug {
-    background: color-mix(in srgb, var(--status-exited) 15%, transparent);
-    color: var(--status-exited);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   /* Diff snippet */
@@ -1798,7 +1860,7 @@
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 0;
     line-height: 1.4;
@@ -1823,11 +1885,11 @@
     white-space: pre;
   }
   .rp-diff-add {
-    background: color-mix(in srgb, var(--status-working) 12%, transparent);
+    background: var(--success-soft);
     color: var(--text);
   }
   .rp-diff-del {
-    background: color-mix(in srgb, var(--status-exited, #c0392b) 12%, transparent);
+    background: var(--danger-soft);
     color: var(--text);
   }
   .rp-diff-context {
@@ -1922,7 +1984,7 @@
     align-items: flex-end;
   }
   .cfg-save-preset {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 6px;
     white-space: nowrap;
   }
@@ -2035,7 +2097,7 @@
     color: var(--text);
   }
   .cfg-preset-del:hover {
-    color: var(--status-exited);
+    color: var(--danger);
   }
 
   /* Jira attachment row */
@@ -2061,7 +2123,7 @@
     border: none;
     cursor: pointer;
     padding: 0 2px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1;
   }

@@ -315,18 +315,7 @@ impl Driver for RedisDriver {
             return Err(types::invalid("redis: no command provided"));
         }
 
-        // Honour an explicitly selected keyspace from the request node context;
-        // the connection is PINNED to that db at handshake (no shared-connection
-        // SELECT — that cross-wired concurrent requests, including writes).
-        let db = req
-            .node
-            .as_deref()
-            .and_then(|node| {
-                NodePath::parse(node)
-                    .get("kdb")
-                    .and_then(|s| s.parse::<i64>().ok())
-            })
-            .unwrap_or_else(|| default_db(cfg));
+        let db = keyspace_for(cfg, req)?;
         let mut conn = self.connect(cfg, db).await?;
 
         // Per-statement timeout: applied as a per-command wall-clock deadline so
@@ -429,6 +418,26 @@ fn default_db(cfg: &ResolvedConfig) -> i64 {
         .as_deref()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(0)
+}
+
+/// The keyspace a command runs in: the request's scope (`kdb:<n>`, or a bare
+/// index from a caller that already stripped the tag), else the profile
+/// default. The connection is PINNED to it at handshake (no shared-connection
+/// `SELECT` — that cross-wired concurrent requests, including writes).
+///
+/// A scope that names no keyspace is REFUSED rather than defaulted: falling
+/// back to the default database is exactly how a `DEL` issued with db3
+/// selected used to delete db0's same-named key.
+fn keyspace_for(cfg: &ResolvedConfig, req: &QueryRequest) -> Result<i64> {
+    match req.scope() {
+        None => Ok(default_db(cfg)),
+        Some(scope) => scope.keyspace().ok_or_else(|| {
+            types::invalid(format!(
+                "redis: '{}' is not a keyspace (expected kdb:<n>)",
+                scope.child()
+            ))
+        }),
+    }
 }
 
 /// Build a `redis::Client` for `cfg` PINNED to logical database `db` (selected
@@ -1143,6 +1152,62 @@ mod tests {
             bytes_to_json(b"hello".to_vec()),
             JsonValue::String("hello".into())
         );
+    }
+
+    fn keyspace_cfg(database: Option<&str>) -> ResolvedConfig {
+        ResolvedConfig {
+            lifecycle: None,
+            engine: Engine::Redis,
+            host: "127.0.0.1".into(),
+            port: 6379,
+            user: None,
+            password: None,
+            database: database.map(str::to_string),
+            tls: Default::default(),
+            params: JsonValue::Null,
+        }
+    }
+
+    fn scoped(node: Option<&str>) -> QueryRequest {
+        QueryRequest {
+            statement: "DEL session:42".into(),
+            node: node.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Every Redis entry point (console, "Get value", grid edits/deletes, MCP)
+    /// scopes with `kdb:<n>`; the service canonicalizes to the same form. The
+    /// selected keyspace must reach the handshake — never the default db.
+    #[test]
+    fn keyspace_scope_reaches_the_driver() {
+        let cfg = keyspace_cfg(None);
+        // The UI / MCP / reviewed-change shapes.
+        assert_eq!(keyspace_for(&cfg, &scoped(Some("kdb:3"))).unwrap(), 3);
+        assert_eq!(
+            keyspace_for(&cfg, &scoped(Some("kdb:3/key:session:42"))).unwrap(),
+            3
+        );
+        // The service's canonical node for `kdb:3`.
+        let canonical = crate::access::canonical_node(Some("kdb:3"));
+        assert_eq!(canonical.as_deref(), Some("kdb:3"));
+        assert_eq!(
+            keyspace_for(&cfg, &scoped(canonical.as_deref())).unwrap(),
+            3
+        );
+        // The pre-fix rewrite (`kdb:3` → `3`) and the MCP `database` field.
+        assert_eq!(keyspace_for(&cfg, &scoped(Some("3"))).unwrap(), 3);
+        assert_eq!(keyspace_for(&cfg, &scoped(Some("db:3"))).unwrap(), 3);
+        assert_eq!(keyspace_for(&cfg, &scoped(Some("db3"))).unwrap(), 3);
+        // No scope → the profile default, else db0.
+        assert_eq!(keyspace_for(&cfg, &scoped(None)).unwrap(), 0);
+        assert_eq!(
+            keyspace_for(&keyspace_cfg(Some("5")), &scoped(None)).unwrap(),
+            5
+        );
+        // A scope that names no keyspace is refused, never defaulted to db0.
+        assert!(keyspace_for(&cfg, &scoped(Some("sessions"))).is_err());
+        assert!(keyspace_for(&cfg, &scoped(Some("kdb:x"))).is_err());
     }
 
     #[test]

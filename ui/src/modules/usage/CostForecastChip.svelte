@@ -3,6 +3,7 @@
   // POST /usage/forecast and shows a projected cost estimate before a run.
   // Usage: <CostForecastChip feature="review" provider="claude" />
   //        <CostForecastChip feature="agent" provider="claude" estTokens={4000} />
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { ForecastReq, ForecastResp } from './types';
 
@@ -24,25 +25,34 @@
   let loading = $state(false);
   let expanded = $state(false);
 
-  async function load(): Promise<void> {
-    if (loading) return;
+  // Request token: a newer load supersedes any in-flight one, so a slow
+  // response for stale inputs can never overwrite the current forecast.
+  let seq = 0;
+
+  async function load(f: string, p: string, est: number | undefined): Promise<void> {
+    const mine = ++seq;
     loading = true;
     try {
-      const req: ForecastReq = { feature, provider };
-      if (estTokens && estTokens > 0) req.est_tokens = estTokens;
-      resp = await api.post<ForecastResp>('/usage/forecast', req);
+      const req: ForecastReq = { feature: f, provider: p };
+      if (est && est > 0) req.est_tokens = est;
+      const r = await api.post<ForecastResp>('/usage/forecast', req);
+      if (mine === seq) resp = r;
     } catch {
-      resp = null;
+      if (mine === seq) resp = null;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
-  // Reload whenever inputs change.
+  // Reload whenever inputs change. Only the three props are dependencies:
+  // `load` reads and writes `loading`/`resp`, so it runs untracked — a
+  // tracked `loading` re-ran this effect on every `finally`, which fired
+  // POST /usage/forecast back-to-back for as long as the chip was mounted.
   $effect(() => {
-    void load();
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    feature; provider; estTokens;
+    const f = feature;
+    const p = provider;
+    const est = estTokens;
+    untrack(() => void load(f, p, est));
   });
 
   function fmtCost(n: number): string {
@@ -87,33 +97,33 @@
     font-size: 11px;
     padding: 2px 7px;
     border-radius: 10px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     vertical-align: middle;
     line-height: 1.4;
     cursor: default;
     user-select: none;
   }
   .forecast-chip.loading {
-    background: var(--surface-3, #0d1117);
-    color: var(--fg-muted, #8b949e);
-    border: 1px solid var(--border-subtle, #21262d);
+    background: var(--surface-3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .forecast-chip.ready {
-    background: var(--surface-3, #0d1117);
-    color: var(--accent, #388bfd);
-    border: 1px solid var(--accent-subtle, #1f3a5f);
+    background: var(--surface-3);
+    color: var(--accent-text);
+    border: 1px solid var(--accent-soft);
     cursor: pointer;
     position: relative;
   }
   .forecast-chip.ready:hover {
-    border-color: var(--accent, #388bfd);
-    background: var(--accent-muted, #0d2136);
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .forecast-chip.no-data {
-    background: var(--surface-3, #0d1117);
-    color: var(--fg-muted, #8b949e);
-    border: 1px dashed var(--border, #30363d);
+    background: var(--surface-3);
+    color: var(--text-dim);
+    border: 1px dashed var(--border);
   }
 
   .forecast-tooltip {
@@ -121,8 +131,8 @@
     z-index: 100;
     margin-top: 4px;
     padding: 10px 12px;
-    background: var(--surface-2, #161b22);
-    border: 1px solid var(--border, #30363d);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: 6px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     min-width: 200px;
@@ -130,23 +140,23 @@
   }
   .forecast-label {
     display: block;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     margin-bottom: 2px;
   }
   .forecast-value {
     display: block;
     font-size: 18px;
     font-weight: 700;
-    color: var(--fg, #e6edf3);
-    font-family: var(--font-mono, monospace);
+    color: var(--text);
+    font-family: var(--font-mono);
   }
   .forecast-basis {
     margin: 6px 0 0;
     font-size: 11px;
-    color: var(--fg-muted, #8b949e);
+    color: var(--text-dim);
     line-height: 1.4;
   }
 

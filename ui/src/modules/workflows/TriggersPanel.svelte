@@ -3,7 +3,7 @@
   // triggers (schedule / webhook / event).  Shown in the workflow inspector
   // sidebar when the "Triggers" tab is active.
   import { onDestroy } from 'svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
@@ -168,7 +168,7 @@
     return '';
   }
 
-  function kindIcon(kind: TriggerKind): string {
+  function kindIcon(kind: TriggerKind): IconName {
     if (kind === 'schedule') return 'clock';
     if (kind === 'webhook') return 'zap';
     if (kind === 'chat') return 'comment';
@@ -395,7 +395,7 @@
     flex: 1;
   }
   .add-form {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px;
@@ -420,7 +420,7 @@
     padding: 4px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background: var(--input-bg, var(--bg));
+    background: var(--surface-2);
     color: var(--text);
   }
   .chk-row {
@@ -448,9 +448,9 @@
     margin: 0;
   }
   code {
-    font-family: var(--mono);
+    font-family: var(--font-mono);
     font-size: 11px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     padding: 1px 4px;
     border-radius: 3px;
   }
@@ -513,7 +513,7 @@
     flex-shrink: 0;
   }
   .row-del:hover {
-    color: var(--danger, #e04c4c);
+    color: var(--danger);
   }
   .empty {
     font-size: 12px;

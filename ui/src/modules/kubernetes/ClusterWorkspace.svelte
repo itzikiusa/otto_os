@@ -23,6 +23,7 @@
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sCluster, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import NamespacePicker from './NamespacePicker.svelte';
@@ -33,7 +34,8 @@
   import InstallPanel from './InstallPanel.svelte';
   import type { ActionDef } from './actions';
   import { actionsFor, runAction } from './actions';
-  import { envBadge, formatAge, kindDef, visibleKinds } from './k8s-util';
+  import { formatAge, kindDef, visibleKinds } from './k8s-util';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
 
   interface Props {
     cluster: K8sCluster;
@@ -342,24 +344,28 @@
 </script>
 
 <div class="wsp" class:prod={cluster.environment === 'prod'} data-testid="k8s-workspace">
-  <div class="topbar">
+  <PageHeader title={cluster.name} class="k8s-topbar">
+  {#snippet leading()}
     <button class="icon-btn" onclick={() => router.go('kubernetes')} title="All clusters" aria-label="Back to clusters"><Icon name="chevronLeft" size={14} /></button>
     <span class="dot" style="background:{cluster.color || 'var(--accent)'}"></span>
+  {/snippet}
+  {#snippet titleContent()}
     <select class="input cluster-sel" aria-label="Cluster" value={cluster.id} onchange={(e) => switchCluster((e.currentTarget as HTMLSelectElement).value)} data-testid="k8s-cluster-switcher">
       {#each k8s.clusters as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
     </select>
-    <span class="env-badge mono" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
+  {/snippet}
+  {#snippet badge()}
+    <EnvBadge env={cluster.environment} />
     {#if k8s.caps?.server_version}<span class="ver mono" title="Server version">{k8s.caps.server_version}</span>{/if}
-
-    <NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} />
+  {/snippet}
+  {#snippet actions()}
+    <span class="ns-keep" data-keep><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
 
     <div class="filter">
       <Icon name="search" size={12} />
       <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
       {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter"><Icon name="x" size={11} /></button>{/if}
     </div>
-
-    <span class="spacer"></span>
 
     <span class="meta dim" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>
       {#if k8s.rowsLoading}loading…{:else if lastLoaded}{k8s.filteredRows.length}{k8s.filter ? `/${rowsForKey.length}` : ''} · {lastLoaded} ago{/if}
@@ -377,7 +383,8 @@
       </button>
     {/if}
     <button class="icon-btn" onclick={() => (hintsOpen = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="command" size={14} /></button>
-  </div>
+  {/snippet}
+  </PageHeader>
 
   {#if k8s.k9sSessionId}
     <div class="k9s">
@@ -518,17 +525,11 @@
     min-height: 0;
     overflow: hidden;
   }
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-wrap: wrap;
-  }
-  .wsp.prod .topbar {
+  .wsp.prod :global(.k8s-topbar) {
     box-shadow: inset 0 2px 0 color-mix(in srgb, var(--status-exited) 60%, transparent);
+  }
+  .ns-keep {
+    display: inline-flex;
   }
   .dot {
     width: 9px;
@@ -537,7 +538,8 @@
     flex-shrink: 0;
   }
   .cluster-sel {
-    max-width: 200px;
+    max-width: 220px;
+    font: inherit;
     font-weight: 600;
   }
   .ver {
@@ -626,7 +628,7 @@
     margin-top: 2px;
   }
   .cnt {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .kinds-mobile {
@@ -703,20 +705,6 @@
     flex: 1;
     min-height: 0;
     background: #000;
-  }
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
   }
   .hints {
     display: grid;

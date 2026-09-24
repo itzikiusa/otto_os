@@ -4,16 +4,20 @@
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
   import { untrack } from 'svelte';
   import { marked } from 'marked';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
   import RunSteps from './RunSteps.svelte';
   import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
-  // Hosted in the side-docked inspector header so the bell stays reachable when
-  // the shell's floating bell is hidden for the docked layout (agents-style).
-  import NotificationBell from '../../shell/NotificationBell.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -21,6 +25,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { workflowProgress, workflowNodeDetail, listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { mergeRunProgress } from './runProgress';
@@ -41,6 +46,10 @@
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
+  /** List load state — a failed load renders inline with Retry, never as the
+   *  "Build a workflow" empty state. */
+  let wfLoading = $state(true);
+  let wfError = $state<string | null>(null);
   let templates = $state<WorkflowTemplate[]>([]);
   let types = $state<NodeTypeSpec[]>([]);
   let current = $state<Workflow | null>(null);
@@ -207,26 +216,39 @@
   // same way FileTree previews markdown: `marked` → a sandboxed iframe
   // (srcdoc, no scripts run) — that's the only "sanitizer" FileTree applies,
   // so mirror it exactly rather than injecting raw HTML into the page.
+  // The srcdoc is themed from the app's tokens (resolved values copied in,
+  // like PluginFrame's `otto:init` theme) so it reads in light AND dark; it
+  // re-renders when the theme/scheme/accent changes (`finalOutputSrcdoc`).
   const FINAL_OUTPUT_CSS = `
-    :root { color-scheme: light dark; }
-    body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 16px; color: #ddd; background: transparent; }
-    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid #ffffff22; padding-bottom: .2em; }
-    a { color: #6ea8fe; } code { background: #ffffff14; padding: .15em .35em; border-radius: 4px; font-family: ui-monospace, monospace; }
-    pre { background: #ffffff10; padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; } th,td { border: 1px solid #ffffff22; padding: 4px 8px; }
-    blockquote { border-left: 3px solid #ffffff33; margin: 0; padding-left: 12px; color: #aaa; }
+    body { font: 14px/1.6 var(--font-ui); margin: 16px; color: var(--text); background: transparent; }
+    h1,h2,h3 { line-height: 1.25; } h1,h2 { border-bottom: 1px solid var(--border); padding-bottom: .2em; }
+    a { color: var(--accent-text); } code { background: var(--surface-2); padding: .15em .35em; border-radius: 4px; font-family: var(--font-mono); }
+    pre { background: var(--surface-2); padding: 12px; border-radius: 6px; overflow: auto; } pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; } th,td { border: 1px solid var(--border); padding: 4px 8px; }
+    blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 12px; color: var(--text-dim); }
     img { max-width: 100%; }
   `;
+  const FINAL_OUTPUT_TOKENS = ['--text', '--text-dim', '--border', '--border-strong', '--surface-2', '--accent-text', '--font-ui', '--font-mono'];
+  /** Markdown → HTML body (stored); the themed document is `finalOutputSrcdoc`. */
   function renderFinalOutputSrcdoc(md: string): string {
-    let inner: string;
     try {
-      inner = marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
+      return marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
     } catch {
-      inner = `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
+      return `<pre>${md.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>`;
     }
-    return `<!doctype html><html><head><meta charset="utf-8"><style>
-  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }${FINAL_OUTPUT_CSS}</style></head><body>${inner}</body></html>`;
   }
+  function themedFinalOutput(body: string, scheme: 'light' | 'dark'): string {
+    const cs = getComputedStyle(document.documentElement);
+    const vars = FINAL_OUTPUT_TOKENS.map((v) => `${v}: ${cs.getPropertyValue(v).trim()};`).join(' ');
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+  :root { color-scheme: ${scheme}; ${vars} }${FINAL_OUTPUT_CSS}</style></head><body>${body}</body></html>`;
+  }
+  const finalOutputSrcdoc = $derived.by(() => {
+    // Theme inputs are read so the frame re-themes when they change.
+    void ui.theme;
+    void ui.accent;
+    return finalOutputHtml ? themedFinalOutput(finalOutputHtml, ui.resolvedScheme) : '';
+  });
   async function loadFinalOutput(runId: string, contextDir: string): Promise<void> {
     finalOutputRunId = runId; // mark attempted up front — no duplicate fetches
     finalOutputAvailable = false;
@@ -281,13 +303,75 @@
     return `${Math.floor(m / 60)}h ago`;
   }
 
+  // Never open onto an empty "build a workflow" pane when the workspace has
+  // workflows: restore the last-opened one (or the first) once per workspace
+  // load. Not on a phone, where the sidebar list is the first screen.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (current) {
+      autoPickedFor = wsId;
+      return;
+    }
+    // The list still holds the previous workspace's rows until load() lands.
+    const mine = workflows.filter((w) => w.workspace_id === wsId);
+    if (mine.length === 0) return;
+    autoPickedFor = wsId;
+    const id = initialSelection('workflows', mine, (w) => w.id);
+    const wf = mine.find((w) => w.id === id);
+    if (wf) untrack(() => open(wf));
+  });
+  $effect(() => {
+    if (current?.id) rememberSelection('workflows', current.id);
+  });
+
+  // The Node palette / Runs popovers hang off header buttons, but the header's
+  // action row clips overflow — so they render at the top of the editor pane,
+  // horizontally under their button (clamped into the pane).
+  let mainEl = $state<HTMLElement | null>(null);
+  let popRight = $state(8);
+  function anchorPop(e: MouseEvent, width: number): void {
+    const b = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+    const m = mainEl?.getBoundingClientRect();
+    // A button collapsed into the header's "⋯" menu has no box — pin right.
+    if (!b || !m || b.width === 0) {
+      popRight = 8;
+      return;
+    }
+    popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+  }
+
+  // The workspace `workflows` belongs to, and a token so a slow load for a
+  // workspace we've since left can't land over the current one.
+  let wfFor: string | null = null;
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const wsId = ws.currentId;
+    const seq = ++loadSeq;
+    // Never list another workspace's rows under this one — neither while this
+    // one loads nor, silently, after its load fails.
+    if (wfFor !== wsId) {
+      workflows = [];
+      wfError = null;
+      wfFor = wsId;
+      if (current && current.workspace_id !== wsId) {
+        current = null;
+        graph = { nodes: [], edges: [] };
+      }
+    }
+    wfLoading = true;
     try {
       if (types.length === 0) types = await api.get<NodeTypeSpec[]>('/workflows/node-types');
       if (templates.length === 0) templates = await api.get<WorkflowTemplate[]>('/workflows/templates');
-      workflows = await api.get<Workflow[]>(`/workspaces/${ws.currentId}/workflows`);
+      const rows = await api.get<Workflow[]>(`/workspaces/${wsId}/workflows`);
+      if (seq !== loadSeq) return;
+      workflows = rows;
+      wfError = null;
     } catch (e) {
-      toasts.error('Failed to load workflows', e instanceof Error ? e.message : String(e));
+      if (seq === loadSeq) wfError = loadErrorText(e);
+    } finally {
+      if (seq === loadSeq) wfLoading = false;
     }
   }
 
@@ -407,14 +491,28 @@
     }
   }
 
+  // Deleting cascades (runs, triggers, node cache all go with it), so it asks
+  // first; when the open workflow goes, open its neighbour instead of leaving
+  // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
+    const ok = await confirmer.ask(
+      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can't be undone.`,
+      { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
+    );
+    if (!ok) return;
     try {
       await api.del(`/workflows/${wf.id}`);
+      const idx = workflows.findIndex((w) => w.id === wf.id);
       workflows = workflows.filter((w) => w.id !== wf.id);
       if (current?.id === wf.id) {
-        current = null;
-        graph = { nodes: [], edges: [] };
+        const next = workflows[Math.min(Math.max(idx, 0), workflows.length - 1)] ?? null;
+        if (next) open(next);
+        else {
+          current = null;
+          graph = { nodes: [], edges: [] };
+        }
       }
+      toasts.success('Workflow deleted', wf.name);
     } catch (e) {
       toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
     }
@@ -446,13 +544,19 @@
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
 
-  function startRename(wf: Workflow): void {
+  // Where the rename was started: the page header's title, or the sidebar row.
+  // Only that one surface shows the input (two autofocused inputs bound to the
+  // same value would steal focus from each other and commit on blur).
+  let renameInBar = $state(false);
+  function startRename(wf: Workflow, inBar = false): void {
     renamingId = wf.id;
     renameValue = wf.name;
+    renameInBar = inBar;
   }
   function cancelRename(): void {
     renamingId = null;
     renameValue = '';
+    renameInBar = false;
   }
   async function commitRename(wf: Workflow): Promise<void> {
     const name = renameValue.trim();
@@ -814,9 +918,14 @@
 
   // The daemon caps parallel workflow runs; a `pending` run is one PARKED in
   // its FIFO queue (it starts the moment a slot frees). Say so — "pending"
-  // read as "about to start any second" and made the queue look stuck.
+  // read as "about to start any second" and made the queue look stuck. The
+  // shared run vocabulary (lib/status.ts) already maps pending → "Queued".
   function runStatusLabel(status: string): string {
-    return status === 'pending' ? 'queued' : status;
+    return runStatus(status).label;
+  }
+  /** Normalised run/step key for the status dot (`succeeded`, `failed`, …). */
+  function dotKey(status: string): string {
+    return runStatus(status).key;
   }
   const activeRunOrdinals = $derived.by(() => {
     const counts: Record<string, number> = {};
@@ -1239,6 +1348,126 @@
   </div>
 {/snippet}
 
+<div class="wf-root">
+<PageHeader class="wf-bar" title={current?.name ?? 'Workflows'}>
+  {#snippet titleContent()}
+    {#if current && renamingId === current.id && renameInBar}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="wf-title-edit"
+        bind:value={renameValue}
+        autofocus
+        aria-label="Workflow name"
+        onkeydown={(e) => {
+          if (e.key === 'Enter') commitRename(current!);
+          else if (e.key === 'Escape') cancelRename();
+        }}
+        onblur={() => commitRename(current!)}
+      />
+    {:else}
+      {current?.name ?? 'Workflows'}
+    {/if}
+  {/snippet}
+  {#snippet badge()}
+    {#if current && !(renamingId === current.id && renameInBar)}
+      <button class="title-edit" title="Rename workflow" aria-label="Rename workflow" onclick={() => current && startRename(current, true)}>
+        <Icon name="edit" size={13} />
+      </button>
+    {/if}
+    {#if current && dirty}<span class="badge">unsaved</span>{/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if current}
+      <button class="btn small" data-overflow="1" data-icon="plus" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+        <Icon name="plus" size={12} /> Node
+      </button>
+      {#if selectedId}
+        <button class="btn small" data-label="Delete selected" data-icon="trash" title="Delete selected" aria-label="Delete selected" onclick={removeSelected}><Icon name="trash" size={12} /></button>
+      {/if}
+      <button class="btn small" data-overflow="1" disabled={!dirty} onclick={save}>Save</button>
+      <button class="btn small" data-overflow="1" data-icon="clock" onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
+        <Icon name="clock" size={12} /> Runs
+      </button>
+
+      <!-- Instructions toggle: standing rules every step follows -->
+      <button
+        class="btn small"
+        data-overflow="-1"
+        data-icon="note"
+        onclick={() => (instructionsOpen = !instructionsOpen)}
+        title="Standing rules every step follows, by the letter"
+        data-label="Instructions"
+      >
+        <Icon name="note" size={12} /> Instructions
+      </button>
+
+      <!-- Triggers config toggle -->
+      <button class="btn small" data-overflow="1" data-icon="clock" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers" data-label="Triggers">
+        <Icon name="clock" size={12} /> Triggers
+      </button>
+
+      <!-- Tidy: reflow the graph into a few readable rows -->
+      <button class="btn small" data-overflow="-2" data-icon="grid" onclick={tidy} title="Tidy layout into rows" data-label="Tidy">
+        <Icon name="grid" size={12} /> Tidy
+      </button>
+
+      <!-- Version history toggle -->
+      <button
+        class="btn small"
+        data-overflow="-1"
+        data-icon="commit"
+        onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
+        title="Version history"
+        data-label="Versions"
+      >
+        <Icon name="commit" size={12} /> Versions
+      </button>
+
+      <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
+      <button
+        class="btn small"
+        data-overflow="-2"
+        data-icon="sidebar"
+        class:active={sideDock}
+        onclick={() => ui.setWfDockSide(!sideDock)}
+        title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
+        data-label={sideDock ? 'Dock inspector to the bottom' : 'Dock inspector to the side'}
+      >
+        <Icon name="sidebar" size={12} /> Dock
+      </button>
+
+      <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
+           (no second full-height rail beside the app shell's right rail). -->
+      {#if viewport.isDesktop && run && run.context_dir}
+        <button
+          class="btn small"
+          data-icon="panel"
+          class:active={ui.wfCtxOpen}
+          onclick={() => ui.toggleWfCtx()}
+          title="Context files & agents panel"
+          data-label="Context panel"
+          data-testid="ctx-sidebar-toggle"
+        >
+          <Icon name="panel" size={12} /> Panel
+        </button>
+      {/if}
+
+      <button class="btn small" data-overflow="1" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
+      {#if running}
+        <button class="btn small danger" data-keep onclick={stop}><Icon name="square" size={11} /> Stop</button>
+      {/if}
+      <button
+        class="btn primary small"
+        class:active={runInputOpen}
+        disabled={running}
+        onclick={openRunInput}
+        title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
+      >
+        {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 <div class="wf">
   <aside class="side" style="width:{ui.wfSideWidth}px">
     <div class="gen">
@@ -1282,7 +1511,7 @@
                   }}
                   title={t.description}
                 >
-                  <span class="tpl-ic"><Icon name={t.icon} size={14} /></span>
+                  <span class="tpl-ic"><Icon name={asIcon(t.icon, 'box')} size={14} /></span>
                   <span class="tpl-body">
                     <span class="tpl-name">{t.name}</span>
                     <span class="tpl-sub">agent design + engine</span>
@@ -1308,7 +1537,7 @@
             onclick={() => openRunById(r.workflow_id, r.run_id)}
             title={`${r.workflow_name} — ${runStatusLabel(r.status)}`}
           >
-            <span class="dot {r.status}"></span>
+            <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
             <span class="run-name">{r.workflow_name}</span>
             {#if activeWfRunCounts[r.workflow_id] > 1}
               <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
@@ -1329,7 +1558,7 @@
       <div class="list-h">Workflows</div>
       {#each workflows as wf (wf.id)}
         <div class="row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
-          {#if renamingId === wf.id}
+          {#if renamingId === wf.id && !renameInBar}
             <!-- svelte-ignore a11y_autofocus -->
             <input
               class="row-rename"
@@ -1354,12 +1583,19 @@
             <button class="row-edit" title="Duplicate" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
               <Icon name="copy" size={12} />
             </button>
-            <button class="row-del" title="Delete" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
+            <button class="row-del" title="Delete workflow…" aria-label="Delete workflow “{wf.name}”…" data-testid="wf-delete-btn" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}
-      {#if workflows.length === 0}
-        <p class="empty">No workflows yet — describe one above.</p>
+      {#if workflows.length > 0 && wfError}
+        <!-- Rows from the last good load, flagged as such. -->
+        <LoadState what="workflows" variant="compact" error={wfError} onretry={() => void load()} />
+      {:else if workflows.length === 0 && (!wfError || current)}
+        <!-- A failed load is said ONCE: the main pane owns it (with Retry)
+             unless a workflow is open there, then the rail does. -->
+        <LoadState what="workflows" variant="compact" loading={wfLoading} error={wfError} empty onretry={() => void load()}>
+          {#snippet emptyView()}<p class="empty">No workflows yet — describe one above.</p>{/snippet}
+        </LoadState>
       {/if}
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1367,6 +1603,7 @@
   </aside>
 
   <main
+    bind:this={mainEl}
     class="main"
     class:side-dock={sideDock}
     style={sideDock
@@ -1374,139 +1611,34 @@
       : ''}
   >
     {#if current}
-      <header class="bar">
-        {#if renamingId === current.id}
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="wf-title-edit"
-            bind:value={renameValue}
-            autofocus
-            aria-label="Workflow name"
-            onkeydown={(e) => {
-              if (e.key === 'Enter') commitRename(current!);
-              else if (e.key === 'Escape') cancelRename();
-            }}
-            onblur={() => commitRename(current!)}
-          />
-        {:else}
-          <span class="wf-title">{current.name}</span>
-          <button class="title-edit" title="Rename workflow" onclick={() => current && startRename(current)}>
-            <Icon name="edit" size={13} />
-          </button>
-        {/if}
-        {#if dirty}<span class="badge">unsaved</span>{/if}
-        <span class="grow"></span>
-
-        <div class="menu-wrap">
-          <button class="btn small" onclick={() => (paletteOpen = !paletteOpen)}>
-            <Icon name="plus" size={12} /> Node
-          </button>
-          {#if paletteOpen}
-            <div class="palette">
-              {#each types as t (t.kind)}
-                <button class="pal-item" onclick={() => addNode(t)}>
-                  <span class="pal-ic" style="--c:{t.color}"><Icon name={t.icon} size={12} /></span>
-                  <span class="pal-body">
-                    <span class="pal-name">{t.label}</span>
-                    <span class="pal-cat">{t.category}</span>
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {/if}
+      <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
+      {#if paletteOpen}
+        <div class="palette wf-pop" style="right:{popRight}px">
+          {#each types as t (t.kind)}
+            <button class="pal-item" onclick={() => addNode(t)}>
+              <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
+              <span class="pal-body">
+                <span class="pal-name">{t.label}</span>
+                <span class="pal-cat">{t.category}</span>
+              </span>
+            </button>
+          {/each}
         </div>
-
-        {#if selectedId}
-          <button class="btn small" onclick={removeSelected}><Icon name="trash" size={12} /></button>
-        {/if}
-        <button class="btn small" disabled={!dirty} onclick={save}>Save</button>
-
-        <div class="menu-wrap">
-          <button class="btn small" onclick={() => { runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
-            <Icon name="clock" size={12} /> Runs
-          </button>
-          {#if runsOpen}
-            <div class="palette runs-pop">
-              {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
-              {#each runs as r (r.id)}
-                <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
-                  <span class="dot {r.status}"></span>
-                  <span class="run-status">{runStatusLabel(r.status)}</span>
-                  <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
-                  <span class="grow"></span>
-                  <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
-                </button>
-              {/each}
-            </div>
-          {/if}
+      {/if}
+      {#if runsOpen}
+        <div class="palette runs-pop wf-pop" style="right:{popRight}px">
+          {#if runs.length === 0}<div class="runs-empty">No runs yet</div>{/if}
+          {#each runs as r (r.id)}
+            <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => void openRunById(r.workflow_id, r.id)}>
+              <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
+              <span class="run-status">{runStatusLabel(r.status)}</span>
+              <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
+              <span class="grow"></span>
+              <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
+            </button>
+          {/each}
         </div>
-
-        <!-- Instructions toggle: standing rules every step follows -->
-        <button
-          class="btn small"
-          onclick={() => (instructionsOpen = !instructionsOpen)}
-          title="Standing rules every step follows, by the letter"
-        >
-          <Icon name="note" size={12} /> Instructions
-        </button>
-
-        <!-- Triggers config toggle -->
-        <button class="btn small" onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers">
-          <Icon name="clock" size={12} /> Triggers
-        </button>
-
-        <!-- Tidy: reflow the graph into a few readable rows -->
-        <button class="btn small" onclick={tidy} title="Tidy layout into rows">
-          <Icon name="grid" size={12} /> Tidy
-        </button>
-
-        <!-- Version history toggle -->
-        <button
-          class="btn small"
-          onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
-          title="Version history"
-        >
-          <Icon name="commit" size={12} /> Versions
-        </button>
-
-        <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
-        <button
-          class="btn small"
-          class:active={sideDock}
-          onclick={() => ui.setWfDockSide(!sideDock)}
-          title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
-        >
-          <Icon name="sidebar" size={12} /> Dock
-        </button>
-
-        <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
-             (no second full-height rail beside the app shell's right rail). -->
-        {#if viewport.isDesktop && run && run.context_dir}
-          <button
-            class="btn small"
-            class:active={ui.wfCtxOpen}
-            onclick={() => ui.toggleWfCtx()}
-            title="Context files & agents panel"
-            data-testid="ctx-sidebar-toggle"
-          >
-            <Icon name="panel" size={12} /> Panel
-          </button>
-        {/if}
-
-        <button class="btn small" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
-        {#if running}
-          <button class="btn small danger" onclick={stop}><Icon name="square" size={11} /> Stop</button>
-        {/if}
-        <button
-          class="btn primary small"
-          class:active={runInputOpen}
-          disabled={running}
-          onclick={openRunInput}
-          title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
-        >
-          {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
-        </button>
-      </header>
+      {/if}
 
       <!-- Manual-run input editor: this is WHERE you provide the run input the
            trigger emits (repo_id, story_id, goals, msg, jira_ticket, …). -->
@@ -1567,7 +1699,7 @@
 
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
-          <Icon name="user-check" size={14} />
+          <Icon name="userCheck" size={14} />
           <span>Run paused — waiting for approval at <strong>{run.approval_node_id}</strong></span>
           <button class="btn primary small" disabled={approving} onclick={() => approveRun(true)}>
             Approve
@@ -1698,13 +1830,11 @@
         >
           {#if sideDock}
             <!-- Persistent side-panel header (mirrors the agents Right panel):
-                 title on the left; the notification bell + a real close (×) on
-                 the right. The shell's floating bell is hidden in this layout,
-                 so this is the reachable bell. -->
+                 title on the left, a real close (×) on the right. The
+                 notification bell lives in the sidebar, not here. -->
             <div class="insp-side-head">
               <strong>Inspector</strong>
               <span class="grow"></span>
-              <NotificationBell />
               <button
                 class="icon-btn"
                 onclick={closeInspector}
@@ -1718,7 +1848,7 @@
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
-              <span class="tl-label"><span class="dot {run.status}"></span>{runStatusLabel(run.status)}</span>
+              <span class="tl-label"><StatusBadge status={runStatus(run.status)} testid="run-status" /></span>
               <span class="grow"></span>
               {#if runActive}
                 <button
@@ -1748,7 +1878,7 @@
                   data-status={ns.status}
                   onclick={() => (selectedId = ns.node_id)}
                 >
-                  <span class="dot {ns.status}"></span>
+                  <span class="dot {dotKey(ns.status)}" role="img" aria-label={runStatusLabel(ns.status)}></span>
                   <span class="tl-name">{nodeName(ns.node_id)}</span>
                   {#if ns.duration_ms != null}<span class="tl-ms">{fmtMs(ns.duration_ms)}</span>{/if}
                 </button>
@@ -1763,7 +1893,7 @@
                   <Icon name="check" size={13} />
                   <span>Final output</span>
                 </summary>
-                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+                <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
               </details>
             {/if}
             {#if run.context_dir && !viewport.isDesktop}
@@ -1786,7 +1916,7 @@
             <div class="insp-h">
               <strong>{selectedNode.name || selectedNode.kind}</strong>
               <span class="mono dim">{selectedNode.kind}</span>
-              {#if selectedRun}<span class="dot {selectedRun.status}"></span>{selectedRun.status}{/if}
+              {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
@@ -2730,12 +2860,18 @@
           {/if}
         </div>
       {/if}
+    {:else if workflows.length === 0 && (wfError || wfLoading)}
+      <LoadState what="workflows" variant="page" loading={wfLoading} error={wfError} empty onretry={() => void load()} />
     {:else}
-      <div class="placeholder">
-        <Icon name="split" size={40} />
-        <h2>Build a workflow</h2>
-        <p>Describe what you want on the left and we’ll wire it up — or start blank and drag nodes.</p>
-      </div>
+      <!-- The sidebar's Generate / Start blank form is this page's CTA. -->
+      <EmptyState
+        variant="page"
+        icon="split"
+        title={workflows.length > 0 ? 'Pick a workflow' : 'Build a workflow'}
+        body={workflows.length > 0
+          ? 'Open one from the list on the left, or describe a new one.'
+          : 'Describe what you want on the left and we’ll wire it up — or start blank and drag nodes.'}
+      />
     {/if}
   </main>
 
@@ -2788,7 +2924,7 @@
               <Icon name="check" size={13} />
               <span>Final output</span>
             </summary>
-            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputHtml}></iframe>
+            <iframe class="final-output-frame" title="Final output" sandbox="allow-same-origin" srcdoc={finalOutputSrcdoc}></iframe>
           </details>
         {/if}
         <div class="ctx-body">
@@ -2803,6 +2939,7 @@
       {/if}
     </aside>
   {/if}
+</div>
 </div>
 
 <!-- Big editor for a cramped node-form JSON field (R10). Edits write straight
@@ -2823,9 +2960,15 @@
 
 <style>
   .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
-  .wf {
+  .wf-root {
     display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .wf {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .side {
@@ -2955,7 +3098,7 @@
     height: 28px;
     border-radius: 7px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .tpl-body {
@@ -2969,7 +3112,7 @@
     color: var(--text);
   }
   .tpl-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .list {
@@ -3030,7 +3173,7 @@
     color: var(--status-exited);
   }
   .row-edit:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row-rename {
     flex: 1;
@@ -3069,7 +3212,7 @@
     height: 16px;
     padding: 0 4px;
     border-radius: 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--accent) 22%, transparent);
     color: var(--text);
   }
@@ -3102,9 +3245,9 @@
   }
   /* Disambiguators for concurrent runs of the same workflow (item 8). */
   .run-ord {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0 5px;
     border-radius: 99px;
@@ -3117,12 +3260,12 @@
     flex-shrink: 0;
   }
   .run-prog {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .run-when {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-inline-start: 6px;
   }
@@ -3166,7 +3309,7 @@
   }
   /* Persistent header for the side-docked panel (mirrors the agents Right panel
      header): full-bleed to the panel edges, sticks to the top while the body
-     scrolls. Holds the title, the notification bell, and the close (×). */
+     scrolls. Holds the title and the close (×). */
   .insp-side-head {
     display: flex;
     align-items: center;
@@ -3208,22 +3351,6 @@
     line-height: 1.5;
     margin: 0;
   }
-  .bar {
-    display: flex;
-    align-items: center;
-    /* The action row must WRAP, never overflow: `.main` doesn't clip, so an
-       unwrapped bar slides its last buttons (Dock / Panel / Run…) under the
-       context sidebar, where they are painted over and unclickable. */
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .wf-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
   .title-edit {
     background: none;
     border: none;
@@ -3234,12 +3361,11 @@
     align-items: center;
   }
   .title-edit:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .wf-title-edit {
-    font-size: 13px;
-    font-weight: 600;
-    padding: 4px 8px;
+    font: inherit;
+    padding: 2px 8px;
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--accent);
@@ -3248,8 +3374,8 @@
     min-width: 220px;
   }
   .badge {
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 1px 7px;
     border-radius: 99px;
@@ -3257,8 +3383,12 @@
   .grow {
     flex: 1;
   }
-  .menu-wrap {
-    position: relative;
+  /* Header popovers anchored at the top of the editor pane (right = inline). */
+  .palette.wf-pop {
+    top: 6px;
+    left: auto;
+    inset-inline-end: auto;
+    max-height: min(320px, calc(100% - 12px));
   }
   .palette {
     position: absolute;
@@ -3309,7 +3439,7 @@
     font-weight: 600;
   }
   .pal-cat {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
   }
@@ -3526,7 +3656,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
   }
   .ctx-files > summary {
     display: flex;
@@ -3540,7 +3670,7 @@
     min-width: 0;
   }
   .ctx-files > summary code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 400;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3560,7 +3690,7 @@
     margin: 8px 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-subtle, transparent);
+    background: var(--surface-2);
     flex-shrink: 0;
   }
   .final-output > summary {
@@ -3579,17 +3709,11 @@
     height: 320px;
     border: none;
     border-top: 1px solid var(--border);
-    background: var(--surface-1, #1a1a1a);
+    background: var(--surface); /* the srcdoc body is transparent + token-themed */
   }
   .tl-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
     flex-shrink: 0;
     padding-inline-end: 4px;
   }
@@ -3610,10 +3734,10 @@
     border-color: var(--accent);
   }
   .tl-step[data-status='success'] {
-    border-color: color-mix(in srgb, var(--status-working, #28c840) 55%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 55%, var(--border));
   }
   .tl-step[data-status='error'] {
-    border-color: color-mix(in srgb, var(--status-exited) 55%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
   .tl-step[data-status='running'] {
     border-color: var(--accent);
@@ -3622,7 +3746,7 @@
     white-space: nowrap;
   }
   .tl-ms {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono);
   }
@@ -3711,7 +3835,7 @@
   .ctx-path {
     display: block;
     min-width: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3796,10 +3920,9 @@
     flex: 1;
     text-align: start;
     font-size: 12px;
-    text-transform: capitalize;
   }
   .run-when {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .btn.danger {
@@ -3812,36 +3935,35 @@
     border-radius: 50%;
     display: inline-block;
   }
-  .dot.success {
-    background: var(--status-working, #28c840);
+  /* Run/step dots use the shared run vocabulary (lib/status.ts runStatus):
+     running is info-blue and pulses — never the succeeded green. */
+  .dot.succeeded {
+    background: var(--status-working);
   }
-  .dot.error {
+  .dot.failed {
     background: var(--status-exited);
   }
   .dot.running {
-    background: var(--status-working, #28c840);
+    background: var(--info);
+    animation: wf-dot-pulse 1.6s ease-in-out infinite;
   }
-  .dot.pending,
+  .dot.waiting {
+    background: var(--status-warn);
+  }
+  .dot.queued,
+  .dot.cancelled,
   .dot.skipped {
     background: var(--text-dim);
   }
-  .placeholder {
-    margin: auto;
-    text-align: center;
-    color: var(--text-dim);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
+  @keyframes wf-dot-pulse {
+    50% {
+      opacity: 0.4;
+    }
   }
-  .placeholder h2 {
-    margin: 8px 0 0;
-    font-size: 16px;
-    color: var(--text);
-  }
-  .placeholder p {
-    font-size: 12.5px;
-    max-width: 340px;
+  @media (prefers-reduced-motion: reduce) {
+    .dot.running {
+      animation: none;
+    }
   }
   .spin {
     width: 11px;
@@ -3910,7 +4032,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
   }
   .ri-head {
@@ -3965,7 +4087,7 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: var(--panel, rgba(255, 255, 255, 0.03));
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-dim);
@@ -3975,7 +4097,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: var(--warn-bg, rgba(240, 192, 64, 0.12));
+    background: var(--warning-soft);
     border-bottom: 1px solid var(--border);
     font-size: 12.5px;
     color: var(--text);
@@ -4125,7 +4247,7 @@
     margin-top: 2px;
   }
   .retry-h {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -4182,7 +4304,7 @@
   }
   .ver-num {
     font-family: var(--font-mono);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     flex-shrink: 0;
   }
@@ -4194,7 +4316,7 @@
     white-space: nowrap;
   }
   .ver-when {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }

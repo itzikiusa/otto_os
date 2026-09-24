@@ -235,6 +235,13 @@ impl OutputScanner for PromptGuard {
             }
         });
     }
+
+    /// Both maps are keyed by session id and were never pruned — one ~1 KiB
+    /// tail per session ever spawned, for the daemon's lifetime.
+    fn on_session_end(&self, session_id: &Id) {
+        lock(&self.tails).remove(session_id);
+        lock(&self.last_approved).remove(session_id);
+    }
 }
 
 /// Fans `on_output` out to several scanners (the `SessionManager` exposes a
@@ -253,6 +260,12 @@ impl OutputScanner for CompositeScanner {
     fn on_output(&self, session_id: &Id, provider: &str, chunk: &[u8]) {
         for s in &self.scanners {
             s.on_output(session_id, provider, chunk);
+        }
+    }
+
+    fn on_session_end(&self, session_id: &Id) {
+        for s in &self.scanners {
+            s.on_session_end(session_id);
         }
     }
 }
@@ -398,5 +411,20 @@ mod tests {
             "claude",
             b"\n  Do you trust the files in this folder?\n  1. Yes, proceed\n",
         );
+    }
+
+    /// Per-session state is dropped when the session's output stream ends
+    /// (it used to accumulate for every session the daemon ever ran).
+    #[test]
+    fn session_end_drops_per_session_state() {
+        let guard = PromptGuard::new();
+        let id = "s-end".to_string();
+        guard.on_output(&id, "codex", b"working on it");
+        guard.mark_approved(&id);
+        assert!(lock(&guard.tails).contains_key(&id));
+        let composite = CompositeScanner::new(vec![guard.clone() as Arc<dyn OutputScanner>]);
+        composite.on_session_end(&id);
+        assert!(!lock(&guard.tails).contains_key(&id));
+        assert!(!guard.recently_approved(&id));
     }
 }

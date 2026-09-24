@@ -14,6 +14,11 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 > flags the drift; see [Known drift](#known-drift-between-docs-and-code) below.
 >
 > _Last verified against the codebase: **2026-09-02**._
+>
+> **Building or changing a feature's UI?** Follow the
+> [design guidelines](../design/guidelines/README.md): tokens, page chrome,
+> components, agent-facing patterns, copy, accessibility and the UI review
+> checklist.
 
 ---
 
@@ -43,6 +48,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [Product](./product.md) | The full product-owner workflow on top of Jira/Confluence: multi-lens/multi-provider analysis + summarizer + open questions, rewrite, test-case generation → Confluence publish, the multi-agent **Plan/Tasks** breakdown (+ send-to-swarm), Discovery drafts → RFC/story, the global Learnings base, versioned history, and the background watcher. | Needs a connected Jira/Confluence account first. |
 | [Discovery Chat](./discovery-chat.md) | The blank-canvas discovery flow on the Product page — a persistent, resumable agent thread you feed ideas/transcripts, then publish as an **RFC** or a **Jira story**. | On the Product page; agent CLI on `PATH` (+ Jira to publish a story). |
 | [Canvas](./canvas.md) | File-backed visual scenes in two modes — **Excalidraw** (`canvas.json`) or **Mermaid** (`canvas.mermaid`); an agent edits the file while you converse in an embedded terminal. | In the Canvas tab, or from a Product story. |
+| [Design Hall](./design-hall.md) | The **artifact graph** behind every design studio: projects, artifacts, immutable content-addressed versions (`base_version` → 409), typed version-aware links extracted from `otto://design/…` references (cycle rejection, broken-ref badges), FTS search for the References drawer, captured design signals, an idempotent import of Product-arena attachments + Canvas scenes, and four read-only agent tools. Phase 0: backend only. | Automatic — the import runs at daemon start; grant the `design` feature to non-root users. |
 
 ## Team communication
 
@@ -102,6 +108,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [RTL & responsive shell](./rtl-and-responsive.md) | Right-to-left support (incl. the terminal-bidi mode), the responsive phone/iPad shell (breakpoints, collapsible sections, touch terminal), light/dark theming, the per-device session view, and how the E2E suite verifies it all. | Settings → Appearance. |
 | [Multi-window](./multi-window.md) | Open any number of Otto windows (**File → New Window**, `⌘⇧N`), each an independent workspace surface (own module, workspace, session tabs, splits, view mode); quitting snapshots the whole window set (frames/screens/fullscreen) and the next launch restores it. Sessions live in the daemon — windows hold only references, so nothing restarts or duplicates. | Desktop app only; browser/E2E use `?win=<id>`. |
 | [Snipping Tool](./snipping-tool.md) | One-gesture screenshots for agent work: a system-wide shortcut (default ⌘⌃⇧2, fires while another app is frontmost) → native region select → annotation editor (boxes/arrows/text/pixelate/badges, colors, undo) — the image is **on the clipboard at every step** (capture + each edit auto-copies), ready to paste into a session. | macOS; grant Screen Recording to `ottod` on first capture. |
+| [Help](./help.md) | The in-app **Help** page (`#/walkthroughs`): one code-grounded README per module plus Basics, searchable by title, text and **shortcut keys**, deep-linkable, with an **Open <module>** button — and one short **tour film** whose chapters link to the guides. Adding a guide is dropping a markdown file in `ui/src/modules/help/sections/`. | Sidebar footer → **Help**, **Help → Otto Help**, or ⌘K → "Guide: …". |
 | [Custom plugins](./plugins.md) | Runtime, out-of-process sidecar plugins (install/enable/remove without rebuild): the supervisor, reverse-proxy + iframe UI, the scoped host API, and slug-keyed RBAC. User/operator companion to the [authoring guide](../plugins/AUTHORING.md). | Settings → Plugins (installed app needs a rebuild to surface). |
 
 ---

@@ -5,7 +5,7 @@
   //   • Team skills    — library skills every agent inherits (config.skills)
   //   • Triggers       — channel rules that auto-launch swarm work
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
@@ -157,7 +157,7 @@
     }
   }
 
-  const TABS: { id: Tab; label: string; icon: string }[] = [
+  const TABS: { id: Tab; label: string; icon: IconName }[] = [
     { id: 'goals', label: 'Standing goals', icon: 'check' },
     { id: 'skills', label: 'Team skills', icon: 'zap' },
     { id: 'triggers', label: 'Triggers', icon: 'comment' },
@@ -306,7 +306,7 @@
     color: var(--text);
   }
   .tab.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
   }
   .hint {
@@ -347,17 +347,17 @@
     font-weight: 600;
   }
   .blocking {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
   }
   .tchip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
@@ -372,9 +372,9 @@
     cursor: pointer;
   }
   .toggle.on {
-    background: #7ee787;
-    color: #0a0a0a;
-    border-color: #7ee787;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     font-weight: 600;
   }
   .form {

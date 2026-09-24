@@ -1,0 +1,22 @@
+{
+  "type": "otto-scene3d",
+  "version": 2,
+  "background": "#e9e7f5",
+  "grid": true,
+  "environment": { "preset": "studio-soft", "intensity": 1, "background": true },
+  "camera": { "position": [3.4, 2.1, 5.2], "target": [0, 0.8, 0], "fov": 30 },
+  "lights": [
+    { "id": "key", "name": "Key light", "type": "directional", "position": [4, 6, 4], "target": [0, 0.8, 0], "intensity": 1.6, "shadow": true }
+  ],
+  "objects": [
+    { "id": "card", "name": "Gift card", "type": "box", "radius": 0.05, "position": [0, 0.95, 0], "rotation": [0, 20, 0], "scale": [1.6, 1, 0.03], "material": { "preset": "glossy-plastic", "color": "#4f46e5" } },
+    { "id": "plinth", "name": "Plinth", "type": "cylinder", "position": [0, 0.2, 0], "rotation": [0, 0, 0], "scale": [1.7, 0.4, 1.7], "material": { "preset": "matte-paper" } },
+    { "id": "coin", "name": "Coin", "type": "cylinder", "position": [1.25, 0.5, 0.6], "rotation": [90, 0, 0], "scale": [0.35, 0.05, 0.35], "material": { "preset": "glossy-plastic", "color": "#f59e0b" } }
+  ],
+  "groups": [],
+  "states": [
+    { "id": "idle", "name": "Idle" },
+    { "id": "flipped", "name": "Flipped", "duration_ms": 500, "overrides": { "card": { "rotation": [0, 200, 0] } } }
+  ],
+  "default_state": "idle"
+}

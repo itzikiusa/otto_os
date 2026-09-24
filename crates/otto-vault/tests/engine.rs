@@ -1051,3 +1051,137 @@ async fn okf_index_generation_preserves_declared_version() {
         assert!(raw.contains(&format!("okf_version: \"{version}\"")), "{raw}");
     }
 }
+
+/// A symlinked note (`docs/README.md -> ../README.md` is a common layout) used
+/// to fail every scan as "incomplete", which also froze pruning of deletions
+/// and made delete/rename/restore report failure after they had succeeded.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_symlinked_note_does_not_wedge_scans_or_pruning() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    std::os::unix::fs::symlink("../index.md", td.path().join("runbooks/linked.md")).unwrap();
+    eng.scan(id).await.unwrap();
+    // An external deletion is still pruned while the symlink is present.
+    std::fs::remove_file(td.path().join("log.md")).unwrap();
+    eng.scan(id).await.unwrap();
+    let root = eng.dir(WS, id, "").await.unwrap();
+    assert!(
+        !root.entries.iter().any(|e| e.path == "log.md"),
+        "{:?}",
+        root.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+    );
+    let runbooks = eng.dir(WS, id, "runbooks").await.unwrap();
+    assert!(!runbooks
+        .entries
+        .iter()
+        .any(|e| e.path == "runbooks/linked.md"));
+    eng.delete_note(WS, id, "runbooks/deploy.md").await.unwrap();
+    assert!(td.path().join(".trash/runbooks/deploy.md").is_file());
+    // The symlink itself is never touched.
+    assert!(std::fs::symlink_metadata(td.path().join("runbooks/linked.md")).is_ok());
+}
+
+/// Asset reads resolved only the parent, so a final-component symlink could
+/// stream any file the daemon can read (`logo.png -> ~/.ssh/id_rsa`).
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_asset_symlink_cannot_escape_the_vault() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.key"), "top secret").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.key"),
+        td.path().join("assets/logo.png"),
+    )
+    .unwrap();
+    let err = eng.asset_path(WS, id, "assets/logo.png").await.unwrap_err();
+    assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
+    // A regular attachment (and an in-vault symlink) still streams.
+    assert!(eng.asset_path(WS, id, "assets/arch.png").await.is_ok());
+    std::os::unix::fs::symlink("arch.png", td.path().join("assets/alias.png")).unwrap();
+    assert!(eng.asset_path(WS, id, "assets/alias.png").await.is_ok());
+    assert!(matches!(
+        eng.asset_path(WS, id, "assets/missing.png").await,
+        Err(otto_core::Error::NotFound(_))
+    ));
+}
+
+/// Rename rewrites kept a shortened basename even when it now resolves to a
+/// different note, missed dotted note names, and edited links inside code.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_rename_rewrite_never_retargets_links() {
+    let eng = engine().await;
+    let td = tempfile::tempdir().unwrap();
+    let r = td.path();
+    for d in ["a", "c", "rel"] {
+        std::fs::create_dir_all(r.join(d)).unwrap();
+    }
+    std::fs::write(r.join("a/Old.md"), "# Old").unwrap();
+    std::fs::write(r.join("c/Spec.md"), "# Other spec").unwrap();
+    std::fs::write(
+        r.join("c/x.md"),
+        "See [[Old]] and [[Release 1.2]].\n````\n```\n[[Old]]\n```\n````\n`` [[Old]] ``\n",
+    )
+    .unwrap();
+    std::fs::write(r.join("rel/Release 1.2.md"), "# Release").unwrap();
+    let v = eng
+        .register(WS, "Rewrite", Some(r.to_string_lossy().to_string()), false)
+        .await
+        .unwrap();
+    eng.scan(v.id).await.unwrap();
+
+    eng.rename(WS, v.id, "a/Old.md", "b/Spec.md").await.unwrap();
+    let x = std::fs::read_to_string(r.join("c/x.md")).unwrap();
+    assert!(x.starts_with("See [[b/Spec]] and"), "{x}");
+    assert!(x.contains("```\n[[Old]]\n```"), "fenced code edited: {x}");
+    assert!(x.contains("`` [[Old]] ``"), "code span edited: {x}");
+    let spec = eng.note(WS, v.id, "c/x.md").await.unwrap();
+    let dst = |raw: &str| {
+        spec.outgoing
+            .iter()
+            .find(|l| l.raw_target == raw)
+            .and_then(|l| l.dst_path.clone())
+    };
+    assert_eq!(dst("b/Spec").as_deref(), Some("b/Spec.md"));
+
+    // A dotted note name resolves, so its rename is followed too.
+    assert_eq!(dst("Release 1.2").as_deref(), Some("rel/Release 1.2.md"));
+    let res = eng
+        .rename(WS, v.id, "rel/Release 1.2.md", "rel/Release 1.3.md")
+        .await
+        .unwrap();
+    assert_eq!(res.links_updated, 1, "{res:?}");
+    let x = std::fs::read_to_string(r.join("c/x.md")).unwrap();
+    assert!(x.contains("[[Release 1.3]]"), "{x}");
+}
+
+/// A case-only rename left the old-case row "present" on case-insensitive
+/// APFS (`stat note.md` still succeeds), so every later scan was incomplete.
+#[tokio::test(flavor = "multi_thread")]
+async fn regression_case_only_rename_prunes_old_row() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let paths = |listing: DirListing| -> Vec<String> {
+        listing.entries.into_iter().map(|e| e.path).collect()
+    };
+    eng.rename(WS, id, "runbooks/deploy.md", "runbooks/Deploy.md")
+        .await
+        .unwrap();
+    assert!(td.path().join("runbooks/Deploy.md").is_file());
+    eng.scan(id).await.unwrap();
+    assert_eq!(
+        paths(eng.dir(WS, id, "runbooks").await.unwrap()),
+        vec!["runbooks/Deploy.md".to_string()]
+    );
+    // The same shape arises from an external case-only rename.
+    std::fs::rename(
+        td.path().join("runbooks/Deploy.md"),
+        td.path().join("runbooks/deploy.md"),
+    )
+    .unwrap();
+    eng.scan(id).await.unwrap();
+    assert_eq!(
+        paths(eng.dir(WS, id, "runbooks").await.unwrap()),
+        vec!["runbooks/deploy.md".to_string()]
+    );
+}

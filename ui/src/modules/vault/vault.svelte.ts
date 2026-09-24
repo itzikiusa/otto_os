@@ -41,6 +41,8 @@ import { authedBlobUrl } from '../../lib/api/client';
 import { assetPath } from '../../lib/api/vault';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
+import { confirmer } from '../../lib/confirm.svelte';
+import { lsGet, lsSet } from '../../lib/storage';
 
 export type LeftMode = 'files' | 'search' | 'tags';
 export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file' | 'trash' | 'history';
@@ -65,6 +67,18 @@ export interface TreeNode {
   loaded: boolean;
   loading: boolean;
   children: TreeNode[];
+}
+
+/** How a vault 409 should be handled. The daemon uses 409 both for a REAL
+ *  optimistic-concurrency conflict ("note changed on disk") and for transient
+ *  back-pressure ("indexing is busy" / "index is refreshing; retry"). Showing
+ *  the conflict banner for the latter pushed users to "reload", discarding
+ *  their draft over a condition that clears in a second. */
+export function vaultConflictKind(e: unknown): 'disk' | 'busy' | null {
+  if (!(e instanceof ApiError) || e.status !== 409) return null;
+  if (/changed on disk/i.test(e.message)) return 'disk';
+  if (/busy|refreshing|retry/i.test(e.message)) return 'busy';
+  return null;
 }
 
 const LAST_VAULT_KEY = 'otto_vault_last';
@@ -190,10 +204,13 @@ class VaultStore {
   okfBusy = $state(false);
 
   private noteLoadSeq = 0;
+  private searchSeq = 0;
   private savePromise: Promise<boolean> | null = null;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Consecutive "vault busy" save failures — drives the retry backoff. */
+  private busyRetries = 0;
 
   get wsId(): string {
     return ws.current?.id ?? '';
@@ -209,8 +226,8 @@ class VaultStore {
       // Vaults are GLOBAL (the ws in the URL is auth context only) — the
       // last-vault choice and per-vault view keys are ws-independent too.
       const lastId = Number(
-        localStorage.getItem(LAST_VAULT_KEY) ??
-          localStorage.getItem(`${LAST_VAULT_KEY}:${this.wsId}`) ??
+        lsGet(LAST_VAULT_KEY) ??
+          lsGet(`${LAST_VAULT_KEY}:${this.wsId}`) ??
           0,
       );
       const pick = this.vaults.find((v) => v.id === lastId) ?? this.vaults[0] ?? null;
@@ -246,6 +263,7 @@ class VaultStore {
     this.note = null;
     this.notePath = null;
     this.backlinks = [];
+    this.searchHits = [];
     this.okfReport = null;
     this.roots = [];
     this.docsRun = null;
@@ -256,8 +274,8 @@ class VaultStore {
     this.clearFileView();
     this.centerMode = 'empty';
     if (!v) return;
-    localStorage.setItem(LAST_VAULT_KEY, String(v.id));
-    this.editing = localStorage.getItem(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
+    lsSet(LAST_VAULT_KEY, String(v.id));
+    this.editing = lsGet(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
     await Promise.all([this.loadRoot(), this.refreshStatus(), this.refreshDocsRuns()]);
     void this.loadTags();
     await this.restoreView();
@@ -475,7 +493,7 @@ class VaultStore {
       this.dirty = false;
       this.conflict = false;
       try {
-        const saved = JSON.parse(localStorage.getItem(this.draftKey(id, path)) ?? 'null');
+        const saved = JSON.parse(lsGet(this.draftKey(id, path)) ?? 'null');
         if (saved && typeof saved.content === 'string' && saved.content !== n.raw) {
           this.draft = saved.content;
           this.dirty = true;
@@ -500,7 +518,7 @@ class VaultStore {
   private persistDraft(): void {
     if (!this.current || !this.notePath) return;
     try {
-      localStorage.setItem(this.draftKey(this.current.id, this.notePath), this.dirty
+      lsSet(this.draftKey(this.current.id, this.notePath), this.dirty
         ? JSON.stringify({content: this.draft, hash: this.note?.meta.hash}) : 'null');
     } catch { /* storage quota must never interrupt editing or the save timer */ }
   }
@@ -567,7 +585,7 @@ class VaultStore {
    *  contract, including across full app restarts. */
   persistView(): void {
     if (!this.current) return;
-    localStorage.setItem(
+    lsSet(
       this.viewKey(),
       JSON.stringify({ tabs: this.tabs, active: this.activeTab, mode: this.centerMode, graphLocal: this.graphLocal, historyPath: this.historyPath, historySince: this.historySince }),
     );
@@ -577,7 +595,7 @@ class VaultStore {
     if (!this.current) return;
     let saved: { tabs?: unknown; active?: unknown; mode?: unknown; graphLocal?: unknown; historyPath?: unknown; historySince?: unknown } = {};
     try {
-      saved = JSON.parse(localStorage.getItem(this.viewKey()) ?? '{}');
+      saved = JSON.parse(lsGet(this.viewKey()) ?? '{}');
     } catch {
       /* corrupt blob — start clean */
     }
@@ -612,6 +630,8 @@ class VaultStore {
     if (!this.current) return;
     // Leaving a dirty note for a file view must not lose the edit.
     if (!(await this.canLeaveNote())) return;
+    // Supersede any note load still in flight so it cannot replace this file.
+    this.noteLoadSeq += 1;
     this.claimTab({ kind: 'file', path }, opts.newTab);
     await this.loadFile(path);
     this.persistView();
@@ -665,17 +685,21 @@ class VaultStore {
 
   async reloadBacklinks(): Promise<void> {
     if (!this.current || !this.notePath) return;
+    // Late replies must not show note A's backlinks under note B (or vault B).
+    const id = this.current.id, path = this.notePath;
+    let next: VaultBacklink[];
     try {
-      this.backlinks = await vaultBacklinks(this.wsId, this.current.id, this.notePath);
+      next = await vaultBacklinks(this.wsId, id, path);
     } catch {
-      this.backlinks = [];
+      next = [];
     }
+    if (this.current?.id === id && this.notePath === path) this.backlinks = next;
   }
 
   setView(edit: boolean): void {
     this.editing = edit;
     if (this.current) {
-      localStorage.setItem(`${VIEW_MODE_KEY}:${this.current.id}`, edit ? 'edit' : 'read');
+      lsSet(`${VIEW_MODE_KEY}:${this.current.id}`, edit ? 'edit' : 'read');
     }
   }
 
@@ -715,10 +739,13 @@ class VaultStore {
           this.conflict = false;
           this.persistDraft();
         } while (this.dirty);
+        this.busyRetries = 0;
         void this.reloadBacklinks();
         return true;
       } catch (e) {
-        if (e instanceof ApiError && e.status === 409) this.conflict = true;
+        const kind = vaultConflictKind(e);
+        if (kind === 'disk') this.conflict = true;
+        else if (kind === 'busy') this.retryBusySave(id, path);
         else toasts.error(`Save: ${msg(e)}`);
         return false;
       } finally {
@@ -731,10 +758,30 @@ class VaultStore {
     return success;
   }
 
-  /** Conflict banner: discard local edits and reload the disk version. */
+  /** Transient "vault busy" 409: keep the draft (already persisted locally)
+   *  and retry with backoff instead of raising the conflict banner. */
+  private retryBusySave(id: number, path: string): void {
+    const delay = Math.min(10_000, 500 * 2 ** this.busyRetries);
+    this.busyRetries += 1;
+    if (this.busyRetries === 1) {
+      toasts.warn('Vault is busy indexing', 'Your edits are kept — saving will retry automatically.');
+    }
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      if (this.current?.id === id && this.notePath === path && this.dirty) void this.saveNow();
+    }, delay);
+  }
+
+  /** Conflict banner: discard local edits and reload the disk version. The
+   *  one irreversible choice (the draft is not in revision history), so it is
+   *  never a single click. */
   async conflictReload(): Promise<void> {
     if (this.notePath) {
-      if (this.current) localStorage.setItem(this.draftKey(this.current.id, this.notePath), 'null');
+      if (this.dirty && !(await confirmer.ask(
+        `Discard your unsaved edits to "${this.notePath}" and load the version on disk? This cannot be undone.`,
+        { title: 'Discard your edits?', confirmLabel: 'Discard my edits', danger: true },
+      ))) return;
+      if (this.current) lsSet(this.draftKey(this.current.id, this.notePath), 'null');
       this.dirty = false;
       this.conflict = false;
       await this.open(this.notePath);
@@ -750,11 +797,23 @@ class VaultStore {
 
   // -- note operations ---------------------------------------------------------------
 
-  async createNote(path: string, content: string): Promise<void> {
-    if (!this.current) return;
-    await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
+  /** Every caller fires this with `void`, so failures (the note already
+   *  exists → 409, a bad path → 400) must surface here, not as an unhandled
+   *  rejection with no feedback. */
+  async createNote(path: string, content: string): Promise<boolean> {
+    if (!this.current) return false;
+    try {
+      await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
+    } catch (e) {
+      toasts.error(
+        `Create ${path}`,
+        e instanceof ApiError && e.status === 409 ? 'A note already exists at that path.' : msg(e),
+      );
+      return false;
+    }
     await this.refreshTree();
     await this.open(path, { edit: true });
+    return true;
   }
 
   async createFolder(path: string): Promise<void> {
@@ -937,13 +996,18 @@ class VaultStore {
       this.searchHits = [];
       return;
     }
+    // Newest query + same vault only: hits from vault A (or an older query)
+    // landing in vault B's list 404 when clicked.
+    const id = this.current.id, seq = ++this.searchSeq;
+    const current = () => this.current?.id === id && this.searchSeq === seq;
     this.searching = true;
     try {
-      this.searchHits = await vaultSearch(this.wsId, this.current.id, { query: q, limit: 50 });
+      const hits = await vaultSearch(this.wsId, id, { query: q, limit: 50 });
+      if (current()) this.searchHits = hits;
     } catch (e) {
-      toasts.error(`Search: ${msg(e)}`);
+      if (current()) toasts.error(`Search: ${msg(e)}`);
     } finally {
-      this.searching = false;
+      if (current()) this.searching = false;
     }
   }
 
@@ -955,11 +1019,14 @@ class VaultStore {
 
   async loadTags(): Promise<void> {
     if (!this.current) return;
+    const id = this.current.id;
+    let next: typeof this.tags;
     try {
-      this.tags = await vaultTags(this.wsId, this.current.id);
+      next = await vaultTags(this.wsId, id);
     } catch {
-      this.tags = [];
+      next = [];
     }
+    if (this.current?.id === id) this.tags = next;
   }
 
   async switcherQuery(q: string): Promise<VaultSwitchHit[]> {

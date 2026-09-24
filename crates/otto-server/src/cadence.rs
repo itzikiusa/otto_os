@@ -13,7 +13,9 @@
 //! keeps the cursor in its own column so a config edit can never clobber it. The
 //! UTC default timezone makes every pre-v2 task behave exactly as before.
 
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc,
+};
 use chrono_tz::Tz;
 use otto_core::{Error, Result};
 use serde_json::Value;
@@ -57,27 +59,65 @@ fn cadence(spec: &Value) -> &str {
         .unwrap_or("interval")
 }
 
-/// The `at` time on `now`'s LOCAL day (in `tz`), as a UTC instant. DST-safe: a
-/// non-existent local time (spring-forward gap) resolves to the next valid
-/// instant; an ambiguous one (fall-back) takes the earlier offset.
-fn scheduled_today(now: DateTime<Utc>, tz: Tz, h: u32, m: u32) -> Option<DateTime<Utc>> {
-    let local_day = now.with_timezone(&tz).date_naive();
-    let naive = local_day.and_hms_opt(h, m, 0)?;
+/// Resolve a LOCAL wall-clock time in `tz` to a UTC instant, DST-safe: an
+/// ambiguous time (fall-back overlap) takes the EARLIER instant, and a
+/// non-existent one (spring-forward gap) resolves to the first valid instant
+/// after the gap (the moment the clock jumps) — Vixie cron's "a job skipped by
+/// the gap runs right after it" behaviour.
+fn resolve_local(tz: Tz, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
     match tz.from_local_datetime(&naive) {
-        chrono::LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        chrono::LocalResult::Ambiguous(a, _) => Some(a.with_timezone(&Utc)),
-        chrono::LocalResult::None => {
-            // Gap: step forward an hour until the wall time exists.
-            let bumped = local_day.and_hms_opt((h + 1).min(23), m, 0)?;
-            tz.from_local_datetime(&bumped)
-                .earliest()
-                .map(|dt| dt.with_timezone(&Utc))
+        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+        LocalResult::Ambiguous(a, _) => Some(a.with_timezone(&Utc)),
+        LocalResult::None => {
+            // Gap: walk the wall clock forward to where it exists again. Real
+            // gaps are an hour (at most a few); the cap only bounds a bad tzdb.
+            let mut n = naive;
+            for _ in 0..(24 * 60) {
+                n = n.checked_add_signed(Duration::minutes(1))?;
+                if let Some(dt) = tz.from_local_datetime(&n).earliest() {
+                    return Some(dt.with_timezone(&Utc));
+                }
+            }
+            None
         }
     }
 }
 
+/// The `at` time on a given LOCAL date (in `tz`), as a UTC instant (DST-safe,
+/// see [`resolve_local`]).
+fn scheduled_on(day: NaiveDate, tz: Tz, h: u32, m: u32) -> Option<DateTime<Utc>> {
+    resolve_local(tz, day.and_hms_opt(h, m, 0)?)
+}
+
+/// The `at` time on `now`'s LOCAL day (in `tz`), as a UTC instant. DST-safe: a
+/// non-existent local time (spring-forward gap) resolves to the first valid
+/// instant after the gap; an ambiguous one (fall-back) takes the earlier offset.
+fn scheduled_today(now: DateTime<Utc>, tz: Tz, h: u32, m: u32) -> Option<DateTime<Utc>> {
+    scheduled_on(now.with_timezone(&tz).date_naive(), tz, h, m)
+}
+
+/// How far back a never-run cron schedule looks for a missed first fire when
+/// the caller knows when the schedule was created (see [`is_due_since`]).
+const FIRST_FIRE_LOOKBACK_DAYS: i64 = 7;
+
 /// Is the task due at `now` (given its last completed-run cursor + timezone)?
 pub fn is_due(spec: &Value, last_run: Option<DateTime<Utc>>, now: DateTime<Utc>, tz: Tz) -> bool {
+    is_due_since(spec, last_run, None, now, tz)
+}
+
+/// [`is_due`] plus the schedule's creation instant. A cron that has never run
+/// otherwise only looks one minute back, so its FIRST fire is lost when the Mac
+/// slept / the daemon was down at that minute (or a tick straddled it) and it
+/// waits a whole period. With `created` known, the never-run anchor is the
+/// creation time (bounded to [`FIRST_FIRE_LOOKBACK_DAYS`]), so a missed first
+/// fire is caught up exactly once — like `daily`/`weekly` already do.
+pub fn is_due_since(
+    spec: &Value,
+    last_run: Option<DateTime<Utc>>,
+    created: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> bool {
     match cadence(spec) {
         "interval" => match last_run {
             None => true,
@@ -103,13 +143,20 @@ pub fn is_due(spec: &Value, last_run: Option<DateTime<Utc>>, now: DateTime<Utc>,
         }
         "cron" => match cron::Schedule::parse(cron_expr(spec)) {
             Ok(sched) => {
-                // Due when the next fire AFTER the cursor (or, if never run, after
-                // a minute ago so a just-created matching minute fires) is <= now.
-                let anchor = last_run.unwrap_or_else(|| now - Duration::minutes(1));
+                // Due when the next fire AFTER the cursor is <= now. Never run: after
+                // the creation time (bounded), else after a minute ago so a
+                // just-created matching minute fires.
+                let anchor = last_run.unwrap_or_else(|| match created {
+                    Some(c) => c.max(now - Duration::days(FIRST_FIRE_LOOKBACK_DAYS)),
+                    None => now - Duration::minutes(1),
+                });
                 sched.next_after(anchor, tz).is_some_and(|next| next <= now)
             }
             Err(_) => false,
         },
+        // One shot: due once `run_at` has passed, and never again after the
+        // first completed run (the cursor is the "already fired" flag).
+        "once" => last_run.is_none() && once_at(spec, tz).is_some_and(|t| now >= t),
         _ => false,
     }
 }
@@ -118,14 +165,17 @@ pub fn is_due(spec: &Value, last_run: Option<DateTime<Utc>>, now: DateTime<Utc>,
 pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
     match cadence(spec) {
         "interval" => Some(from + Duration::minutes(every_min(spec))),
+        // Daily/weekly step LOCAL dates (not `+ n days` in UTC), so the shown
+        // next run stays at the wall-clock `at` across a DST change.
         "daily" => {
             let (h, m) = parse_at(spec);
-            let today = scheduled_today(from, tz, h, m)?;
-            Some(if from < today {
-                today
+            let day = from.with_timezone(&tz).date_naive();
+            let today = scheduled_on(day, tz, h, m)?;
+            if from < today {
+                Some(today)
             } else {
-                today + Duration::days(1)
-            })
+                scheduled_on(day.succ_opt()?, tz, h, m)
+            }
         }
         "weekly" => {
             let (h, m) = parse_at(spec);
@@ -134,23 +184,45 @@ pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
                 .and_then(Value::as_i64)
                 .unwrap_or(0)
                 .clamp(0, 6) as u32;
-            let today = scheduled_today(from, tz, h, m)?;
-            let cur = from.with_timezone(&tz).weekday().num_days_from_monday() as i64;
+            let day = from.with_timezone(&tz).date_naive();
+            let today = scheduled_on(day, tz, h, m)?;
+            let cur = day.weekday().num_days_from_monday() as i64;
             let mut delta = (wd as i64 - cur).rem_euclid(7);
             if delta == 0 && from >= today {
                 delta = 7;
             }
-            Some(today + Duration::days(delta))
+            scheduled_on(day.checked_add_signed(Duration::days(delta))?, tz, h, m)
         }
         "cron" => cron::Schedule::parse(cron_expr(spec))
             .ok()?
             .next_after(from, tz),
+        // Only a still-future `run_at` is a "next run"; once it has passed
+        // there is none (the schedule is spent).
+        "once" => once_at(spec, tz).filter(|t| from < *t),
         _ => None,
     }
 }
 
 fn cron_expr(spec: &Value) -> &str {
     spec.get("expr").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The single fire instant of a `once` cadence (`{cadence:"once", run_at}`):
+/// an RFC3339 instant as-is, or a LOCAL wall-clock `YYYY-MM-DDTHH:MM[:SS]`
+/// (a space instead of `T` is accepted) resolved in `tz` — DST-safe via
+/// [`resolve_local`] (a gap time fires at the first valid instant after the
+/// gap; an ambiguous fall-back time fires at the earlier one). `None` when
+/// `run_at` is missing or unparseable.
+pub fn once_at(spec: &Value, tz: Tz) -> Option<DateTime<Utc>> {
+    let raw = spec.get("run_at").and_then(Value::as_str)?.trim();
+    if let Ok(t) = DateTime::parse_from_rfc3339(raw) {
+        return Some(t.with_timezone(&Utc));
+    }
+    let norm = raw.replacen(' ', "T", 1);
+    ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"]
+        .iter()
+        .find_map(|f| NaiveDateTime::parse_from_str(&norm, f).ok())
+        .and_then(|naive| resolve_local(tz, naive))
 }
 
 /// Validate a schedule spec at create/update time.
@@ -176,13 +248,28 @@ pub fn validate(spec: &Value) -> Result<()> {
         }
         "cron" => {
             let expr = cron_expr(spec);
-            cron::Schedule::parse(expr).map_err(|e| {
+            let sched = cron::Schedule::parse(expr).map_err(|e| {
                 Error::Invalid(format!("schedule.expr is not a valid cron expression: {e}"))
             })?;
+            // A well-formed but impossible date (e.g. `0 0 31 2 *`) would be
+            // saved and then silently never fire.
+            if sched.next_after(Utc::now(), Tz::UTC).is_none() {
+                return Err(Error::Invalid(format!(
+                    "schedule.expr '{expr}' never fires (no matching date)"
+                )));
+            }
+        }
+        "once" => {
+            if once_at(spec, Tz::UTC).is_none() {
+                return Err(Error::Invalid(
+                    "schedule.run_at must be an RFC3339 instant or a local 'YYYY-MM-DDTHH:MM'"
+                        .into(),
+                ));
+            }
         }
         other => {
             return Err(Error::Invalid(format!(
-                "schedule.cadence must be interval|daily|weekly|cron (got '{other}')"
+                "schedule.cadence must be interval|daily|weekly|cron|once (got '{other}')"
             )))
         }
     }
@@ -208,6 +295,10 @@ pub fn describe(spec: &Value, tz: Tz) -> String {
             format!("weekly {} at {h:02}:{m:02} {tz}", names[wd])
         }
         "cron" => format!("cron `{}` ({tz})", cron_expr(spec)),
+        "once" => format!(
+            "once at {} ({tz})",
+            spec.get("run_at").and_then(Value::as_str).unwrap_or("?")
+        ),
         other => other.to_string(),
     }
 }
@@ -285,47 +376,100 @@ pub mod cron {
             }
         }
 
+        /// Does any wall-clock minute in `[from, to)` match the schedule? Used
+        /// for the minutes a spring-forward gap removed from the local clock.
+        fn gap_matches(&self, from: NaiveDateTime, to: NaiveDateTime) -> bool {
+            let mut n = from;
+            let mut steps = 0u32;
+            while n < to && steps < 24 * 60 {
+                steps += 1;
+                let date = n.date();
+                if self.months.contains(&date.month())
+                    && self.day_matches(date)
+                    && self.hours.contains(&n.hour())
+                    && self.minutes.contains(&n.minute())
+                {
+                    return true;
+                }
+                match n.checked_add_signed(Duration::minutes(1)) {
+                    Some(next) => n = next,
+                    None => return false,
+                }
+            }
+            false
+        }
+
         /// The first cron instant strictly after `after`, evaluated in `tz`.
         /// Returns `None` if nothing matches within ~4 years (e.g. impossible
         /// date). Day-level fast-forward keeps even yearly crons cheap.
+        ///
+        /// Walks REAL instants (whole UTC minutes) and matches each one's LOCAL
+        /// wall-clock fields. It never rebuilds a local time through `with_*` on
+        /// a `DateTime<Tz>`: those resolve via `.single()` and return `None` on an
+        /// ambiguous (fall-back) wall time, which used to end the search — and,
+        /// since the cursor only advances on a run, the schedule — for good.
+        ///
+        /// DST semantics (Vixie cron's): a job with a FIXED hour list fires once
+        /// on fall-back day (in the first pass of the repeated hour) and, when its
+        /// time falls in a spring-forward gap, fires once right after the gap. A
+        /// job whose hour field is `*` runs in real time through both.
         pub fn next_after(&self, after: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
-            let local = after.with_timezone(&tz);
-            // First candidate: the next whole minute after `after`.
-            let mut cand = local
-                .with_second(0)?
-                .with_nanosecond(0)?
-                .checked_add_signed(Duration::minutes(1))?;
-            let limit = local + Duration::days(366 * 4);
+            // First candidate: the next whole minute after `after` (UTC arithmetic).
+            let secs = after.timestamp();
+            let mut cand = DateTime::<Utc>::from_timestamp(secs - secs.rem_euclid(60) + 60, 0)?;
+            let limit = after.checked_add_signed(Duration::days(366 * 4))?;
+            let every_hour = self.hours.len() == 24;
             let mut guard = 0u32;
             while cand <= limit {
                 guard += 1;
                 if guard > 5_000_000 {
                     return None;
                 }
-                let date = cand.date_naive();
+                let local = cand.with_timezone(&tz).naive_local();
+                // Spring-forward: the wall clock jumped straight to `local`. A
+                // fixed-hour job whose time was in the skipped span fires now.
+                if !every_hour {
+                    let prev = cand
+                        .checked_sub_signed(Duration::minutes(1))?
+                        .with_timezone(&tz)
+                        .naive_local();
+                    let expected = prev.checked_add_signed(Duration::minutes(1))?;
+                    if local > expected && self.gap_matches(expected, local) {
+                        return Some(cand);
+                    }
+                }
+                let date = local.date();
                 if !self.months.contains(&date.month()) || !self.day_matches(date) {
-                    // Skip to 00:00 of the next day (in local tz).
-                    let next_day = date.checked_add_signed(Duration::days(1))?;
-                    cand = match tz
-                        .from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?)
-                        .earliest()
-                    {
-                        Some(dt) => dt,
-                        None => cand.checked_add_signed(Duration::hours(1))?,
+                    // Skip to the first instant of the next LOCAL day.
+                    let next = resolve_local(tz, date.succ_opt()?.and_hms_opt(0, 0, 0)?);
+                    cand = match next {
+                        Some(n) if n > cand => n,
+                        _ => cand.checked_add_signed(Duration::hours(1))?,
                     };
                     continue;
                 }
-                if !self.hours.contains(&cand.hour()) {
-                    cand = cand.checked_add_signed(Duration::minutes(60 - cand.minute() as i64))?;
-                    // realign to top of the next hour
-                    cand = cand.with_minute(0)?;
+                if !self.hours.contains(&local.hour()) {
+                    // Top of the next hour (real minutes, so a skip can never land
+                    // on — or loop in — a wall time that does not exist).
+                    cand =
+                        cand.checked_add_signed(Duration::minutes(60 - local.minute() as i64))?;
                     continue;
                 }
-                if !self.minutes.contains(&cand.minute()) {
+                // Fall-back: this is the SECOND pass of the repeated hour. A
+                // fixed-hour job already had its chance in the first pass.
+                if !every_hour {
+                    if let LocalResult::Ambiguous(first, _) = tz.from_local_datetime(&local) {
+                        if first.with_timezone(&Utc) != cand {
+                            cand = cand.checked_add_signed(Duration::minutes(1))?;
+                            continue;
+                        }
+                    }
+                }
+                if !self.minutes.contains(&local.minute()) {
                     cand = cand.checked_add_signed(Duration::minutes(1))?;
                     continue;
                 }
-                return Some(cand.with_timezone(&Utc));
+                return Some(cand);
             }
             None
         }
@@ -474,6 +618,9 @@ mod tests {
         assert!(validate(&json!({"cadence":"cron","expr":"99 9 * * 1"})).is_err()); // minute > 59
         assert!(validate(&json!({"cadence":"cron","expr":"0 9 * * 9"})).is_err());
         // dow > 7
+        // Well-formed but impossible (Feb 31) → rejected; Feb 29 is fine.
+        assert!(validate(&json!({"cadence":"cron","expr":"0 0 31 2 *"})).is_err());
+        assert!(validate(&json!({"cadence":"cron","expr":"0 0 29 2 *"})).is_ok());
     }
 
     #[test]
@@ -538,5 +685,291 @@ mod tests {
             sched.next_after(utc(2026, 6, 26, 10, 0), Tz::UTC).unwrap(),
             utc(2026, 6, 26, 17, 0)
         );
+    }
+
+    // --- DST (Asia/Jerusalem falls back Sun 2026-10-25 02:00 IDT→01:00 IST and
+    // springs forward Fri 2026-03-27 02:00 IST→03:00 IDT; the EU on the 25th /
+    // 29th at 01:00Z; New York falls back 2026-11-01 at 06:00Z) ---
+
+    fn jlm() -> Tz {
+        "Asia/Jerusalem".parse().unwrap()
+    }
+
+    #[test]
+    fn cron_survives_the_fall_back_hour() {
+        // Regression: the hour skip used to cross the ambiguous 01:00 and
+        // `with_minute(0)` returned None — the schedule never fired again.
+        let sched = cron::Schedule::parse("0 9 * * *").unwrap();
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 6, 0), jlm()),
+            Some(utc(2026, 10, 25, 7, 0)) // 09:00 IST (UTC+2)
+        );
+        let s = json!({"cadence":"cron","expr":"0 9 * * *"});
+        let last = Some(utc(2026, 10, 24, 6, 0));
+        assert!(!is_due(&s, last, utc(2026, 10, 25, 6, 59), jlm()));
+        assert!(is_due(&s, last, utc(2026, 10, 25, 7, 1), jlm()));
+        assert_eq!(
+            next_run(&s, utc(2026, 10, 24, 6, 0), jlm()),
+            Some(utc(2026, 10, 25, 7, 0))
+        );
+    }
+
+    #[test]
+    fn cron_anchor_inside_the_repeated_hour() {
+        // The cursor itself sits in the second 01:xx pass (with seconds).
+        let sched = cron::Schedule::parse("0 9 * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 10, 24, 23, 10, 30).unwrap();
+        assert_eq!(
+            sched.next_after(after, jlm()),
+            Some(utc(2026, 10, 25, 7, 0))
+        );
+    }
+
+    #[test]
+    fn cron_fixed_time_in_the_repeated_hour_fires_once() {
+        let sched = cron::Schedule::parse("30 1 * * *").unwrap();
+        // First pass: 01:30 IDT == 22:30Z.
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 22, 0), jlm()),
+            Some(utc(2026, 10, 24, 22, 30))
+        );
+        // After it ran — even when the run finished inside the second pass —
+        // the repeated 01:30 IST is skipped; next is tomorrow 01:30 IST.
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 22, 30), jlm()),
+            Some(utc(2026, 10, 25, 23, 30))
+        );
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 23, 10), jlm()),
+            Some(utc(2026, 10, 25, 23, 30))
+        );
+    }
+
+    #[test]
+    fn cron_wildcard_hour_runs_in_real_time_through_fall_back() {
+        let sched = cron::Schedule::parse("0 * * * *").unwrap();
+        // 01:00 IDT (22:00Z) → the repeated 01:00 IST (23:00Z), an hour later.
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 22, 0), jlm()),
+            Some(utc(2026, 10, 24, 23, 0))
+        );
+    }
+
+    #[test]
+    fn cron_time_in_spring_forward_gap_fires_right_after_it() {
+        let sched = cron::Schedule::parse("30 2 * * *").unwrap();
+        // 02:30 does not exist on 2026-03-27 → fires at the jump (03:00 IDT).
+        assert_eq!(
+            sched.next_after(utc(2026, 3, 26, 12, 0), jlm()),
+            Some(utc(2026, 3, 27, 0, 0))
+        );
+        // …once: the next is 02:30 IDT the day after.
+        assert_eq!(
+            sched.next_after(utc(2026, 3, 27, 0, 0), jlm()),
+            Some(utc(2026, 3, 27, 23, 30))
+        );
+        // A time outside the gap is unaffected; a wildcard-hour job just keeps
+        // its real-time cadence (no extra catch-up fire).
+        let nine = cron::Schedule::parse("0 9 * * *").unwrap();
+        assert_eq!(
+            nine.next_after(utc(2026, 3, 26, 12, 0), jlm()),
+            Some(utc(2026, 3, 27, 6, 0))
+        );
+        let q = cron::Schedule::parse("*/15 * * * *").unwrap();
+        assert_eq!(
+            q.next_after(utc(2026, 3, 26, 23, 50), jlm()),
+            Some(utc(2026, 3, 27, 0, 0))
+        );
+    }
+
+    #[test]
+    fn cron_europe_and_us_both_directions() {
+        let berlin: Tz = "Europe/Berlin".parse().unwrap();
+        let sched = cron::Schedule::parse("30 2 * * *").unwrap();
+        // Spring forward 2026-03-29: 02:30 is in the gap → at the jump.
+        assert_eq!(
+            sched.next_after(utc(2026, 3, 28, 12, 0), berlin),
+            Some(utc(2026, 3, 29, 1, 0))
+        );
+        // Fall back 2026-10-25: the first 02:30 (CEST) only, then 02:30 CET
+        // the next day.
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 24, 12, 0), berlin),
+            Some(utc(2026, 10, 25, 0, 30))
+        );
+        assert_eq!(
+            sched.next_after(utc(2026, 10, 25, 0, 30), berlin),
+            Some(utc(2026, 10, 26, 1, 30))
+        );
+        let london: Tz = "Europe/London".parse().unwrap();
+        let nine = cron::Schedule::parse("0 9 * * *").unwrap();
+        assert_eq!(
+            nine.next_after(utc(2026, 10, 24, 8, 0), london),
+            Some(utc(2026, 10, 25, 9, 0))
+        );
+        let ny: Tz = "America/New_York".parse().unwrap();
+        assert_eq!(
+            nine.next_after(utc(2026, 10, 31, 13, 0), ny),
+            Some(utc(2026, 11, 1, 14, 0))
+        );
+    }
+
+    #[test]
+    fn cron_catches_up_once_after_downtime_across_dst() {
+        let s = json!({"cadence":"cron","expr":"0 9 * * *"});
+        // Down from before the fall-back until the 27th: due once…
+        assert!(is_due(
+            &s,
+            Some(utc(2026, 10, 24, 6, 0)),
+            utc(2026, 10, 27, 12, 0),
+            jlm()
+        ));
+        // …and after that catch-up run the cursor moves on to tomorrow 09:00.
+        let ran = Some(utc(2026, 10, 27, 12, 0));
+        assert!(!is_due(&s, ran, utc(2026, 10, 27, 18, 0), jlm()));
+        assert_eq!(
+            next_run(&s, utc(2026, 10, 27, 12, 0), jlm()),
+            Some(utc(2026, 10, 28, 7, 0))
+        );
+    }
+
+    #[test]
+    fn cron_first_fire_catch_up_uses_creation_time() {
+        // Created Sunday; asleep through Monday 09:00; wakes at 10:00.
+        let s = json!({"cadence":"cron","expr":"0 9 * * 1"});
+        let created = Some(utc(2026, 6, 28, 12, 0));
+        let now = utc(2026, 6, 29, 10, 0);
+        assert!(!is_due(&s, None, now, Tz::UTC));
+        assert!(is_due_since(&s, None, created, now, Tz::UTC));
+        // Before the first fire → not due.
+        assert!(!is_due_since(
+            &s,
+            None,
+            created,
+            utc(2026, 6, 29, 8, 0),
+            Tz::UTC
+        ));
+        // The look-back is bounded: a months-old never-run monthly cron does
+        // not fire on a random day.
+        let monthly = json!({"cadence":"cron","expr":"0 9 1 * *"});
+        assert!(!is_due_since(
+            &monthly,
+            None,
+            Some(utc(2026, 5, 1, 0, 0)),
+            utc(2026, 6, 20, 12, 0),
+            Tz::UTC
+        ));
+    }
+
+    #[test]
+    fn daily_fires_once_in_the_repeated_hour() {
+        let s = json!({"cadence":"daily","at":"01:30"});
+        // The earlier 01:30 (IDT, 22:30Z) is the slot.
+        assert!(is_due(
+            &s,
+            Some(utc(2026, 10, 23, 22, 31)),
+            utc(2026, 10, 24, 22, 45),
+            jlm()
+        ));
+        // Ran in the first pass → not again in the second pass.
+        assert!(!is_due(
+            &s,
+            Some(utc(2026, 10, 24, 22, 31)),
+            utc(2026, 10, 24, 23, 40),
+            jlm()
+        ));
+    }
+
+    #[test]
+    fn daily_in_spring_forward_gap_fires_at_the_jump() {
+        let s = json!({"cadence":"daily","at":"02:30"});
+        assert_eq!(
+            next_run(&s, utc(2026, 3, 26, 12, 0), jlm()),
+            Some(utc(2026, 3, 27, 0, 0))
+        );
+        assert!(is_due(
+            &s,
+            Some(utc(2026, 3, 26, 0, 5)),
+            utc(2026, 3, 27, 0, 1),
+            jlm()
+        ));
+    }
+
+    #[test]
+    fn daily_and_weekly_next_run_keep_wall_clock_across_dst() {
+        // Was `today + 1 day` in UTC → 06:00Z (08:00 IST), an hour early.
+        let d = json!({"cadence":"daily","at":"09:00"});
+        assert_eq!(
+            next_run(&d, utc(2026, 10, 24, 7, 0), jlm()),
+            Some(utc(2026, 10, 25, 7, 0))
+        );
+        // Sunday (weekday 6) 09:00, from after this Sunday's slot.
+        let w = json!({"cadence":"weekly","at":"09:00","weekday":6});
+        assert_eq!(
+            next_run(&w, utc(2026, 10, 18, 7, 0), jlm()),
+            Some(utc(2026, 10, 25, 7, 0))
+        );
+    }
+
+    // ---- `once` (one-shot reminders / Personal Agent one-off runs) ----------
+
+    #[test]
+    fn once_fires_after_run_at_and_never_again() {
+        let s = json!({"cadence":"once","run_at":"2026-09-24T17:00:00Z"});
+        assert!(!is_due(&s, None, utc(2026, 9, 24, 16, 59), Tz::UTC));
+        assert!(is_due(&s, None, utc(2026, 9, 24, 17, 0), Tz::UTC));
+        // A missed fire (daemon down / Mac asleep) catches up once.
+        assert!(is_due(&s, None, utc(2026, 9, 25, 8, 0), Tz::UTC));
+        // Spent after the first completed run.
+        assert!(!is_due(&s, Some(utc(2026, 9, 24, 17, 0)), utc(2026, 9, 25, 8, 0), Tz::UTC));
+        assert_eq!(
+            next_run(&s, utc(2026, 9, 24, 12, 0), Tz::UTC),
+            Some(utc(2026, 9, 24, 17, 0))
+        );
+        assert_eq!(next_run(&s, utc(2026, 9, 24, 17, 0), Tz::UTC), None);
+    }
+
+    #[test]
+    fn once_local_time_resolves_in_the_schedule_timezone() {
+        // 17:00 in Jerusalem (IDT, UTC+3 on 2026-09-24) == 14:00 UTC.
+        let tz: Tz = "Asia/Jerusalem".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-09-24T17:00"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 9, 24, 14, 0)));
+        assert!(!is_due(&s, None, utc(2026, 9, 24, 13, 59), tz));
+        assert!(is_due(&s, None, utc(2026, 9, 24, 14, 0), tz));
+        // An explicit offset wins over the schedule timezone.
+        let abs = json!({"cadence":"once","run_at":"2026-09-24T17:00:00+00:00"});
+        assert_eq!(once_at(&abs, tz), Some(utc(2026, 9, 24, 17, 0)));
+        // A space separator is accepted too.
+        let spaced = json!({"cadence":"once","run_at":"2026-09-24 17:00"});
+        assert_eq!(once_at(&spaced, tz), Some(utc(2026, 9, 24, 14, 0)));
+    }
+
+    #[test]
+    fn once_in_the_spring_forward_gap_fires_right_after_it() {
+        // New York 2026-03-08: 02:00 → 03:00 local. 02:30 does not exist; it
+        // fires at the first valid instant after the gap (03:00 EDT = 07:00 UTC).
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-03-08T02:30"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 3, 8, 7, 0)));
+    }
+
+    #[test]
+    fn once_in_the_fall_back_overlap_takes_the_earlier_instant() {
+        // New York 2026-11-01: 01:30 happens twice; the first (EDT, UTC-4) is
+        // 05:30 UTC, the second (EST) 06:30 UTC.
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let s = json!({"cadence":"once","run_at":"2026-11-01T01:30"});
+        assert_eq!(once_at(&s, tz), Some(utc(2026, 11, 1, 5, 30)));
+    }
+
+    #[test]
+    fn once_validates_run_at() {
+        assert!(validate(&json!({"cadence":"once","run_at":"2026-09-24T17:00"})).is_ok());
+        assert!(validate(&json!({"cadence":"once","run_at":"2026-09-24T17:00:00Z"})).is_ok());
+        assert!(validate(&json!({"cadence":"once"})).is_err());
+        assert!(validate(&json!({"cadence":"once","run_at":"tomorrow at 5"})).is_err());
+        assert!(describe(&json!({"cadence":"once","run_at":"2026-09-24T17:00"}), Tz::UTC)
+            .starts_with("once at 2026-09-24T17:00"));
     }
 }

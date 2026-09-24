@@ -1,11 +1,15 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Runtime custom-plugins management (root). Install from a local path or git
   // URL, enable/disable (spawns/stops the sidecar), remove. Access for non-root
   // users is granted per-plugin in Settings → Users.
   import { onMount } from 'svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import { plugins, type PluginRecord } from '../../lib/stores/plugins.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   let list = $state<PluginRecord[]>([]);
@@ -63,7 +67,7 @@
   }
 
   async function remove(p: PluginRecord) {
-    if (!window.confirm(`Remove plugin "${p.name}"? Its files under ~/otto-plugins are kept.`)) return;
+    if (!(await confirmer.ask(`Remove plugin "${p.name}"? Its files under ~/otto-plugins are kept.`, { title: 'Remove plugin', confirmLabel: 'Remove' }))) return;
     busy = true;
     error = null;
     try {
@@ -78,10 +82,10 @@
   }
 </script>
 
-<div class="page">
-  <h1>Plugins</h1>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('plugins')} subtitle="Sidecar processes installed at runtime, no rebuild" />
+  <PageBody width="readable">
   <p class="lead">
-    Custom plugins are external sidecar processes installed at runtime (no app rebuild).
     Install from a local folder or a git URL, then enable to run it. Grant non-root users
     access to a plugin in <strong>Settings → Users</strong>.
   </p>
@@ -111,7 +115,7 @@
         {#each list as p (p.slug)}
           <tr>
             <td>
-              <div class="name"><Icon name={p.icon} size={14} /> {p.name}</div>
+              <div class="name"><Icon name={asIcon(p.icon, 'box')} size={14} /> {p.name}</div>
               <div class="src">{p.source}</div>
             </td>
             <td><code>{p.slug}</code></td>
@@ -130,6 +134,7 @@
       </tbody>
     </table>
   {/if}
+  </PageBody>
 </div>
 
 {#if pickerOpen}
@@ -145,18 +150,18 @@
 {/if}
 
 <style>
-  .page {
-    padding: 20px 24px;
-    max-width: 900px;
-  }
-  h1 {
-    font-size: 20px;
-    margin: 0 0 6px;
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .lead {
     color: var(--text-dim);
-    font-size: 13px;
-    margin: 0 0 16px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 0 0 14px;
   }
   .install {
     display: flex;
@@ -168,7 +173,7 @@
     padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg-elev, transparent);
+    background: var(--surface-2);
     color: var(--text);
     font-size: 13px;
   }
@@ -176,26 +181,26 @@
     padding: 7px 12px;
     border: 1px solid var(--border);
     border-radius: 6px;
-    background: var(--bg-elev, transparent);
+    background: var(--surface-2);
     color: var(--text);
     font-size: 13px;
     cursor: pointer;
   }
   .btn.primary {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .btn.danger {
-    color: #e5484d;
+    color: var(--danger);
   }
   .btn:disabled {
     opacity: 0.5;
     cursor: default;
   }
   .error {
-    color: #e5484d;
-    border: 1px solid color-mix(in srgb, #e5484d 40%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 6px;
     padding: 8px 12px;
     margin-bottom: 12px;

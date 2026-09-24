@@ -1,25 +1,145 @@
 /* Otto design tokens. Themes: native | pro-dark | warm. Scheme: light | dark
    (data-scheme on <html>; "auto" resolves via prefers-color-scheme in app code).
-   The terminal palette is set separately in Terminal.svelte per theme. */
+   The terminal palette is set separately in Terminal.svelte per theme.
+
+   Only use names defined in this file (or app.css) — `npm run check` runs
+   scripts/ui-guards.mjs, which fails on a var(--x) that is defined nowhere.
+   Canonical set: --bg --bg-sidebar --surface --surface-2 --surface-3 --border
+   --border-strong --hover --text --text-dim --accent(-soft/-text/-solid/
+   -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
+   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow. */
 
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
 
+  /* Type scale. 11px is the floor for anything a user has to read; smaller
+     sizes are for decorative counters only. The shared primitives in app.css
+     use these; modules migrate onto them over time. */
+  --fs-xs: 11px;
+  --fs-s: 12px;
+  --fs-m: 13px;
+  --fs-l: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
   --radius-s: 5px;
   --radius-m: 8px;
   --radius-l: 12px;
 
+  /* Layers (docs/design/guidelines/foundations.md §6). Floating UI picks one
+     of these instead of inventing a number; scripts/ui-guards.mjs ratchets
+     z-index literals outside 0–10 (in-pane stacking). Nothing exceeds
+     --z-overlay-max. */
+  --z-sticky: 10; /* in-pane: sticky headers, resize handles */
+  --z-floating-bar: 40; /* FloatingBar over the content column */
+  --z-mobile-nav: 60; /* BottomNav */
+  --z-drawer: 90; /* Drawer (+1 panel), BottomNav "More" sheet (+2/+3) */
+  --z-command: 150; /* Palette, ShortcutsOverlay */
+  --z-modal: 200; /* Modal (and ConfirmDialog) */
+  --z-toast: 300; /* Toasts */
+  --z-find: 9000; /* FindInPage */
+  --z-popover-backdrop: 9998; /* ContextMenu / popover click-catcher */
+  --z-popover: 9999; /* ContextMenu, NotificationBell panel — above sheets */
+  --z-overlay-max: 9999;
+
   --accent: #0a84ff;
+  /* Text/icon colour on an --accent-solid fill (see the warm/dark override). */
   --accent-contrast: #ffffff;
 
+  /* Status INDICATOR colours (dots, bars, rails). Dark-scheme values here;
+     the light scheme swaps in darker ones below so they also pass as text. */
   --status-working: #28c840;
   --status-idle: #98989f;
   --status-exited: #ff5f57;
   /* Amber "warning/attention" status (ahead-behind, dirty, pending, warn
-     severity). Single value like the others — readable on both schemes. */
+     severity). */
   --status-warn: #e0a000;
   --status-warn-soft: rgba(224, 160, 0, 0.16);
+
+  /* Semantic tones (dark-scheme defaults; light values below). The bare name
+     is TEXT-SAFE: >= 4.5:1 on --bg, --surface, --surface-2 and on its own
+     -soft tint in every theme. Use -soft for tinted backgrounds/chips and
+     --danger-solid for a filled destructive button carrying white text. */
+  --danger: #ff8a80;
+  --warning: #e3b341;
+  --success: #56d06c;
+  --info: #6cb2ff;
+  --danger-solid: #c42b22;
+
+  /* Derived tokens. Declared once: they resolve on <html> against whichever
+     theme block (or custom accent) is active, so every theme gets them. */
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
+  --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
+  --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
+  --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Accent as TEXT (links, accent labels): pulled toward --text so it clears
+     4.5:1 in every theme, a user-picked custom accent included. */
+  --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
+  /* Accent as a FILL under --accent-contrast text (primary buttons). */
+  --accent-solid: color-mix(in srgb, var(--accent) 84%, black);
+  --hover: color-mix(in srgb, var(--text) 7%, transparent);
+  --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
+
+  /* Design Hall studio identity — the categorical fill of a studio's BADGE
+     TILE only (a 16–28px square behind a --studio-glyph icon, always shown
+     next to the studio's name). Never text, never large areas, never status.
+     Each fill keeps the white glyph at >= 3:1 (graphics contrast) and reads on
+     both schemes, so there is one set for every theme. */
+  --studio-frames: #2563eb;
+  --studio-graphics: #ea580c;
+  --studio-site: #16a34a;
+  --studio-3d: #7c3aed;
+  --studio-whiteboard: #d97706;
+  --studio-brand: #db2777;
+  --studio-spatial: #0d9488;
+  --studio-glyph: #ffffff;
+
+  /* Git worktree identity (a branch checked out in ANOTHER worktree): violet,
+     so it never reads as the local-branch accent. --worktree is the indicator
+     (pip fill, tints, borders); --worktree-text is text-safe (>= 4.5:1 on
+     --surface/--surface-2 and on its own 18% tint). Light values below. */
+  --worktree: #a78bfa;
+  --worktree-text: #c4b5fd;
+
+  /* Categorical chart series (bars, stacked segments, legend swatches) —
+     GRAPHICS only (>= 3:1 on --surface), never text or status. Always pair a
+     series with its legend label. Light values below. */
+  --cat-1: #6cb2ff;
+  --cat-2: #e3b341;
+  --cat-3: #3fcf8e;
+  --cat-4: #b18cff;
+  --cat-5: #ff8fb1;
+  --cat-6: #5ad1d1;
+
+  /* Native form controls (checkboxes, radios, scrollbars, date pickers,
+     select popups) follow the scheme and tint with the theme accent, so a
+     dark page never shows a white system checkbox. */
+  color-scheme: dark;
+  accent-color: var(--accent);
+}
+
+/* Light-scheme tones (Pro Dark is always dark, whatever the scheme says). */
+html[data-scheme='light']:not([data-theme='pro-dark']) {
+  color-scheme: light;
+  --danger: #b3261e;
+  --warning: #8a5100;
+  --success: #17702f;
+  --info: #0858b8;
+  --status-working: #17702f;
+  --status-idle: #69696e;
+  --status-exited: #b3261e;
+  --status-warn: #8a5100;
+  --status-warn-soft: rgba(138, 81, 0, 0.12);
+  --worktree: #7c3aed;
+  --worktree-text: #6d28d9;
+  --cat-1: #1f6fd1;
+  --cat-2: #b26a00;
+  --cat-3: #178a4c;
+  --cat-4: #7a4fd6;
+  --cat-5: #c2417a;
+  --cat-6: #0f8a8a;
 }
 
 /* ---------- Native theme (default) ---------- */
@@ -29,9 +149,10 @@ html[data-theme='native'][data-scheme='light'] {
   --bg-sidebar: #ececf1;
   --surface: #ffffff;
   --surface-2: #f0f0f4;
+  --surface-3: #e6e6ec;
   --border: rgba(0, 0, 0, 0.1);
   --text: #1d1d1f;
-  --text-dim: #6e6e73;
+  --text-dim: #636368;
   --term-bg: #fbfbfd;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
 }
@@ -41,9 +162,10 @@ html[data-theme='native'][data-scheme='dark'] {
   --bg-sidebar: #232328;
   --surface: #2a2a30;
   --surface-2: #323238;
+  --surface-3: #3a3a41;
   --border: rgba(255, 255, 255, 0.1);
   --text: #f2f2f5;
-  --text-dim: #98989f;
+  --text-dim: #9f9fa6;
   --term-bg: #131318;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
@@ -56,6 +178,7 @@ html[data-theme='pro-dark'][data-scheme='dark'] {
   --bg-sidebar: #1c1c23;
   --surface: #1f1f27;
   --surface-2: #26262f;
+  --surface-3: #2e2e38;
   --border: rgba(255, 255, 255, 0.08);
   --text: #e8e8ee;
   --text-dim: #9a9aa8;
@@ -71,6 +194,7 @@ html[data-theme='warm'][data-scheme='light'] {
   --bg-sidebar: #f3f1ed;
   --surface: #ffffff;
   --surface-2: #f0ede8;
+  --surface-3: #e7e3dc;
   --border: rgba(60, 50, 30, 0.12);
   --text: #3d3a35;
   --text-dim: #6b6760;
@@ -84,17 +208,122 @@ html[data-theme='warm'][data-scheme='dark'] {
   --bg-sidebar: #262420;
   --surface: #2c2a25;
   --surface-2: #33312b;
+  --surface-3: #3b3832;
   --border: rgba(255, 245, 225, 0.1);
   --text: #e8e4da;
   --text-dim: #a09a8e;
   --term-bg: #1a1916;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
   --accent: #2bb673;
+  /* White on this bright green is 2.61:1 — fill with the accent itself and
+     put dark text on it instead (6.8:1). */
+  --accent-solid: var(--accent);
+  --accent-contrast: #0f1a14;
 }
 
-/* Sidebar translucency (vibrancy shows through in the Tauri window). */
+/* ---------- Ambient backdrop + glass materials ----------
+
+   The ambient backdrop (Settings → Appearance: None / Subtle / Wallpaper) is a
+   soft full-bleed image generated in lib/ambient.ts and set inline on <html>
+   as --ambient-art. It is painted by the shell (seen through the sidebar's
+   blur), by the chrome strips (toolbar / status bar, fixed-attached so it
+   lines up with the sidebar), and by Home's desktop. Every ambient pixel stays
+   inside a scheme luminance band, which is what keeps text on glass AA
+   (unit/ambient.test.ts measures it against these values).
+
+   Glass is for CHROME ONLY — sidebar, toolbar strip, status bar, menus,
+   popovers, the palette, the menu-bar popover. Never behind tables, editors,
+   terminals, logs or forms (foundations.md §7).
+
+   --glass-tint          sidebar material (over the ambient backdrop)
+   --glass-tint-native   sidebar / menu-bar popover over the desktop app's
+                         NATIVE vibrancy (the real desktop, not luminance-
+                         banded, so it keeps the stronger 84% tint)
+   --glass-tint-bar      toolbar strip + status bar (over the ambient)
+   --glass-tint-raised   menus, popovers, palette (over app content)
+   --glass-blur(-raised) the backdrop-filter that goes with them
+   --glass-border        the hairline edge of a floating glass surface
+   --glass-shadow        elevation of a floating glass surface
+   --separator           the quiet hairline between chrome and content
+   --shadow-card         elevation 1: content cards resting on the page */
+:root {
+  --ambient-image: var(--ambient-art, none);
+  --glass-tint: color-mix(in srgb, var(--bg-sidebar) 72%, transparent);
+  --glass-tint-native: color-mix(in srgb, var(--bg-sidebar) 84%, transparent);
+  --glass-tint-bar: color-mix(in srgb, var(--bg) 72%, transparent);
+  --glass-tint-raised: color-mix(in srgb, var(--surface) 90%, transparent);
+  --glass-blur: blur(24px) saturate(1.5);
+  --glass-blur-raised: blur(20px) saturate(1.4);
+  --glass-border: color-mix(in srgb, var(--text) 10%, transparent);
+  --glass-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.06),
+    0 10px 36px rgba(0, 0, 0, 0.16);
+  --separator: color-mix(in srgb, var(--text) 8%, transparent);
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 2px 8px rgba(0, 0, 0, 0.03);
+}
+html[data-scheme='dark'],
+html[data-theme='pro-dark'] {
+  --glass-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.5),
+    0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
+/* Reduced transparency (the system setting, or Settings → Appearance): every
+   glass surface is its opaque token and the ambient backdrop is off. */
+html[data-transparency='reduced'] {
+  --ambient-image: none;
+  --glass-tint: var(--bg-sidebar);
+  --glass-tint-native: var(--bg-sidebar);
+  --glass-tint-bar: var(--bg);
+  --glass-tint-raised: var(--surface);
+  --glass-blur: none;
+  --glass-blur-raised: none;
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --ambient-image: none;
+    --glass-tint: var(--bg-sidebar);
+    --glass-tint-native: var(--bg-sidebar);
+    --glass-tint-bar: var(--bg);
+    --glass-tint-raised: var(--surface);
+    --glass-blur: none;
+    --glass-blur-raised: none;
+  }
+}
+
+/* The sidebar material: glass over the ambient backdrop in a browser, over
+   the window's native NSVisualEffect vibrancy in the desktop app. */
 .sidebar-material {
-  background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  background: var(--glass-tint);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+html.otto-vibrant .sidebar-material {
+  background: var(--glass-tint-native);
+}
+
+/* A chrome strip (toolbar row, status bar): the ambient, fixed to the
+   viewport so it lines up with what the sidebar shows, under the bar tint.
+   Opaque paint — no backdrop-filter, so it never becomes the containing
+   block of fixed-position popups inside it. */
+.chrome-material {
+  background-color: var(--bg);
+  background-image: linear-gradient(var(--glass-tint-bar), var(--glass-tint-bar)), var(--ambient-image);
+  background-attachment: fixed;
+  background-size: cover;
+  background-position: center;
+}
+
+/* A floating glass surface over app content: menus, popovers, the palette. */
+.glass-raised {
+  background: var(--glass-tint-raised);
+  backdrop-filter: var(--glass-blur-raised);
+  -webkit-backdrop-filter: var(--glass-blur-raised);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
 }

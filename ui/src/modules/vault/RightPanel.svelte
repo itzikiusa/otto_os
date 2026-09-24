@@ -191,7 +191,7 @@
   }
   .tri {
     transition: transform 0.12s;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tri.open {
@@ -199,9 +199,9 @@
   }
   .badge {
     margin-inline-start: auto;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: var(--hover, rgba(127, 127, 127, 0.15));
+    background: var(--hover);
     border-radius: 999px;
     padding: 1px 7px;
   }
@@ -221,7 +221,7 @@
     color: var(--text);
   }
   .item:hover {
-    background: var(--hover, rgba(127, 127, 127, 0.12));
+    background: var(--hover);
   }
   .item:disabled {
     cursor: default;
@@ -244,7 +244,7 @@
     opacity: 0.6;
   }
   .ghost {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     border: 1px dashed var(--text-dim);
     border-radius: 4px;
     padding: 0 4px;

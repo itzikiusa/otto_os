@@ -2,6 +2,8 @@
   import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster, GroupDetail, GroupOffset, GroupSummary } from '../../lib/api/types';
   import type { DryRunResp } from './types';
 
@@ -14,6 +16,9 @@
 
   let groups = $state<GroupSummary[]>([]);
   let loading = $state(true);
+  /** Failed loads — inline with Retry, never "No consumer groups." / a blank detail. */
+  let loadError = $state<string | null>(null);
+  let detailError = $state<string | null>(null);
   // True when the broker's ACLs deny consumer-group access (probed once, cached
   // server-side). We show a clear banner instead of erroring, and skip re-probes.
   let accessDenied = $state(false);
@@ -76,6 +81,14 @@
     void cluster.id;
     selected = null;
     detail = null;
+    detailError = null;
+    // Another cluster's groups are not "stale data" for this one.
+    groups = [];
+    loadError = null;
+    loadGroups();
+  });
+
+  function loadGroups(): void {
     loading = true;
     accessDenied = false;
     api
@@ -83,6 +96,7 @@
       .then((g) => {
         groups = g;
         accessDenied = false;
+        loadError = null;
       })
       .catch((e) => {
         if (e instanceof ApiError && e.status === 403 && /consumer-group access/i.test(e.message)) {
@@ -91,21 +105,22 @@
           accessMsg = e.message;
           groups = [];
         } else {
-          toasts.error('Failed to load groups', String(e));
+          loadError = loadErrorText(e);
         }
       })
       .finally(() => (loading = false));
-  });
+  }
 
   function open(id: string) {
     selected = id;
     detail = null;
+    detailError = null;
     detailLoading = true;
     resetTopic = '';
     api
       .get<GroupDetail>(`/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(id)}`)
       .then((d) => (detail = d))
-      .catch((e) => toasts.error('Failed to describe group', String(e)))
+      .catch((e) => (detailError = loadErrorText(e)))
       .finally(() => (detailLoading = false));
   }
 
@@ -211,7 +226,12 @@
 
 <div class="groups">
   <div class="list" style="--groups-list-w:{listW}px">
-    {#if loading}
+    {#if loadError}
+      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups} />
+    {/if}
+    {#if loadError && groups.length === 0}
+      <!-- rendered above -->
+    {:else if loading}
       <p class="muted pad">Loading…</p>
     {:else if accessDenied}
       <div class="acl-denied pad">
@@ -252,6 +272,9 @@
   <div class="detail">
     {#if detailLoading}
       <p class="muted pad">Loading group…</p>
+    {:else if detailError && selected}
+      {@const gid = selected}
+      <LoadState what="this group" error={detailError} empty onretry={() => open(gid)} />
     {:else if detail}
       <header>
         <span class="gid big">{detail.group_id}</span>
@@ -472,7 +495,7 @@
     font-size: 11px;
   }
   .state {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 1px 6px;
@@ -483,8 +506,8 @@
     color: var(--status-working, #28c840);
   }
   .state.warn {
-    background: color-mix(in srgb, #f5a623 22%, transparent);
-    color: #f5a623;
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
   }
   .state.dim {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -510,7 +533,7 @@
   }
   .lag-total.has-lag,
   td.has-lag {
-    color: #f5a623;
+    color: var(--warning);
     font-weight: 600;
   }
   .offsets-header {
@@ -538,12 +561,12 @@
   .lag-bar {
     height: 6px;
     border-radius: 3px;
-    background: color-mix(in srgb, #f5a623 15%, transparent);
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
     overflow: hidden;
   }
   .lag-fill {
     height: 100%;
-    background: #f5a623;
+    background: var(--status-warn);
     border-radius: 3px;
   }
   .reset-bar {
@@ -608,17 +631,17 @@
     flex-direction: column;
     gap: 6px;
     margin: 8px;
-    border: 1px solid color-mix(in srgb, var(--status-degraded, #e3b341) 45%, var(--border));
-    border-inline-start: 3px solid var(--status-degraded, #e3b341);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+    border-inline-start: 3px solid var(--warning);
     border-radius: var(--radius-s, 4px);
-    background: color-mix(in srgb, var(--status-degraded, #e3b341) 8%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
   }
   .acl-title {
     font-weight: 600;
     color: var(--text);
   }
   .acl-denied code {
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     background: var(--surface-2);
     padding: 0 4px;
     border-radius: 3px;
@@ -645,7 +668,7 @@
     color: var(--status-working, #28c840);
   }
   .dryrun-summary .warn {
-    color: #f5a623;
+    color: var(--warning);
   }
   .close-dry {
     margin-inline-start: auto;
@@ -676,7 +699,7 @@
     color: var(--status-working, #28c840);
   }
   .dryrun-table td.warn {
-    color: #f5a623;
+    color: var(--warning);
   }
   .dryrun-preview p {
     padding: 5px 10px;

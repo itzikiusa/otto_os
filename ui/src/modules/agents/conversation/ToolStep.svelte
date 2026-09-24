@@ -229,7 +229,7 @@
   }
   .step-trunc {
     height: 16px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .step-dot {
     width: 7px;
@@ -325,16 +325,16 @@
     box-shadow: inset 3px 0 0 var(--status-exited, #e5534b);
   }
   .step-stats {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
     white-space: nowrap;
   }
   .step-stats .add {
-    color: var(--status-working, #3fb950);
+    color: var(--success);
     font-weight: 600;
   }
   .step-stats .del {
-    color: var(--status-exited, #e5534b);
+    color: var(--danger);
     font-weight: 600;
   }
   /* hljs paints tokens only; the block keeps the chat's surface. */

@@ -11,10 +11,11 @@ function workspace() {
     const result = deferred<any[]>(); requests.push({ path, result }); return result.promise;
   } };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
-    '../api/client': { api }, '../api/workflows': { listActiveWorkflowRuns: async () => [] },
+    '../api/client': { api }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15 },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
   });
   ws.refreshOtherSessions = async () => {};
   return { ws, requests, restored };

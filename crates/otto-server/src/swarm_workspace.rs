@@ -131,6 +131,13 @@ pub async fn ensure_integration_worktree(
     swarm: &Swarm,
     project: &SwarmProject,
 ) -> Result<(String, String)> {
+    // One creation at a time per project: a new worktree-mode project's first
+    // tick dispatches up to `max_parallel_sessions` turns at once, all of which
+    // saw the worktree absent below; the losers of `git worktree add -b` failed
+    // ("branch already exists") and their agents silently did the whole first
+    // turn in an empty scratch dir outside the repo.
+    let lock = integration_lock(&project.id);
+    let _creating = lock.lock().await;
     // Expand tilde-form paths (older projects persisted them raw) — a literal
     // `~` never resolves as a git dir.
     let repo_path = project
@@ -169,6 +176,20 @@ pub async fn ensure_integration_worktree(
             .await;
     }
     Ok((wt_str, branch))
+}
+
+/// Per-project lock serializing [`ensure_integration_worktree`].
+fn integration_lock(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    type Locks =
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(project_id.to_string())
+        .or_default()
+        .clone()
 }
 
 /// Ensure the agent has a prepared, unique working directory. Returns its path.

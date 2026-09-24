@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Self-Improvement settings page: per-workspace scheduled self-reflection.
   // Periodically reviews recent sessions and improves the workspace's memory
   // and handling skills — safe edits apply automatically, risky ones queue for
@@ -262,17 +266,10 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Self-Improvement</h1>
-      <div class="sub">
-        Periodically review this workspace's recent agent sessions and improve its memory and
-        handling skills. Safe edits apply automatically; risky ones wait for your approval below.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('self-improvement')} subtitle="Improve memory and skills from recent sessions" />
+  <PageBody width="readable">
+  <SectionIntro>Otto periodically reviews this workspace's recent agent sessions and improves its memory and handling skills. <strong>Safe edits apply automatically; risky ones wait for your approval below.</strong></SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->
@@ -460,9 +457,17 @@
       </div>
     {/if}
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .form {
     display: flex;
     flex-direction: column;
@@ -551,7 +556,7 @@
   }
 
   .chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 1px 6px;
@@ -606,7 +611,7 @@
   .diff summary {
     font-size: 12px;
     cursor: pointer;
-    color: var(--accent);
+    color: var(--accent-text);
     width: fit-content;
     margin-bottom: 6px;
   }

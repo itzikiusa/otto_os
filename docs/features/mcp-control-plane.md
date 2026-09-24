@@ -27,7 +27,7 @@ the token kind, and the routes.
 > [`mcp-control-plane-plan.md`](./mcp-control-plane-plan.md)) — including §14, the
 > two adversarial-review resolutions this implementation follows. This guide is the
 > **user-facing** reference; it links to the design for internals rather than
-> duplicating them. Related: **[Scheduled Tasks](./scheduled-tasks.md)** (whose 7
+> duplicating them. Related: **[Scheduled Tasks](./scheduled-tasks.md)** (whose 8
 > `otto.*` tools ride on the outward surface), the
 > **[daemon HTTP API](./daemon-http-api.md)**, and `docs/contracts/api.md`
 > (MCP Control Plane) — authoritative for the API shape.
@@ -142,8 +142,24 @@ started sessions in that workspace receive Otto's built-in MCP server. Toggle
 use from the **External tool catalog**, a filterable checklist grouped by feature
 category with per-group **All/None**.
 
-The outward checklist does **not** affect Otto sessions: session tools come from the
-separate inward `ottod mcp-tools` catalog. Open **Connect an external client** to see
+Session tools come from the inward `ottod mcp-tools` catalog, which **also** offers
+every tool enabled here that it doesn't serve natively (e.g. `otto_create_pr`),
+proxied through the same governed choke point — so the checklist, and the approval
+setting below, apply to Otto sessions as well as external clients.
+
+**Ask before each call.** Enabling a mutating tool makes it *callable*; each call
+still waits for a human approval by default. Under every **enabled mutating** tool
+the checklist shows an **Ask before each call** switch (on = gated, the default);
+each category with such tools also gets **Always ask / Don't ask**. Turning it off
+(after a confirm) stores the tool in `mcp_approval_exempt_tools`: its calls then run
+without a prompt but still pass the per-token scope, enable and RBAC gates and are
+**audited** like every other call. Disabling a tool drops its exemption, so
+re-enabling it starts gated again. If the global `mcp_require_approval_dangerous`
+switch is off, the page says so — nothing asks at all then. Policies and per-tool
+server rules (§7, **Servers → Tools**) govern registered external servers only; they
+never re-impose an approval on an `otto.*` tool.
+
+Open **Connect an external client** to see
 the HTTP URL, install commands, network-access controls, and **Access tokens**. A new
 restricted `kind='mcp'` token is shown **once**; only its 12-character prefix is shown
 thereafter. The disclosure includes this install snippet for an external agent's
@@ -244,24 +260,26 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 
 | Category | Read tools | Mutating tools (DANGEROUS) |
 |---|---|---|
-| **Workflows** | ✅ list / get / list_runs / get_run | ⚠ run, cancel_run |
-| **Message Brokers** | ✅ list_clusters / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
-| **Git** | ✅ list_repos / status / list_prs / get_pr / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, start_pr_review |
-| **Database** | ✅ list_connections / *query_db_readonly*¹ | — |
+| **Workflows** | ✅ list (every workspace) / get / list_runs (summary rows) / get_run | ⚠ run, cancel_run |
+| **Message Brokers** | ✅ list_clusters (every workspace) / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
+| **Git** | ✅ list_repos / status / list_prs (paged) / get_pr / get_pr_checks / *get_pr_diff*¹ / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, merge_pr, start_pr_review |
+| **Database** | ✅ list_connections (every workspace) / *query_db_readonly*¹ | — |
 | **API Client** | ✅ api_list / api_get_request / api_history (masked: no secret values, no tokens, JWTs as claims) | ⚠ api_execute (sends one saved request; method/new-host confirm flags), api_upsert_request, api_run_automation |
-| **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
-| **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
-| **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace) |
+| **Issues** | ✅ list_issue_accounts / search_issues / get_issue / list_issue_transitions / search_confluence / get_confluence_page / list_confluence_page_comments — `account_id` optional with one account | ⚠ comment_issue, transition_issue, create/update/comment_confluence_page |
+| **Swarm** | ✅ list (every workspace) / get / list_runs / list_swarm_projects / list_swarm_tasks / get_board | ⚠ post_swarm_board, create_work_item² |
+| **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_write_file, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace); `vault_id` may be the vault's name |
+| **Design Hall** | ✅ design_list / list_design_projects / design_get / design_links / design_search | ⚠ design_assist, design_link |
 | **Sessions** | ✅ list / get / wait_session | ⚠ broadcast_message, open_session (spawns an agent session + opening prompt), send_message (one session by id) |
-| **Code Review** | ✅ list_findings / get_finding | ⚠ start_pr_review |
-| **Product** | ✅ list_stories / get_story | — |
+| **Code Review** | ✅ list_pr_reviews / list_findings / get_finding | ⚠ start_pr_review |
+| **Product** | ✅ list_stories (global library) / get_story (id or Jira key) | — |
 | **Channels** | ✅ list_integrations | ⚠ test_integration |
 | **Usage / Skills** | ✅ get_usage_summary / list_bundled_skills | — |
 | **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
-| **Scheduled Tasks** | ✅ list / list_runs | ⚠ create / update / set_enabled / run / delete |
+| **Scheduled Tasks** | ✅ list (every workspace) / get / list_runs | ⚠ create / update / set_enabled / run / delete |
+| **Personal Agents** | ✅ list_agent_rooms / room_read / room_post (never approval-gated — persisted + user-visible) | — |
 | **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_sqs_peek³ / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message) — no S3 write, no EC2 start/stop |
 | **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_logs (text tail, never `follow`) / k8s_top | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones need `params.confirm_name == name`) |
-| **Code & Context / Agents / Approvals** | ✅ *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
+| **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
 (messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
@@ -275,6 +293,68 @@ per-service feature grants (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`,
 **Classification rule.** Every read tool is in exactly one of `DEFAULT_ENABLED`
 (surfaced when the server is on) or the opt-in set; every mutating tool is in
 `DANGEROUS` (off by default, approval-gated). A unit test enforces this invariant.
+
+**Git: finding the repo across workspaces.** A repo is registered in exactly one
+workspace (`repos.path` is unique), but an agent session runs in whichever
+workspace it was opened in — so the git tools never assume "this workspace":
+
+- `otto.list_repos` / `otto_list_repos` list the repos of **every** workspace the
+  caller can read (Git:View + workspace Viewer), each row carrying `workspace_id` +
+  `workspace_name`, the session's own workspace first (`GET /git/repos/directory`).
+  An optional `workspace_id` narrows to one workspace.
+- Every tool that takes a `repo_id` (`git_status`, `list_prs`, `get_pr`,
+  `create_pr`, `comment_pr`, `start_pr_review`, `open_pr_draft`, and the native
+  `otto_git_pr_review`) accepts a **friendly reference** — the id, the repo name,
+  a local path inside the checkout, or the remote (`owner/repo` or any URL
+  spelling). Omit it inside a session to use the repo the session is working in
+  (its cwd, or — for a workflow clone outside every registered path — the
+  checkout's `origin` remote). Resolution is server-side
+  (`GET /git/repos/resolve`, and in-process in the governed choke point).
+- An **ambiguous** reference (the same name/remote registered twice) is settled by
+  the caller's own workspace when exactly one candidate lives there; otherwise the
+  call fails listing the candidates (id, name, workspace). An **unknown** one fails
+  listing the closest matches or what IS available — the agent can retry with an
+  id at once, never "search again".
+- Safety: resolution only sees workspaces the effective user can read; a
+  `kind='mcp'` token pinned to a workspace only sees that workspace, and the pin is
+  re-checked against the **resolved** repo's workspace. The resolved `repo_id` +
+  the repo's own `workspace_id` replace the caller's arguments for audit, the
+  approval's workspace and args-hash (a name and the id reuse one approval) and
+  execution. A repo that isn't registered anywhere is not auto-registered — add
+  it under **Git → Add repository**.
+
+**Every other id: names, not opaque ids, across workspaces.** The repo fix
+above is generalised to every id an `otto.*` tool takes (`crates/otto-server/src/agent_refs.rs`):
+
+- **Discovery.** The list tools for per-workspace objects — `list_workflows`,
+  `list_connections`, `list_broker_clusters`, `list_swarms`,
+  `list_scheduled_tasks`, `list_goal_loops`, `list_agent_rooms` — span EVERY
+  workspace the caller can read (current first) and answer
+  `{kind, items, current_workspace_id, workspace_count}`, each row carrying
+  `workspace_id` + `workspace_name`; `workspace_id` narrows to one.
+  `list_workspaces` and `list_issue_accounts` supply the two ids no tool used to
+  list. Served by `GET /refs/directory` (inward) and in-process (outward).
+- **Friendly references.** Every id argument also takes a human reference —
+  a workflow / connection / cluster / swarm / scheduled task / goal loop / room
+  / vault / artifact / AWS account / K8s cluster by name, a story by its Jira
+  key, an issue account by label / email / base URL, a saved API request /
+  automation / environment by name, a workspace by name, a Confluence page by
+  URL, a Jira transition by name or target status. An issue account may be
+  omitted when you have exactly one. Same error contract as repos: ambiguous →
+  the candidates (settled by your current workspace when exactly one is
+  there), unknown → the closest matches or what IS available. Served by
+  `GET /refs/resolve` (inward) and in-process (outward).
+- **Safety.** Every lookup is a self-call of the kind's own list route AS the
+  caller (a short-lived token, revoked afterwards), so that route's RBAC decides
+  visibility — a reference can never resolve to anything the caller could not
+  already list. The resolved object's own workspace joins the arguments, and a
+  workspace-pinned `kind='mcp'` token's pin is re-checked against it — for
+  id-only objects (a workflow run, a session, an improvement run) the workspace
+  is read back from the object. A pinned token is **denied** any tool whose
+  workspace cannot be established (findings, swarm tasks, improvement-edit
+  actions) instead of the old silent bypass; global rows (AWS / K8s, your own
+  issue accounts, the story + design libraries, usage, skills) stay reachable.
+- A plain id from an unpinned caller costs nothing extra — no lookup runs.
 
 The same feature **reads** are also injected into Otto's *own* agent
 sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
@@ -314,9 +394,14 @@ path too.
 
 ## 4. The governance pipeline (`McpService::invoke`)
 
-Every governed `tools/call` — from the UI tester, the live-agent gateway, and the
-outward `otto.*` tools — funnels through one choke point. The stages run in this
-order; the **first** decisive stage wins:
+Every governed `tools/call` to a **registered server** — from the UI tester and the
+live-agent gateway — funnels through one choke point. (Otto's own `otto.*` tools use
+their own choke point, `governed_invoke`: per-token scope → enable → git repo
+resolution → approval (a mutating tool unless exempted via **Ask before each call**
+or cleared by a trusted token write grant, under the global
+`mcp_require_approval_dangerous` switch) → dry-run → execute → audit. Allowlists,
+policies and per-tool server rules below do not apply to them.) The stages run in
+this order; the **first** decisive stage wins:
 
 1. **Resolve** the server (must exist) and the tool. An **undiscovered/unknown tool
    fails closed** — treated as `dangerous` + `high` injection + disabled.
@@ -385,14 +470,18 @@ code-search are read-exfiltration vectors and are **opt-in**; all mutating tools
 off by default and `DANGEROUS` (approval-gated). In addition to the core tools above,
 the outward surface carries **read + write tools for every Otto feature** (workflows,
 brokers, git/PRs, issues, swarm, vault, sessions, code-review, product, usage,
-channels, skills, self-improvement) and the **seven Scheduled-Tasks tools** — the full
+channels, skills, self-improvement) and the **eight Scheduled-Tasks tools** — the full
 category table is in **§3.3**, and see the
-[Scheduled Tasks guide](./scheduled-tasks.md#9-mcp-surface-the-7-otto-tools).
+[Scheduled Tasks guide](./scheduled-tasks.md#9-mcp-surface-the-8-otto-tools).
 
-`otto.query_db_readonly` is enforced read-only **server-side**: the executor
-classifies the statement itself (only `SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`, single
-statement) and forces `confirm_write=false`, **regardless** of the connection's
-write-guard flag.
+`otto.query_db_readonly` is enforced read-only **server-side**, in two layers,
+**regardless** of the connection's write-guard flag: the tool classifies the
+statement itself (only `SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`, single statement),
+then runs it through `/connections/{id}/db/mcp-query` — the same path the
+per-session DB tools use — which re-classifies with the engine's own lexer and
+executes inside the engine's read-only mode (a read-only transaction on
+MySQL/Postgres, `readonly` on ClickHouse), with sensitive cells masked. An
+optional `node` (e.g. `db:<name>`) scopes the query.
 
 ---
 
@@ -507,6 +596,9 @@ the Vault v3 doc tools (`otto_vault_list`/`_dir`/`_read`/`_search`/`_backlinks`/
 `otto_search_memory`, `otto_list_repos`, `otto_list_sessions`, `otto_get_session`, `otto_wait_session`,
 `otto_list_product_stories`, `otto_list_findings`, `otto_usage_summary`,
 `otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested),
+the discovery tools `otto_list_workspaces`, `otto_list_issue_accounts`,
+`otto_list_issue_transitions`, `otto_list_goal_loops`, `otto_list_agent_rooms`,
+`otto_list_workflow_runs` and `k8s_health`,
 the API-client tools `otto_api_list`, `otto_api_get_request`, `otto_api_history`,
 `otto_api_execute`, `otto_api_upsert_request`, `otto_api_run_automation`,
 and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
@@ -515,6 +607,20 @@ and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text/plain
 tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
 three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action`.
+
+**Cross-workspace, by name.** The native list tools (`otto_list_workflows`,
+`otto_list_connections`, `otto_list_broker_clusters`, `otto_list_swarms`,
+`otto_list_product_stories`, `otto_list_goal_loops`, `otto_list_agent_rooms`,
+`otto_list_workspaces`, `otto_list_issue_accounts`) read `GET /refs/directory`
+— every workspace the session owner can read, this session's first — instead of
+only `OTTO_WORKSPACE_ID`; `otto_list_sessions`, `canvas_list_scenes` and the
+improvement lists take an optional `workspace_id` (id or name). Before a call,
+the bridge resolves every friendly id argument (a connection / cluster / account
+/ vault / workflow / room / scene name, a workspace name, an omitted sole issue
+account) through `GET /refs/resolve`, so `otto_db_query {connection_id:
+"GROOVE_SINATRA_STG"}` just works and an unknown name answers with the
+candidates. When the daemon cannot be reached at all the reference is passed
+through untouched, so the call's own checks report the real problem.
 
 **Control-plane parity.** The inward server *also* mirrors the operator's
 MCP → Otto server checklist: every `otto.*` tool enabled there (`GET /mcp/otto-server`)
@@ -526,8 +632,12 @@ allow-list → approval → audit choke point the outward server and the HTTP
 transport use, so a mutating tool still waits on a human approval. Native tools
 win by name; a governed twin of a native capability under a different name
 (`otto.get_usage_summary` vs `otto_usage_summary`, `otto.get_product_story`,
-`otto.query_db_readonly`) is not re-advertised. The session's `workspace_id` is
-injected when the tool's schema takes one and the agent omitted it. A tool
+`otto.query_db_readonly`, `otto.list_swarm_projects` / `_tasks` vs
+`swarm_list_projects` / `_tasks`, `otto.list_pr_reviews` vs `otto_git_pr_review`,
+and every `otto.aws_*` / `otto.k8s_*` vs the bare-named console tools — which a
+session used to see twice) is not re-advertised. The session's `workspace_id` is
+injected only when the governed tool REQUIRES one: an optional one means "span
+every workspace" (the directory list tools) or is filled server-side. A tool
 disabled in the checklist is refused by name with a pointer to where to enable
 it. If the daemon can't answer `GET /mcp/otto-server`, no governed tool is
 advertised and the reason is logged to the bridge's stderr.
@@ -638,7 +748,11 @@ the workspace role.
 **Settings keys** (`settings` table, JSON): `otto_mcp_enabled` (per-workspace map;
 unlisted workspaces default on), `mcp_otto_server_enabled` (default
 `false`), `mcp_otto_server_tools` (default = read subset + the two scheduled-task
-reads), `mcp_require_approval_dangerous` (default `true`), `mcp_health_interval_secs`
+reads), `mcp_require_approval_dangerous` (default `true`),
+`mcp_approval_exempt_tools` (default `[]` — mutating `otto.*` tools whose
+"Ask before each call" is off; set via CP25 `approval_exempt_tools`),
+`mcp_trust_token_write_grant` (default `true` — a `kind='mcp'` token minted with
+`allow_writes` skips the per-call prompt), `mcp_health_interval_secs`
 (default `300`; `0` = off).
 
 ---
@@ -699,6 +813,34 @@ require-approval). Approve it in **Activity → Approvals** (MCP Admin, and not 
 same user who requested it), then re-invoke — the approval is **single-use** and
 bound to the exact arguments, so changing the args invalidates it.
 
+**`otto_create_pr` still asks for approval although I enabled it.** Enabling a
+mutating `otto.*` tool only makes it callable; the per-call approval is a separate
+setting. Turn **Ask before each call** off under that tool in **MCP → Otto server**
+(MCP Admin). Calls stay audited.
+
+**An agent says a repo "doesn't exist" / asks you to search again.** Repos are
+registered in exactly one workspace. `otto_list_repos` now lists every workspace you
+can read, and git tools accept a repo name, path or `owner/repo`; an unknown one
+fails listing the closest matches. If the repo is in no list at all, it isn't
+registered — add it under **Git → Add repository**.
+
+**An agent can't find a workflow / connection / cluster / Jira account.** The
+list tools span every workspace you can read (`otto_list_workflows`,
+`otto_list_connections`, …) and every tool accepts a name where it takes an id;
+`otto_list_workspaces` and `otto_list_issue_accounts` list the two ids agents
+used to have no source for. An unknown name fails listing what IS available. If
+an object is in no list, you lack access to its workspace (or the feature).
+
+**A workspace-pinned MCP token is denied "cannot establish which workspace".**
+Expected for tools whose target carries no workspace Otto can check (findings,
+swarm tasks, improvement-edit actions): use a token without a workspace pin for
+those. Everything else is checked against the target's real workspace.
+
+**New tools don't appear for an external client.** An install that saved its
+MCP → Otto server checklist keeps that list — tick the new tools
+(`list_workspaces`, `list_issue_accounts`, …) there. Otto's own sessions have
+native twins of the discovery tools regardless.
+
 **A tool is `denied`.** Walk the pipeline: is the server enabled + managed? Is there a
 workspace **deny** in the Allowlist (deny wins)? Is the per-tool **Enabled** switch
 off? Does a **policy** deny it? The **Audit** row's `decision_reason` names the stage.
@@ -731,7 +873,7 @@ cost is not tracked.
 
 ## 14. Related docs
 
-- **[Scheduled Tasks](./scheduled-tasks.md)** — its 7 `otto.*` tools ride on the
+- **[Scheduled Tasks](./scheduled-tasks.md)** — its 8 `otto.*` tools ride on the
   outward surface and are governed by this pipeline.
 - **[Daemon HTTP API](./daemon-http-api.md)** — auth, tokens, and calling `/mcp/*`.
 - **Design (internal):** [`mcp-control-plane-design.md`](./mcp-control-plane-design.md)

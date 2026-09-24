@@ -1,6 +1,6 @@
 # Otto WebSocket Contract (FROZEN)
 
-Two WS endpoints. Auth for both: a bearer token validated BEFORE the upgrade
+Three WS endpoints. Auth for all: a bearer token validated BEFORE the upgrade
 completes; invalid token → HTTP 401, no upgrade.
 
 - The event stream (`/ws/events`) accepts the token via the
@@ -103,9 +103,16 @@ while the viewport is scrolled up (a rebuild yanks it to the bottom).
                                                     // Also pushed unsolicited to resync a viewer whose output stream
                                                     // lagged (dropped chunks) or whose dead session came back alive.
 {"type":"status","status":"working"}                // running|working|idle|exited|reconnectable
-{"type":"exit","code":0}                            // child exited; socket stays open
+{"type":"exit","code":0}                            // child exited; socket stays open. When the session is respawned
+                                                    // (resume/restart from any client or engine) the server moves this
+                                                    // socket onto the new process within ~1 s — or at the next `input` —
+                                                    // and sends `status` (live value) + an unsolicited `scrollback`
+                                                    // (new `epoch`); clients drop their exited state on a live `status`.
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
 {"type":"error","code":"forbidden","message":"..."}
+{"type":"error","code":"input_failed","message":"..."} // input not delivered: no live process, or the process is not reading
+                                                    // its terminal (queue full / not drained in 15 s — already-queued bytes
+                                                    // are still delivered in order). Sent once per failing stretch.
 {"type":"search_result","query":"foo","matches":[{"line":42,"text":"foo bar baz"},...]}  // up to 200 matches
 ```
 
@@ -127,6 +134,100 @@ it is sent once and the socket is closed right after. Clients should treat it as
 Multiple clients may attach to one session simultaneously; all receive the same
 output broadcast. Input is interleaved in arrival order. On attach the server
 sends current `status` immediately.
+
+## 1b. Remote live browser — `WS /ws/browser/{tab_id}/live`
+
+The screencast + input channel of a tab's **remote** live session (a
+daemon-owned Chromium — see api.md "Browser — remote live view"). The session
+must already exist (`POST /api/v1/browser/tabs/{id}/live`); otherwise the
+upgrade is refused with 404.
+
+**Auth** (validated BEFORE the upgrade): `Sec-WebSocket-Protocol: otto-bearer,
+<token>` (server echoes `otto-bearer`), `?token=` accepted as a fallback.
+Share-scoped and MCP-only tokens → 403. The caller must hold `Feature::Browser`
+≥ View **and** be the session's owner, a workspace Admin of the tab's workspace,
+or root (anyone else → 404, so a session's existence doesn't leak). Driving
+(every input/nav/resize/control/dialog frame) additionally needs workspace
+**editor** + `Feature::Browser` ≥ Edit; a watch-only viewer's input frames are
+dropped and one `{"type":"error","code":"forbidden"}` is sent. The grant is
+re-validated every 5 s off the socket loop (token revoked / role lost → the
+socket closes with `{"type":"closed","reason":"revoked"}`; a lost Edit only
+narrows to watch-only).
+
+Frames are capped at 256 KiB client → server. At most 8 viewers per session.
+
+### Server → client
+
+**Binary frames — screencast frames.** One frame per message, self-describing:
+
+```
+byte 0        : format version = 1
+bytes 1..5    : u32 big-endian N = length of the JSON header
+bytes 5..5+N  : UTF-8 JSON header
+bytes 5+N..   : the image (JPEG)
+```
+
+Header:
+
+```json
+{"seq":42,"mime":"image/jpeg","width":1280,"height":800,
+ "device_width":1280,"device_height":800,"page_scale_factor":1,
+ "offset_top":0,"scroll_x":0,"scroll_y":320,"timestamp":1727170000.123}
+```
+
+`width`/`height` are the image's pixel size; `device_width`/`device_height`
+the viewport in CSS px (map a pointer position `(px, py)` on the drawn image to
+viewport CSS px as `x = px * device_width / drawn_width`,
+`y = py * device_height / drawn_height`). **Backpressure:** the client acks
+every frame it has DRAWN with `{"type":"ack","seq":42}`; the daemon keeps at
+most 2 un-acked frames in flight per viewer and otherwise holds only the
+**newest** frame (older ones are dropped, never queued). JPEG quality and frame
+rate adapt to each viewer's ack latency (quality 35–80, every 1st–3rd frame);
+a client that never acks gets one frame and then nothing.
+
+**JSON text frames:**
+
+```json
+{"type":"state","session":{…BrowserLiveSession…}}           // on attach, and on every change (url/title/loading/history/controller/viewers/state)
+{"type":"cursor","cursor":"pointer"}                          // CSS cursor under the pointer (default|pointer|text|move|grab|grabbing|not-allowed|wait|progress|crosshair|help|col-resize|row-resize|ew-resize|ns-resize|…)
+{"type":"dialog","dialog_type":"alert|confirm|prompt|beforeunload","message":"…","default_prompt":"…","url":"…"}   // a JS dialog is blocking the page; answer with a `dialog` frame (auto-dismissed after 60 s)
+{"type":"blocked","host":"10.0.0.1","reason":"ssrf"}          // a navigation/redirect was refused by the SSRF guard (host only)
+{"type":"popup","url":"https://…"}                            // the page tried to open a new window; the popup is closed — the client may open `url` in a new tab
+{"type":"download","status":"blocked|quarantined","filename":"report.pdf","bytes":1234}
+{"type":"approval","approval_id":"…","status":"pending|approved|denied","title":"Submit form on example.com"}   // an agent's outward action is waiting on / was decided by a human
+{"type":"error","code":"forbidden|not_driver|bad_frame|nav_failed|input_failed|engine_unavailable","message":"…"}
+{"type":"closed","reason":"closed|idle|crashed|revoked|replaced"}   // the session ended; the socket closes right after
+```
+
+### Client → server (JSON text frames)
+
+```json
+{"type":"ack","seq":42}
+{"type":"mouse","action":"move|down|up|wheel","x":412.5,"y":88,"button":"left|middle|right|back|forward|none","buttons":1,"click_count":1,"delta_x":0,"delta_y":120,"modifiers":0}
+{"type":"key","action":"down|up","key":"a","code":"KeyA","text":"a","key_code":65,"location":0,"repeat":false,"modifiers":0}
+{"type":"text","text":"日本"}                                    // committed IME / insertText
+{"type":"ime","text":"にほ","selection_start":2,"selection_end":2}   // in-progress IME composition (Input.imeSetComposition)
+{"type":"paste","text":"clipboard contents"}                     // ≤ 100 000 chars, inserted as text (the daemon never reads the host clipboard)
+{"type":"nav","action":"goto|back|forward|reload|stop","url":"https://…"}   // goto is netguard-checked
+{"type":"resize","width":1280,"height":800,"device_scale_factor":2}         // CSS px; clamped to 200..3840 × 200..2160, dsf 1..3
+{"type":"control","action":"take_over|hand_back"}
+{"type":"dialog","accept":true,"prompt_text":"…"}
+```
+
+- `x`/`y` are viewport CSS px (see the frame header). `modifiers` is the CDP
+  bitmask: Alt=1, Ctrl=2, Meta/Command=4, Shift=8. `buttons` is the DOM
+  `MouseEvent.buttons` bitmask. `wheel` uses `delta_x`/`delta_y` in CSS px.
+- `key` frames carry DOM `KeyboardEvent.key`/`code`; `text` is the character
+  a keydown produces (omit for non-printing keys). The daemon maps them onto
+  `Input.dispatchKeyEvent` (`keyDown` with `text` → a `char`-producing
+  keydown, `rawKeyDown` otherwise; `windowsVirtualKeyCode` derived from `code`
+  when `key_code` is absent). macOS editing shortcuts (⌘A/⌘C/⌘V/⌘X/⌘Z) are sent
+  as the matching editing `commands`.
+- Mouse moves closer than 8 ms to the previous dispatched move are dropped
+  server-side (clicks, wheels and keys never are).
+- Input from a viewer while `controller == "agent"` → `not_driver` (send
+  `take_over` first). The first input while `controller == "none"` makes this
+  viewer's user the driver.
 
 ## 2. Event stream — `WS /ws/events`
 
@@ -152,7 +253,10 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `workspace_id`; other **workspace-scoped events** (improvement, swarm,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 49
+**owner-scoped events** (`assistant_turn`, `assistant_task_update`,
+`assistant_needs_you`, `assistant_limit`) reach only the user named by their
+`user_id` (not root);
+**broadcast events** (`Notice`) reach every authenticated client. There are 69
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -804,6 +908,83 @@ story's design artifact.
 - TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string | null }`
   and `{ type: 'mockup_session_started'; workspace_id: Id; story_id: Id; attachment_id: Id; session_id: Id }`.
 
+### `design_artifact_updated` / `design_link_updated` / `design_learning_update`
+
+Workspace-scoped Design Hall graph events, emitted by `crates/otto-design`
+(`service.rs`) for every change to the artifact graph (`/design/*` REST, the
+startup/admin legacy import). They supersede `mockup_updated` /
+`canvas_updated` for graph-aware clients; both legacy events keep firing for
+their own routes.
+
+```json
+{ "type": "design_artifact_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "format": "html|scene3d|otto-canvas|png|…", "change": "created|content|meta|approved|archived|deleted|live|thumbnail", "version_id": "<Id>" | null, "content": "..." | null }
+{ "type": "design_link_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "link_id": "<Id>" | null, "target_artifact_id": "<Id>" | null, "target_version_id": "<Id>" | null, "reason": "created|deleted|extracted|target_approved|target_updated|target_deleted" }
+{ "type": "design_learning_update", "workspace_id": "<Id>", "kind": "variant_chosen|…|shipped|rule_proposed", "signal_id": "<Id>" | null, "artifact_id": "<Id>" | null }
+```
+
+- `design_artifact_updated` — one per committed version (`created`, `content`:
+  PUT content, named commit, import `sync`) with `version_id` set, and one per
+  metadata change (`meta`, `approved`, `archived`, `deleted`) with
+  `version_id: null` except `approved` (the approved version). `thumbnail`
+  (`version_id: null`, `content: null`): a new rendered thumbnail was stored
+  (`PUT /design/artifacts/{id}/thumbnail`) — refresh the image only; it is
+  not an edit (`updated_at` unchanged), so never re-render in response. `live`
+  (`version_id: null`) is an UNCOMMITTED mid-turn save by a design-assist agent
+  on the working copy — already validated for the format (an invalid,
+  half-written file is never broadcast); the turn's commit follows as
+  `content`. Variant turns never emit `live`. `content` is the
+  UTF-8 source for text/JSON formats ≤ 4 MB; an explicit `null` (never omitted)
+  for binaries, oversized payloads and metadata changes → clients re-fetch
+  `GET /design/artifacts/{id}/content`.
+- `design_link_updated` — `artifact_id` is always the CONSUMER (link source).
+  `created` / `deleted`: an explicit link changed. `extracted`: the document's
+  `otto://design/…` references were re-indexed on save and the extracted set
+  changed. `target_approved`: the target got a new approved version (sent to
+  every `follow_approved` consumer — teal pulse + "now vN"). `target_updated`:
+  the target got a new head (sent to `follow_latest` consumers).
+  `target_deleted`: the target was hard-deleted (the link is now `broken`).
+- `design_learning_update` — a design signal was captured (`POST
+  /design/signals`, or automatically: `edit_after_draft`, `status_change`,
+  `shipped`, `agent_draft`, `variant_accepted` / `variant_rejected`), or —
+  `kind: "rule_proposed"`, `signal_id`/`artifact_id` null — a learning pass
+  queued new team rules for approval (`GET /design/learned`).
+- Scope: `Workspace` (members with viewer+ on `workspace_id`), like the canvas /
+  mockup events.
+- TypeScript types: the `design_artifact_updated` / `design_link_updated` /
+  `design_learning_update` members of `OttoEvent` in `ui/src/lib/api/types.ts`
+  (`DesignArtifactChange`, `DesignLinkUpdateReason`, `DesignSignalKind`). The
+  UI routes all three into `designBus` (`ui/src/lib/events.svelte.ts`), a short
+  sequenced log each open Design Hall view reads once; a WS reconnect bumps its
+  `resyncTick` so open views reload.
+
+### `design_assist_updated` / `design_variants_ready`
+
+Workspace-scoped states of the unified design-assist pipeline
+(`crates/otto-server/src/design_assist.rs`).
+
+```json
+{ "type": "design_assist_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "turn_id": "<Id>", "status": "starting|running|done|unchanged|conflict|failed", "mode": "generate|refine|critique|a11y|variant", "branch": "main|variant/<run>/<k>", "session_id": "<Id>" | null, "version_id": "<Id>" | null, "error": "..." | null }
+{ "type": "design_variants_ready", "workspace_id": "<Id>", "artifact_id": "<Id>", "run_id": "<Id>", "base_version_id": "<Id>" | null, "version_ids": ["<Id>"], "failed": 0 }
+```
+
+- `design_assist_updated` — `starting` when `POST …/assist` / `…/variants`
+  accepted the turn, `running` the moment its agent session is live (attach
+  the shell by `session_id`), then exactly one terminal state: `done` (a
+  version was committed — `version_id`; a main turn also emits the usual
+  `design_artifact_updated {change:"content"}`), `unchanged` (no change; always
+  for `critique`), `conflict` (the head moved meanwhile — the draft was kept as
+  the side version `version_id` on `variant/<turn_id>/1`), `failed` (`error`).
+  The full turn (references offered, verified citations, findings, summary) is
+  `GET /design/artifacts/{artifact_id}/assist`. Optional ids travel as explicit
+  `null`.
+- `design_variants_ready` — every turn of a variants run finished;
+  `version_ids` are the committed variant versions (the head is untouched),
+  `failed` the turns that produced nothing. Accept one with `POST
+  /design/artifacts/{id}/variants/{version}/accept`.
+- Scope: `Workspace` (members with viewer+ on `workspace_id`).
+- TypeScript types: the `design_assist_updated` / `design_variants_ready`
+  members of `OttoEvent` (`DesignAssistStatus`, `DesignAssistMode`).
+
 ### `canvas_refs_changed`
 
 Workspace-scoped. Emitted by `crates/otto-server/src/canvas_refs.rs` whenever a
@@ -885,6 +1066,28 @@ like `canvas_updated`'s `doc`).
 - TypeScript types: `{ type: 'browser_tab_updated'; workspace_id: Id; tab: unknown }`
   and `{ type: 'browser_annotation_added'; workspace_id: Id; annotation: unknown }`.
 
+### `browser_live_session_updated` / `browser_engine_install_updated`
+
+Remote live browser (api.md "Browser — remote live view").
+
+```json
+{ "type": "browser_live_session_updated", "workspace_id": "<Id>", "tab_id": "<Id>", "owner_id": "<Id>", "state": "ready" }
+{ "type": "browser_engine_install_updated", "build": "chrome", "version": "149.0.7827.55", "state": "downloading", "received_bytes": 52428800, "total_bytes": 157286400, "error": null }
+```
+
+- `browser_live_session_updated` — a tab's remote live session was opened,
+  became ready, crashed or closed (`state` ∈ `starting|ready|crashed|closed`).
+  Deliberately carries **no URL/title** (the session is private to its owner —
+  fetch `GET /browser/tabs/{id}/live`, or attach the live WS, for details).
+  Scope: `Workspace` (viewer+ on `workspace_id`) so every open Browser page can
+  badge the tab.
+- `browser_engine_install_updated` — the Chromium download job changed state
+  (`state` ∈ `downloading|verifying|extracting|installed|failed`; progress ticks
+  at most 4/s while downloading; `error` is set on `failed`). Machine-wide like
+  `k8s_install_updated`: scope `Everyone`.
+- TypeScript: `{ type: 'browser_live_session_updated'; workspace_id: Id; tab_id: Id; owner_id: Id; state: BrowserLiveSessionState }`
+  and `{ type: 'browser_engine_install_updated'; build: BrowserChromeBuild; version: string; state: BrowserEngineInstallState; received_bytes: number; total_bytes: number | null; error: string | null }`.
+
 ### `aws_account_updated` / `aws_install_updated`
 
 Global scope (the AWS account registry is a global library, like connections)
@@ -956,3 +1159,43 @@ after workflow completion. No new event type is introduced.
 Personal Agent Memory/Context document edits use the versioned HTTP responses
 documented in `api.md`; they do not introduce a WS event. New runs/chats snapshot
 saved Context, while existing sessions retain their initial context.
+
+### `assistant_turn` / `assistant_task_update` / `assistant_needs_you` / `assistant_limit`
+
+Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
+the assistant owner's `user_id` and is delivered ONLY to that user's
+connections — not to workspace members and not to root (the assistant is
+personal). Emitted by `crates/otto-server/src/assistant.rs` and its submodules.
+Reply prose still streams over the session-family `transcript_live` /
+`transcript_appended` events of `thread.session_id`; these four events carry the
+assistant's own index and queue.
+
+```json
+{"type":"assistant_turn","user_id":"…","thread_id":"…","turn":{…AssistantTurn…},"thread":{…AssistantThread…}}
+{"type":"assistant_task_update","user_id":"…","task":{…AssistantTask…}}
+{"type":"assistant_needs_you","user_id":"…","task":{…AssistantTask…},"open_count":2}
+{"type":"assistant_limit","user_id":"…","thread_id":"…","limit":{…AssistantLimitState…},"suggestion":{"provider":"codex","model":null,"account_id":null},"task_id":"…","auto_switched":false}
+```
+
+- `assistant_turn` — a turn was added to a thread's index: the user's own send
+  (echoed so the bar, the window and the phone stay in step), an assistant reply
+  once it has landed in the transcript (with its provider badge), or a system
+  line — a memory chip (`kind:"memory"`, `data.undo` says how to undo it), a
+  delegation ("Asked *Daily Recap*…"), a delivered reminder, a route change or a
+  limit notice. `thread` is the thread row after the change (its `status`,
+  provider and `updated_at` moved), or `null` when unchanged. Clients append by
+  `turn.id` (idempotent — a re-sent id replaces).
+- `assistant_task_update` — a task was created or changed state
+  (`queued → running → needs_you → done | failed | cancelled`). Carries the full
+  row; clients replace by `task.id`.
+- `assistant_needs_you` — an item entered OR left the needs-you queue (a task
+  moved into or out of `needs_you`). `open_count` is the queue size after the
+  change, so the menu-bar dot and phone badge update without a re-fetch.
+- `assistant_limit` — a provider usage limit was detected for the thread's
+  current route (PTY or transcript text such as "usage limit reached … resets
+  2pm"). `suggestion` is the route the user can continue on (`null` when no other
+  provider is configured); `task_id` is the `limit` needs-you item asking
+  "continue on X?". `auto_switched: true` means `auto_failover` was on and the
+  thread already moved (a `route` turn follows); otherwise nothing switches until
+  the user answers.
+- TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Otto Assistant`).

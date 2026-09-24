@@ -176,11 +176,21 @@
     <div class="skills">
       {#each skills as s, i (s.name)}
         <span class="skill-chip" class:must={s.must_use}>
-          <button class="link" onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}>
+          <button
+            class="link"
+            aria-label={s.must_use ? `Make ${s.name} optional` : `Require ${s.name} (must use)`}
+            aria-pressed={s.must_use}
+            title={s.must_use ? 'Must use — click to make optional' : 'Optional — click to require'}
+            onclick={() => (skills[i] = { ...s, must_use: !s.must_use })}
+          >
             {s.must_use ? '★' : '☆'}
           </button>
           {s.name}
-          <button class="link" onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
+          <button
+            class="link"
+            aria-label="Remove skill {s.name}"
+            title="Remove skill"
+            onclick={() => (skills = skills.filter((_, j) => j !== i))}>×</button>
         </span>
       {/each}
     </div>
@@ -251,7 +261,7 @@
   }
   .skill-chip.must {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .link {
     border: none;

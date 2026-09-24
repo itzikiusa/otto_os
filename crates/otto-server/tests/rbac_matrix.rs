@@ -140,9 +140,17 @@ fn app(pool: SqlitePool, user: User) -> Router {
         // Personal documents: read-only grants cannot save memory/context.
         .route("/personal-agents/{id}/memory", get(ok).put(ok))
         .route("/personal-agents/{id}/context", get(ok).put(ok))
+        // Otto Assistant (Feature::Agents): reads View, writes Edit; the route
+        // preview is a POST read.
+        .route("/assistant/threads", get(ok).post(ok))
+        .route("/assistant/route/preview", post(ok))
+        .route("/assistant/agent/{tool}", post(ok))
         // Users / Settings (Admin)
         .route("/users", post(ok))
         .route("/settings", put(ok))
+        // Design Hall (Feature::Design): reads View, writes Edit, admin Admin.
+        .route("/design/artifacts", get(ok).post(ok))
+        .route("/design/admin/import", post(ok))
         // An intentionally-unmapped protected route (fail-closed → Deny).
         .route("/foo", get(ok));
 
@@ -355,4 +363,74 @@ async fn personal_document_viewer_cannot_save() {
         assert_eq!(status(&viewer, Method::PUT, path).await, StatusCode::FORBIDDEN);
         assert_eq!(status(&editor, Method::PUT, path).await, StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn assistant_routes_follow_the_agents_view_edit_ladder() {
+    let viewer = app_for(&[(Feature::Agents, Capability::View)], false).await;
+    assert_eq!(
+        status(&viewer, Method::GET, "/api/v1/assistant/threads").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&viewer, Method::POST, "/api/v1/assistant/route/preview").await,
+        StatusCode::OK,
+        "the route preview is a read"
+    );
+    assert_eq!(
+        status(&viewer, Method::POST, "/api/v1/assistant/threads").await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        status(&viewer, Method::POST, "/api/v1/assistant/agent/remember").await,
+        StatusCode::FORBIDDEN
+    );
+    let editor = app_for(&[(Feature::Agents, Capability::Edit)], false).await;
+    assert_eq!(
+        status(&editor, Method::POST, "/api/v1/assistant/threads").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&editor, Method::POST, "/api/v1/assistant/agent/remember").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn design_grants_follow_the_view_edit_admin_ladder() {
+    let viewer = app_for(&[(Feature::Design, Capability::View)], false).await;
+    assert_eq!(
+        status(&viewer, Method::GET, "/api/v1/design/artifacts").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&viewer, Method::POST, "/api/v1/design/artifacts").await,
+        StatusCode::FORBIDDEN
+    );
+    let editor = app_for(&[(Feature::Design, Capability::Edit)], false).await;
+    assert_eq!(
+        status(&editor, Method::POST, "/api/v1/design/artifacts").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&editor, Method::POST, "/api/v1/design/admin/import").await,
+        StatusCode::FORBIDDEN,
+        "the legacy import is a Design:Admin action"
+    );
+    let admin = app_for(&[(Feature::Design, Capability::Admin)], false).await;
+    assert_eq!(
+        status(&admin, Method::POST, "/api/v1/design/admin/import").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn canvas_grant_alone_does_not_open_design_routes() {
+    // The migration copies existing canvas grants to `design` once; at runtime
+    // the two features are independent axes.
+    let app = app_for(&[(Feature::Canvas, Capability::Admin)], false).await;
+    assert_eq!(
+        status(&app, Method::GET, "/api/v1/design/artifacts").await,
+        StatusCode::FORBIDDEN
+    );
 }

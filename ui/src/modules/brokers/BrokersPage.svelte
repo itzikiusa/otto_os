@@ -1,5 +1,10 @@
 <script lang="ts">
   import Icon from '../../lib/components/Icon.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { api } from '../../lib/api/client';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -86,9 +91,30 @@
 
   const selected = $derived(brokers.selected);
 
-  function envBadge(c: BrokerCluster): string {
-    return c.environment === 'prod' ? 'prod' : c.environment === 'staging' ? 'stg' : 'dev';
-  }
+  // Never open onto an empty "pick a cluster" pane when clusters exist: restore
+  // the last-selected cluster (or the first) once per workspace load. Not on a
+  // phone — selecting collapses the cluster list there, which is the first
+  // screen.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (brokers.selectedId) {
+      autoPickedFor = wsId;
+      return;
+    }
+    if (brokers.loading || brokers.clusters.length === 0) return;
+    autoPickedFor = wsId;
+    const id = initialSelection('brokers', brokers.clusters, (c) => c.id);
+    if (id) brokers.select(id);
+  });
+  $effect(() => {
+    if (brokers.selectedId) rememberSelection('brokers', brokers.selectedId);
+  });
+  // Nothing to list (no clusters, no sections): hide the list pane — the one
+  // page-level empty state owns the page and its "Add a cluster" CTA.
+  const isEmpty = $derived(!brokers.loading && brokers.clusters.length === 0 && brokers.sections.length === 0);
+
 
   async function testConn(c: BrokerCluster) {
     testing = true;
@@ -294,7 +320,51 @@
   }
 </script>
 
+<div class="brokers-root">
+<PageHeader
+  class="cluster-head"
+  title={selected?.name ?? 'Message Brokers'}
+  subtitle={selected?.bootstrap_servers}
+>
+  {#snippet leading()}
+    {#if selected}
+      <button
+        class="content-toggle"
+        onclick={() => (contentOpen = !contentOpen)}
+        aria-expanded={contentOpen}
+        title={contentOpen ? 'Collapse details' : 'Expand details'}
+      >
+        <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+      </button>
+      <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
+    {/if}
+  {/snippet}
+  {#snippet titleContent()}
+    {#if selected}<span class="name">{selected.name}</span>{:else}Message Brokers{/if}
+  {/snippet}
+  {#snippet badge()}
+    {#if selected}
+      <EnvBadge env={selected.environment} />
+      {#if selected.read_only}<span class="ro">read-only</span>{/if}
+      {#if selected.ssh}
+        <span class="tunnel-pill" class:ready={tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}>
+          <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
+        </span>
+      {/if}
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if selected}
+      <button class="btn small danger" data-overflow="-1" onclick={() => removeCluster(selected)}>Remove</button>
+      <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
+      <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>
+        {testing ? 'Testing…' : 'Test'}
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 <div class="brokers-page">
+  {#if !isEmpty}
   <aside class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
     <div class="aside-head">
       <button
@@ -361,6 +431,7 @@
     ondblclick={resetSideW}
     onpointerdown={startSideResize}
   ></div>
+  {/if}
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
@@ -391,36 +462,6 @@
       </div>
     {/if}
     {#if selected}
-      <header class="cluster-head">
-        <button
-          class="content-toggle"
-          onclick={() => (contentOpen = !contentOpen)}
-          aria-expanded={contentOpen}
-          title={contentOpen ? 'Collapse details' : 'Expand details'}
-        >
-          <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-        </button>
-        <div class="ch-title">
-          <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
-          <span class="name">{selected.name}</span>
-          <span class="env {selected.environment}">{selected.environment}</span>
-          {#if selected.read_only}<span class="ro">read-only</span>{/if}
-          {#if selected.ssh}
-            <span class="tunnel-pill" class:ready={tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}>
-              <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
-            </span>
-          {/if}
-          <span class="boot mono">{selected.bootstrap_servers}</span>
-        </div>
-        <div class="actions">
-          <button class="btn small" onclick={() => testConn(selected)} disabled={testing}>
-            {testing ? 'Testing…' : 'Test'}
-          </button>
-          <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
-          <button class="btn small danger" onclick={() => removeCluster(selected)}>Remove</button>
-        </div>
-      </header>
-
       <nav class="tabs">
         <button class:on={tab === 'overview'} onclick={() => (tab = 'overview')}>Overview</button>
         <button class:on={tab === 'topics'} onclick={() => (tab = 'topics')}>Topics</button>
@@ -448,23 +489,43 @@
         {/key}
       </div>
     {:else}
-      <div class="empty">
-        <Icon name="box" size={30} />
-        <h3>Message Brokers</h3>
-        <p>Connect a Kafka cluster to browse topics, peek messages, inspect consumer-group lag, and watch broker CPU / RAM.</p>
-        <button class="btn primary" onclick={openAdd}>Add a cluster</button>
-      </div>
+      {#if isEmpty}
+        <EmptyState
+          variant="page"
+          icon="box"
+          title="Connect a Kafka cluster"
+          body="Browse topics, peek messages, inspect consumer-group lag, and watch broker CPU / RAM."
+          actionLabel="Add a cluster"
+          actionIcon="plus"
+          onaction={openAdd}
+        />
+      {:else if !brokers.loading}
+        <!-- Clusters exist: the list pane (with its own "+") is right there, so
+             no duplicate "Add a cluster" CTA. -->
+        <EmptyState
+          variant="page"
+          icon="box"
+          title="Pick a cluster"
+          body="Open a cluster from the list to browse its topics, consumer groups and schemas."
+        />
+      {/if}
     {/if}
   </main>
+</div>
 </div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- The whole header toggles (the caret button stays the keyboard/AT
+       control); clicks on its own buttons don't. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="sec-head"
+    onclick={(e) => {
+      if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
+    }}
     class:drop={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedClusterId}
-    style="padding-left: {depth * 14 + 6}px"
+    style="padding-inline-start: {depth * 14 + 6}px"
     draggable="true"
     ondragstart={(e) => {
       draggedSectionId = node.sec.id;
@@ -486,6 +547,8 @@
       class="caret"
       onclick={() => (collapsed[node.sec.id] = !collapsed[node.sec.id])}
       title={isOpen ? 'Collapse' : 'Expand'}
+      aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
+      aria-expanded={isOpen}
     >
       <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
@@ -508,7 +571,7 @@
   <div
     class="cluster"
     class:sel={brokers.selectedId === c.id}
-    style="padding-left: {depth * 14 + 6}px"
+    style="padding-inline-start: {depth * 14 + 6}px"
     draggable="true"
     ondragstart={(e) => {
       draggedClusterId = c.id;
@@ -523,7 +586,7 @@
   >
     <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
     <span class="cn">{c.name}</span>
-    <span class="env {c.environment}">{envBadge(c)}</span>
+    <EnvBadge env={c.environment} />
   </div>
 {/snippet}
 
@@ -533,9 +596,15 @@
 {/if}
 
 <style>
-  .brokers-page {
+  .brokers-root {
     display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .brokers-page {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .clusters {
@@ -592,7 +661,7 @@
     align-items: center;
     gap: 4px;
     padding: 6px 8px 6px 6px;
-    cursor: grab;
+    cursor: pointer;
     color: var(--text-dim);
     border-inline-start: 2px solid transparent;
     user-select: none;
@@ -638,7 +707,7 @@
     flex: none;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     border-radius: 8px;
@@ -676,19 +745,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .env {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    color: var(--text-dim);
-  }
-  .env.prod {
-    background: color-mix(in srgb, var(--status-exited, #ff5f57) 22%, transparent);
-    color: var(--status-exited, #ff5f57);
   }
   .cluster-main {
     flex: 1;
@@ -747,26 +803,11 @@
     opacity: 1;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
   }
-  .cluster-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    gap: 12px;
-  }
-  .ch-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-  }
-  .ch-title .name {
-    font-size: 15px;
+  .name {
     font-weight: 600;
   }
-  .ch-title .ro {
-    font-size: 10px;
+  .ro {
+    font-size: var(--fs-xs);
     color: var(--status-exited, #ff5f57);
     border: 1px solid currentColor;
     border-radius: 4px;
@@ -776,7 +817,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -785,18 +826,6 @@
   .tunnel-pill.ready {
     background: color-mix(in srgb, var(--status-working, #28c840) 18%, transparent);
     color: var(--status-working, #28c840);
-  }
-  .boot {
-    font-size: 11px;
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .actions {
-    display: flex;
-    gap: 6px;
-    flex: none;
   }
   .tabs {
     display: flex;
@@ -830,27 +859,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .empty {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 24px;
-  }
-  .empty h3 {
-    margin: 4px 0 0;
-    color: var(--text);
-  }
-  .empty p {
-    max-width: 440px;
-  }
-  .mono {
-    font-family: var(--font-mono);
   }
   .muted {
     color: var(--text-dim);
@@ -968,10 +976,6 @@
     .cn {
       font-size: 15px;
     }
-    .env {
-      font-size: 10px;
-      padding: 2px 6px;
-    }
     .sec-name {
       font-size: 14px;
     }
@@ -997,42 +1001,9 @@
       font-size: 14px;
       padding: 0 12px;
     }
-    /* The cluster header wraps so the name + bootstrap + actions never collide
-       or clip off the right edge. */
+    /* The page header carries the phone-only content toggle. */
     .content-toggle {
       display: inline-flex;
-    }
-    .cluster-head {
-      flex-wrap: wrap;
-      align-items: flex-start;
-      padding: 12px 14px;
-      gap: 8px 10px;
-    }
-    .ch-title {
-      flex: 1 1 100%;
-      flex-wrap: wrap;
-      gap: 6px 8px;
-      align-items: center;
-    }
-    .ch-title .name {
-      font-size: 17px;
-    }
-    .ch-title .boot {
-      flex: 1 1 100%;
-      font-size: 12px;
-      white-space: normal;
-      word-break: break-all;
-    }
-    .env {
-      font-size: 10px;
-    }
-    .actions {
-      flex: 1 1 100%;
-    }
-    .actions .btn.small {
-      flex: 1;
-      font-size: 13px;
-      padding: 8px 10px;
     }
     /* Collapsed content: keep only the header (with its caret). */
     .cluster-main.collapsed .tabstrip,
@@ -1058,12 +1029,6 @@
     .tab-body {
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
-    }
-    .empty {
-      padding: 28px 18px;
-    }
-    .empty p {
-      font-size: 14px;
     }
   }
 </style>

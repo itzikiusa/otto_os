@@ -1,10 +1,18 @@
 <script lang="ts">
-  // Virtualized results table: sticky header, monospace cells, NULL as a
-  // dimmed ∅, objects/arrays shown as compact JSON with a click-to-expand cell
-  // viewer. Columns auto-size to their content and are drag-resizable. Sort /
+  // Virtualized results table: sticky two-line header (name over type),
+  // monospace cells, numbers right-aligned in tabular figures, NULL as a dim
+  // italic `NULL`, objects/arrays as compact JSON with a click-to-expand cell
+  // viewer. Columns auto-size to their content, are drag-resizable and
+  // drag-reorderable, and an optional filter row sits under the header. Sort /
   // search / quick-filter state is owned by ResultsGrid and arrives as props;
   // the header + cell context menus are callbacks; every editing concern
   // (drafts, selection, viewer) lives on `flow`.
+  //
+  // Layout stability: nothing that resolves AFTER the rows paint (the
+  // editability probe, the PK lookup) may change a column's width. The
+  // row-number column reserves the selection-checkbox slot whether or not the
+  // result turns out editable, so the grid never shifts sideways when the
+  // probe lands (the "table jumps when I open it" bug).
   import { tick } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -12,6 +20,7 @@
   import type { QueryResult } from '../../lib/api/types';
   import { SET_EMPTY, SET_NULL, type EditFlow } from './EditFlow.svelte';
   import { cellDisplay, cellStr, clip, compactJson, copyText, isComplex, prettyJson } from './results-format';
+  import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
 
   interface Props {
     result: QueryResult;
@@ -25,8 +34,15 @@
     searchLc: string;
     sortCol: number | null;
     sortDir: 'asc' | 'desc' | null;
-    /** Column-name signature of the result — widths + scroll reset when it changes. */
+    /** Column-name signature of the result — widths, order + scroll reset when it changes. */
     resetToken: string;
+    /** Show the per-column filter row under the header. */
+    filterRow?: boolean;
+    /** Per-column filter text, keyed by ORIGINAL column index. */
+    colFilters?: Record<number, string>;
+    oncolfilter?: (ci: number, text: string) => void;
+    /** The keyboard/click cursor moved onto a row (its liveRows index). */
+    onfocusrow?: (idx: number | null) => void;
     oncellmenu: (e: MouseEvent, ci: number, v: unknown, rowIdx: number) => void;
     onheadermenu: (e: MouseEvent, ci: number) => void;
     oncyclesort: (ci: number) => void;
@@ -43,6 +59,10 @@
     sortCol,
     sortDir,
     resetToken,
+    filterRow = false,
+    colFilters = {},
+    oncolfilter,
+    onfocusrow,
     oncellmenu,
     onheadermenu,
     oncyclesort,
@@ -78,16 +98,60 @@
     return () => ro.disconnect();
   });
 
-  // Preserve column widths / scroll when the new result has the SAME columns
-  // (a re-run of the same query), so the grid doesn't jump; reset them only
-  // when the shape actually changes — `resetToken` is that signature.
+  // Preserve column widths / order / scroll when the new result has the SAME
+  // columns (a re-run of the same query), so the grid doesn't jump; reset them
+  // only when the shape actually changes — `resetToken` is that signature.
   $effect(() => {
     void resetToken;
     scrollTop = 0;
     if (scrollEl) scrollEl.scrollTop = 0;
     colWidths = {};
     dragName = null;
+    order = result.columns.map((_c, i) => i);
   });
+
+  // ── Column order (drag a header onto another to move it) ─────────────────────
+  // Display position → ORIGINAL column index. Everything row-side (values,
+  // edits, menus, filters) keeps speaking original indices.
+  let order = $state<number[]>([]);
+  const cols = $derived(
+    order.length === result.columns.length ? order : result.columns.map((_c, i) => i),
+  );
+  let dragFrom = $state<number | null>(null);
+  let dropAt = $state<number | null>(null);
+  function onHeadDragStart(e: DragEvent, pos: number): void {
+    dragFrom = pos;
+    e.dataTransfer?.setData('text/plain', String(pos));
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onHeadDragOver(e: DragEvent, pos: number): void {
+    if (dragFrom === null) return;
+    e.preventDefault();
+    dropAt = pos;
+  }
+  function onHeadDrop(e: DragEvent, pos: number): void {
+    e.preventDefault();
+    if (dragFrom !== null) order = moveColumn(cols, dragFrom, pos);
+    dragFrom = null;
+    dropAt = null;
+  }
+  function onHeadDragEnd(): void {
+    dragFrom = null;
+    dropAt = null;
+  }
+
+  // Per-column layout kind (numbers right-aligned, JSON link-styled…).
+  const kinds = $derived.by<ColumnKind[]>(() =>
+    result.columns.map((c, i) =>
+      columnKind(
+        c.type_hint,
+        liveRows.slice(0, 50).map((r) => r[i]),
+      ),
+    ),
+  );
+
+  // Row-number column width: a function of the ROW COUNT only (see header note).
+  const rnCh = $derived(rowNumberWidthCh(liveRows.length));
 
   // The visible window over viewRows, plus the spacer heights above/below it.
   const total = $derived(viewRows.length);
@@ -123,9 +187,10 @@
   }
 
   // ── Column widths ────────────────────────────────────────────────────────────
-  // Auto-size each column from header + cell content (sampling up to 200 rows),
-  // clamped to [MIN, MAX]. NULLs contribute nothing so they never widen a column.
-  const MIN_CH = 5;
+  // Auto-size each column from header (name OR type — they sit on two lines) +
+  // cell content (sampling up to 200 rows), clamped to [MIN, MAX]. NULLs
+  // contribute their 4-char label at most so they never widen a column.
+  const MIN_CH = 6;
   const MAX_CH = 48;
   const WIDTH_SAMPLE = 200;
 
@@ -135,11 +200,16 @@
   function autoWidthCh(colIndex: number): number {
     if (!result) return MIN_CH;
     const col = result.columns[colIndex];
-    let max = col.name.length + (col.type_hint && !mini ? col.type_hint.length + 2 : 0);
+    // Name + sort indicator on line one; the type hint on line two (mini grids
+    // show both on one line). PK badge room is reserved for EVERY column so the
+    // badge landing after the editability probe can't reflow the header.
+    let max = mini
+      ? col.name.length + (col.type_hint ? col.type_hint.length + 2 : 0)
+      : Math.max(col.name.length + 5, (col.type_hint ?? '').length + 1);
     const n = Math.min(liveRows.length, WIDTH_SAMPLE);
     for (let r = 0; r < n; r++) {
       const v = liveRows[r][colIndex];
-      if (v === null || v === undefined) continue; // ∅ must not widen
+      if (v === null || v === undefined) continue; // NULL must not widen
       // Never serialize a complex value just to MEASURE it — a Mongo document can
       // be ~90KB and the result is clamped to MAX_CH regardless. Sentinels measure
       // by their rendered form; scalars measure exactly.
@@ -148,8 +218,9 @@
       if (len > max) max = len;
       if (max >= MAX_CH) break; // already clamped — nothing longer can change it
     }
-    // +2 ch padding allowance; clamp.
-    return Math.max(MIN_CH, Math.min(MAX_CH, max + 2));
+    // +4 ch: the cell's 20px of horizontal padding (~3ch at 12px mono) plus a
+    // little air, so a value that fits isn't ellipsized by its own padding.
+    return Math.max(MIN_CH, Math.min(MAX_CH, max + 4));
   }
 
   const autoWidths = $derived.by<number[]>(() =>
@@ -165,7 +236,7 @@
   let dragName = $state<string | null>(null);
   let dragStartX = 0;
   let dragStartCh = 0;
-  const PX_PER_CH = 7.4; // approx for the monospace cell font at 11.5px
+  const PX_PER_CH = 7.2; // approx for the monospace cell font at 12px
 
   function startResize(e: PointerEvent, colIndex: number): void {
     e.preventDefault();
@@ -191,6 +262,13 @@
     }
     dragName = null;
   }
+  /** Double-click the resize handle → back to the auto width. */
+  function resetWidth(colIndex: number): void {
+    const name = result?.columns[colIndex]?.name ?? '';
+    const next = { ...colWidths };
+    delete next[name];
+    colWidths = next;
+  }
 
   // Autofocus + select the inline editor input on open. Svelte actions can't be
   // async, so defer the focus/select to a microtask after mount.
@@ -203,18 +281,23 @@
 
   // ── Keyboard grid navigation ─────────────────────────────────────────────────
   // Roving focus over the VISIBLE (filtered + sorted) rows: `r` indexes viewRows,
-  // `c` the column. The scroll container owns focus + keydown; the focused cell
-  // gets a ring. Arrows/Home/End/Page move, Enter edits (or expands a complex /
-  // read-only cell), ⌘/Ctrl+C copies the cell, and ContextMenu / Shift+F10 opens
-  // the row menu anchored to the cell.
+  // `c` the DISPLAY column. The scroll container owns focus + keydown; the
+  // focused cell gets a ring. Arrows/Home/End/Page move, Enter edits (or expands
+  // a complex / read-only cell), ⌘/Ctrl+C copies the cell, and ContextMenu /
+  // Shift+F10 opens the row menu anchored to the cell.
   let focusCell = $state<{ r: number; c: number } | null>(null);
-  /** Approx sticky-header height the top of a row must clear to be visible. */
-  const HEAD_H = 27;
+  /** Sticky-header height the top of a row must clear to be visible. */
+  const HEAD_H = $derived(filterRow ? 70 : 40);
 
   // Roving keyboard focus is positional — a new result invalidates it.
   $effect(() => {
     void result;
     focusCell = null;
+  });
+  // Report the row under the cursor (drives the row-detail panel).
+  $effect(() => {
+    const r = focusCell?.r;
+    onfocusrow?.(r === undefined ? null : (viewRows[r]?.idx ?? null));
   });
 
   function ensureRowVisible(r: number): void {
@@ -231,16 +314,19 @@
     if (!focusCell || !result) return;
     const entry = viewRows[focusCell.r];
     if (!entry) return;
+    const ci = cols[focusCell.c];
     const rect = scrollEl?.querySelector('td.kbd-focus')?.getBoundingClientRect();
     const ev = new MouseEvent('contextmenu', {
       clientX: rect ? rect.left + Math.min(rect.width, 160) / 2 : 80,
       clientY: rect ? rect.bottom - 2 : 80,
     });
-    oncellmenu(ev, focusCell.c, entry.row[focusCell.c], entry.idx);
+    oncellmenu(ev, ci, entry.row[ci], entry.idx);
   }
 
   function onGridKeydown(e: KeyboardEvent): void {
     if (mini || !result || flow.editing || flow.reviewSql || flow.viewer || flow.docEditor) return;
+    // Typing in the filter row must not move the cell cursor.
+    if ((e.target as HTMLElement | null)?.closest('.filter-row')) return;
     const nRows = viewRows.length;
     const nCols = result.columns.length;
     if (nRows === 0 || nCols === 0) return;
@@ -267,11 +353,12 @@
     if (!focusCell) return;
     const entry = viewRows[focusCell.r];
     if (!entry) return;
-    const v = entry.row[focusCell.c];
+    const ci = cols[focusCell.c];
+    const v = entry.row[ci];
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (flow.isEditableCell(focusCell.c) && !isComplex(v)) flow.beginEdit(entry.idx, focusCell.c);
-      else flow.openCell(v, entry.idx, focusCell.c);
+      if (flow.isEditableCell(ci) && !isComplex(v)) flow.beginEdit(entry.idx, ci);
+      else flow.openCell(v, entry.idx, ci);
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
@@ -294,6 +381,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
 <div
   class="grid-scroll"
+  class:mini
+  data-grid-frame={mini ? undefined : ''}
   bind:this={scrollEl}
   onscroll={onScroll}
   tabindex={mini ? undefined : 0}
@@ -303,60 +392,110 @@
     : 'Results grid — arrow keys move, Enter edits or expands, ⌘C copies the cell, Shift+F10 opens the row menu'}
   onkeydown={onGridKeydown}
 >
-  <table class="grid mono" class:expanded={expandJson} style="--last:{result.columns.length}; --row-h:{ROW_H}px">
+  <table
+    class="grid mono"
+    class:expanded={expandJson}
+    class:mini
+    style="--last:{result.columns.length}; --row-h:{ROW_H}px; --rn-w:calc({rnCh}ch + 30px)"
+  >
     <thead>
       <tr>
         <th class="rownum">
-          {#if flow.editable}
-            <input
-              class="sel-box"
-              type="checkbox"
-              checked={flow.allInViewSelected}
-              onchange={() => flow.toggleAllInView(viewRows.map((r) => r.idx))}
-              title="Select all rows in view"
-              aria-label="Select all rows"
-            />
-          {:else}#{/if}
+          <!-- The checkbox slot is ALWAYS reserved (see the layout-stability note). -->
+          <span class="sel-slot">
+            {#if flow.editable}
+              <input
+                class="sel-box"
+                type="checkbox"
+                checked={flow.allInViewSelected}
+                onchange={() => flow.toggleAllInView(viewRows.map((r) => r.idx))}
+                title="Select all rows in view"
+                aria-label="Select all rows"
+              />
+            {/if}
+          </span>
+          <span class="rownum-n">#</span>
         </th>
-        {#each result.columns as c, ci (ci)}
+        {#each cols as ci, pos (ci)}
+          {@const c = result.columns[ci]}
+          {@const isPk = flow.editable && flow.editPkCols.includes(c.name)}
           <th
-            title={mini ? (c.type_hint ?? undefined) : `${c.name} — click to sort, right-click for filters`}
-            class:pk={flow.editable && flow.editPkCols.includes(c.name)}
+            title={mini ? (c.type_hint ?? undefined) : `${c.name}${c.type_hint ? ` · ${c.type_hint}` : ''} — click to sort, drag to reorder, right-click for more`}
+            class:pk={isPk}
             class:sortable={!mini}
             class:sorted={sortCol === ci}
+            class:num={kinds[ci] === 'num'}
+            class:drop-before={dropAt === pos && dragFrom !== null && dragFrom > pos}
+            class:drop-after={dropAt === pos && dragFrom !== null && dragFrom < pos}
             aria-sort={sortCol === ci ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
             style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;"
             oncontextmenu={(e) => onheadermenu(e, ci)}
+            ondragover={(e) => onHeadDragOver(e, pos)}
+            ondrop={(e) => onHeadDrop(e, pos)}
           >
             {#if mini}
-              <span class="th-inner">
+              <span class="th-inner one-line">
                 <span class="th-name">{c.name}</span>
                 {#if c.type_hint}<span class="th-type">{c.type_hint}</span>{/if}
               </span>
             {:else}
-              <button class="th-sort" type="button" onclick={() => oncyclesort(ci)}>
+              <button
+                class="th-sort"
+                type="button"
+                draggable="true"
+                ondragstart={(e) => onHeadDragStart(e, pos)}
+                ondragend={onHeadDragEnd}
+                onclick={() => oncyclesort(ci)}
+              >
                 <span class="th-inner">
-                  <span class="th-name">{c.name}</span>
-                  {#if flow.editable && flow.editPkCols.includes(c.name)}<span class="th-pk" title="Primary key (read-only)">PK</span>{/if}
-                  {#if c.type_hint}<span class="th-type">{c.type_hint}</span>{/if}
+                  <span class="th-line">
+                    <span class="th-name">{c.name}</span>
+                    {#if isPk}<span class="th-pk" title="Primary key (read-only)">PK</span>{/if}
+                    <span class="th-sort-ind" class:on={sortCol === ci} aria-hidden="true"
+                      >{sortCol === ci ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}</span
+                    >
+                  </span>
+                  <span class="th-type">{c.type_hint ?? ' '}</span>
                 </span>
-                <span class="th-sort-ind" class:on={sortCol === ci} aria-hidden="true"
-                  >{sortCol === ci ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}</span
-                >
               </button>
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <span
                 class="th-resize"
                 class:active={dragName === c.name}
+                title="Drag to resize · double-click to fit"
                 onpointerdown={(e) => startResize(e, ci)}
                 onpointermove={onResizeMove}
                 onpointerup={endResize}
                 onpointercancel={endResize}
+                ondblclick={() => resetWidth(ci)}
               ></span>
             {/if}
           </th>
         {/each}
       </tr>
+      {#if filterRow && !mini}
+        <!-- Per-column filter (client-side, over the loaded rows). `td`, not
+             `th`, so header counts stay one per column. -->
+        <tr class="filter-row">
+          <td class="rownum"><Icon name="filter" size={11} /></td>
+          {#each cols as ci (ci)}
+            {@const c = result.columns[ci]}
+            <td style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;">
+              <input
+                class="col-filter mono"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="filter"
+                value={colFilters[ci] ?? ''}
+                aria-label="Filter {c.name}"
+                title="Contains · =exact · >n <n · NULL · !NULL"
+                oninput={(e) => oncolfilter?.(ci, e.currentTarget.value)}
+              />
+            </td>
+          {/each}
+        </tr>
+      {/if}
     </thead>
     <tbody>
       {#if padTop > 0}
@@ -364,18 +503,20 @@
       {/if}
       {#each windowRows as { row, idx }, wi (idx)}
         {@const vpos = startIdx + wi}
-        <tr class:odd={idx % 2 === 1} class:selected={flow.selected.has(idx)}>
+        <tr class:odd={idx % 2 === 1} class:selected={flow.selected.has(idx)} class:cursor={focusCell?.r === vpos}>
           <td class="rownum">
-            {#if flow.editable}
-              <input
-                class="sel-box"
-                type="checkbox"
-                checked={flow.selected.has(idx)}
-                onclick={(e) => flow.toggleRow(idx, e)}
-                title="Select row (shift-click for a range)"
-                aria-label="Select row {idx + 1}"
-              />
-            {/if}
+            <span class="sel-slot">
+              {#if flow.editable}
+                <input
+                  class="sel-box"
+                  type="checkbox"
+                  checked={flow.selected.has(idx)}
+                  onclick={(e) => flow.toggleRow(idx, e)}
+                  title="Select row (shift-click for a range)"
+                  aria-label="Select row {idx + 1}"
+                />
+              {/if}
+            </span>
             <span class="rownum-n">{idx + 1}</span>
             <!-- Redis has no insert builder (a "row" is a key), so no duplicate. -->
             {#if flow.editable && flow.engine !== 'redis'}
@@ -389,9 +530,11 @@
               </button>
             {/if}
           </td>
-          {#each result.columns as _c, ci (ci)}
+          {#each cols as ci, pos (ci)}
+            {@const _c = result.columns[ci]}
             {@const v = row[ci]}
             {@const w = widthFor(ci)}
+            {@const kind = kinds[ci]}
             {#if flow.editing && flow.editing.rowIdx === idx && flow.editing.colIdx === ci}
               <td class="cell editing" style="width:{w}ch; max-width:{w}ch;">
                 <!-- svelte-ignore a11y_autofocus -->
@@ -408,13 +551,14 @@
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell dirty"
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                class:num={kind === 'num'}
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Pending change — Review & apply (bar below) writes it; double-click to keep editing"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: ci })}
+                onclick={() => (focusCell = { r: vpos, c: pos })}
                 ondblclick={() => flow.beginEdit(idx, ci)}
                 oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">∅</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
+              >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">NULL</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
             {:else if flow.hasPendingUnder(idx, _c.name)}
               <!-- A path-level change (Vertical view: $set/$unset/$rename inside
                    this document field) — the cell keeps showing the stored value
@@ -422,10 +566,10 @@
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell dirty"
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Nested change pending — Review & apply (bar below) writes it; see the Vertical view"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: ci })}
+                onclick={() => (focusCell = { r: vpos, c: pos })}
                 ondblclick={() => flow.openCell(v, idx, ci)}
                 oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
               >{v === null || v === undefined ? '' : clip(cellStr(v))}</td>
@@ -433,24 +577,25 @@
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell null"
+                class:num={kind === 'num'}
                 class:editable={flow.isEditableCell(ci)}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="NULL"
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: ci })}
+                onclick={() => (focusCell = { r: vpos, c: pos })}
                 ondblclick={() => flow.beginEdit(idx, ci)}
                 oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
-              ><span class="null-glyph">∅</span></td>
+              ><span class="null-glyph">NULL</span></td>
             {:else if isComplex(v)}
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell json"
                 class:wrap={expandJson}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 title="Click to expand"
                 style="width:{w}ch; max-width:{w}ch;"
                 onclick={() => {
-                  focusCell = { r: vpos, c: ci };
+                  focusCell = { r: vpos, c: pos };
                   flow.openCell(v, idx, ci);
                 }}
                 ondblclick={() => { flow.openCell(v, idx, ci); flow.startViewerEdit(); }}
@@ -460,10 +605,12 @@
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td
                 class="cell"
+                class:num={kind === 'num'}
+                class:bool={kind === 'bool'}
                 class:editable={flow.isEditableCell(ci)}
-                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === pos}
                 style="width:{w}ch; max-width:{w}ch;"
-                onclick={() => (focusCell = { r: vpos, c: ci })}
+                onclick={() => (focusCell = { r: vpos, c: pos })}
                 ondblclick={() => flow.beginEdit(idx, ci)}
                 oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
               >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); flow.openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
@@ -476,6 +623,9 @@
       {/if}
     </tbody>
   </table>
+  {#if !mini && viewRows.length === 0 && liveRows.length > 0}
+    <div class="grid-nomatch">No rows match the current filters.</div>
+  {/if}
 </div>
 
 <style>
@@ -483,8 +633,16 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    /* Reserve the scrollbar gutter up front: a result that grows past the
+       viewport must not narrow the grid by a scrollbar's width mid-render. */
+    scrollbar-gutter: stable;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
+    background: var(--surface);
+    position: relative;
+  }
+  .grid-scroll.mini {
+    scrollbar-gutter: auto;
   }
   .grid-scroll:focus {
     outline: none;
@@ -499,7 +657,8 @@
     outline-offset: -1.5px;
   }
   .grid {
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     table-layout: fixed;
     width: max-content;
     min-width: 100%;
@@ -509,15 +668,20 @@
     position: sticky;
     top: 0;
     z-index: 2;
+    height: 40px;
+    box-sizing: border-box;
     text-align: start;
-    padding: 5px 10px;
+    padding: 4px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    border-inline-end: 1px solid var(--border);
-    font-size: 11px;
+    border-inline-end: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    font-size: var(--fs-s);
     white-space: nowrap;
-    vertical-align: bottom;
+    vertical-align: middle;
     overflow: hidden;
+  }
+  .grid.mini thead th {
+    height: 28px;
   }
   /* When sortable, the header content lives in a button that fills the cell. */
   .grid thead th.sortable {
@@ -526,14 +690,19 @@
   .grid thead th.sorted {
     background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
   }
+  .grid thead th.drop-before {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .grid thead th.drop-after {
+    box-shadow: inset -2px 0 0 var(--accent);
+  }
   .th-sort {
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 6px;
+    align-items: center;
     width: 100%;
+    height: 100%;
     /* leave a sliver on the right for the resize handle */
-    padding: 5px 12px 5px 10px;
+    padding: 3px 12px 3px 10px;
     border: none;
     background: transparent;
     color: inherit;
@@ -542,61 +711,81 @@
     cursor: pointer;
   }
   .th-sort:hover {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--hover);
   }
-  .th-sort-ind {
-    flex: 0 0 auto;
-    font-size: 8.5px;
-    line-height: 1;
-    color: var(--text-dim);
-    opacity: 0;
-    transform: translateY(-1px);
-    transition: opacity 0.12s;
-  }
-  .th-sort:hover .th-sort-ind {
-    opacity: 0.55;
-  }
-  .th-sort-ind.on {
-    opacity: 1;
-    color: var(--accent);
+  .th-sort:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -2px;
   }
   .th-inner {
-    display: inline-flex;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    width: 100%;
+  }
+  .th-inner.one-line {
+    flex-direction: row;
     align-items: baseline;
     gap: 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
+  }
+  .th-line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+  th.num .th-line {
+    justify-content: flex-end;
+  }
+  th.num .th-type {
+    text-align: end;
   }
   .th-name {
-    font-weight: 700;
+    font-weight: 600;
     color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .th-sort-ind {
+    flex: 0 0 auto;
+    font-size: var(--fs-xs);
+    line-height: 1;
+    color: var(--text-dim);
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+  .th-sort:hover .th-sort-ind {
+    opacity: 0.6;
+  }
+  .th-sort-ind.on {
+    opacity: 1;
+    color: var(--accent-text);
   }
   .th-pk {
     flex: 0 0 auto;
-    font-size: 8.5px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    line-height: 14px;
     padding: 0 4px;
-    border-radius: 3px;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    transform: translateY(-1px);
+    border-radius: var(--radius-s);
+    color: var(--accent-text);
+    background: var(--accent-soft);
   }
   .th-type {
-    flex: 0 0 auto;
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* Drag handle on the header's right edge. */
   .th-resize {
     position: absolute;
     top: 0;
-    right: -3px;
+    inset-inline-end: -3px;
     width: 7px;
     height: 100%;
     cursor: col-resize;
@@ -606,8 +795,8 @@
   .th-resize::after {
     content: '';
     position: absolute;
-    top: 4px;
-    bottom: 4px;
+    top: 6px;
+    bottom: 6px;
     left: 3px;
     width: 1px;
     background: transparent;
@@ -616,11 +805,46 @@
   .th-resize.active::after {
     background: var(--accent);
   }
+  /* ── Filter row (sticky under the header) ── */
+  .filter-row td {
+    position: sticky;
+    top: 40px;
+    z-index: 2;
+    height: 30px;
+    box-sizing: border-box;
+    padding: 3px 6px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    border-inline-end: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  }
+  .filter-row td.rownum {
+    z-index: 3;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .col-filter {
+    width: 100%;
+    height: 22px;
+    box-sizing: border-box;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-xs);
+  }
+  .col-filter::placeholder {
+    color: var(--text-dim);
+  }
+  .col-filter:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
   .grid td {
     padding: 4px 10px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-    border-inline-end: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    font-size: 11.5px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    border-inline-end: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+    font-size: var(--fs-s);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -643,13 +867,21 @@
     overflow: auto;
     line-height: 1.4;
   }
+  /* Numbers: right-aligned, tabular figures so digits line up. */
+  .grid td.num {
+    text-align: end;
+    font-variant-numeric: tabular-nums;
+  }
   /* Stripe by data-row index (not :nth-child) so the pattern stays stable as
      the virtualized window scrolls. */
   .grid tbody tr.odd td {
-    background: color-mix(in srgb, var(--text-dim) 4%, transparent);
+    background: color-mix(in srgb, var(--text) 2.5%, var(--surface));
   }
   .grid tbody tr:not(.spacer):hover td {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--hover);
+  }
+  .grid tbody tr.cursor td {
+    background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   }
   /* Spacer rows reserve scroll height for the off-screen (un-rendered) rows. */
   .grid tbody tr.spacer td {
@@ -661,22 +893,44 @@
   .rownum {
     color: var(--text-dim);
     text-align: end;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     position: sticky;
     inset-inline-start: 0;
     background: var(--surface-2);
     z-index: 1;
-    width: 4ch;
-    max-width: 4ch;
+    /* Constant width — see the layout-stability note in the script. */
+    width: var(--rn-w);
+    min-width: var(--rn-w);
+    max-width: var(--rn-w);
+    box-sizing: border-box;
+    padding-inline: 6px 8px !important;
+    font-variant-numeric: tabular-nums;
+  }
+  .grid tbody tr.odd td.rownum,
+  .grid tbody tr:not(.spacer):hover td.rownum {
+    background: var(--surface-2);
   }
   .grid thead .rownum {
     z-index: 3;
   }
+  .grid.mini .rownum {
+    --rn-w: 5ch;
+  }
+  .grid.mini .sel-slot {
+    display: none;
+  }
+  .sel-slot {
+    display: inline-flex;
+    align-items: center;
+    float: inline-start;
+    width: 16px;
+    height: 17px;
+  }
   .rownum-n {
     display: inline-block;
   }
-  /* Per-row duplicate action: revealed on row hover, anchored to the RIGHT of the
-   * # cell so it never covers the selection checkbox. */
+  /* Per-row duplicate action: revealed on row hover, anchored to the trailing
+   * edge of the # cell so it never covers the selection checkbox. */
   .row-dup {
     position: absolute;
     top: 0;
@@ -688,7 +942,7 @@
     justify-content: center;
     border: none;
     background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 0;
   }
@@ -698,36 +952,31 @@
   .row-dup:hover {
     background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
   }
-  /* Selection checkbox in the # column (only present for editable results). */
-  .rownum:has(.sel-box) {
-    width: 6ch;
-    max-width: 6ch;
-    text-align: start;
-    padding-inline-start: 5px;
-  }
   .sel-box {
     width: 12px;
     height: 12px;
-    margin: 0 4px 0 0;
-    vertical-align: middle;
+    margin: 0;
     cursor: pointer;
     accent-color: var(--accent);
   }
   .grid tbody tr.selected td {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
   }
   .grid tbody tr.selected:not(.spacer):hover td {
-    background: color-mix(in srgb, var(--accent) 24%, transparent);
+    background: color-mix(in srgb, var(--accent) 22%, var(--surface));
   }
-  .cell.null {
-    text-align: center;
-  }
+  /* NULL: a dim italic word, never an empty cell that reads as a bug. */
   .null-glyph {
-    color: color-mix(in srgb, var(--text-dim) 75%, transparent);
-    font-style: normal;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: var(--fs-xs);
+    letter-spacing: 0.02em;
+  }
+  .cell.bool {
+    color: var(--text);
   }
   .cell.json {
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
   }
   .cell.json:hover {
@@ -739,8 +988,8 @@
   }
   .cell-expand {
     position: absolute;
-    top: 1px;
-    inset-inline-end: 1px;
+    top: 4px;
+    inset-inline-end: 2px;
     display: none;
     align-items: center;
     justify-content: center;
@@ -748,7 +997,7 @@
     height: 16px;
     padding: 0;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text-dim);
     cursor: pointer;
@@ -758,7 +1007,7 @@
     display: inline-flex;
   }
   .cell-expand:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .cell.editable {
@@ -774,8 +1023,8 @@
   }
   /* A parked (pending) cell draft: visibly different until reviewed & applied. */
   .cell.dirty {
-    background: color-mix(in srgb, var(--status-warn) 14%, transparent) !important;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-warn) 55%, transparent);
+    background: var(--warning-soft) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 55%, transparent);
     font-style: italic;
     cursor: default;
   }
@@ -786,7 +1035,7 @@
     outline: none;
     background: transparent;
     color: var(--text);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     padding: 4px 10px;
   }
   .cell-input:disabled {
@@ -797,6 +1046,13 @@
     color: var(--text);
     border-radius: 2px;
   }
+  .grid-nomatch {
+    position: sticky;
+    inset-inline-start: 0;
+    padding: 18px 16px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
 
   /* ───────────────── Phone (≤640px) ─────────────────
      Make sure the grid fills its bounded block and scrolls in BOTH directions
@@ -805,13 +1061,11 @@
     .grid-scroll {
       -webkit-overflow-scrolling: touch;
     }
-    /* Bump tiny grid text up a notch for phone legibility. Row height is fixed
-       (virtualization) so we keep cell font modest; headers can grow freely. */
     .grid thead th {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
     .grid td {
-      font-size: 12.5px;
+      font-size: var(--fs-m);
     }
   }
 </style>

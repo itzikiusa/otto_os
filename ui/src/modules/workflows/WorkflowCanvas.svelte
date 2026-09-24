@@ -3,7 +3,7 @@
   // (wheel), drag nodes, drag output→input ports to connect, live run-status
   // coloring. Pure SVG + absolutely-positioned cards inside one transformed
   // viewport, so everything works in graph coordinates.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -294,7 +294,7 @@
       >
         <span class="stripe"></span>
         <div class="head">
-          <span class="ic"><Icon name={spec(n.kind)?.icon ?? 'box'} size={14} /></span>
+          <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
           <span class="body">
             <span class="title">{n.name || spec(n.kind)?.label || n.kind}</span>
             <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
@@ -406,7 +406,7 @@
   }
   .edge-badge text {
     fill: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
   }
   .edge-hit {
@@ -473,7 +473,7 @@
     font-size: 9px;
     font-weight: 700;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .sn {
@@ -490,7 +490,7 @@
     flex-shrink: 0;
   }
   .until {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-top: 2px;
     overflow: hidden;
@@ -498,8 +498,8 @@
     white-space: nowrap;
   }
   .until code {
-    color: var(--accent);
-    font-size: 10px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
   }
   .node:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
@@ -530,7 +530,7 @@
     height: 26px;
     border-radius: 7px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .body {
@@ -547,7 +547,7 @@
     text-overflow: ellipsis;
   }
   .kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -628,7 +628,7 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .zpct {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 0 4px;
     min-width: 34px;

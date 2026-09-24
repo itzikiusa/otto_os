@@ -14,6 +14,9 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import InstallPanel from './InstallPanel.svelte';
@@ -27,7 +30,7 @@
   import AthenaView from './AthenaView.svelte';
   import EksView from './EksView.svelte';
   import RdsView from './RdsView.svelte';
-  import EnvPill from './EnvPill.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'rds'];
@@ -103,14 +106,56 @@
     }
   }
 
-  const showRail = $derived(!viewport.isMobile || !routeAccountId);
-  const showContent = $derived(!viewport.isMobile || !!routeAccountId || aws.accounts.length === 0);
+  const canAdmin = $derived(auth.isRoot);
+  // No accounts at all → the list pane is hidden and one page-level EmptyState
+  // (with the single "Add account" CTA) owns the page.
+  const noAccounts = $derived(aws.accountsLoaded && aws.accounts.length === 0 && !routeAccountId);
+  const showRail = $derived(!noAccounts && (!viewport.isMobile || !routeAccountId));
+  const showContent = $derived(noAccounts || !viewport.isMobile || !!routeAccountId);
+  // The overview's account filter lives in the header; AccountsOverview filters by it.
+  let filter = $state('');
+  const SERVICE_LABEL: Record<AwsService, string> = { s3: 'S3', sqs: 'SQS', ec2: 'EC2', athena: 'Athena', eks: 'EKS', rds: 'RDS' };
 </script>
+
+<div class="aws-page">
+<PageHeader
+  title={routeAccountId && account ? account.name : 'AWS'}
+  crumbs={routeAccountId && account && !viewport.isMobile ? [{ label: 'AWS', onclick: () => router.go('aws') }] : []}
+  subtitle={!routeAccountId && aws.installed ? `Accounts are Otto rows (+ Keychain); the console shells out to the aws CLI${aws.status?.version ? ` v${aws.status.version}` : ''}` : undefined}
+>
+  {#snippet leading()}
+    {#if viewport.isMobile && routeAccountId}
+      <button class="icon-btn" onclick={() => router.go('aws')} aria-label="Back to accounts" title="Back to accounts">
+        <Icon name="chevronLeft" size={15} />
+      </button>
+    {/if}
+  {/snippet}
+  {#snippet badge()}
+    {#if routeAccountId && account}
+      <EnvBadge env={account.environment} />
+      {#if routeService}<span class="svc-badge">{SERVICE_LABEL[routeService]}</span>{/if}
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if aws.installed && !routeAccountId && aws.accounts.length > 3}
+      <label class="filter">
+        <Icon name="search" size={13} />
+        <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
+      </label>
+    {/if}
+    {#if aws.installed && canAdmin && aws.accounts.length > 0}
+      <button class="btn primary" onclick={openCreate} data-testid="aws-add-account">
+        <Icon name="plus" size={13} /> Add account
+      </button>
+    {/if}
+  {/snippet}
+</PageHeader>
 
 {#if !aws.statusLoaded}
   <div class="pad"><Skeleton rows={4} /></div>
 {:else if aws.statusError}
   <EmptyState
+    variant="page"
     icon="cloud"
     title="AWS console unavailable"
     body={aws.statusError}
@@ -118,18 +163,17 @@
     onaction={() => void aws.loadStatus()}
   />
 {:else if !aws.installed}
-  <InstallPanel />
+  <div class="aws-scroll"><InstallPanel /></div>
 {:else}
-  <div class="aws" class:mobile={viewport.isMobile}>
+  <div class="aws" class:mobile={viewport.isMobile} class:solo={!showRail}>
     {#if showRail}
       <aside class="rail-col">
         {#if viewport.isMobile}
-          <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
+          <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
         {:else}
           <AccountRail
             activeId={routeAccountId}
             activeService={routeService}
-            onadd={openCreate}
             onedit={openEdit}
             ondelete={(a) => void deleteAccount(a)}
           />
@@ -138,25 +182,15 @@
     {/if}
     {#if showContent}
       <section class="content">
-        {#if viewport.isMobile && routeAccountId}
-          <div class="mobile-bar">
-            <button class="back" onclick={() => router.go('aws')} aria-label="Back to accounts">
-              <Icon name="chevronLeft" size={14} /> Accounts
-            </button>
-            {#if account}
-              <span class="mb-name">{account.name}</span>
-              <EnvPill env={account.environment} />
-            {/if}
-          </div>
-        {/if}
         {#if !routeAccountId}
-          {#if !viewport.isMobile}
-            <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
+          {#if !viewport.isMobile || noAccounts}
+            <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
           {/if}
         {:else if !aws.accountsLoaded}
           <div class="pad"><Skeleton rows={5} /></div>
         {:else if !account}
           <EmptyState
+            variant="page"
             icon="cloud"
             title="Account not found"
             body="This AWS account was removed or the link is stale."
@@ -164,9 +198,10 @@
             onaction={() => router.go('aws')}
           />
         {:else if !routeService}
-          <EmptyState icon="cloud" title={account.name} body="Pick a service from the rail." />
+          <EmptyState variant="page" icon="cloud" title={account.name} body="Pick a service from the rail." />
         {:else if !serviceAllowedByRbac}
           <EmptyState
+            variant="page"
             icon="lock"
             title="No access"
             body={`You don't have View on ${routeService.toUpperCase()} for the AWS console. Ask an administrator for a grant.`}
@@ -192,6 +227,7 @@
     {/if}
   </div>
 {/if}
+</div>
 
 {#if wizardOpen}
   <AccountWizard
@@ -213,18 +249,59 @@
 {/if}
 
 <style>
+  .aws-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .pad {
-    padding: 16px;
+    padding: 18px 20px;
+  }
+  .aws-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
   .aws {
     display: grid;
     grid-template-columns: 224px minmax(0, 1fr);
-    height: 100%;
+    flex: 1;
     min-height: 0;
     overflow: hidden;
   }
-  .aws.mobile {
+  .aws.mobile,
+  .aws.solo {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .svc-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    color: var(--text-dim);
+  }
+  .filter input {
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 12.5px;
+    outline: none;
+    width: 160px;
   }
   .rail-col {
     border-right: 1px solid var(--border);
@@ -245,30 +322,5 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-  }
-  .mobile-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .back {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    border: 0;
-    background: transparent;
-    color: var(--accent);
-    font: inherit;
-    font-size: 13px;
-    cursor: pointer;
-    padding: 4px 0;
-  }
-  .mb-name {
-    margin-left: auto;
-    font-weight: 600;
-    font-size: 13px;
   }
 </style>

@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import { onMount } from 'svelte';
   import { accessApi } from '../../lib/api/access';
   import { api } from '../../lib/api/client';
@@ -177,12 +181,14 @@
   }
 </script>
 
+<div class="settings-section">
+  <PageHeader
+    title={sectionLabel('access-groups')}
+    subtitle="Reusable access rules across resources"
+  />
+  <PageBody width="readable">
+  <SectionIntro>Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong></SectionIntro>
 <section class="access-groups">
-  <h2>Groups & access roles</h2>
-  <p class="hint">
-    Groups apply reusable access rules across resources. Users still need page access in Settings →
-    Users.
-  </p>
   {#if !auth.isRoot}<p>Only root can manage groups and role presets.</p>
   {:else if loading}<p>Loading groups…</p>
   {:else}
@@ -299,24 +305,27 @@
     </section>
   {/if}
 </section>
+  </PageBody>
+</div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .access-groups {
-    padding: 24px;
     display: flex;
     flex-direction: column;
     gap: 18px;
-    max-width: 1050px;
     color: var(--text);
   }
-  h2,
   h3,
   h4,
   p {
     margin: 0;
-  }
-  h2 {
-    font-size: 20px;
   }
   h3 {
     font-size: 16px;

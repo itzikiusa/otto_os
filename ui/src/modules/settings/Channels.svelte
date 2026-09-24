@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Channels settings page: per-workspace Slack + Telegram + Webhook integration config.
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -8,7 +12,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { agentProviders } from '../../lib/providers';
@@ -242,17 +246,10 @@
   }
 </script>
 
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
-    <div>
-      <h1>Channels</h1>
-      <div class="sub">
-        Configure Slack, Telegram and inbound Webhook integrations for this workspace.
-        Tokens and webhook keys are stored in the macOS Keychain.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('channels')} subtitle="Slack, Telegram and webhook bridges for this workspace" />
+  <PageBody width="readable">
+  <SectionIntro>Configure Slack, Telegram and inbound webhook integrations per workspace. Tokens and webhook keys are stored in the <strong>macOS Keychain</strong>, never in Otto’s database.</SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->
@@ -266,7 +263,7 @@
   {:else}
     <div class="channel-list">
       <!-- Slack card -->
-      {#snippet channelCard(channel: Channel, intg: Integration | null, icon: string, label: string)}
+      {#snippet channelCard(channel: Channel, intg: Integration | null, icon: IconName, label: string)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="channel-card card"
@@ -329,6 +326,7 @@
       {@render channelCard('webhook', webhook, 'globe', 'Webhook')}
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <!-- Edit modal -->
@@ -515,6 +513,13 @@
 {/if}
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .channel-list {
     display: flex;
     flex-direction: column;
@@ -534,7 +539,7 @@
     height: 32px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     display: grid;
     place-items: center;
     flex-shrink: 0;

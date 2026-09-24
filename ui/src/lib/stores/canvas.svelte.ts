@@ -11,6 +11,7 @@
 import { api } from '../api/client';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
+import { loadErrorText } from '../loadError';
 import { assistToNodes, emptyScene, parseScene } from '../../modules/canvas/scene';
 import type {
   AssistMode,
@@ -65,7 +66,10 @@ class CanvasStore {
   saving = $state(false);
   savedAt = $state<number | null>(null);
   dirty = $state(false);
+  /** Why the last `open()` failed (rendered inline with Retry by CanvasPage). */
   loadError = $state<string | null>(null);
+  /** The scene id that `loadError` belongs to — what Retry re-opens. */
+  loadErrorId = $state<string | null>(null);
 
   #history: string[] = [];
   #future: string[] = [];
@@ -87,7 +91,7 @@ class CanvasStore {
     try {
       this.scenes = await api.get<CanvasSceneSummary[]>(`/canvas/scenes`);
     } catch (e) {
-      this.listError = e instanceof Error ? e.message : String(e);
+      this.listError = loadErrorText(e);
       throw e;
     } finally {
       this.listLoading = false;
@@ -108,6 +112,7 @@ class CanvasStore {
 
   async open(id: string): Promise<void> {
     this.loadError = null;
+    this.loadErrorId = null;
     try {
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}`);
       this.currentId = row.id;
@@ -131,7 +136,8 @@ class CanvasStore {
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
     } catch (e) {
-      this.loadError = e instanceof Error ? e.message : String(e);
+      this.loadError = loadErrorText(e);
+      this.loadErrorId = id;
       throw e;
     }
   }
@@ -178,8 +184,13 @@ class CanvasStore {
    *  Skipped while the user has UNSAVED edits in flight (`dirty`) — the agent's
    *  ~1s live poll would otherwise reset the source pane mid-keystroke; once
    *  the debounced save lands (dirty clears) live pushes apply again, and the
-   *  server-side `expect_updated_at` guard arbitrates the final commit. */
-  ingestDoc(doc: CanvasDoc): void {
+   *  server-side `expect_updated_at` guard arbitrates the final commit.
+   *  `sceneId` binds a result to the scene it was produced for: an Ask-AI run
+   *  can take minutes, and applying it to whichever scene is open by then
+   *  wrote scene A's drawing into scene B on the next autosave. (The server
+   *  already committed it to its own scene; opening that scene shows it.) */
+  ingestDoc(doc: CanvasDoc, sceneId?: string | null): void {
+    if (sceneId !== undefined && sceneId !== this.currentId) return;
     if (typeof doc.source !== 'string') return;
     if (this.dirty) return;
     this.source = doc.source;
@@ -188,8 +199,10 @@ class CanvasStore {
     this.savedAt = Date.now();
   }
 
-  /** Append a turn to the inline conversation. */
-  pushConvo(role: 'user' | 'assistant', text: string): void {
+  /** Append a turn to the inline conversation (of `sceneId` when given — a
+   *  late reply for another scene is dropped, not appended to this one). */
+  pushConvo(role: 'user' | 'assistant', text: string, sceneId?: string | null): void {
+    if (sceneId !== undefined && sceneId !== this.currentId) return;
     this.convo = [...this.convo, { role, text, ts: Date.now() }];
   }
 

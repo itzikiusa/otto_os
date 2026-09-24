@@ -327,15 +327,15 @@
     padding: 8px 10px;
   }
   .tpl-notes a {
-    color: var(--accent);
+    color: var(--accent-text);
     margin-inline-start: 4px;
   }
   .warn {
     margin: 0;
     font-size: 12px;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 12%, transparent);
-    border: 1px solid color-mix(in srgb, #e0a000 35%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-s, 6px);
     padding: 8px 10px;
   }

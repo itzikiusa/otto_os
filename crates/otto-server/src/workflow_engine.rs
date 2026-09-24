@@ -535,10 +535,16 @@ pub fn classify_resume(
         .collect();
     // Paused at an approval? That node is the re-entry point regardless of its
     // recorded status — the pause is fully persisted and re-awaiting the
-    // operator is free of side effects.
+    // operator is free of side effects. But a DIFFERENT step caught
+    // mid-flight wins: a stale pause flag (left by an older code path) must
+    // never make a side-effect step (`git_pr`, `channel_notify`) look like a
+    // resumable approval and get replayed.
     let entry = if run.waiting_approval {
-        run.approval_node_id
-            .clone()
+        running_ids
+            .iter()
+            .find(|id| kind_of(id.as_str()).is_some_and(|k| k != "human_approval"))
+            .cloned()
+            .or_else(|| run.approval_node_id.clone())
             .or_else(|| running_ids.first().cloned())
     } else {
         running_ids.first().cloned()
@@ -635,6 +641,27 @@ pub fn classify_resume(
         nodes,
         error: any_error.then(|| "one or more nodes failed".to_string()),
     }
+}
+
+/// Settle a run's node states for a terminal FAIL after a restart: a step
+/// still `running` becomes `error` ("interrupted") — retryable, and no
+/// ever-growing timer — and never-reached `pending` steps become `skipped`.
+/// Settled states pass through untouched.
+fn settle_interrupted_nodes(mut nodes: Vec<NodeRunState>) -> Vec<NodeRunState> {
+    for n in nodes.iter_mut() {
+        match n.status {
+            NodeStatus::Running => {
+                n.status = NodeStatus::Error;
+                if n.error.is_none() {
+                    n.error = Some("interrupted by a daemon restart".into());
+                }
+                n.activity = None;
+            }
+            NodeStatus::Pending => n.status = NodeStatus::Skipped,
+            NodeStatus::Success | NodeStatus::Error | NodeStatus::Skipped => {}
+        }
+    }
+    nodes
 }
 
 /// Reconcile every run a previous daemon process left in flight: resume where
@@ -743,7 +770,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                             .update_run(
                                 &run.id,
                                 RunStatus::Error,
-                                &run.nodes,
+                                &settle_interrupted_nodes(run.nodes.clone()),
                                 Some("Interrupted by a daemon restart; resume bookkeeping failed — re-run the workflow."),
                                 true,
                             )
@@ -753,6 +780,10 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 }
             }
             ResumeDecision::Fail { nodes, error } => {
+                // A failed run must not keep a step `running` forever (the UI
+                // timer counts up and the step can't be retried): the policy
+                // gates above hand over the raw snapshot.
+                let nodes = settle_interrupted_nodes(nodes);
                 let rev = repo
                     .update_run(&run.id, RunStatus::Error, &nodes, Some(&error), true)
                     .await
@@ -768,6 +799,12 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     &nodes,
                     false,
                 );
+                // Tell the chat thread that started it — its last message was
+                // otherwise "▶ … started" forever.
+                if let Ok((wf, _)) = &loaded {
+                    deliver_run_result(ctx, wf, &nodes, RunStatus::Error, None, &run.input, None)
+                        .await;
+                }
                 settled += 1;
             }
             ResumeDecision::Finish {
@@ -790,6 +827,9 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     &nodes,
                     false,
                 );
+                if let Ok((wf, _)) = &loaded {
+                    deliver_run_result(ctx, wf, &nodes, status, None, &run.input, None).await;
+                }
                 settled += 1;
             }
         }
@@ -948,6 +988,61 @@ fn run_gate() -> &'static tokio::sync::Semaphore {
     GATE.get_or_init(|| tokio::sync::Semaphore::new(max_parallel_runs()))
 }
 
+tokio::task_local! {
+    /// The run-gate permit of the run executing on this task — set by
+    /// [`spawn_run`] around [`run_workflow`]. A `human_approval` gate hands it
+    /// back while it waits for a human ([`release_run_permit`]) and re-takes
+    /// it after the decision ([`reacquire_run_permit`]): a run parked for
+    /// approval (up to 24h) used to hold one of the 2 daemon-wide slots the
+    /// whole time, queueing every other workflow behind it.
+    static RUN_PERMIT: std::cell::RefCell<Option<tokio::sync::SemaphorePermit<'static>>>;
+}
+
+/// Give this task's run-gate permit back while the run is parked. Returns
+/// whether a permit was released (false off a `spawn_run` task, or when it
+/// was already released) — pass it to [`reacquire_run_permit`].
+fn release_run_permit() -> bool {
+    RUN_PERMIT
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Re-take the run-gate permit released by [`release_run_permit`] — FIFO
+/// behind runs that queued meanwhile. No-op when nothing was released.
+async fn reacquire_run_permit(released: bool) {
+    if !released {
+        return;
+    }
+    if let Ok(permit) = run_gate().acquire().await {
+        let _ = RUN_PERMIT.try_with(|cell| *cell.borrow_mut() = Some(permit));
+    }
+}
+
+/// Key of a chat `skip` marker in `ServerCtx::wf_skip_current`: ONE step of
+/// one run, so a marker can only ever skip the step it was aimed at.
+pub(crate) fn skip_marker_key(run_id: &str, node_id: &str) -> String {
+    format!("{run_id}/{node_id}")
+}
+
+/// Consume the skip marker for `(run_id, node_id)`; true when one was set.
+fn take_skip_marker(ctx: &ServerCtx, run_id: &str, node_id: &str) -> bool {
+    ctx.wf_skip_current
+        .lock()
+        .map(|mut s| s.remove(&skip_marker_key(run_id, node_id)))
+        .unwrap_or(false)
+}
+
+/// Drop every skip marker of a run at run end — an unconsumed marker must not
+/// fire on a later retry of the same run id.
+fn clear_skip_markers(ctx: &ServerCtx, run_id: &str) {
+    let prefix = format!("{run_id}/");
+    if let Ok(mut s) = ctx.wf_skip_current.lock() {
+        s.retain(|k| !k.starts_with(&prefix));
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -980,15 +1075,29 @@ pub fn spawn_run(
                 .await
             {
                 tracing::error!(%run_id, "persisting run scope failed: {e}");
-                let _ = WorkflowsRepo::new(ctx.pool.clone())
+                let nodes = prior_nodes.as_deref().unwrap_or(&[]);
+                let rev = WorkflowsRepo::new(ctx.pool.clone())
                     .update_run(
                         &run_id,
                         RunStatus::Error,
-                        prior_nodes.as_deref().unwrap_or(&[]),
+                        nodes,
                         Some(&format!("cannot persist execution scope: {e}")),
                         true,
                     )
-                    .await;
+                    .await
+                    .unwrap_or(0);
+                // Announce it: open run views otherwise kept showing "queued".
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "error",
+                    None,
+                    rev,
+                    None,
+                    nodes,
+                    false,
+                );
                 return;
             }
         }
@@ -1027,7 +1136,7 @@ pub fn spawn_run(
                 match pinned_repo.definition_for_run(&r).await {
                     Ok(definition) => definition,
                     Err(error) => {
-                        let _ = pinned_repo
+                        let rev = pinned_repo
                             .update_run(
                                 &run_id,
                                 RunStatus::Error,
@@ -1035,7 +1144,19 @@ pub fn spawn_run(
                                 Some(&error.to_string()),
                                 true,
                             )
-                            .await;
+                            .await
+                            .unwrap_or(0);
+                        emit_run_updated(
+                            &ctx,
+                            &workflow.workspace_id,
+                            &run_id,
+                            "error",
+                            None,
+                            rev,
+                            None,
+                            &r.nodes,
+                            false,
+                        );
                         return;
                     }
                 }
@@ -1049,8 +1170,14 @@ pub fn spawn_run(
                 return;
             }
         };
-        run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes).await;
-        drop(permit);
+        // The permit rides in a task-local so a parked approval gate can hand
+        // it back (see RUN_PERMIT); it is released when the run ends.
+        RUN_PERMIT
+            .scope(
+                std::cell::RefCell::new(Some(permit)),
+                run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes),
+            )
+            .await;
     });
 }
 
@@ -1558,8 +1685,68 @@ pub async fn run_workflow(
         // happens to be on. Best-effort + SAFE (only creates a new worktree under
         // data_dir; never touches the user's checkout). Returns the primary
         // provisioned worktree to adopt as the run's working directory.
-        let provisioned_cwd = provision_wf_worktrees(&ctx, &run_id, &mut entries).await;
+        let (provisioned_cwd, isolation_failures) =
+            provision_wf_worktrees(&ctx, &run_id, &mut entries).await;
         files.set_repos(entries.clone());
+        if !isolation_failures.is_empty() {
+            // Fail LOUDLY before any step runs: never let agents work in the
+            // user's own checkout because isolation silently failed.
+            let msg = format!(
+                "cannot isolate this run from your own checkout — {}",
+                isolation_failures.join("; ")
+            );
+            tracing::warn!(%run_id, "{msg}");
+            // Nothing ran: a retry keeps its prior step history, a fresh run
+            // shows every step skipped.
+            let nodes: Vec<NodeRunState> = match &prior_nodes {
+                Some(prior) => prior.clone(),
+                None => states
+                    .iter()
+                    .cloned()
+                    .map(|mut s| {
+                        s.status = NodeStatus::Skipped;
+                        s
+                    })
+                    .collect(),
+            };
+            let rev = repo
+                .update_run_if(
+                    &run_id,
+                    &[RunStatus::Pending, RunStatus::Running],
+                    RunStatus::Error,
+                    &nodes,
+                    Some(&msg),
+                    true,
+                )
+                .await
+                .ok()
+                .flatten();
+            if let Some(rev) = rev {
+                deliver_run_result(
+                    &ctx,
+                    &workflow,
+                    &nodes,
+                    RunStatus::Error,
+                    None,
+                    &input,
+                    None,
+                )
+                .await;
+                emit_run_updated(
+                    &ctx,
+                    &workflow.workspace_id,
+                    &run_id,
+                    "error",
+                    None,
+                    rev,
+                    None,
+                    &nodes,
+                    false,
+                );
+            }
+            reap_run_worktrees(&ctx, &run_id).await;
+            return;
+        }
         let input = seed_input_from_entries(input, &entries);
         match provisioned_cwd {
             Some(wt) => {
@@ -1774,24 +1961,43 @@ pub async fn run_workflow(
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
 
-    // Lifecycle transition Pending→Running (a real status write). Every LATER
-    // in-loop write uses `update_run_progress` (nodes only, no status) so a
-    // concurrent Cancel is never resurrected back to Running (see item 1).
-    let rev = repo
-        .update_run(&run_id, RunStatus::Running, &states, None, false)
+    // Lifecycle transition Pending→Running — a compare-and-set. Startup
+    // (repo resolution, `git worktree add` of a full tree) takes seconds; a
+    // Cancel that landed in that window already wrote `canceled`, and the old
+    // unconditional write flipped it back to `running` and executed the whole
+    // workflow the user saw canceled. Every LATER in-loop write uses
+    // `update_run_progress` (nodes only, no status) for the same reason.
+    match repo
+        .update_run_if(
+            &run_id,
+            &[RunStatus::Pending],
+            RunStatus::Running,
+            &states,
+            None,
+            false,
+        )
         .await
-        .unwrap_or(0);
-    emit_run_updated(
-        &ctx,
-        &workflow.workspace_id,
-        &run_id,
-        "running",
-        None,
-        rev,
-        None,
-        &states,
-        false,
-    );
+    {
+        Ok(Some(rev)) => emit_run_updated(
+            &ctx,
+            &workflow.workspace_id,
+            &run_id,
+            "running",
+            None,
+            rev,
+            None,
+            &states,
+            false,
+        ),
+        Ok(None) => {
+            // Settled (canceled) before it started: execute nothing — the
+            // node loop's first iteration breaks straight to the canceled
+            // finalize, which reaps the worktrees just provisioned.
+            tracing::info!(%run_id, "workflow run canceled during startup — not executing");
+            canceled = true;
+        }
+        Err(e) => tracing::warn!(%run_id, "workflow run start write failed: {e}"),
+    }
 
     // Live progress: if this run was triggered from a chat thread, stream brief
     // per-step updates back to it. A single pump task posts them in order; manual
@@ -1803,7 +2009,7 @@ pub async fn run_workflow(
         }
         None => (ProgressSink::disabled(), None),
     };
-    if progress.enabled() {
+    if progress.enabled() && !canceled {
         let goals: Vec<String> = input
             .get("goals")
             .and_then(Value::as_array)
@@ -1828,18 +2034,20 @@ pub async fn run_workflow(
 
     // Global wall clock: a run can't execute forever. Checked at each node
     // boundary; a node already executing finishes first (bounded per-node).
-    // Anchored to the ROW's `started_at` (not a process-local Instant) so a
-    // crash-looping daemon resuming the run over and over can't extend its
-    // budget indefinitely; falls back to "now" if the row can't be read.
-    let run_deadline = repo
-        .get_run(&run_id)
-        .await
-        .map(|r| r.started_at)
-        .unwrap_or_else(|_| chrono::Utc::now())
-        + chrono::Duration::from_std(RUN_WALL_CLOCK_TIMEOUT)
-            .unwrap_or_else(|_| chrono::Duration::hours(10));
+    // The budget is per EXECUTION (a fresh run, a retry-a-step, a restart
+    // resume) and excludes time parked at a `human_approval` gate. It used to
+    // be anchored to the row's `started_at`, which failed every approval given
+    // after 10h (the gate itself waits up to 24h) and every retry of a run
+    // older than 10h before it executed a single node. A crash-looping daemon
+    // still can't extend a run indefinitely: restart resumes are capped at
+    // MAX_RESUME_ATTEMPTS.
+    let mut run_deadline = Instant::now() + RUN_WALL_CLOCK_TIMEOUT;
 
     for node_id in order {
+        // Canceled before it started (the Pending→Running CAS above lost).
+        if canceled {
+            break;
+        }
         // Honor a cancel request (the API flips the run status to Canceled).
         if let Ok(r) = repo.get_run(&run_id).await {
             if r.status == RunStatus::Canceled {
@@ -1849,7 +2057,7 @@ pub async fn run_workflow(
         }
 
         // Stop once the run has exceeded its global time budget.
-        if chrono::Utc::now() >= run_deadline {
+        if Instant::now() >= run_deadline {
             timed_out = true;
             break;
         }
@@ -2129,11 +2337,21 @@ pub async fn run_workflow(
                                 break Err(otto_core::Error::Internal("run canceled".into()));
                             }
                         }
-                        // A chat `skip` command (consume-once) → abort this node and
-                        // skip it; the run continues to the next node.
-                        if ctx.wf_skip_current.lock().map(|mut s| s.remove(&run_id.to_string())).unwrap_or(false) {
-                            skip_current = true;
-                            break Err(otto_core::Error::Internal("step skipped".into()));
+                        // A chat `skip` command (consume-once) for THIS step → abort
+                        // it and skip it; the run continues to the next node. The
+                        // marker is keyed by (run, step), so one set for an earlier
+                        // step never fires on this one before it did any work. An
+                        // approval gate is never skippable — that would pass it
+                        // unapproved (the chat user needn't hold approve rights).
+                        if take_skip_marker(&ctx, &run_id, &node_id) {
+                            if node.kind == "human_approval" {
+                                states[idx].logs.push(
+                                    "⚠ skip ignored — an approval step must be approved or rejected".into(),
+                                );
+                            } else {
+                                skip_current = true;
+                                break Err(otto_core::Error::Internal("step skipped".into()));
+                            }
                         }
                     }
                     r = &mut fut => break r,
@@ -2167,6 +2385,18 @@ pub async fn run_workflow(
                         max_eff + 1,
                         sleep_ms / 1000
                     ));
+                    // The failed attempt's agent must not stay alive next to the
+                    // retry's fresh one (5 live PTYs per step in a 529 storm; and
+                    // fd exhaustion is itself a retry class). Suspend/kill it the
+                    // way a successful step's session is stopped.
+                    if stop_step_sessions_wanted(&node.kind, &node.params) {
+                        while let Ok(sid) = sess_rx.try_recv() {
+                            record_association(&mut states[idx], sid);
+                        }
+                        for sid in states[idx].sessions.clone() {
+                            stop_step_session(&ctx, &sid, &run_id, &mut retry_logs).await;
+                        }
+                    }
                     // Bail out of the backoff promptly if the run was canceled.
                     if let Ok(r) = repo.get_run(&run_id).await {
                         if r.status == RunStatus::Canceled {
@@ -2179,6 +2409,11 @@ pub async fn run_workflow(
                 }
             }
         };
+        // Time parked waiting for a human is not execution time — it doesn't
+        // count against the run's wall-clock budget.
+        if node.kind == "human_approval" {
+            run_deadline += started.elapsed();
+        }
         // Drain any session ids reported right as the node finished.
         while let Ok(sid) = sess_rx.try_recv() {
             record_association(&mut states[idx], sid);
@@ -2196,7 +2431,18 @@ pub async fn run_workflow(
         // mark it Skipped, and continue to the NEXT node (unlike cancel, the run
         // proceeds). A marker output keeps dependents satisfied — an empty output
         // would make them BranchSkip and cascade the whole tail away.
+        // A marker nobody consumed (the step finished first) dies with the step.
+        take_skip_marker(&ctx, &run_id, &node_id);
         if skip_current {
+            // A skipped review step's fleet is cancelled through the review
+            // engine, like a run cancel does: killing a reviewer's PTY alone
+            // makes its recovery loop respawn it, ownerless.
+            for review_id in states[idx].review_ids.clone() {
+                if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
+                    crate::modules::cancel_running_review(&ctx, &review, &workflow.workspace_id)
+                        .await;
+                }
+            }
             for sid in &states[idx].sessions {
                 if let Err(e) = ctx.manager.kill_session(sid).await {
                     tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
@@ -2204,6 +2450,19 @@ pub async fn run_workflow(
             }
             states[idx].status = NodeStatus::Skipped;
             states[idx].logs.push("⏭ skipped via chat command".into());
+            // A skipped step decided nothing, so none of its CONDITIONAL
+            // out-edges is taken (those branches BranchSkip). Nothing used to be
+            // pruned here — both sides of a branch after a skipped condition /
+            // review ran. Unconditional edges stay live; the marker output below
+            // satisfies those dependents.
+            for e in outgoing_edges(&workflow.graph, &node_id) {
+                if e.condition.is_some() {
+                    inactive_edges.insert(e.id.clone());
+                    states[idx]
+                        .logs
+                        .push(format!("edge → {} not taken (step skipped)", e.target));
+                }
+            }
             cap_node_logs(&mut states[idx].logs, NODE_LOG_CAP);
             states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
             outputs.insert(
@@ -2306,6 +2565,13 @@ pub async fn run_workflow(
                 let mut elogs = std::mem::take(&mut states[idx].logs);
                 elogs.append(&mut retry_logs);
                 elogs.push(format!("✗ {e}"));
+                // A failed step's agent is stopped like a successful one's —
+                // it used to idle at its prompt until the idle sweep found it.
+                if stop_step_sessions_wanted(&node.kind, &node.params) {
+                    for sid in states[idx].sessions.clone() {
+                        stop_step_session(&ctx, &sid, &run_id, &mut elogs).await;
+                    }
+                }
                 // A failed step leaves a trace file too — the error is part of
                 // the handoff trail (a fix step or a human reads what broke).
                 let mut flogs = files.persist_step(
@@ -2362,64 +2628,7 @@ pub async fn run_workflow(
     }
 
     if canceled {
-        // Reviews can outlive an await:false step and spawn sessions after its
-        // polling loop ended. Cancel their work, not only the harvested PTYs.
-        for review_id in states.iter().flat_map(|s| s.review_ids.iter()) {
-            if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
-                crate::modules::cancel_running_review(&ctx, &review, &workflow.workspace_id).await;
-            }
-        }
-        // Stop every agent session this run spawned — a cancel must halt the live
-        // agents (each is a real claude/codex PTY that would otherwise keep working
-        // and burning tokens), not just flip the run row. Includes agent steps AND
-        // review reviewers/summarizer (their ids are harvested into `sessions`).
-        // Best-effort: a failure on one session is logged and never blocks the rest.
-        let session_ids: Vec<Id> = states
-            .iter()
-            .flat_map(|s| s.sessions.iter().cloned())
-            .collect();
-        for sid in session_ids {
-            if let Err(e) = ctx.manager.kill_session(&sid).await {
-                tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
-            }
-        }
-        for s in states.iter_mut() {
-            if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
-                s.status = NodeStatus::Skipped;
-            }
-        }
-        let rev = repo
-            .update_run(
-                &run_id,
-                RunStatus::Canceled,
-                &states,
-                Some("canceled"),
-                true,
-            )
-            .await
-            .unwrap_or(0);
-        deliver_run_result(
-            &ctx,
-            &workflow,
-            &states,
-            RunStatus::Canceled,
-            None,
-            &input,
-            None,
-        )
-        .await;
-        emit_run_updated(
-            &ctx,
-            &workflow.workspace_id,
-            &run_id,
-            "canceled",
-            None,
-            rev,
-            None,
-            &states,
-            false,
-        );
-        reap_run_worktrees(&ctx, &run_id).await;
+        finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
         return;
     }
 
@@ -2434,10 +2643,29 @@ pub async fn run_workflow(
             "run exceeded the {}-hour time limit",
             RUN_WALL_CLOCK_TIMEOUT.as_secs() / 3600
         );
-        let rev = repo
-            .update_run(&run_id, RunStatus::Error, &states, Some(&msg), true)
+        // Terminal writes are CAS on in-flight: a cancel that landed after the
+        // last boundary check wins, and is finalized as a cancel.
+        let rev = match repo
+            .update_run_if(
+                &run_id,
+                &[RunStatus::Pending, RunStatus::Running],
+                RunStatus::Error,
+                &states,
+                Some(&msg),
+                true,
+            )
             .await
-            .unwrap_or(0);
+        {
+            Ok(Some(rev)) => rev,
+            Ok(None) => {
+                finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
+                0
+            }
+        };
         deliver_run_result(
             &ctx,
             &workflow,
@@ -2459,6 +2687,7 @@ pub async fn run_workflow(
             &states,
             false,
         );
+        clear_skip_markers(&ctx, &run_id);
         reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
@@ -2474,10 +2703,29 @@ pub async fn run_workflow(
     } else {
         None
     };
-    let rev = repo
-        .update_run(&run_id, final_status, &states, err_msg.as_deref(), true)
+    let rev = match repo
+        .update_run_if(
+            &run_id,
+            &[RunStatus::Pending, RunStatus::Running],
+            final_status,
+            &states,
+            err_msg.as_deref(),
+            true,
+        )
         .await
-        .unwrap_or(0);
+    {
+        Ok(Some(rev)) => rev,
+        // Canceled after the last node boundary: the cancel wins (it used to
+        // be silently overwritten with success).
+        Ok(None) => {
+            finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
+            0
+        }
+    };
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
@@ -2519,7 +2767,89 @@ pub async fn run_workflow(
     );
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
+    clear_skip_markers(&ctx, &run_id);
     reap_run_worktrees(&ctx, &run_id).await;
+    // Reap earlier runs whose worktrees were kept for a reopenable session
+    // that has since gone (or aged past the reopen TTL).
+    sweep_stale_run_worktrees(&ctx).await;
+}
+
+/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
+/// every session it spawned, mark unfinished steps skipped, write the
+/// `canceled` terminal state (CAS — it never overwrites a run that settled
+/// otherwise), report back and reap the worktrees. Shared by the in-loop
+/// cancel, a cancel that landed during startup, and one that landed after the
+/// last node boundary (the success/error CAS lost).
+async fn finalize_canceled_run(
+    ctx: &ServerCtx,
+    repo: &WorkflowsRepo,
+    workflow: &Workflow,
+    run_id: &Id,
+    states: &mut [NodeRunState],
+    input: &Value,
+) {
+    // Reviews can outlive an await:false step and spawn sessions after its
+    // polling loop ended. Cancel their work, not only the harvested PTYs.
+    for review_id in states.iter().flat_map(|s| s.review_ids.iter()) {
+        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+            crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
+        }
+    }
+    // Stop every agent session this run spawned — a cancel must halt the live
+    // agents (each is a real claude/codex PTY that would otherwise keep working
+    // and burning tokens), not just flip the run row. Includes agent steps AND
+    // review reviewers/summarizer (their ids are harvested into `sessions`).
+    // Best-effort: a failure on one session is logged and never blocks the rest.
+    let session_ids: Vec<Id> = states
+        .iter()
+        .flat_map(|s| s.sessions.iter().cloned())
+        .collect();
+    for sid in session_ids {
+        if let Err(e) = ctx.manager.kill_session(&sid).await {
+            tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
+        }
+    }
+    for s in states.iter_mut() {
+        if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
+            s.status = NodeStatus::Skipped;
+        }
+    }
+    let rev = repo
+        .update_run_if(
+            run_id,
+            &[RunStatus::Pending, RunStatus::Running, RunStatus::Canceled],
+            RunStatus::Canceled,
+            states,
+            Some("canceled"),
+            true,
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    deliver_run_result(
+        ctx,
+        workflow,
+        states,
+        RunStatus::Canceled,
+        None,
+        input,
+        None,
+    )
+    .await;
+    emit_run_updated(
+        ctx,
+        &workflow.workspace_id,
+        run_id,
+        "canceled",
+        None,
+        rev,
+        None,
+        states,
+        false,
+    );
+    clear_skip_markers(ctx, run_id);
+    reap_run_worktrees(ctx, run_id).await;
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -3250,9 +3580,9 @@ async fn execute_node(
             otto_netguard::check_url(url)
                 .await
                 .map_err(otto_core::Error::Upstream)?;
-            let client = reqwest::Client::builder()
+            // Guarded resolver pins the vetted address (no DNS rebinding).
+            let client = otto_netguard::guarded_client_builder()
                 .timeout(Duration::from_secs(30))
-                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), url);
@@ -3757,7 +4087,10 @@ async fn execute_node(
                 .unwrap_or(86_400)
                 .max(60);
             let deadline = Instant::now() + Duration::from_secs(timeout_s);
-            loop {
+            // A parked run hands its run-gate slot back while a human decides
+            // (up to 24h) and re-takes it — FIFO — once decided.
+            let released = release_run_permit();
+            let decision = loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if Instant::now() >= deadline {
                     // Clear the pause flag before erroring so the run doesn't
@@ -3767,22 +4100,29 @@ async fn execute_node(
                             .bind(run_id)
                             .execute(pool)
                             .await;
-                    return Err(otto_core::Error::Upstream(
+                    break Err(otto_core::Error::Upstream(
                         "human_approval: timed out waiting for operator decision".into(),
                     ));
                 }
                 // Read the current state of the run row.
-                let row = sqlx::query(
+                let row = match sqlx::query(
                     "SELECT waiting_approval, approved_by, approval_note
                      FROM workflow_runs WHERE id = ?",
                 )
                 .bind(run_id)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| otto_core::Error::Internal(format!("human_approval poll: {e}")))?;
+                {
+                    Ok(row) => row,
+                    Err(e) => {
+                        break Err(otto_core::Error::Internal(format!(
+                            "human_approval poll: {e}"
+                        )))
+                    }
+                };
 
                 let Some(row) = row else {
-                    return Err(otto_core::Error::Internal(
+                    break Err(otto_core::Error::Internal(
                         "human_approval: run row disappeared".into(),
                     ));
                 };
@@ -3800,13 +4140,13 @@ async fn execute_node(
                     // the `approved_at` column for the "approved" path.
                     match approved_by {
                         None => {
-                            return Err(otto_core::Error::Upstream(format!(
+                            break Err(otto_core::Error::Upstream(format!(
                                 "human_approval: rejected — {}",
                                 note.as_deref().unwrap_or("no note")
                             )));
                         }
                         Some(by) => {
-                            return Ok((
+                            break Ok((
                                 json!({
                                     "approved": true,
                                     "approved_by": by,
@@ -3818,7 +4158,9 @@ async fn execute_node(
                         }
                     }
                 }
-            }
+            };
+            reacquire_run_permit(released).await;
+            decision
         }
 
         // --- Swarm Task (wired) ---------------------------------------------
@@ -3936,9 +4278,9 @@ async fn execute_node(
             otto_netguard::check_url(&url)
                 .await
                 .map_err(otto_core::Error::Upstream)?;
-            let client = reqwest::Client::builder()
+            // Guarded resolver pins the vetted address (no DNS rebinding).
+            let client = otto_netguard::guarded_client_builder()
                 .timeout(Duration::from_secs(30))
-                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
@@ -4791,13 +5133,22 @@ async fn execute_node(
                         }
                         if let Ok(rr) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
                             if rr.status == RunStatus::Canceled {
-                                status = "cancelled".into();
-                                break;
+                                // Stop HERE: breaking out went on to the goals
+                                // agent / the next target's review before the
+                                // engine's cancel poll dropped this future, and a
+                                // review started in that gap was never cancelled.
+                                return Err(otto_core::Error::Internal("run canceled".into()));
                             }
                         }
                         if Instant::now() >= deadline {
                             status = "timeout".into();
                             logs.push(format!("review_run{tag}: timed out waiting for review"));
+                            // Don't abandon it running: inside a fix/review loop
+                            // the next iteration would start a second fleet on the
+                            // same worktree next to it.
+                            if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
+                                crate::modules::cancel_running_review(ctx, &review, &ws.id).await;
+                            }
                             break;
                         }
                     }
@@ -6863,15 +7214,22 @@ fn normalize_prompt(input: Value) -> Value {
 /// SAFETY (load-bearing): this only ever CREATES a new linked worktree + a fresh
 /// `otto-wf/<run_id>` branch under the data dir. It never checks out, resets, or
 /// switches branches in the user's own repo, never deletes, never fetches or
-/// forces. `rev-parse` (read-only) resolves the base; if the base ref is absent
-/// or the worktree can't be created, it logs and leaves the entry untouched, so
-/// the run still proceeds on the given working copy. No-op when no `base` is set.
+/// forces. `rev-parse` (read-only) resolves the base — the local branch, else
+/// its remote-tracking `origin/<base>` (a repo that only has `origin/develop`
+/// used to fall through here). No-op when no `base` is set.
+///
+/// Returns `(primary, isolation_failures)`. A failure is an entry that WOULD
+/// run in the user's own checkout because its base could not be resolved or
+/// its worktree could not be created: the caller fails the run with those
+/// messages rather than silently letting agents edit/commit in the user's
+/// working copy (seen for `koala-zenith-go`: base `develop` only on origin).
 async fn provision_wf_worktrees(
     ctx: &ServerCtx,
     run_id: &Id,
     entries: &mut [crate::workflow_context::RepoEntry],
-) -> Option<String> {
+) -> (Option<String>, Vec<String>) {
     let mut primary: Option<String> = None;
+    let mut failures: Vec<String> = Vec::new();
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
     for e in entries.iter_mut() {
         if e.error.is_some() {
@@ -6896,15 +7254,16 @@ async fn provision_wf_worktrees(
         }
         let git = otto_git::LocalGit::new(&repo.path);
         // READ-ONLY: resolve the base branch to a commit in the user's repo.
-        let base_commit = match git.rev_parse(&base).await {
-            Ok(c) => c,
-            Err(_) => {
-                tracing::warn!(
-                    "wf worktree: base '{base}' not found in {} — using the given checkout",
-                    repo.path
-                );
-                continue;
-            }
+        let Some(base_commit) = resolve_wf_base(&git, &base).await else {
+            tracing::warn!(
+                "wf worktree: base '{base}' not found in {} (locally or as origin/{base}) — refusing to run in the user's checkout",
+                repo.path
+            );
+            failures.push(format!(
+                "base branch '{base}' was not found in {} (neither locally nor as origin/{base}) — fetch it or fix the run's base",
+                repo.name
+            ));
+            continue;
         };
         let wt_path = ctx
             .data_dir
@@ -6926,13 +7285,26 @@ async fn provision_wf_worktrees(
             }
             Err(err) => {
                 tracing::warn!(
-                    "wf worktree provision failed for {} @ {base}: {err} — using the given checkout",
+                    "wf worktree provision failed for {} @ {base}: {err} — refusing to run in the user's checkout",
                     repo.name
                 );
+                failures.push(format!(
+                    "could not create an isolated worktree of {} @ {base}: {err}",
+                    repo.name
+                ));
             }
         }
     }
-    primary
+    (primary, failures)
+}
+
+/// Resolve a run's declared base to a commit: the ref as given (a local
+/// branch, tag or sha), else the remote-tracking `origin/<base>`. Read-only.
+async fn resolve_wf_base(git: &otto_git::LocalGit, base: &str) -> Option<String> {
+    if let Ok(c) = git.rev_parse(base).await {
+        return Some(c);
+    }
+    git.rev_parse(&format!("origin/{base}")).await.ok()
 }
 
 /// Reap the worktrees a run provisioned under
@@ -6951,12 +7323,27 @@ async fn provision_wf_worktrees(
 /// a failed run's reap destroyed an implement step's uncommitted test suite —
 /// the branch policy alone protects only what was committed). If that sweep
 /// fails, the worktree directory is kept rather than destroyed.
+///
+/// Reopen policy: while a step session whose cwd is one of these worktrees can
+/// still be reopened, the worktrees stay ([`run_worktrees_in_use`]) — "Open
+/// session" on a finished step resumes the agent IN its worktree, and reaping
+/// it under the session re-created an empty non-git dir that the next
+/// startup sweep then deleted with whatever the user did there. Deferred
+/// runs are reaped by the next sweep once their sessions are gone (or the
+/// reopen TTL has passed).
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return, // nothing provisioned
     };
+    if run_worktrees_in_use(ctx, run_id, &dir).await {
+        tracing::info!(
+            "wf reap: keeping {} — a step session there can still be reopened",
+            dir.display()
+        );
+        return;
+    }
     let branch = format!("otto-wf/{run_id}");
     let mut kept_any = false;
     for entry in entries.flatten() {
@@ -6967,14 +7354,20 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         let wt_str = wt.to_string_lossy().to_string();
         // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
         let wt_git = otto_git::LocalGit::new(&wt_str);
+        // Not (or no longer) a readable git worktree: its content can't be
+        // swept into a commit, so the directory cleanup below must not
+        // bulldoze it either.
         let Ok(common) = wt_git
             .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .await
         else {
+            tracing::warn!("wf reap: {wt_str} is not a readable git worktree — keeping it");
+            kept_any = true;
             continue;
         };
         let common = common.trim();
         let Some(root) = std::path::Path::new(common).parent() else {
+            kept_any = true;
             continue;
         };
         match wt_git
@@ -7033,6 +7426,12 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
 /// from ottod startup after [`reconcile_interrupted_runs`] — runs it chose to
 /// resume are `pending` again by then, so their worktrees survive.
 pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
+    // One sweep at a time: it also runs at every run end (deferred reaps), and
+    // two sweeps committing/removing the same worktree would race.
+    static SWEEP: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let Ok(_sweeping) = SWEEP.get_or_init(|| tokio::sync::Mutex::new(())).try_lock() else {
+        return;
+    };
     let base = ctx.data_dir.join("workflow-runs");
     let entries = match std::fs::read_dir(&base) {
         Ok(e) => e,
@@ -7057,6 +7456,47 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
         }
         reap_run_worktrees(ctx, &run_id).await;
     }
+}
+
+/// How long a FINISHED run's worktrees outlive it while one of its step
+/// sessions is still reopenable (suspended). A LIVE session — a
+/// `keep_session: true` step, or one still at its prompt — holds them for as
+/// long as it lives.
+const RUN_WORKTREE_REOPEN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether any step session of `run_id` still works in (or can be reopened
+/// in) the run's worktree dir `dir`: a live session always holds it, a
+/// suspended (`reconnectable`) one within [`RUN_WORKTREE_REOPEN_TTL`] of the
+/// run's end. Sessions elsewhere (review fleets, interactive ones) never hold.
+async fn run_worktrees_in_use(ctx: &ServerCtx, run_id: &str, dir: &std::path::Path) -> bool {
+    use otto_core::domain::SessionStatus;
+    let Ok(run) = WorkflowsRepo::new(ctx.pool.clone())
+        .get_run(&run_id.to_string())
+        .await
+    else {
+        return false;
+    };
+    let ttl = chrono::Duration::from_std(RUN_WORKTREE_REOPEN_TTL)
+        .unwrap_or_else(|_| chrono::Duration::hours(24));
+    let reopen_window = run.finished_at.is_none_or(|f| chrono::Utc::now() - f < ttl);
+    for sid in run.nodes.iter().flat_map(|n| n.sessions.iter()) {
+        let Ok(s) = ctx.manager.get(sid).await else {
+            continue;
+        };
+        if !std::path::Path::new(&s.cwd).starts_with(dir) {
+            continue;
+        }
+        match s.status {
+            SessionStatus::Exited => {}
+            SessionStatus::Reconnectable => {
+                if reopen_window {
+                    return true;
+                }
+            }
+            SessionStatus::Running | SessionStatus::Working | SessionStatus::Idle => return true,
+        }
+    }
+    false
 }
 
 async fn resolve_repo_entries(
@@ -7715,6 +8155,65 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    /// A STALE approval flag (the run had moved past its gate) must not mask
+    /// a side-effect step caught mid-flight: that step's outcome is unknown,
+    /// so the run fails instead of replaying it as a "resumable approval".
+    #[test]
+    fn classify_resume_stale_approval_flag_never_masks_a_side_effect_step() {
+        let g = WorkflowGraph {
+            nodes: vec![
+                node("gate", "human_approval"),
+                node("pr", "git_pr"),
+                node("c", "log"),
+            ],
+            edges: vec![edge("gate", "pr"), edge("pr", "c")],
+        };
+        let mut run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("gate", NodeStatus::Success),
+                nstate("pr", NodeStatus::Running),
+                nstate("c", NodeStatus::Pending),
+            ],
+        );
+        run.waiting_approval = true;
+        run.approval_node_id = Some("gate".into());
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Fail { nodes, error } => {
+                assert!(error.contains("'pr'"), "{error}");
+                assert_eq!(nodes[1].status, NodeStatus::Error);
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settle_interrupted_nodes_leaves_nothing_running() {
+        let nodes = settle_interrupted_nodes(vec![
+            nstate("a", NodeStatus::Success),
+            nstate("b", NodeStatus::Running),
+            nstate("c", NodeStatus::Pending),
+            nstate("d", NodeStatus::Error),
+        ]);
+        let st: Vec<NodeStatus> = nodes.iter().map(|n| n.status).collect();
+        assert_eq!(
+            st,
+            vec![
+                NodeStatus::Success,
+                NodeStatus::Error,
+                NodeStatus::Skipped,
+                NodeStatus::Error
+            ]
+        );
+        assert!(nodes[1].error.as_deref().unwrap().contains("interrupted"));
+    }
+
+    #[test]
+    fn skip_marker_key_is_per_run_and_step() {
+        assert_eq!(skip_marker_key("r1", "n2"), "r1/n2");
+        assert_ne!(skip_marker_key("r1", "n2"), skip_marker_key("r1", "n3"));
     }
 
     /// A re-queued retry-a-step (pending with progress) resumes its PERSISTED

@@ -16,6 +16,9 @@ pub fn canned_reply(prompt: &str) -> String {
     if prompt.contains("OTTO_TASK: mockup_assist") {
         return mockup_assist_reply(prompt);
     }
+    if prompt.contains("OTTO_TASK: design_assist") {
+        return design_assist_reply(prompt);
+    }
     if prompt.contains("OTTO_TASK: db_assist") {
         return db_assist_reply();
     }
@@ -89,6 +92,43 @@ fn db_assist_reply() -> String {
     "Grouped player counts by brand.\n\n```sql\nSELECT brand_id, COUNT(*) AS players \
      FROM player_details GROUP BY brand_id ORDER BY players DESC\n```"
         .to_string()
+}
+
+/// E2E stub for the unified Design Hall assist turn (`design_assist.rs`). The
+/// handler prefers the agent's in-place file edit and falls back to a fenced
+/// block in the reply, so offline we answer with a fence for the file the
+/// prompt names (the marker `E2E design`). A critique turn edits nothing. When
+/// the prompt offered a reference (a `[R1] …` line), the summary cites it as
+/// `[R1]` so the citation-verification path is exercised end to end.
+fn design_assist_reply(prompt: &str) -> String {
+    // The prompt lists offered references one per line (`[R1] <title> …`).
+    let cite = if prompt.contains("\n[R1] ") {
+        " (layout rhythm from [R1])"
+    } else {
+        ""
+    };
+    if prompt.contains("MODE: critique") {
+        return format!("Top finding: the primary action lacks contrast{cite}.");
+    }
+    if prompt.contains("`design.html`") {
+        return format!(
+            "Built the screen{cite}.\n\n```html\n<!doctype html><html><head><meta charset=\"utf-8\">\
+<title>E2E design</title></head><body><h1>E2E design</h1><p>Drawn by the offline stub.</p>\
+</body></html>\n```"
+        );
+    }
+    if prompt.contains("`design.mmd`") || prompt.contains("`source.mmd`") {
+        return format!(
+            "Drew the flow{cite}.\n\n```mermaid\nflowchart TD\n  A[E2E design] --> B[Done]\n```"
+        );
+    }
+    if prompt.contains("`scene.json`") {
+        return format!(
+            "Blocked out the scene{cite}.\n\n```json\n{{\"type\":\"otto-scene3d\",\"version\":1,\
+\"objects\":[{{\"id\":\"e2e_box\",\"type\":\"box\",\"name\":\"E2E design\"}}],\"lights\":[],\"groups\":[]}}\n```"
+        );
+    }
+    format!("No change{cite}.")
 }
 
 fn mockup_assist_reply(prompt: &str) -> String {
@@ -217,6 +257,18 @@ mod tests {
         let st = canned_reply("OTTO_TASK: scheduled_task run the job");
         assert!(st.contains("Reviewed:") && st.contains("\n---\n"));
         assert_eq!(canned_reply("no sentinel"), "OK");
+    }
+
+    #[test]
+    fn design_assist_reply_follows_the_named_file() {
+        let h = canned_reply("OTTO_TASK: design_assist edit `design.html`\n[R1] Hero (site)\n");
+        assert!(h.contains("```html") && h.contains("E2E design") && h.contains("[R1]"));
+        let m = canned_reply("OTTO_TASK: design_assist edit `source.mmd`");
+        assert!(m.contains("```mermaid") && !m.contains("[R1]"));
+        let s = canned_reply("OTTO_TASK: design_assist edit `scene.json`");
+        assert!(s.contains("\"otto-scene3d\""));
+        let c = canned_reply("OTTO_TASK: design_assist MODE: critique `design.html`");
+        assert!(!c.contains("```"));
     }
 
     #[test]

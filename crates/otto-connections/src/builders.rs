@@ -53,6 +53,19 @@ fn opt_port(params: &Value, key: &str, kind: &str) -> Result<Option<u16>> {
     }
 }
 
+/// Refuse a profile value that `ssh` could read as an OPTION rather than a
+/// host / user: a leading `-`, or whitespace / control characters that would
+/// split or smuggle an argument. Profiles can be imported from third-party
+/// connection files, so these values are not trusted just for being saved.
+fn reject_option_like(kind: &str, key: &str, value: &str) -> Result<()> {
+    if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Error::Invalid(format!(
+            "{kind}: param '{key}' must not start with '-' or contain whitespace"
+        )));
+    }
+    Ok(())
+}
+
 /// If `jump` is set for a non-SSH kind, wrap the given local command spec to
 /// run via `ssh -t [-i identity] <jump> -- <program> <args…>`.
 fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Result<CommandSpec> {
@@ -60,6 +73,7 @@ fn maybe_wrap_ssh_tunnel(p: &Value, spec: CommandSpec, kind_name: &str) -> Resul
         Some(j) => j,
         None => return Ok(spec),
     };
+    reject_option_like(kind_name, "jump", jump)?;
     // Build: ssh -t -o StrictHostKeyChecking=accept-new [-i identity] <jump>
     //        -- <original_program> <original_args…>
     // `accept-new` trusts a first-time bastion on first connect (recording its
@@ -98,6 +112,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 Some(h) => h,
                 None => return Ok((login_shell(), false)),
             };
+            reject_option_like("ssh", "host", host)?;
             // Trust a first-time host on first connect (adds its key to
             // known_hosts), matching what a user does by answering "yes" to the
             // authenticity prompt; a *changed* known key is still refused.
@@ -114,13 +129,19 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 args.push(port.to_string());
             }
             if let Some(jump) = opt_str(p, "jump") {
+                reject_option_like("ssh", "jump", jump)?;
                 args.push("-J".into());
                 args.push(jump.into());
             }
             let target = match opt_str(p, "user") {
-                Some(user) => format!("{user}@{host}"),
+                Some(user) => {
+                    reject_option_like("ssh", "user", user)?;
+                    format!("{user}@{host}")
+                }
                 None => host.to_string(),
             };
+            // `--` ends option parsing: the destination is never an option.
+            args.push("--".into());
             args.push(target);
             Ok((
                 CommandSpec {
@@ -376,7 +397,16 @@ pub fn validate_params(kind: ConnectionKind, params: &Value, _has_secret: bool) 
     // secret and returns the clear "references {secret} but no secret is stored"
     // error if it is still missing.
     let secret = Some("x");
-    build_command(&conn, secret).map(|_| ())
+    build_command(&conn, secret).map(|_| ())?;
+    // A DB profile's SSH tunnel (`params.ssh`, opened by the Database Explorer
+    // / Kafka viewer): refuse a host or user ssh could read as an option now,
+    // not only when the tunnel is first opened.
+    if let Some(ssh) = params.get("ssh").filter(|v| !v.is_null()) {
+        let tunnel: otto_ssh::SshTunnelConfig = serde_json::from_value(ssh.clone())
+            .map_err(|e| Error::Invalid(format!("invalid ssh config: {e}")))?;
+        tunnel.validate()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -423,11 +453,55 @@ mod tests {
                 "2222",
                 "-J",
                 "bastion.example.com",
+                "--",
                 "deploy@db.example.com"
             ]
         );
         assert!(!warn);
         assert!(spec.env.is_empty());
+    }
+
+    /// A profile value (possibly imported) can never reach ssh's argv as an
+    /// option — neither the terminal's host/user/jump nor a DB tunnel's.
+    #[test]
+    fn option_like_ssh_values_are_refused() {
+        for params in [
+            json!({"host":"-oProxyCommand=x"}),
+            json!({"host":"h1","user":"-oProxyCommand=x"}),
+            json!({"host":"h1","jump":"-oProxyCommand=x"}),
+            json!({"host":"h 1"}),
+        ] {
+            assert!(
+                build_command(&conn(ConnectionKind::Ssh, params.clone()), None).is_err(),
+                "{params}"
+            );
+        }
+        assert!(build_command(
+            &conn(
+                ConnectionKind::Mysql,
+                json!({"host":"db","jump":"-oProxyCommand=x"})
+            ),
+            None
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"-oProxyCommand=x"}}),
+            false
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"bastion","user":"-l"}}),
+            false
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"bastion.internal","user":"ec2-user"}}),
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -436,7 +510,7 @@ mod tests {
         let (spec, _) = build_command(&c, None).unwrap();
         assert_eq!(
             spec.args,
-            vec!["-o", "StrictHostKeyChecking=accept-new", "h1"]
+            vec!["-o", "StrictHostKeyChecking=accept-new", "--", "h1"]
         );
 
         // No host: we don't validate — fall back to a login shell so a

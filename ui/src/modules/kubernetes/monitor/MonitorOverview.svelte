@@ -10,9 +10,12 @@
   import { k8sApi } from '../../../lib/api/k8s';
   import type { K8sMonitorOverviewRow } from '../../../lib/api/types';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import PageHeader from '../../../lib/components/PageHeader.svelte';
+  import PageBody from '../../../lib/components/PageBody.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { envBadge, formatBytes } from '../k8s-util';
+  import { formatBytes } from '../k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, classColor, classLabel, collectorLine, fmtPct, fmtRate, healthLabel, isWindow, rbacMessage } from './monitor-util';
 
   let window = $state<(typeof WINDOWS)[number]>('24h');
@@ -78,25 +81,24 @@
   const CLASSES = ['oom', 'crash', 'probe', 'unknown'] as const;
 </script>
 
-<div class="page" data-testid="k8s-monitor-overview">
-  <div class="page-header">
-    <div>
-      <h1>
-        <button class="crumb" onclick={() => router.go('kubernetes')}>Kubernetes</button>
-        <span class="sep">/</span> Monitor
-      </h1>
-      <div class="sub">Pod-level metrics from your services' own endpoints, restart classification and a health digest per cluster.</div>
+<div class="mon-ov" data-testid="k8s-monitor-overview">
+<PageHeader
+  title="Monitor"
+  crumbs={[{ label: 'Kubernetes', onclick: () => router.go('kubernetes') }]}
+  subtitle="Pod-level metrics from your services' own endpoints, restart classification and a health digest per cluster."
+>
+  {#snippet actions()}
+    <div class="seg" role="radiogroup" aria-label="Window" data-keep>
+      {#each WINDOWS as w (w)}
+        <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+      {/each}
     </div>
-    <div class="actions">
-      <div class="seg" role="radiogroup" aria-label="Window">
-        {#each WINDOWS as w (w)}
-          <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
-        {/each}
-      </div>
-      <button class="btn small" onclick={() => router.go('kubernetes/monitor/fleet')} title="One dashboard over every cluster — restarts, memory, req/s, latency — read from ClickHouse only" data-testid="k8s-monitor-fleet-link"><Icon name="chart" size={12} /> Fleet dashboard</button>
-      <button class="btn ghost" onclick={() => void load()} title="Refresh" aria-label="Refresh overview"><Icon name="refresh" size={14} /></button>
-    </div>
-  </div>
+    <button class="btn small" onclick={() => router.go('kubernetes/monitor/fleet')} title="One dashboard over every cluster — restarts, memory, req/s, latency — read from ClickHouse only" data-testid="k8s-monitor-fleet-link"><Icon name="chart" size={12} /> Fleet dashboard</button>
+    <button class="icon-btn" onclick={() => void load()} title="Refresh" aria-label="Refresh overview"><Icon name="refresh" size={14} /></button>
+  {/snippet}
+</PageHeader>
+<PageBody>
+<div class="mon-ov-body">
 
   {#if loading && !rows.length}
     <div class="grid"><Skeleton rows={3} height={140} /></div>
@@ -114,7 +116,7 @@
           <div class="row1">
             <span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span>
             <span class="name">{r.cluster.name}</span>
-            <span class="env-badge" class:prod={r.cluster.environment === 'prod'}>{envBadge(r.cluster.environment)}</span>
+            <EnvBadge env={r.cluster.environment} />
             <span class="health {h.cls}" data-testid="k8s-monitor-health">{h.label}</span>
           </div>
 
@@ -196,27 +198,15 @@
     </div>
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
-  .crumb {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--text-dim);
-    font: inherit;
-    cursor: pointer;
-  }
-  .crumb:hover {
-    color: var(--accent);
-  }
-  .sep {
-    color: var(--text-dim);
-    margin: 0 4px;
-  }
-  .actions {
+  .mon-ov {
     display: flex;
-    gap: 8px;
-    align-items: center;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .seg {
     display: inline-flex;
@@ -279,23 +269,9 @@
     flex: 1;
     min-width: 0;
   }
-  .env-badge {
-    flex-shrink: 0;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-  }
   .health {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -334,7 +310,7 @@
     min-width: 0;
   }
   .k {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -410,7 +386,7 @@
   }
   .rbac code {
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: pre-wrap;
     word-break: break-word;
     user-select: all;

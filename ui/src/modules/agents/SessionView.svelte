@@ -3,7 +3,9 @@
   // One pane: session header (status, provider, restart/kill) + terminal.
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import { events } from '../../lib/events.svelte';
+  import { sessionState } from '../../lib/status';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import SessionNetworkStatus from '../connections/SessionNetworkStatus.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
@@ -17,6 +19,7 @@
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { popoutItems } from '../../lib/popoutMenu';
   import { now } from '../../lib/stores/now.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -96,6 +99,9 @@
   // Sticky "needs you" flag — the session is blocked on operator input. Distinct
   // from plain idle; cleared by the store when the user opens/inputs.
   const needsYou = $derived(ws.needsYou[sessionId] === true);
+  /** The one shared session state (lib/status.ts) — a suspended session reads
+   *  "Suspended", not a red "exited"; stale while the events socket is down. */
+  const paneState = $derived(sessionState(session, status, needsYou, { stale: events.state !== 'connected' }));
   /** True when this agent session can be resumed after exiting. */
   const resumable = $derived(
     session?.kind === 'agent' && session?.provider_session_id != null,
@@ -278,7 +284,7 @@
     const i = order.indexOf(effView);
     setView(order[(i + 1) % order.length]);
   }
-  const VIEW_META: [SessionViewMode, string, string][] = [
+  const VIEW_META: [SessionViewMode, string, IconName][] = [
     ['terminal', 'Terminal', 'terminal'],
     ['chat', 'Chat', 'comment'],
     ['split', 'Split', 'split'],
@@ -288,7 +294,8 @@
    *  button's own menu. Split is offered on the same rule as the inline tab. */
   function viewRows(prefixed: boolean): MenuItem[] {
     return VIEW_META.filter(([m]) => m !== 'split' || wide).map(([m, label, icon]) => ({
-      label: prefixed ? `View: ${label}${effView === m ? ' ✓' : ''}` : `${effView === m ? '✓ ' : ''}${label}`,
+      label: prefixed ? `View: ${label}` : label,
+      checked: effView === m,
       icon,
       action: () => setView(m),
     }));
@@ -421,6 +428,16 @@
   }
 
   async function restart(): Promise<void> {
+    // Restart kills the live process and respawns it — a working agent loses
+    // its in-flight turn, so that one case asks first (idle/exited don't).
+    if (status === 'working') {
+      const name = session?.title?.trim() || 'this session';
+      const ok = await confirmer.ask(
+        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
+        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
+      );
+      if (!ok) return;
+    }
     try {
       await ws.restartSession(sessionId);
       // Nudge the embedded Terminal to drop its exited overlay and reconnect to
@@ -450,15 +467,13 @@
     }
   }
 
-  // "Always delete" (Settings → Appearance) is the answer to this confirm
-  // already, so it skips the dialog — same as the tab ×.
+  // Always asked — even under "Always delete" (Settings → Appearance), same as
+  // the tab ×: a remembered preference never skips an irreversible delete.
   async function del(): Promise<void> {
-    const ok =
-      ui.closeTabPref === 'delete' ||
-      (await confirmer.ask(
-        'Delete this session and its entire history? This cannot be undone.',
-        { title: 'Delete session', confirmLabel: 'Delete' },
-      ));
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
     if (!ok) return;
     try {
       await ws.killSession(sessionId);
@@ -566,6 +581,7 @@
       ...(tier >= 7
         ? [{ label: session?.title ?? sessionId, disabled: true } as MenuItem, { separator: true } as MenuItem]
         : []),
+      ...popoutItems(`agents/${sessionId}`, session?.title),
       // Editing rows are hidden from viewers (the ⋯ button itself only appears
       // for a viewer once a tier has folded something into it).
       ...(readOnly
@@ -642,7 +658,7 @@
     bind:this={headEl}
     bind:clientWidth={headW}
   >
-    <StatusDot {status} {needsYou} />
+    <StatusDot state={paneState} />
     {#if renaming}
       <!-- svelte-ignore a11y_autofocus -->
       <input
@@ -698,10 +714,12 @@
     {#if typeof session?.meta?.account_label === 'string'}
       <span class="chip" title="Subscription account pinned to this session">{session.meta.account_label}</span>
     {/if}
-    {#if needsYou}
+    {#if paneState.key === 'needs-you'}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
-        <Icon name="bell" size={10} /> Needs you
+        <Icon name="bell" size={11} /> Needs you
       </span>
+    {:else if paneState.key === 'suspended' || paneState.key === 'stale'}
+      <span class="state-note" title={paneState.hint}>{paneState.label}</span>
     {/if}
     {#if summary && summary.total > 0}
       <span
@@ -778,12 +796,13 @@
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.toggleMaximize(sessionId)}
         title={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
+        aria-label={maximized ? 'Restore tiled view' : 'Zoom in on this session'}
       >
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
     {/if}
     {#if !readOnly && isAgent && tier < 5}
-      <button class="icon-btn" onclick={restart} title="Restart session"><Icon name="refresh" size={13} /></button>
+      <button class="icon-btn" onclick={restart} title={status === 'working' ? 'Restart session (asks first — it is working)' : 'Restart session'} aria-label="Restart session"><Icon name="refresh" size={13} /></button>
     {/if}
     {#if !readOnly || tier >= 4}
       <!-- The overflow menu. `title="More…"` is a pinned selector; the title
@@ -917,7 +936,7 @@
   }
   .pane-fullname {
     font-size: 11px;
-    color: var(--text-muted, var(--muted));
+    color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -934,9 +953,7 @@
   }
   .provider-chip {
     height: 16px;
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    font-size: var(--fs-xs);
   }
   /* "Needs you" — session blocked on operator input. Amber, attention-grabbing
      but tasteful; distinct from the (calmer) status dot for idle/working. */
@@ -945,44 +962,50 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    height: 16px;
-    padding: 0 6px;
+    height: 18px;
+    padding: 0 7px;
     border-radius: 99px;
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 16%, transparent);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--warning);
+    background: var(--warning-soft);
+    white-space: nowrap;
+  }
+  /* Quiet state word next to the dot for the states a dot alone can't say
+     (suspended, reconnecting). */
+  .state-note {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     white-space: nowrap;
   }
   /* Per-session task roll-up "done/total" — matches the sidebar chip. */
   .task-chip {
     flex-shrink: 0;
     padding: 0 5px;
-    height: 15px;
-    line-height: 15px;
+    height: 16px;
+    line-height: 16px;
     border-radius: 999px;
-    font-size: 9px;
-    font-weight: 700;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    background: var(--surface-2);
   }
   .task-chip.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .task-chip.done {
-    color: var(--status-working, #3fb950);
-    background: color-mix(in srgb, var(--status-working, #3fb950) 16%, transparent);
+    color: var(--success);
+    background: var(--success-soft);
   }
   /* "now: «task»" — what the agent is doing this moment. Truncates so it never
      pushes the header controls off-screen in a narrow tile. */
   .now-task {
     min-width: 0;
     flex: 0 1 auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -997,7 +1020,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 99px;
     cursor: pointer;
@@ -1008,8 +1031,8 @@
   }
   .handover-pending {
     flex-shrink: 0;
-    font-size: 10.5px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 1px 7px;
     border-radius: 99px;
@@ -1020,7 +1043,7 @@
   .idle-hint {
     flex-shrink: 1;
     min-width: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -1028,7 +1051,7 @@
     opacity: 0.75;
   }
   .pane-cwd {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -1072,7 +1095,7 @@
   }
   .view-seg > button {
     height: 18px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 0 8px;
   }
   /* Tier-5 stand-in for the segmented control: one icon, menu on click. */
@@ -1113,17 +1136,17 @@
     gap: 2px;
   }
   .term-ctl-size {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
     color: var(--text-dim);
     min-width: 30px;
     text-align: center;
   }
   .term-ctl-copy {
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .term-ctl-copy.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
@@ -1159,14 +1182,14 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border-radius: 3px;
     line-height: 1;
   }
   .dir-remove:hover {
-    color: var(--danger, #e5534b);
-    background: color-mix(in srgb, var(--danger, #e5534b) 12%, transparent);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .dir-add {
     display: flex;
@@ -1220,13 +1243,14 @@
   .pane-head.t4 .term-ctl,
   .pane-head.t4 .now-task,
   .pane-head.t4 .idle-hint,
+  .pane-head.t4 .state-note,
   .pane-head.t4 .handover-crumb,
   .pane-head.t4 .handover-pending {
     display: none;
   }
   .pane-head.t4 .view-seg > button {
     padding: 0 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .pane-head.t4 .pane-title {
     max-width: 96px;

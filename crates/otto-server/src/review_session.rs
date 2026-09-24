@@ -42,6 +42,12 @@ pub const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
 /// idles for the whole timeout.
 const PASTE_ECHO_WAIT: Duration = Duration::from_secs(8);
 const PASTE_ECHO_POLL: Duration = Duration::from_millis(250);
+/// Extra time a paste that has not echoed yet gets while the TUI is still
+/// busy drawing (output advanced within [`PASTE_BUSY_QUIET`]). A 46–70 KB
+/// reviewer prompt can take longer than [`PASTE_ECHO_WAIT`] to land, and
+/// re-pasting on top of a slow-but-successful paste submitted it TWICE.
+const PASTE_LATE_WAIT: Duration = Duration::from_secs(20);
+const PASTE_BUSY_QUIET: Duration = Duration::from_millis(1500);
 // After submitting, confirm the agent actually started (output advanced); if
 // not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
 const DISPATCH_WAIT: Duration = Duration::from_secs(6);
@@ -520,6 +526,62 @@ async fn persist_agent<F: FnOnce(&mut ReviewAgentState)>(
     }
 }
 
+/// Union the per-lens files of an orchestrator run into its merged findings.
+/// A lens the merge already carries (by `lens` label) is trusted as merged;
+/// any other lens's file is added, skipping exact duplicates. Returns the
+/// slugs with neither a readable file nor a finding in the merge — lenses that
+/// had not finished when the result was adopted.
+pub(crate) fn merge_lens_files(
+    findings: &mut Vec<ReviewFinding>,
+    lens_files: &[(String, PathBuf)],
+) -> Vec<String> {
+    let same = |a: &ReviewFinding, b: &ReviewFinding| {
+        a.path == b.path && a.line == b.line && a.body.trim() == b.body.trim()
+    };
+    let mut missing = Vec::new();
+    for (slug, path) in lens_files {
+        let merged_has_lens = findings
+            .iter()
+            .any(|f| f.lens.as_deref() == Some(slug.as_str()));
+        if merged_has_lens {
+            continue;
+        }
+        let extra = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| parse_findings_array(&t));
+        match extra {
+            Some(extra) => {
+                for mut f in extra {
+                    if f.lens.is_none() {
+                        f.lens = Some(slug.clone());
+                    }
+                    if !findings.iter().any(|g| same(g, &f)) {
+                        findings.push(f);
+                    }
+                }
+            }
+            None => missing.push(slug.clone()),
+        }
+    }
+    missing
+}
+
+/// The reviewer row's terminal note: `N findings`, or — when lenses were still
+/// running at adoption — a note starting with `partial` (which
+/// `review_run_complete` in `modules.rs` keys on) naming them.
+pub(crate) fn partial_or_count_note(count: usize, missing: &[String]) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    if missing.is_empty() {
+        format!("{count} finding{plural}")
+    } else {
+        format!(
+            "partial — {count} finding{plural}; lens{} not finished: {}",
+            if missing.len() == 1 { "" } else { "es" },
+            missing.join(", ")
+        )
+    }
+}
+
 /// Map a run failure reason to the human note shown on the review agent row.
 fn review_error_note(reason: Option<FailReason>) -> String {
     match reason {
@@ -623,12 +685,32 @@ pub async fn run_agent_session_with_recovery(
 
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
-        let findings = parse_findings(raw);
+        let mut findings = parse_findings(raw);
+        // Orchestrator: top the merged result up from the per-lens files. At
+        // the hold cap the watch adopts the parent's merge while sub-agents are
+        // still running, and the lens files are deleted after the summarizer —
+        // so a lens that finished after the merge was silently lost. Lenses
+        // with neither a file nor a finding in the merge are reported, and the
+        // row is marked `partial` so the run can't resolve their findings.
+        let missing = if lens_slugs.is_empty() {
+            Vec::new()
+        } else {
+            let files: Vec<(String, PathBuf)> = lens_slugs
+                .iter()
+                .map(|slug| {
+                    (
+                        slug.clone(),
+                        lens_findings_path(review_id, agent_index, slug),
+                    )
+                })
+                .collect();
+            merge_lens_files(&mut findings, &files)
+        };
         let count = findings.len();
         let persisted = findings.clone();
         persist_agent(states, reviews, review_id, agent_index, move |s| {
             s.status = "done".into();
-            s.note = format!("{count} finding{}", if count == 1 { "" } else { "s" });
+            s.note = partial_or_count_note(count, &missing);
             s.comment_count = count as u32;
             s.findings = persisted;
         })
@@ -861,8 +943,14 @@ fn paste_probe(prompt: &str) -> String {
     norm.chars().take(40).collect()
 }
 
-/// True once the last screenful contains `probe` (whitespace-normalized) —
-/// i.e. the pasted prompt is really sitting in the input box.
+/// True once the screen contains `probe` (whitespace-normalized) or a paste
+/// placeholder — i.e. the pasted prompt is really sitting in the input box.
+///
+/// Matched against ANSI-FREE text: the emulator's current screen (the vt100
+/// grid — what a user would see) plus the escape-stripped scrollback tail.
+/// Matching the RAW PTY bytes missed pastes whose echo was interleaved with
+/// colour/cursor sequences, and every miss re-pasted a prompt that had in fact
+/// landed — 23 of 201 re-pasted review transcripts held the prompt twice.
 fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str) -> bool {
     if probe.is_empty() {
         return true;
@@ -870,9 +958,23 @@ fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str)
     let Some(h) = manager.live_handle(sid) else {
         return false;
     };
-    let raw = String::from_utf8_lossy(&h.scrollback(200)).into_owned();
-    let norm: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    screen_shows_paste(&norm, probe)
+    let rows = h.screen_rows();
+    let tail = crate::agent_tasks_nudge::strip_ansi(&h.scrollback(200));
+    [rows.join(" "), rows.concat(), tail]
+        .iter()
+        .any(|text| screen_shows_paste(&normalize_ws(text), probe))
+}
+
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// True while the TUI has drawn something within [`PASTE_BUSY_QUIET`] — a
+/// large paste still being ingested/rendered.
+fn tui_busy(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
+    manager
+        .live_handle(sid)
+        .is_some_and(|h| h.last_output_at().elapsed() < PASTE_BUSY_QUIET)
 }
 
 /// The paste counts as echoed when the screen shows the probe text OR a
@@ -903,14 +1005,24 @@ pub async fn submit_prompt(
     }
     let probe = paste_probe(prompt);
     for attempt in 0..2 {
+        if attempt == 1 {
+            // Clear whatever partial line a half-landed paste left, so a
+            // re-paste never concatenates onto it.
+            let _ = manager.input(sid, b"\x15").await;
+            tokio::time::sleep(PASTE_TO_ENTER).await;
+        }
         let _ = manager.input(sid, &bracketed_paste(prompt)).await;
         tokio::time::sleep(PASTE_TO_ENTER).await;
         let deadline = Instant::now() + PASTE_ECHO_WAIT;
+        // Past the base wait, keep waiting (bounded) while the TUI is still
+        // drawing: a big paste that is slow to land is not a lost paste.
+        let late_deadline = deadline + PASTE_LATE_WAIT;
         loop {
             if paste_echoed(manager, sid, &probe) {
                 break;
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= late_deadline || (now >= deadline && !tui_busy(manager, sid)) {
                 break;
             }
             tokio::time::sleep(PASTE_ECHO_POLL).await;
@@ -919,9 +1031,14 @@ pub async fn submit_prompt(
             break;
         }
         if attempt == 0 {
-            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
-            // Let whatever redraw ate the paste finish before trying again.
+            // Let whatever redraw ate the paste finish, then look ONE more
+            // time before re-sending — a paste that landed during the settle
+            // must not be pasted again.
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if paste_echoed(manager, sid, &probe) {
+                break;
+            }
+            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
         }
     }
     let before = manager.live_handle(sid).map(|h| h.last_output_at());
@@ -961,6 +1078,55 @@ mod tests {
         ));
         // An empty input box does not.
         assert!(!screen_shows_paste("› Ask Codex to do anything", probe));
+    }
+
+    #[test]
+    fn late_lens_files_are_merged_and_unfinished_lenses_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = |slug: &str| tmp.path().join(format!("{slug}.json"));
+        // `security` finished after the parent merged; `perf` never finished.
+        std::fs::write(
+            p("security"),
+            r#"[{"path":"a.rs","line":3,"severity":"high","body":"late one"},
+                {"path":"b.rs","line":1,"severity":"low","body":"dup"}]"#,
+        )
+        .unwrap();
+        // `correctness` is already in the merge — its file must not re-add.
+        std::fs::write(
+            p("correctness"),
+            r#"[{"path":"c.rs","line":9,"severity":"high","body":"merged"}]"#,
+        )
+        .unwrap();
+        let mut findings = parse_findings(
+            r#"[{"path":"c.rs","line":9,"severity":"high","body":"merged","lens":"correctness"},
+                {"path":"b.rs","line":1,"severity":"low","body":"dup","lens":"other"}]"#,
+        );
+        let files: Vec<(String, PathBuf)> = ["correctness", "security", "perf"]
+            .iter()
+            .map(|s: &&str| (s.to_string(), p(s)))
+            .collect();
+        let missing = merge_lens_files(&mut findings, &files);
+        assert_eq!(missing, vec!["perf".to_string()]);
+        assert_eq!(findings.len(), 3, "late finding added, duplicate skipped");
+        assert!(findings
+            .iter()
+            .any(|f| f.body == "late one" && f.lens.as_deref() == Some("security")));
+        assert!(partial_or_count_note(3, &missing).starts_with("partial"));
+        assert_eq!(partial_or_count_note(1, &[]), "1 finding");
+    }
+
+    #[test]
+    fn styled_echo_is_detected_once_escapes_are_stripped() {
+        // Raw PTY bytes interleave the echo with SGR/cursor sequences; the
+        // raw-byte match missed it and the prompt was pasted a second time.
+        let probe = "You are a Codex worker on /repo (branch";
+        let raw = b"\x1b[2m> \x1b[22mYou are a\x1b[1C Codex worker\x1b[0m on /repo (branch main)";
+        let plain = crate::agent_tasks_nudge::strip_ansi(raw);
+        assert!(screen_shows_paste(&normalize_ws(&plain), probe));
+        let placeholder = crate::agent_tasks_nudge::strip_ansi(
+            b"\x1b[38;5;246m[Pasted text #1 +812 lines]\x1b[39m",
+        );
+        assert!(screen_shows_paste(&normalize_ws(&placeholder), probe));
     }
 
     #[test]

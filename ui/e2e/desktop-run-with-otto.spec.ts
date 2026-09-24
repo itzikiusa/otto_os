@@ -337,12 +337,14 @@ test.describe('run-with-otto UI', () => {
     // The pipeline rail — the fixed stage machine, incl. the human gate.
     await expect(page.getByText('Approval').first()).toBeVisible();
     await expect(page.getByText('PR draft').first()).toBeVisible();
-    // Repo select lists the seeded repo; Browse… + model input are present.
+    // Repo select lists the seeded repo; Browse… + the model control are
+    // present. The model control is the shared catalog-backed ModelPicker
+    // (label "Model (optional)"), shown for the default provider.
     const repoSel = page.getByLabel('Repository');
     await expect(repoSel).toBeVisible();
     await expect(repoSel.locator('option', { hasText: 'e2e-repo' })).toHaveCount(1);
     await expect(page.getByRole('button', { name: 'Browse…' })).toBeVisible();
-    await expect(page.getByLabel('Model override')).toBeVisible();
+    await expect(page.locator('.model-ctl').getByLabel('Model (optional)')).toBeVisible();
     // The in-product differentiation from Workflows.
     await expect(page.getByRole('link', { name: 'Build a Workflow' })).toBeVisible();
     await expectNoHorizontalOverflow(page);

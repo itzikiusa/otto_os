@@ -4,6 +4,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import type { ProductQuestion, NewQuestionReq, UpdateQuestionReq } from './types';
 
   // ── Load questions when tab becomes active ─────────────────────────────────
@@ -283,7 +284,7 @@
       <!-- Post selected -->
       {#if selectedIds.size > 0}
         <button
-          class="action-btn accent-btn"
+          class="btn small primary"
           onclick={postSelected}
           disabled={postingIds}
         >
@@ -292,7 +293,7 @@
       {/if}
 
       <!-- Add question -->
-      <button class="action-btn" onclick={openAdd}>+ Add question</button>
+      <button class="btn small" onclick={openAdd}>+ Add question</button>
     </div>
 
     <!-- ── Loading state ────────────────────────────────────────────────────── -->
@@ -359,13 +360,13 @@
                   </select>
                   <div class="edit-actions">
                     <button
-                      class="action-btn accent-btn"
+                      class="btn small primary"
                       onclick={saveEdit}
                       disabled={savingId === q.id}
                     >
                       {savingId === q.id ? 'Saving…' : 'Save'}
                     </button>
-                    <button class="action-btn" onclick={cancelEdit} disabled={savingId === q.id}>
+                    <button class="btn small ghost" onclick={cancelEdit} disabled={savingId === q.id}>
                       Cancel
                     </button>
                   </div>
@@ -442,13 +443,13 @@
                 ></textarea>
                 <div class="edit-actions">
                   <button
-                    class="action-btn accent-btn"
+                    class="btn small primary"
                     onclick={saveAnswer}
                     disabled={savingId === q.id}
                   >
                     {savingId === q.id ? 'Saving…' : 'Save answer'}
                   </button>
-                  <button class="action-btn" onclick={cancelAnswer} disabled={savingId === q.id}>
+                  <button class="btn small ghost" onclick={cancelAnswer} disabled={savingId === q.id}>
                     Cancel
                   </button>
                 </div>
@@ -461,54 +462,47 @@
 
     <!-- ── Add question dialog ───────────────────────────────────────────── -->
     {#if addOpen}
-      <div class="modal-backdrop" role="presentation" onclick={closeAdd}>
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-        <div class="modal-box" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-          <div class="modal-head">
-            <span class="modal-title">Add Question</span>
-            <button class="modal-close" onclick={closeAdd} aria-label="Close">✕</button>
-          </div>
-          <div class="modal-body">
-            <label class="form-label">Question <span class="req">*</span>
-              <textarea
-                class="form-textarea"
-                bind:value={newText}
-                rows={3}
-                placeholder="What needs clarification?"
-                disabled={addWorking}
-              ></textarea>
-            </label>
-            <label class="form-label">Rationale
-              <input
-                class="form-input"
-                bind:value={newRationale}
-                placeholder="Why is this question important?"
-                disabled={addWorking}
-              />
-            </label>
-            <label class="form-label">Category
-              <select class="form-select" bind:value={newCategory} disabled={addWorking}>
-                <option value="scope">Scope</option>
-                <option value="data">Data</option>
-                <option value="ux">UX</option>
-                <option value="edge-case">Edge Case</option>
-                <option value="dependency">Dependency</option>
-                <option value="other">Other</option>
-              </select>
-            </label>
-          </div>
-          <div class="modal-footer">
-            <button
-              class="action-btn accent-btn"
-              onclick={addQuestion}
-              disabled={addWorking || !newText.trim()}
-            >
-              {addWorking ? 'Adding…' : 'Add question'}
-            </button>
-            <button class="action-btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
-          </div>
+      <Modal title="Add Question" width={480} onclose={closeAdd}>
+        <div class="qt-add-body">
+          <label class="form-label">Question <span class="req">*</span>
+            <textarea
+              class="form-textarea"
+              bind:value={newText}
+              rows={3}
+              placeholder="What needs clarification?"
+              disabled={addWorking}
+            ></textarea>
+          </label>
+          <label class="form-label">Rationale
+            <input
+              class="form-input"
+              bind:value={newRationale}
+              placeholder="Why is this question important?"
+              disabled={addWorking}
+            />
+          </label>
+          <label class="form-label">Category
+            <select class="form-select" bind:value={newCategory} disabled={addWorking}>
+              <option value="scope">Scope</option>
+              <option value="data">Data</option>
+              <option value="ux">UX</option>
+              <option value="edge-case">Edge Case</option>
+              <option value="dependency">Dependency</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
         </div>
-      </div>
+        {#snippet footer()}
+          <button class="btn" onclick={closeAdd} disabled={addWorking}>Cancel</button>
+          <button
+            class="btn primary"
+            onclick={addQuestion}
+            disabled={addWorking || !newText.trim()}
+          >
+            {addWorking ? 'Adding…' : 'Add question'}
+          </button>
+        {/snippet}
+      </Modal>
     {/if}
   </div>
 {/if}
@@ -544,47 +538,12 @@
     min-width: 8px;
   }
   .filter-sel {
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: 12px;
     padding: 4px 8px;
-  }
-
-  /* ── Action buttons ──────────────────────────────────────────────── */
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 100ms, border-color 100ms, color 100ms;
-  }
-  .action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
-  }
-  .action-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .accent-btn {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-weight: 600;
-  }
-  .accent-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
   }
 
   /* ── Select-all row ──────────────────────────────────────────────── */
@@ -622,7 +581,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     padding: 10px 12px;
-    background: var(--surface-raised, var(--surface));
+    background: var(--surface);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -699,7 +658,7 @@
   }
   .answer-label {
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     margin-inline-end: 4px;
   }
   .q-ref {
@@ -707,13 +666,13 @@
     color: var(--text-dim);
   }
   .q-meta {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
   /* ── Category chips ──────────────────────────────────────────────── */
   .cat-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -723,13 +682,13 @@
   .cat-scope   { background: color-mix(in srgb, #3b82f6 18%, transparent); color: #60a5fa; }
   .cat-data    { background: color-mix(in srgb, #8b5cf6 18%, transparent); color: #a78bfa; }
   .cat-ux      { background: color-mix(in srgb, #ec4899 18%, transparent); color: #f472b6; }
-  .cat-edge    { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #fbbf24; }
-  .cat-dep     { background: color-mix(in srgb, #10b981 18%, transparent); color: #34d399; }
+  .cat-edge    { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .cat-dep     { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
   .cat-other   { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
   /* ── Status pills ────────────────────────────────────────────────── */
   .status-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -737,8 +696,8 @@
     border-radius: 999px;
   }
   .pill-open      { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-  .pill-answered  { background: color-mix(in srgb, #10b981 18%, transparent); color: #34d399; }
+  .pill-posted    { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
+  .pill-answered  { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
   .pill-discarded { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }
 
   /* ── Per-question action buttons ─────────────────────────────────── */
@@ -769,14 +728,14 @@
     cursor: not-allowed;
   }
   .warn-btn:hover:not(:disabled) {
-    border-color: #f59e0b;
-    color: #b45309;
-    background: color-mix(in srgb, #f59e0b 10%, transparent);
+    border-color: var(--warning);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .danger-btn:hover:not(:disabled) {
-    border-color: #ef4444;
-    color: #b91c1c;
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border-color: var(--danger);
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
 
   /* ── Phone: the row-actions wrap below the text automatically (see `.q-body`
@@ -852,63 +811,10 @@
   }
 
   /* ── Add question modal ──────────────────────────────────────────── */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: color-mix(in srgb, #000 45%, transparent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-  }
-  .modal-box {
-    background: var(--surface-raised, var(--surface));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    width: 480px;
-    max-width: 94vw;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 12px 32px color-mix(in srgb, #000 40%, transparent);
-  }
-  .modal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px 10px;
-    border-bottom: 1px solid var(--border);
-  }
-  .modal-title {
-    font-size: 13.5px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .modal-close {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 14px;
-    cursor: pointer;
-    padding: 2px 6px;
-    line-height: 1;
-    border-radius: var(--radius-s);
-  }
-  .modal-close:hover {
-    color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .modal-body {
-    padding: 14px;
+  .qt-add-body {
     display: flex;
     flex-direction: column;
     gap: 10px;
-  }
-  .modal-footer {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px 14px;
-    border-top: 1px solid var(--border);
   }
   .form-label {
     display: flex;
@@ -921,7 +827,7 @@
     color: var(--text-dim);
   }
   .req {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 700;
   }
   .form-textarea,
@@ -952,6 +858,6 @@
 
   .mono {
     font-family: var(--font-mono, monospace);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

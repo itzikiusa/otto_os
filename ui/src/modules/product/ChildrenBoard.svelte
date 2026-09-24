@@ -4,6 +4,8 @@
   // counts across the whole epic. Clicking a card opens the child; the epic's
   // Design tab is where all children's artifacts are reviewed together.
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { storyStage } from '../../lib/status';
   import { product } from '../../lib/stores/product.svelte';
   import type { ProductStory } from './types';
 
@@ -35,16 +37,6 @@
     }
     return { total: children.length, docs, stories: children.length - docs, stages, folders: folders.filter((f) => f.name).length };
   });
-
-  function stageColor(stage: string): string {
-    switch (stage) {
-      case 'draft': return 'stage-draft';
-      case 'review': return 'stage-review';
-      case 'approved': return 'stage-approved';
-      case 'done': return 'stage-done';
-      default: return 'stage-other';
-    }
-  }
 </script>
 
 <section class="children-board">
@@ -54,11 +46,11 @@
       {rollup.total} total · {rollup.stories} {rollup.stories === 1 ? 'story' : 'stories'} · {rollup.docs} {rollup.docs === 1 ? 'doc' : 'docs'}
       {#if rollup.folders}· {rollup.folders} {rollup.folders === 1 ? 'folder' : 'folders'}{/if}
       {#each Object.entries(rollup.stages) as [st, n] (st)}
-        <span class="stage-badge {stageColor(st)}">{n} {st}</span>
+        <StatusBadge status={storyStage(st)} label="{n} {storyStage(st).label.toLowerCase()}" />
       {/each}
     </span>
     {#if onaddchild}
-      <button class="p-btn" onclick={onaddchild}><Icon name="plus" size={12} /> Add child</button>
+      <button class="btn small" onclick={onaddchild}><Icon name="plus" size={12} /> Add child</button>
     {/if}
   </div>
   {#if children.length === 0}
@@ -75,9 +67,9 @@
               <span class="cb-card-title">{c.title}</span>
               <span class="cb-card-meta">
                 {#if c.tree_kind === 'doc'}
-                  <span class="doc-badge">DOC</span>
+                  <span class="chip"><Icon name="note" size={10} /> Doc</span>
                 {:else}
-                  <span class="stage-badge {stageColor(c.stage)}">{c.stage}</span>
+                  <StatusBadge status={storyStage(c.stage)} variant="text" />
                 {/if}
                 {#if c.source_kind !== 'draft'}<span class="mono key">{c.source_key}</span>{/if}
               </span>
@@ -150,7 +142,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -190,29 +182,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 10.5px;
-    color: var(--text-dim);
-  }
-  .stage-badge {
-    font-size: 9.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 1px 6px;
-    border-radius: 999px;
-  }
-  .stage-draft { background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-dim); }
-  .stage-review { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
-  .stage-approved { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .stage-done { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-  .stage-other { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
-  .doc-badge {
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .mono {

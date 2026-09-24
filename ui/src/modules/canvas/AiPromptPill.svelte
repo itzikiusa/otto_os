@@ -36,8 +36,14 @@
     const p = prompt.trim();
     if (!p || busy) return;
     busy = true;
+    const sceneId = canvas.currentId;
     try {
       const res = await canvas.assist(p, mode);
+      // Never insert into a scene other than the one the prompt was typed on.
+      if (canvas.currentId !== sceneId) {
+        toasts.info('Ask AI finished', 'You switched scenes, so nothing was inserted.');
+        return;
+      }
       const { x, y } = insertOrigin();
       const n = canvas.insertAssist(res, x, y);
       if (n > 0) {

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -109,13 +109,52 @@ pub fn set_paused(ctx: &ServerCtx, swarm_id: &str, paused: bool) {
     }
 }
 
+/// One tick at a time per swarm. `start_coordinator` spawns the new loop
+/// while the old one may be mid-tick (it only reads `cancel` between ticks),
+/// and two overlapping ticks could read the same `todo` task / free agent and
+/// dispatch it twice.
+fn tick_lock(swarm_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(swarm_id.to_string())
+        .or_default()
+        .clone()
+}
+
 async fn coordinator_loop(ctx: ServerCtx, swarm_id: Id, handle: CoordinatorHandle) {
     loop {
         if handle.cancel.load(Ordering::Relaxed) {
             return;
         }
         if !handle.paused.load(Ordering::Relaxed) {
+            let lock = tick_lock(&swarm_id);
+            let _ticking = lock.lock().await;
+            // Replaced (or stopped) while waiting for the previous loop's tick.
+            if handle.cancel.load(Ordering::Relaxed) {
+                return;
+            }
             if let Err(e) = tick(&ctx, &swarm_id).await {
+                // The swarm was deleted (the delete route only drops rows): stop
+                // this loop — it used to tick and warn every 5s until restart.
+                if matches!(e, Error::NotFound(_))
+                    && matches!(
+                        ctx.swarm_repo.get_swarm(&swarm_id).await,
+                        Err(Error::NotFound(_))
+                    )
+                {
+                    tracing::info!(swarm = %swarm_id, "swarm deleted — stopping its coordinator");
+                    let mut reg = ctx.swarm_coords.lock().unwrap();
+                    if reg
+                        .get(&swarm_id)
+                        .is_some_and(|h| Arc::ptr_eq(&h.cancel, &handle.cancel))
+                    {
+                        reg.remove(&swarm_id);
+                    }
+                    return;
+                }
                 tracing::warn!(swarm = %swarm_id, "swarm coordinator tick: {e}");
             }
         }
@@ -192,27 +231,23 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         if crate::swarm_verify::agent_under_verification(&agent.id) {
             continue;
         }
+        // Claim: move the task to in_progress so it isn't re-selected next tick
+        // — atomically (only from `todo`), so a racing tick / manual run that
+        // already took it makes this one skip it. Persist the picked agent on a
+        // previously-unassigned task — the board must always show WHO owns the
+        // work, not an unassigned card mid-run.
+        match repo.claim_task(&task.id, Some(&agent.id)).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(task = %task.id, "swarm: claim failed: {e}");
+                continue;
+            }
+        }
         // Count this scheduled turn against the task's attempt ceiling. The
         // ceiling itself is enforced in `route_result` once the turn returns a
         // non-terminal status, so the work still happens this tick.
         let _ = repo.bump_task_attempt(&task.id).await;
-        // Claim: move the task to in_progress so it isn't re-selected next tick.
-        // Persist the picked agent on a previously-unassigned task — the board
-        // must always show WHO owns the work, not an unassigned card mid-run.
-        let claim_assignee = task
-            .assignee_agent_id
-            .is_none()
-            .then(|| Some(agent.id.clone()));
-        let _ = repo
-            .update_task(
-                &task.id,
-                TaskPatch {
-                    status: Some("in_progress".into()),
-                    assignee_agent_id: claim_assignee,
-                    ..Default::default()
-                },
-            )
-            .await;
         emit_task(ctx, &task.id).await;
 
         let is_leader = has_reports(ctx, &swarm.id, &agent.id).await;
@@ -321,6 +356,7 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
         .pause_swarm_with_reason(&swarm.id, reason)
         .await;
     set_paused(ctx, &swarm.id, true);
+    stop_runs_for_pause(ctx, &swarm.id).await;
     for s in swarm_session_ids(ctx, &swarm.workspace_id, &swarm.id).await {
         let _ = ctx.manager.suspend(&s).await;
     }
@@ -339,6 +375,32 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
         title: "Swarm paused (budget)".into(),
         body: format!("“{}”: {reason}", swarm.name),
     });
+}
+
+/// `swarm_runs.error` of a turn cut short by a swarm pause (vs. an operator
+/// Stop): its task goes back to `todo` for the resume, attempt refunded.
+pub(crate) const PAUSED_RUN_REASON: &str = "paused";
+
+/// Cut a pausing swarm's in-flight turns short: mark them `stopped`
+/// ([`PAUSED_RUN_REASON`]) and trip their cancel flags BEFORE the sessions are
+/// suspended. Suspending alone killed the PTY mid-turn; the watch saw
+/// `SessionGone`, the retry loop killed the (resumable) session, spawned a
+/// fresh one and re-sent the whole brief — spending on while the swarm showed
+/// "paused" (the budget auto-pause included), and burning an attempt each time.
+async fn stop_runs_for_pause(ctx: &ServerCtx, swarm_id: &str) {
+    match ctx
+        .swarm_repo
+        .stop_active_runs_with_reason(&swarm_id.to_string(), PAUSED_RUN_REASON)
+        .await
+    {
+        Ok(ids) => {
+            for rid in &ids {
+                swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
+                swarm_run::emit_run(ctx, rid).await;
+            }
+        }
+        Err(e) => tracing::warn!(swarm = %swarm_id, "pause: stopping in-flight runs: {e}"),
+    }
 }
 
 /// Keyword-overlap score of an agent's title+specialization against task text.
@@ -444,10 +506,74 @@ async fn route_result(
     // The board may have been cleared (or the task deleted) while this turn ran.
     // A finished turn for a deleted task must do NOTHING — no retries, no
     // handoffs, no feed posts — or a cleared board immediately repopulates.
-    if repo.get_task(&task.id).await.is_err() {
+    let Ok(current) = repo.get_task(&task.id).await else {
+        return;
+    };
+    // The operator moved the card (cancelled / blocked / done / back to todo)
+    // or reassigned it while the turn ran: their decision wins. The turn's
+    // outcome is noted on the board, but no status change, retry, subtask,
+    // verification or merge follows (a failed turn used to resurrect a
+    // cancelled task as `todo`).
+    let reassigned = current.assignee_agent_id != task.assignee_agent_id
+        && current.assignee_agent_id.as_deref() != Some(run.agent_id.as_str());
+    if current.status != "in_progress" || reassigned {
+        let outcome = match &result {
+            Some(r) if !r.summary.is_empty() => format!("finished ({})", clip(&r.summary, 160)),
+            Some(_) => "finished".to_string(),
+            None => "ended without a result".to_string(),
+        };
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "status",
+            &format!(
+                "A run for “{}” {outcome}, but the task was changed meanwhile ({}) — left as you set it.",
+                task.title,
+                if reassigned { "reassigned".to_string() } else { current.status.clone() }
+            ),
+        )
+        .await;
         return;
     }
     let Some(res) = result else {
+        // Stopped rather than failed? A PAUSE parks the task for the resume
+        // (the interrupted turn doesn't count as an attempt); an operator Stop
+        // parks it as `blocked` — re-queueing it as `todo` made Stop behave
+        // like a restart on the next tick.
+        let run_now = repo.get_run(&run.id).await.ok();
+        if let Some(r) = run_now.filter(|r| r.status == "stopped") {
+            let paused = r.error.as_deref() == Some(PAUSED_RUN_REASON);
+            if paused {
+                let _ = repo.refund_task_attempt(&task.id).await;
+            }
+            let _ = repo
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some(if paused { "todo" } else { "blocked" }.into()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            emit_task(ctx, &task.id).await;
+            if !paused {
+                system_post(
+                    ctx,
+                    &task.swarm_id,
+                    Some(&task.project_id),
+                    Some(&task.id),
+                    "status",
+                    &format!(
+                        "Run for “{}” was stopped — the task is parked as blocked; move it back to To do to run it again.",
+                        task.title
+                    ),
+                )
+                .await;
+            }
+            return;
+        }
         // Turn failed/stopped. Retry on the next tick up to the attempt ceiling
         // (D8); once exhausted, block the task so it isn't retried forever.
         if attempt_ceiling_reached(ctx, task).await {
@@ -644,7 +770,32 @@ async fn route_result(
                         },
                     )
                     .await;
-                enqueue_reviews(ctx, task, run, &res).await;
+                if enqueue_reviews(ctx, task, run, &res).await == 0 {
+                    // Nobody to review it: an `in_review` task without a review
+                    // child never advances. Complete it, saying so.
+                    let _ = repo
+                        .update_task(
+                            &task.id,
+                            TaskPatch {
+                                status: Some("done".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    complete_parent_if_done(ctx, task).await;
+                    system_post(
+                        ctx,
+                        &task.swarm_id,
+                        Some(&task.project_id),
+                        Some(&task.id),
+                        "status",
+                        &format!(
+                            "No reviewer could be found for “{}” — completed without review.",
+                            task.title
+                        ),
+                    )
+                    .await;
+                }
             } else if crate::swarm_verify::task_has_goals(ctx, task).await {
                 // Goals attached → the leader verifies each sequentially before the
                 // task is done + its worktree branch is merged (requirement 3).
@@ -689,7 +840,31 @@ async fn route_result(
                     },
                 )
                 .await;
-            enqueue_reviews(ctx, task, run, &res).await;
+            if enqueue_reviews(ctx, task, run, &res).await == 0 {
+                // A review is required but nobody can do it: park it for a
+                // human instead of an `in_review` that never advances.
+                let _ = repo
+                    .update_task(
+                        &task.id,
+                        TaskPatch {
+                            status: Some("blocked".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                system_post(
+                    ctx,
+                    &task.swarm_id,
+                    Some(&task.project_id),
+                    Some(&task.id),
+                    "status",
+                    &format!(
+                        "“{}” needs a review but no reviewer could be found — blocked for a human.",
+                        task.title
+                    ),
+                )
+                .await;
+            }
         }
         "blocked" => {
             let _ = repo
@@ -988,15 +1163,26 @@ async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run:
     }
 }
 
+/// Create one review task per requested review. A reviewer role that doesn't
+/// resolve falls back to the working agent's manager. Returns how many review
+/// tasks were created (0 ⇒ the caller must not leave the task `in_review`).
 async fn enqueue_reviews(
     ctx: &ServerCtx,
     task: &SwarmTask,
     run: &otto_state::SwarmRun,
     res: &SwarmTurnResult,
-) {
+) -> usize {
     let repo = &ctx.swarm_repo;
+    let manager = repo
+        .get_agent(&run.agent_id)
+        .await
+        .ok()
+        .and_then(|a| a.reports_to);
+    let mut created = 0usize;
     for rv in &res.reviews {
-        let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role).await;
+        let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role)
+            .await
+            .or_else(|| manager.clone());
         let Some(reviewer) = reviewer else { continue };
         // A review run: a new task assigned to the reviewer.
         let _ = repo.create_task(NewTask {
@@ -1017,21 +1203,26 @@ async fn enqueue_reviews(
             order_idx: 0,
             created_by: run.agent_id.clone(),
         }).await;
+        created += 1;
     }
-    system_post(
-        ctx,
-        &task.swarm_id,
-        Some(&task.project_id),
-        Some(&task.id),
-        "review_request",
-        &format!("Review requested on “{}”.", task.title),
-    )
-    .await;
+    if created > 0 {
+        system_post(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "review_request",
+            &format!("Review requested on “{}”.", task.title),
+        )
+        .await;
+    }
+    created
 }
 
 /// When a task completes, if it has a parent and all the parent's children are
-/// done, complete the parent too (recursively).
-async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
+/// done, complete the parent too (recursively). Also called by the goal
+/// verification controller when it completes a task.
+pub(crate) async fn complete_parent_if_done(ctx: &ServerCtx, task: &SwarmTask) {
     let repo = &ctx.swarm_repo;
     let Some(parent_id) = &task.parent_task_id else {
         return;
@@ -1718,7 +1909,10 @@ async fn pause(
         .await
         .map_err(ApiError)?;
     set_paused(&ctx, &sid, true);
-    // Suspend idle swarm sessions to free RAM (resume-friendly).
+    // In-flight turns end first (their tasks re-queue for the resume) so the
+    // retry loop can't respawn them; then suspend the sessions to free RAM
+    // (resume-friendly).
+    stop_runs_for_pause(&ctx, &sid).await;
     for s in swarm_session_ids(&ctx, &ws, &sid).await {
         let _ = ctx.manager.suspend(&s).await;
     }
@@ -1879,6 +2073,17 @@ async fn clear_project_h(
         .map_err(ApiError)?;
     for rid in &stopped {
         swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
+        // Stop the agent itself — the flag alone left it working (and
+        // burning tokens) in its worktree on a board that no longer exists.
+        if let Some(sid) = ctx
+            .swarm_repo
+            .get_run(rid)
+            .await
+            .ok()
+            .and_then(|r| r.session_id)
+        {
+            let _ = ctx.manager.kill_session(&sid).await;
+        }
         swarm_run::emit_run(&ctx, rid).await;
     }
     let (tasks_deleted, messages_deleted) = ctx
@@ -1911,9 +2116,48 @@ async fn run_task(
         .get_swarm(&task.swarm_id)
         .await
         .map_err(ApiError)?;
+    // The same gates the coordinator applies: a manual (or manager-agent
+    // `swarm_run_task`) run must not start a second turn for a task already
+    // running, run on an aborted swarm, or bypass the budget pause. (A swarm
+    // that is merely paused — including a new one, which starts paused — may
+    // still run a task by hand.)
+    if !matches!(task.status.as_str(), "todo" | "blocked" | "backlog") {
+        return Err(ApiError(Error::Conflict(format!(
+            "task is {} — only a todo, blocked or backlog task can be run",
+            task.status
+        ))));
+    }
+    if swarm.status == "aborted" {
+        return Err(ApiError(Error::Conflict(
+            "swarm is aborted — tasks can't run".into(),
+        )));
+    }
+    if let Some(reason) = swarm.pause_reason.as_deref().filter(|r| !r.is_empty()) {
+        return Err(ApiError(Error::Conflict(format!(
+            "swarm is paused: {reason} — raise the budget and resume first"
+        ))));
+    }
+    if let Some(reason) = budget_exceeded(&ctx, &swarm).await {
+        return Err(ApiError(Error::Conflict(format!(
+            "swarm budget exhausted: {reason}"
+        ))));
+    }
     let agent = pick_agent(&ctx, &swarm, &task)
         .await
         .ok_or_else(|| ApiError(Error::Invalid("no active agent to run this task".into())))?;
+    if ctx
+        .swarm_repo
+        .agent_has_active_run(&agent.id)
+        .await
+        .unwrap_or(false)
+        || crate::swarm_verify::agent_under_verification(&agent.id)
+    {
+        return Err(ApiError(Error::Conflict(format!(
+            "{} is busy with another turn — try again when it finishes",
+            agent.name
+        ))));
+    }
+    let _ = ctx.swarm_repo.bump_task_attempt(&tid).await;
     let is_leader = has_reports(&ctx, &swarm.id, &agent.id).await;
     let kind = if is_leader && !task.delegated {
         "planning"
@@ -1967,18 +2211,25 @@ async fn stop_run(
     let run = ctx.swarm_repo.get_run(&rid).await.map_err(ApiError)?;
     check(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     swarm_run::signal_cancel(&ctx.swarm_run_cancels, &rid);
-    if matches!(run.status.as_str(), "queued" | "running" | "waiting") {
-        let _ = ctx
-            .swarm_repo
-            .update_run(
-                &rid,
-                RunPatch {
-                    status: Some("stopped".into()),
-                    finished_at: Some(Some(Utc::now())),
-                    ..Default::default()
-                },
-            )
-            .await;
+    let stopped = ctx
+        .swarm_repo
+        .update_run_if_status(
+            &rid,
+            &["queued", "running", "waiting"],
+            RunPatch {
+                status: Some("stopped".into()),
+                finished_at: Some(Some(Utc::now())),
+                ..Default::default()
+            },
+        )
+        .await
+        .ok()
+        .flatten();
+    // Stop the agent, not just the row: the session kept working for up to
+    // the whole turn, and the slot freed by `stopped` then pasted the next
+    // brief into this same busy session.
+    if let Some(sid) = stopped.and_then(|r| r.session_id) {
+        let _ = ctx.manager.kill_session(&sid).await;
     }
     swarm_run::emit_run(&ctx, &rid).await;
     Ok(Json(ctx.swarm_repo.get_run(&rid).await.map_err(ApiError)?))

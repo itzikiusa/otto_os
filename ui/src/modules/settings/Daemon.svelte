@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
   import { api } from '../../lib/api/client';
   import { router } from '../../lib/router.svelte';
@@ -22,7 +25,20 @@
   let port = $state(7700);
   let sandboxEnabled = $state(false);
   let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
-  let savingSandbox = $state(false);
+  // Last-saved values: the ONE Save (in the header) sends only the groups
+  // that differ from these, and is disabled while nothing does.
+  let savedListener = $state<NetworkListener>({ enabled: false, port: 7700 });
+  let savedSandbox = $state<ProcessSandbox>({ enabled: false, network: 'full' });
+  const listenerDirty = $derived(enabled !== savedListener.enabled || port !== savedListener.port);
+  const sandboxDirty = $derived(
+    sandboxEnabled !== savedSandbox.enabled || sandboxNetwork !== savedSandbox.network,
+  );
+  const dirty = $derived(listenerDirty || sandboxDirty);
+  // Latest full settings object (the PUT response). Saves send ONLY the keys
+  // they change: PUT /settings upserts exactly the keys in the body, so
+  // spreading this page-load snapshot reverted keys written since (auto-update
+  // last-run, MCP/PR-review settings, another window) and wrote false
+  // skip-permissions / network-listener audit entries on every save.
   let allSettings: Record<string, unknown> = $state({});
 
   $effect(() => {
@@ -34,11 +50,13 @@
           enabled = nl.enabled;
           port = nl.port;
         }
+        savedListener = { enabled, port };
         const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
         if (sb) {
           sandboxEnabled = sb.enabled;
           sandboxNetwork = sb.network ?? 'full';
         }
+        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
       } catch {
         toasts.error('Could not load daemon settings');
       } finally {
@@ -48,47 +66,52 @@
   });
 
   async function save(): Promise<void> {
+    if (!dirty) return;
+    // Only the changed groups: an unchanged network_listener in the body would
+    // still write a network-listener audit entry.
+    const body: Record<string, unknown> = {};
+    if (listenerDirty) body.network_listener = { enabled, port };
+    if (sandboxDirty) body.process_sandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    const saveListener = listenerDirty;
+    const saveSandbox = sandboxDirty;
     saving = true;
     try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
-        network_listener: { enabled, port },
-      });
-      toasts.success('Daemon settings saved', enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
-      if (auth.meta) auth.meta.network_listener = enabled;
+      allSettings = await api.put<Record<string, unknown>>('/settings', body);
+      const notes: string[] = [];
+      if (saveListener) {
+        savedListener = { enabled, port };
+        if (auth.meta) auth.meta.network_listener = enabled;
+        notes.push(enabled ? `Listening on 0.0.0.0:${port}` : 'Loopback only');
+      }
+      if (saveSandbox) {
+        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+        notes.push(sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off');
+      }
+      toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save daemon settings', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
     }
   }
-
-  async function saveSandbox(): Promise<void> {
-    savingSandbox = true;
-    try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
-        ...allSettings,
-        process_sandbox: { enabled: sandboxEnabled, network: sandboxNetwork },
-      });
-      toasts.success(
-        'Sandbox settings saved',
-        sandboxEnabled ? `Agents confined (network: ${sandboxNetwork})` : 'Sandbox off',
-      );
-    } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      savingSandbox = false;
-    }
-  }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Daemon</h1>
-      <div class="sub">ottod {auth.meta?.version ?? ''} · API v{auth.meta?.api_version ?? 1}</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('daemon')} subtitle={`ottod ${auth.meta?.version ?? ''} · API v${auth.meta?.api_version ?? 1}`}>
+    {#snippet actions()}
+      {#if !loading}
+        <button
+          class="btn small primary"
+          disabled={!dirty || saving}
+          title={dirty ? 'Save network and sandbox settings' : 'No changes to save'}
+          onclick={() => void save()}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  <PageBody width="readable">
 
   {#if loading}
     <Skeleton rows={3} height={40} />
@@ -114,9 +137,6 @@
           disabled={!enabled}
         />
       </div>
-      <button class="btn primary" disabled={saving} onclick={save}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
     </div>
 
     <div class="section-title">Process sandbox</div>
@@ -130,7 +150,7 @@
         the workspace, its git dir, the CLIs' own caches and temp — never the rest of
         your disk. Reads are unaffected. macOS only; ignored on other systems.
       </p>
-      <div class="field" style="max-width: 220px">
+      <div class="field" style="max-width: 320px">
         <label for="dm-sandbox-net">Network</label>
         <select
           id="dm-sandbox-net"
@@ -148,9 +168,6 @@
         Non-`full` network blocks agent CLIs from reaching their model API — use only
         for offline shells.
       </p>
-      <button class="btn primary" disabled={savingSandbox} onclick={saveSandbox}>
-        {savingSandbox ? 'Saving…' : 'Save'}
-      </button>
     </div>
 
     <div class="section-title">Logs</div>
@@ -163,9 +180,17 @@
       <button class="btn" onclick={() => router.go('settings/logs')}>Open log viewer</button>
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 520px;
@@ -173,7 +198,7 @@
   }
   .warn-note {
     font-size: 11.5px;
-    color: #b8860b;
+    color: var(--warning);
     margin: 6px 0 12px;
     opacity: 0;
     transition: opacity 150ms ease-out;

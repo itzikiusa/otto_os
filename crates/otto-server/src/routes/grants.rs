@@ -63,6 +63,9 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::Settings,
     Feature::Users,
     Feature::Canvas,
+    // Design Hall (the artifact graph); granted wherever Canvas was — see the
+    // `design_graph` migration's additive grant copy.
+    Feature::Design,
     Feature::ProofPack,
     Feature::Mcp,
     Feature::MissionControl,

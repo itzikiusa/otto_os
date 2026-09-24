@@ -541,6 +541,9 @@ async fn remove(
 }
 
 /// `POST /scheduled-tasks/{id}/run` — run now (manual; does not move the cursor).
+/// Starts the run in the background and returns its `running` row at once;
+/// completion arrives as `scheduled_task_run_updated`. 409 while a run of the
+/// task is already in progress.
 async fn run_now(
     Path(id): Path<String>,
     State(ctx): State<ServerCtx>,
@@ -548,11 +551,7 @@ async fn run_now(
 ) -> ApiResult<Json<ScheduledTaskRun>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
-    let run_id = scheduled_tasks_engine::run_task(&ctx, &task, "manual")
-        .await
-        .map_err(ApiError)?;
-    ctx.scheduled_tasks
-        .get_run(&run_id)
+    scheduled_tasks_engine::spawn_run(&ctx, &task, "manual")
         .await
         .map(Json)
         .map_err(ApiError)

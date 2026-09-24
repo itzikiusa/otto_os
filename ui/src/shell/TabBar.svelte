@@ -3,16 +3,15 @@
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
+  import { events } from '../lib/events.svelte';
+  import { sessionState, type SessionStateInfo } from '../lib/status';
   import { ws, DB_PANE_ID } from '../lib/stores/workspace.svelte';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
   import { router } from '../lib/router.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { popoutItems } from '../lib/popoutMenu';
   import ShareModal from '../modules/agents/ShareModal.svelte';
-
-  // `bellGutter` reserves space on the right so the shell's floating
-  // notification bell never overlaps the tab-bar controls.
-  let { bellGutter = false }: { bellGutter?: boolean } = $props();
 
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
@@ -35,9 +34,12 @@
     if (id === DB_PANE_ID) return 'Database Explorer';
     const s = ws.sessions.find((x) => x.id === id);
     if (!s) return 'Double-click to rename';
-    const parts = [s.title, s.provider, s.cwd].filter((p) => p !== '' && p != null);
-    const base = parts.join(' · ');
-    return isResumable(id) ? `${base} — ${SUSPENDED_TIP}` : `${base} — double-click to rename`;
+    // One short line per fact: a single very long line made a native tooltip
+    // wider than the window, pinned to its edge and clipped.
+    const title = s.title.length > 80 ? `${s.title.slice(0, 79).trimEnd()}…` : s.title;
+    const parts = [title, [s.provider, s.cwd].filter((p) => p !== '' && p != null).join(' · ')].filter(Boolean);
+    const st = tabState(id);
+    return [...parts, st.resumable ? (st.hint ?? st.label) : 'Double-click to rename'].join('\n');
   }
 
   // ── Keep the active tab visible + surface overflow ────────────────────────
@@ -66,6 +68,10 @@
 
   // Arrow-key navigation across the tablist (ArrowLeft/Right, Home, End).
   function onTabKeydown(e: KeyboardEvent, id: string): void {
+    // Only keys aimed at the tab itself: the rename field (Space, ←/→, Home/
+    // End are text editing) and the × button (Enter/Space must click it)
+    // bubble through here too.
+    if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       activate(id);
@@ -84,17 +90,16 @@
     (tabsEl?.querySelector(`[data-tab-id="${CSS.escape(target)}"]`) as HTMLElement | null)?.focus();
   }
 
-  // A tab is "suspended / resumable" — parked to save memory, but auto-resumes
-  // on open (`--resume`): status `reconnectable`, or an exited agent session
-  // that still has a provider_session_id. A plain exited shell is "ended".
-  function isResumable(id: string): boolean {
-    const status = ws.statusMap[id] ?? 'idle';
-    if (status === 'reconnectable') return true;
-    if (status !== 'exited') return false;
+  // One session vocabulary (lib/status.ts): the tab's dot/↻ and tooltip line
+  // come from `sessionState` — the same state the sidebar row shows. A stale
+  // events socket stops the working pulse ("Reconnecting…").
+  function tabState(id: string): SessionStateInfo {
     const s = ws.sessions.find((x) => x.id === id);
-    return s?.kind === 'agent' && s.provider_session_id != null;
+    return sessionState(s, ws.statusMap[id] ?? 'idle', needsYou(id), { stale: events.state !== 'connected' });
   }
-  const SUSPENDED_TIP = 'Suspended to save memory — opens instantly';
+  function isResumable(id: string): boolean {
+    return id !== DB_PANE_ID && tabState(id).resumable;
+  }
 
   // A tab "needs you" when its session is blocked on operator input — distinct
   // from idle. Cleared by the store when the session is opened / fed input.
@@ -157,9 +162,8 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="tabbar"
+  class="tabbar chrome-material"
   class:tauri-pad={isTauri && !ui.railExpanded}
-  class:bell-gutter={bellGutter}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
@@ -223,6 +227,9 @@
           ...(id !== DB_PANE_ID
             ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) }]
             : []),
+          ...(id === DB_PANE_ID
+            ? popoutItems('database', 'Database')
+            : popoutItems(`agents/${id}`, ws.sessions.find((x) => x.id === id)?.title)),
           { separator: true },
           {
             label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
@@ -238,12 +245,15 @@
       >
         {#if id === DB_PANE_ID}
           <Icon name="db" size={11} />
-        {:else if isResumable(id)}
-          <span class="susp-dot" title={SUSPENDED_TIP} aria-hidden="true">
-            <Icon name="refresh" size={8} />
-          </span>
         {:else}
-          <StatusDot status={ws.statusMap[id] ?? 'idle'} size={6} />
+          {@const st = tabState(id)}
+          {#if st.resumable}
+            <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+              <Icon name="refresh" size={9} />
+            </span>
+          {:else}
+            <StatusDot state={st} size={6} />
+          {/if}
         {/if}
         {#if renamingId === id}
           <!-- svelte-ignore a11y_autofocus -->
@@ -275,13 +285,24 @@
             void ws.requestCloseTab(id);
           }}
           aria-label="Close tab"
-          title="Close (⌘W)"
+          title={ws.closeTabTitle(id)}
         >
           <Icon name="x" size={9} />
         </button>
       </div>
     {/each}
   </div>
+  <!-- History entry point (⌘K "Go to History" and the sidebar row are the
+       others). It used to own a whole 26px strip under the tabs. -->
+  <button
+    class="icon-btn history-btn"
+    onclick={() => router.go('history')}
+    title="History — every past Claude/Codex conversation, resumable"
+    aria-label="History"
+    data-testid="agents-history-btn"
+  >
+    <Icon name="clock" size={14} />
+  </button>
   <div class="view-toggle" role="group" aria-label="View mode">
     <button
       class:active={ws.viewMode === 'tabs'}
@@ -325,15 +346,13 @@
     gap: 4px;
     height: 38px;
     padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    /* Chrome: the toolbar glass over the ambient (.chrome-material), like
+       every other page's PageHeader row. */
+    border-bottom: 1px solid var(--separator);
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {
     padding-inline-start: 78px;
-  }
-  .tabbar.bell-gutter {
-    padding-inline-end: 42px;
   }
   .tabs {
     display: flex;
@@ -405,7 +424,7 @@
   /* "Needs you" — blocked on operator input. Amber accents stand out from the
      calmer active/idle styling without being alarming. */
   .tab.needs-you:not(.active) {
-    border-color: color-mix(in srgb, #febc2e 45%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
     color: var(--text);
   }
   .tab-needs-you {
@@ -415,16 +434,17 @@
     width: 14px;
     height: 14px;
     border-radius: 99px;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 18%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
   }
+  /* ↻ = suspended, resumes on open: calm/dim — amber is only "needs you". */
   .susp-dot {
     display: grid;
     place-items: center;
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     flex-shrink: 0;
-    color: #febc2e;
+    color: var(--text-dim);
   }
   .tab-title {
     overflow: hidden;
@@ -476,7 +496,7 @@
     flex-shrink: 0;
   }
   .tab-rename {
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
@@ -504,7 +524,10 @@
   }
   .view-toggle button.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
+  }
+  .history-btn {
+    flex-shrink: 0;
   }
 </style>
 

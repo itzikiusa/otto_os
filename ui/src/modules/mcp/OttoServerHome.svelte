@@ -7,6 +7,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { mcpCpExtraApi, type McpGatewayToolRow } from './cp-api';
   import ExposePanel from './ExposePanel.svelte';
   import type { McpOttoServerStatus, McpOttoToolInfo, McpSessionAttach } from '../../lib/api/types';
@@ -34,6 +35,11 @@
   const tools = $derived(status?.tools ?? []);
   const enabledNames = $derived(new Set(tools.filter((tool) => tool.enabled).map((tool) => tool.name)));
   const mutatingCount = $derived(tools.filter((tool) => tool.mutating).length);
+  // Full `otto.*` names of the mutating tools whose "Ask before each call" is off.
+  const exemptNames = $derived(new Set(tools.filter((tool) => tool.approval_exempt).map((tool) => tool.name)));
+  // Global `mcp_require_approval_dangerous` — when off, nothing asks at all.
+  const approvalsOn = $derived(status?.require_approval_dangerous ?? true);
+  const skippedCount = $derived(tools.filter((tool) => tool.enabled && tool.mutating && tool.approval_exempt).length);
   const attached = $derived(attach?.attached ?? true);
   const gatewayNames = $derived([...new Set(gatewayTools.map((tool) => tool.name))]);
   const shownGatewayNames = $derived(gatewayNames.slice(0, 60));
@@ -101,6 +107,44 @@
       else next.delete(tool.name);
     }
     await patch({ tools: [...next] });
+  }
+
+  /** Mutating tools that are enabled — the only ones an approval applies to. */
+  function gatedTools(list: McpOttoToolInfo[]): McpOttoToolInfo[] {
+    return list.filter((tool) => tool.mutating && tool.enabled);
+  }
+
+  async function confirmSkip(names: string[]): Promise<boolean> {
+    const what = names.length === 1 ? names[0] : `${names.length} tools`;
+    return confirmer.ask(
+      `Stop asking before each call to ${what}? Agents and external clients will run it without a human approval. Every call is still audited, and you can turn asking back on here at any time.`,
+      { title: "Don't ask before each call", confirmLabel: "Don't ask", danger: true },
+    );
+  }
+
+  /** "Ask before each call" for one tool. Turning it OFF confirms first; a
+   *  cancelled confirm restores the checkbox (its bound value never changed). */
+  async function setAsk(tool: McpOttoToolInfo, ask: boolean, input: HTMLInputElement): Promise<void> {
+    if (!ask && !(await confirmSkip([tool.name]))) {
+      input.checked = true;
+      return;
+    }
+    const next = new Set(exemptNames);
+    if (ask) next.delete(tool.name);
+    else next.add(tool.name);
+    await patch({ approval_exempt_tools: [...next] });
+  }
+
+  async function setCategoryAsk(categoryTools: McpOttoToolInfo[], ask: boolean): Promise<void> {
+    const targets = gatedTools(categoryTools).map((tool) => tool.name);
+    if (!targets.length) return;
+    if (!ask && !(await confirmSkip(targets))) return;
+    const next = new Set(exemptNames);
+    for (const name of targets) {
+      if (ask) next.delete(name);
+      else next.add(name);
+    }
+    await patch({ approval_exempt_tools: [...next] });
   }
 
   async function loadAttach(id: string): Promise<void> {
@@ -219,7 +263,7 @@
       </span>
     </label>
     <p class="counts muted small">
-      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating
+      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount} · <span class="noask">{skippedCount} run without asking</span>{/if}
     </p>
   </section>
 
@@ -234,7 +278,11 @@
     <div>
       <h4 class="sec">External tool catalog</h4>
       <p class="muted small catalog-note">
-        Applies to external clients only — sessions always get Otto's built-in read-only tool set.
+        Enabled tools are served to external clients; Otto sessions also get the enabled ones that
+        aren't built in (e.g. <code>otto_create_pr</code>) through the same gate. A mutating tool asks a
+        human before each call until you turn <em>Ask before each call</em> off for it — every call is
+        audited either way. These approvals are separate from Policies and per-tool server rules, which
+        govern registered external MCP servers only.
       </p>
     </div>
     <input
@@ -245,7 +293,15 @@
       aria-label="Filter tools"
     />
   </div>
+  {#if status && !approvalsOn}
+    <p class="warn" data-testid="mcp-approvals-globally-off">
+      Approval prompts are turned off globally (<code>mcp_require_approval_dangerous</code>), so no
+      otto.* call asks for approval — the per-tool <em>Ask before each call</em> setting has no effect
+      until that is turned back on.
+    </p>
+  {/if}
   {#each groups as group (group.cat)}
+    {@const gated = gatedTools(group.tools)}
     <div class="grp">
       <div class="grp-head">
         <span class="grp-name">{group.cat}</span>
@@ -264,22 +320,61 @@
           onclick={() => void setCategory(group.tools, false)}
         >None</button>
       </div>
+      {#if gated.length}
+        <div class="grp-ask">
+          <span class="muted">
+            Approval for {gated.length} enabled mutating tool{gated.length === 1 ? '' : 's'}:
+          </span>
+          <button
+            class="btn xs"
+            data-testid="mcp-category-ask"
+            disabled={saving || !status || !isMcpAdmin || gated.every((tool) => !tool.approval_exempt)}
+            onclick={() => void setCategoryAsk(group.tools, true)}
+          >Always ask</button>
+          <button
+            class="btn xs"
+            data-testid="mcp-category-no-ask"
+            disabled={saving || !status || !isMcpAdmin || gated.every((tool) => tool.approval_exempt)}
+            onclick={() => void setCategoryAsk(group.tools, false)}
+          >Don't ask</button>
+        </div>
+      {/if}
       <div class="tool-list">
         {#each group.tools as tool (tool.name)}
-          <label class="tool">
-            <input
-              type="checkbox"
-              checked={tool.enabled}
-              disabled={saving || !status || !isMcpAdmin}
-              onchange={() => void toggleTool(tool.name)}
-            />
-            <span class="t-meta">
-              <span class="t-name mono">
-                {tool.name}{#if tool.mutating}<span class="mut">mutating</span>{/if}
+          <div class="tool">
+            <label class="tool-main">
+              <input
+                type="checkbox"
+                checked={tool.enabled}
+                disabled={saving || !status || !isMcpAdmin}
+                onchange={() => void toggleTool(tool.name)}
+              />
+              <span class="t-meta">
+                <span class="t-name mono">
+                  {tool.name}{#if tool.mutating}<span class="mut">mutating</span>{/if}
+                </span>
+                <span class="t-desc">{tool.description}</span>
               </span>
-              <span class="t-desc">{tool.description}</span>
-            </span>
-          </label>
+            </label>
+            {#if tool.mutating && tool.enabled}
+              <label
+                class="ask"
+                title="On: a human approves each call. Off: calls run without asking — still audited."
+              >
+                <input
+                  type="checkbox"
+                  data-testid={`mcp-ask-${tool.name}`}
+                  checked={!tool.approval_exempt}
+                  disabled={saving || !status || !isMcpAdmin}
+                  onchange={(event) => void setAsk(tool, event.currentTarget.checked, event.currentTarget)}
+                />
+                <span>Ask before each call</span>
+                {#if tool.approval_exempt}
+                  <span class="noask">runs without asking · still audited</span>
+                {/if}
+              </label>
+            {/if}
+          </div>
         {/each}
       </div>
     </div>
@@ -342,11 +437,12 @@
 
 <style>
   .otto {
-    padding: 16px;
+    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    max-width: 820px;
+    max-width: var(--page-readable);
+    box-sizing: border-box;
   }
   .hero,
   .panel {
@@ -442,10 +538,9 @@
   }
   .tool {
     display: flex;
-    align-items: flex-start;
-    gap: 10px;
+    flex-direction: column;
+    gap: 6px;
     padding: 10px 12px;
-    cursor: pointer;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .tool:last-child {
@@ -454,8 +549,36 @@
   .tool:hover {
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
   }
-  .tool input {
+  .tool-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+  }
+  .tool-main input {
     margin-top: 2px;
+  }
+  /* Indented under the tool name (checkbox width + gap). */
+  .ask {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-inline-start: 23px;
+    font-size: 11.5px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .noask {
+    color: #e0a000;
+  }
+  .grp-ask {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 2px;
+    font-size: 11px;
   }
   .t-meta {
     display: flex;
@@ -469,10 +592,10 @@
   }
   .mut {
     margin-inline-start: 8px;
-    font-size: 9px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: 4px;
     padding: 0 5px;
   }
@@ -491,7 +614,7 @@
     flex-wrap: wrap;
   }
   .gateway-list code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 5px;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -532,9 +655,9 @@
   .warn {
     margin: 0;
     font-size: 12.5px;
-    color: #e0a000;
-    background: color-mix(in srgb, #e0a000 12%, transparent);
-    border: 1px solid color-mix(in srgb, #e0a000 35%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-s, 6px);
     padding: 10px 12px;
   }

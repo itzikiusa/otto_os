@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings export/import and state backup/restore (C3).
   // Routes used:
   //   GET  /api/v1/settings/export  — download scrubbed settings JSON
@@ -165,13 +168,9 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Backup &amp; Restore</h1>
-      <div class="sub">Back up saved Otto data, restore an archive, or transfer settings.</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('backup')} subtitle="Back up Otto data, restore an archive or transfer settings" />
+  <PageBody width="readable">
 
   <FullBackup />
   <GitBackup />
@@ -265,9 +264,17 @@
       credentials are unaffected.
     </p>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 540px;

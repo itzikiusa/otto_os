@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
     ui,
@@ -8,9 +11,29 @@
     type Direction,
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { AMBIENT_MODES, ambientImage, type AmbientMode } from '../../lib/ambient';
+  import { processWallpaper } from '../../lib/wallpaper';
+  import { barStore } from '../../lib/stores/bar.svelte';
+  import type { BarPref } from '../../lib/floatingBar';
   import { plugins } from '../../lib/stores/plugins.svelte';
-  import { availableModules, resolveOrder, type SidebarModule } from '../../lib/sidebar';
+  import {
+    availableModules,
+    groupModules,
+    moveWithinGroup,
+    resolveOrder,
+    type SidebarPluginEntry,
+  } from '../../lib/sidebar';
+
+  // The "Type or speak… ⌘K" bar over the content column (FloatingBar.svelte).
+  const barPrefs: { id: BarPref; label: string; hint: string }[] = [
+    { id: 'auto', label: 'Auto', hint: 'A short pill at rest, full on Home; it docks into the status bar while you scroll or type in a terminal or editor.' },
+    { id: 'pinned', label: 'Always full', hint: 'The whole pill (model, spaces) stays up; it only shrinks while a terminal or editor has the keyboard.' },
+    { id: 'docked', label: 'Docked', hint: 'A small chip in the status bar that never covers content; ⌘K opens the full bar.' },
+    { id: 'hidden', label: 'Hidden', hint: 'No bar; ⌘K opens the command palette sheet instead.' },
+  ];
 
   // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
   // the user may see + permitted plugins, in the saved order, including hidden
@@ -18,11 +41,16 @@
   const sidebarPlugins = $derived(
     plugins.list
       .filter((p) => auth.canPlugin(p.slug, 'view'))
-      .map((p): SidebarModule => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
+      .map((p): SidebarPluginEntry => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
   );
   const sidebarResolved = $derived(
     resolveOrder(availableModules((f) => auth.can(f, 'view'), sidebarPlugins), ui.sidebarOrder),
   );
+  /** Up/down within the module's sidebar section (same rule as the Navigator). */
+  function moveSidebarItem(id: string, delta: -1 | 1): void {
+    const next = moveWithinGroup(sidebarResolved, id, delta);
+    if (next) ui.setSidebarOrder(next);
+  }
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
     { id: 'native', name: 'Native', desc: 'macOS vibrancy, system accent' },
@@ -39,6 +67,38 @@
     { id: 'rtl', label: 'Right-to-left' },
   ];
 
+  // Backdrop previews: the real generated art for the accent + scheme in
+  // effect (re-derived when either changes), drawn over the window colour.
+  let accentNow = $state('');
+  $effect(() => {
+    void ui.theme;
+    void ui.accent;
+    void ui.resolvedScheme;
+    accentNow = ui.accent || getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  });
+  function previewOf(mode: AmbientMode): string {
+    const photo = ui.ambientPhoto ? ui.ambientPhoto[ui.resolvedScheme] : null;
+    return ambientImage(mode, accentNow, ui.resolvedScheme, photo);
+  }
+
+  let photoBusy = $state(false);
+  async function pickPhoto(e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const input = e.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    photoBusy = true;
+    try {
+      const photo = await processWallpaper(file);
+      if (ui.setAmbientPhoto(photo)) toasts.success('Wallpaper set', 'Stored on this device only.');
+      else toasts.error('Could not store the photo', 'This browser refused the storage — try a smaller image.');
+    } catch (err) {
+      toasts.error('Could not use that image', err instanceof Error ? err.message : String(err));
+    } finally {
+      photoBusy = false;
+    }
+  }
+
   const swatches: Record<ThemeName, { bg: string; fg: string; acc: string }> = {
     native: { bg: '#1e1e23', fg: '#f2f2f5', acc: '#0a84ff' },
     'pro-dark': { bg: '#16161c', fg: '#e8e8ee', acc: '#6c5ce7' },
@@ -46,13 +106,9 @@
   };
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Appearance</h1>
-      <div class="sub">Themes apply instantly and persist per device.</div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('appearance')} subtitle="Themes apply instantly and persist per device" />
+  <PageBody width="readable">
 
   <div class="section-title">Theme</div>
   <div class="theme-grid">
@@ -100,6 +156,54 @@
     {/if}
   </div>
 
+  <div class="section-title">Backdrop</div>
+  <div class="theme-grid" role="radiogroup" aria-label="Backdrop">
+    {#each AMBIENT_MODES as m (m.id)}
+      <button
+        class="theme-card"
+        class:selected={ui.ambient === m.id}
+        role="radio"
+        aria-checked={ui.ambient === m.id}
+        data-ambient-option={m.id}
+        onclick={() => ui.setAmbient(m.id)}
+      >
+        <div class="theme-preview ambient-preview" style:background-image={previewOf(m.id)}>
+          <span class="ap-side"></span>
+          <span class="ap-card"></span>
+        </div>
+        <div class="theme-name">{m.label}</div>
+        <div class="theme-desc">{m.id === 'wallpaper' && ui.ambientPhoto ? 'Your photo' : m.desc}</div>
+      </button>
+    {/each}
+  </div>
+  <div class="row photo-row">
+    <label class="btn small" class:busy={photoBusy}>
+      <Icon name="image" size={12} />
+      {ui.ambientPhoto ? 'Change photo…' : 'Use your own photo…'}
+      <input type="file" accept="image/*" class="visually-hidden" onchange={pickPhoto} disabled={photoBusy} />
+    </label>
+    {#if ui.ambientPhoto}
+      <button class="btn small ghost" onclick={() => ui.setAmbientPhoto(null)}>Remove photo</button>
+    {/if}
+  </div>
+  <p class="hint-line">
+    The backdrop shows through the sidebar, toolbar and status bar, and fills the Home desktop.
+    Pages, tables, editors and terminals stay solid. A photo never leaves this device: Otto
+    blurs it and tones it for light and dark so the text over it stays readable.
+  </p>
+  <label class="switch-row reduce-row">
+    <input
+      type="checkbox"
+      checked={ui.reduceTransparency}
+      onchange={(e) => ui.setReduceTransparency(e.currentTarget.checked)}
+    />
+    <span>Reduce transparency</span>
+  </label>
+  <p class="hint-line">
+    Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce
+    transparency” accessibility setting.
+  </p>
+
   <div class="section-title">Terminal font</div>
   <div class="segmented">
     {#each TERM_FONT_OPTIONS as f (f.id)}
@@ -131,6 +235,22 @@
     tables or box art. Toggling reloads open terminals.
   </p>
 
+  <div class="section-title">Floating bar</div>
+  <div class="segmented" role="radiogroup" aria-label="Floating bar">
+    {#each barPrefs as b (b.id)}
+      <button
+        role="radio"
+        aria-checked={barStore.pref === b.id}
+        class:active={barStore.pref === b.id}
+        onclick={() => barStore.setPref(b.id)}
+      >{b.label}</button>
+    {/each}
+  </div>
+  <p class="hint-line">
+    {barPrefs.find((b) => b.id === barStore.pref)?.hint} Desktop window only — phones and tablets
+    keep the ⌘K sheet. Saved per device.
+  </p>
+
   <div class="section-title">Sessions on this device</div>
   <label class="switch-row">
     <input
@@ -147,7 +267,8 @@
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
-    menu. Choose what happens, or be asked each time.
+    menu. Choose what happens, or be asked each time. Deleting always asks first, and so does
+    closing several session tabs at once.
   </p>
   <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
     <label class="switch-row">
@@ -160,31 +281,54 @@
     </label>
     <label class="switch-row">
       <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
-      <span>Always delete — stop it and remove its history</span>
+      <span>Always delete — stop it and remove its history (asks to confirm)</span>
     </label>
   </div>
 
   <div class="section-title">Database Explorer</div>
-  <label class="row num-row">
-    <span>Switch to Vertical view when a result has more than</span>
-    <input
-      type="number"
-      class="input num-input mono"
-      min="0"
-      max="500"
-      step="1"
-      value={ui.dbAutoVerticalCols}
-      oninput={(e) => {
-        // A cleared box is mid-edit, not "0" — leave the setting until a number lands.
-        if (e.currentTarget.value !== '') ui.setDbAutoVerticalCols(Number(e.currentTarget.value));
-      }}
-      aria-label="Auto-Vertical column threshold"
-    />
-    <span>columns</span>
-  </label>
   <p class="hint-line">
-    0 = never. Applies unless you picked a view for that tab (the Grid / Vertical / JSON switch
-    or ⇧⌘V); MongoDB results open in Vertical by default. Saved per device.
+    Open wide results in the Vertical view (one record per block) instead of the grid. Set per
+    engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
+    table is what the grid is for.
+  </p>
+  <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
+    {#each AUTO_VERTICAL_ENGINES as eng (eng.id)}
+      {@const n = ui.dbAutoVertical[eng.id]}
+      <div class="av-row">
+        <label class="switch-row av-toggle">
+          <input
+            type="checkbox"
+            checked={n > 0}
+            onchange={(e) => ui.setDbAutoVertical(eng.id, e.currentTarget.checked ? 10 : 0)}
+          />
+          <span>{eng.label}</span>
+        </label>
+        <label class="av-num" class:off={n === 0}>
+          <span>more than</span>
+          <input
+            type="number"
+            class="input num-input mono"
+            min="1"
+            max="500"
+            step="1"
+            disabled={n === 0}
+            value={n === 0 ? '' : n}
+            placeholder="—"
+            oninput={(e) => {
+              // A cleared box is mid-edit, not "off" — keep the setting until a number lands.
+              const v = e.currentTarget.value;
+              if (v !== '' && Number(v) > 0) ui.setDbAutoVertical(eng.id, Number(v));
+            }}
+            aria-label="{eng.label}: column threshold"
+          />
+          <span>columns</span>
+        </label>
+      </div>
+    {/each}
+  </div>
+  <p class="hint-line">
+    A view you pick on a tab (the Grid / Vertical / JSON switch or ⇧⌘V) always wins. Saved per
+    device.
   </p>
 
   <div class="section-title">Sidebar</div>
@@ -194,45 +338,57 @@
     (“Customize sidebar” at the bottom of the expanded sidebar). Saved per device.
   </p>
   <div class="sidebar-list" data-testid="settings-sidebar-list">
-    {#each sidebarResolved as m, i (m.id)}
-      <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
-        <Icon name={m.icon} size={14} />
-        <span class="grow">{m.label}</span>
-        <button
-          class="sb-btn"
-          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, -1)}
-          disabled={i === 0}
-          title="Move up"
-          aria-label={`Move ${m.label} up`}
-        >
-          <Icon name="arrowUp" size={12} />
-        </button>
-        <button
-          class="sb-btn"
-          onclick={() => ui.moveSidebar(sidebarResolved.map((x) => x.id), m.id, 1)}
-          disabled={i === sidebarResolved.length - 1}
-          title="Move down"
-          aria-label={`Move ${m.label} down`}
-        >
-          <Icon name="arrowDown" size={12} />
-        </button>
-        <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
-          <input
-            type="checkbox"
-            checked={!ui.sidebarHidden.includes(m.id)}
-            onchange={() => ui.toggleSidebarHidden(m.id)}
-            aria-label={`Show ${m.label}`}
-          />
-        </label>
-      </div>
+    <!-- Section by section, as the sidebar shows them; moves stay in-section. -->
+    {#each groupModules(sidebarResolved) as sec (sec.group.id)}
+      <div class="sidebar-group-label">{sec.group.label}</div>
+      {#each sec.modules as m, i (m.id)}
+        <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
+          <Icon name={m.icon} size={14} />
+          <span class="grow">{m.label}</span>
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarItem(m.id, -1)}
+            disabled={i === 0}
+            title="Move up"
+            aria-label={`Move ${m.label} up`}
+          >
+            <Icon name="arrowUp" size={12} />
+          </button>
+          <button
+            class="sb-btn"
+            onclick={() => moveSidebarItem(m.id, 1)}
+            disabled={i === sec.modules.length - 1}
+            title="Move down"
+            aria-label={`Move ${m.label} down`}
+          >
+            <Icon name="arrowDown" size={12} />
+          </button>
+          <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
+            <input
+              type="checkbox"
+              checked={!ui.sidebarHidden.includes(m.id)}
+              onchange={() => ui.toggleSidebarHidden(m.id)}
+              aria-label={`Show ${m.label}`}
+            />
+          </label>
+        </div>
+      {/each}
     {/each}
   </div>
   <div class="row">
     <button class="btn small" onclick={() => ui.resetSidebar()}>Reset to default</button>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .theme-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
@@ -263,6 +419,54 @@
     flex-direction: column;
     gap: 6px;
     margin-bottom: 8px;
+  }
+  /* Backdrop preview: the window colour under the generated art, with a
+     sketch of the sidebar glass and a content card on top. */
+  .ambient-preview {
+    position: relative;
+    background-color: var(--bg);
+    background-size: cover;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .ap-side {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 30%;
+    background: var(--glass-tint);
+    border-inline-end: 1px solid var(--separator);
+  }
+  .ap-card {
+    position: absolute;
+    inset-block: 14px;
+    inset-inline: 40% 10%;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+  }
+  .photo-row {
+    margin-top: 10px;
+    gap: 6px;
+  }
+  .photo-row label:focus-within {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 1px;
+  }
+  .photo-row .busy {
+    opacity: 0.6;
+    pointer-events: none;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .reduce-row {
+    margin-top: 12px;
   }
   .tp-bar {
     width: 34px;
@@ -320,21 +524,43 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 1px 6px;
     margin-inline-start: 6px;
     vertical-align: middle;
   }
-  .num-row {
-    font-size: 12.5px;
-    color: var(--text);
-    margin-top: 8px;
-  }
   .num-input {
     width: 64px;
     text-align: end;
+  }
+  /* Auto-Vertical per engine: toggle · "more than N columns", one row each. */
+  .av-table {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+    max-width: min(460px, 92vw);
+  }
+  .av-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 30px;
+  }
+  .av-toggle {
+    min-width: 120px;
+  }
+  .av-num {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .av-num.off {
+    opacity: 0.55;
   }
   .accent-input {
     width: 36px;
@@ -368,6 +594,17 @@
   }
   .sidebar-row:hover {
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .sidebar-group-label {
+    padding: 8px 8px 2px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-dim);
+  }
+  .sidebar-group-label:first-child {
+    padding-top: 2px;
   }
   .sidebar-row .grow {
     flex: 1;

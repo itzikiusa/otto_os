@@ -149,7 +149,7 @@
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .compact .install-icon {
     width: 32px;

@@ -3,6 +3,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import SessionView from '../agents/SessionView.svelte';
   import IterationRow from './IterationRow.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { humanVerification } from './verification';
   import type { GoalLoop } from '../../lib/api/types';
 
@@ -55,13 +58,18 @@
   }
 </script>
 
-<div class="detail">
-  <header class="head">
-    <button class="btn ghost" onclick={onback}>← Back</button>
+<div class="detail-page">
+<PageHeader title={loop?.name ?? 'Goal loop'}>
+  {#snippet leading()}
+    <button class="icon-btn" title="Back to Goal Loops" aria-label="Back" onclick={onback}>
+      <Icon name="chevronLeft" size={15} />
+    </button>
+  {/snippet}
+  {#snippet badge()}
+    {#if loop}<span class="status {loop.status}">{loop.status}</span>{/if}
+  {/snippet}
+  {#snippet actions()}
     {#if loop}
-      <h1>{loop.name}</h1>
-      <span class="status {loop.status}">{loop.status}</span>
-      <span class="spacer"></span>
       {#if loop.status === 'running'}
         <button class="btn" onclick={() => act(() => loops.pause(id), 'Pause')}>Pause</button>
         <button class="btn danger" onclick={() => act(() => loops.stop(id), 'Stop')}>Stop</button>
@@ -73,7 +81,10 @@
         <button class="btn ghost" onclick={del}>Delete</button>
       {/if}
     {/if}
-  </header>
+  {/snippet}
+</PageHeader>
+<PageBody>
+<div class="detail">
 
   {#if !loop}
     <p class="muted">Loading…</p>
@@ -168,27 +179,17 @@
     </section>
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
   textarea { width: 100%; min-height: 60px; box-sizing: border-box; background: var(--surface); color: var(--text); border: 1px solid var(--border); }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .detail {
-    padding: 16px 22px;
-    overflow-y: auto;
-    height: 100%;
-  }
-  .head {
+  .detail-page {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-  h1 {
-    font-size: 16px;
-    margin: 0;
-  }
-  .spacer {
-    flex: 1;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
   .status {
     font-size: 11px;
@@ -203,8 +204,8 @@
     color: var(--status-working);
   }
   .status.succeeded {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
     font-weight: 600;
   }
   .status.failed,

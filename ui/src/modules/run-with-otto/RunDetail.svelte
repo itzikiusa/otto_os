@@ -3,8 +3,11 @@
   // stage timeline, proof + findings, the approval gate, and the PR draft. Reads
   // the open run + its events straight from the store.
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import RunStageRail from './RunStageRail.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import { humanize, isTerminal, sourceColor, sourceLabel, statusTone } from './runStatus';
 
@@ -52,7 +55,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!confirm('Cancel this run?')) return;
+    if (!(await confirmer.ask('Cancel this run?', { title: 'Cancel run', confirmLabel: 'Cancel run' }))) return;
     error = '';
     busy = true;
     try {
@@ -128,9 +131,15 @@
   <!-- stage timeline -->
   <section class="block">
     <h3 class="h">Stage timeline</h3>
-    {#if events.length === 0}
-      <div class="muted">No stage events yet.</div>
-    {:else}
+    <LoadState
+      what="the stage timeline"
+      variant="compact"
+      loading={!runWithOtto.eventsByRun[run.id] && !runWithOtto.eventsError[run.id]}
+      error={runWithOtto.eventsError[run.id]}
+      empty={events.length === 0}
+      onretry={() => void runWithOtto.loadEvents(run.id)}
+    >
+      {#snippet emptyView()}<div class="muted">No stage events yet.</div>{/snippet}
       <ol class="timeline">
         {#each events as ev (ev.id)}
           <li class="tl-item">
@@ -139,14 +148,14 @@
               <div class="tl-top">
                 <span class="tl-kind">{humanize(ev.kind)}</span>
                 {#if ev.status}<span class="pill {statusTone(ev.status)} tiny">{humanize(ev.status)}</span>{/if}
-                <span class="tl-when">{ev.created_at}</span>
+                <span class="tl-when"><RelTime iso={ev.created_at} /></span>
               </div>
               {#if ev.message}<div class="tl-msg">{ev.message}</div>{/if}
             </div>
           </li>
         {/each}
       </ol>
-    {/if}
+    </LoadState>
   </section>
 
   <!-- approval gate -->
@@ -222,7 +231,7 @@
   .h { margin: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
   .goal { font-size: 0.92rem; line-height: 1.45; }
   .src-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; flex-wrap: wrap; }
-  .link { color: var(--accent); }
+  .link { color: var(--accent-text); }
   .muted { color: var(--text-dim); }
   .mono { font-family: var(--font-mono); font-size: 0.78rem; }
   .dot { color: var(--text-dim); }
@@ -281,6 +290,6 @@
   .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

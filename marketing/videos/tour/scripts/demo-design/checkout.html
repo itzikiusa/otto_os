@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>One-page checkout</title>
+<style>
+  :root { --p:#4F46E5; --ink:#111827; --muted:#6B7280; --line:#E5E7EB; --alt:#F5F3FF; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif; color:var(--ink);
+         background: radial-gradient(1200px 600px at 10% -10%, #E0E7FF, transparent), radial-gradient(900px 500px at 110% 10%, #FEF3C7, transparent), #FAFAFF; }
+  .wrap { max-width: 1040px; margin: 48px auto; display:grid; grid-template-columns: 1.3fr 1fr; gap: 28px; padding: 0 24px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:22px; padding:28px; box-shadow: 0 20px 50px rgba(79,70,229,.08); }
+  h1 { font-size:30px; margin:0 0 4px; letter-spacing:-.5px; } .sub { color:var(--muted); margin:0 0 22px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:14px 0 6px; }
+  .in { border:1px solid var(--line); border-radius:12px; padding:12px 14px; font-size:16px; background:#fff; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .saved { display:flex; gap:12px; margin-top:6px; }
+  .cc { flex:1; border:2px solid var(--line); border-radius:14px; padding:14px; font-weight:600; }
+  .cc.on { border-color: var(--p); background: var(--alt); }
+  .cc small { display:block; color:var(--muted); font-weight:500; }
+  .btn { margin-top:22px; width:100%; border:0; border-radius:999px; padding:16px; font-size:17px; font-weight:700; color:#fff; background: var(--p); box-shadow: 0 10px 24px rgba(79,70,229,.35); }
+  .item { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); }
+  .tot { display:flex; justify-content:space-between; font-size:20px; font-weight:800; margin-top:16px; }
+  .badge { display:inline-block; background:#FEF3C7; color:#92400E; border-radius:999px; padding:3px 10px; font-size:12px; font-weight:700; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Checkout</h1>
+      <p class="sub">One page. Saved cards first. <span class="badge">New</span></p>
+      <label>Pay with</label>
+      <div class="saved">
+        <div class="cc on">•••• 4242<small>Visa · expires 08/28</small></div>
+        <div class="cc">•••• 5555<small>Mastercard · expires 02/27</small></div>
+      </div>
+      <label>Email</label><div class="in">maya@example.com</div>
+      <div class="row">
+        <div><label>City</label><div class="in">Lisbon</div></div>
+        <div><label>Postcode</label><div class="in">1100-148</div></div>
+      </div>
+      <button class="btn">Pay now</button>
+    </div>
+    <div class="card">
+      <h2 style="margin:0 0 8px">Your order</h2>
+      <div class="item"><span>Mechanical Keyboard</span><b>$129.00</b></div>
+      <div class="item"><span>USB-C Cable 2m</span><b>$15.00</b></div>
+      <div class="item"><span>Shipping</span><b>$4.00</b></div>
+      <div class="tot"><span>Total</span><span>$148.00</span></div>
+    </div>
+  </div>
+</body>
+</html>

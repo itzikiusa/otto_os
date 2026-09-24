@@ -225,7 +225,13 @@
         <button class="btn small primary" type="submit" disabled={busy === 'branch' || branchName.trim() === ''}>
           {busy === 'branch' ? '…' : 'Create'}
         </button>
-        <button class="btn small ghost" type="button" onclick={() => { branchOpen = false; branchName = ''; }}>
+        <button
+          class="btn small ghost"
+          type="button"
+          aria-label="Cancel new branch"
+          title="Cancel"
+          onclick={() => { branchOpen = false; branchName = ''; }}
+        >
           <Icon name="x" size={11} />
         </button>
       </form>
@@ -261,7 +267,7 @@
     align-items: center;
     gap: 5px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 2px 8px;
     font-size: 11.5px;
@@ -269,7 +275,7 @@
     flex-shrink: 0;
   }
   .ab {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
   }
   .ab.up { color: var(--status-working); }
@@ -319,7 +325,7 @@
   }
   .split .caret {
     padding: 0 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 1;
   }
   .branch-wrap {

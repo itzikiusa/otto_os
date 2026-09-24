@@ -51,6 +51,44 @@ fn default_ssh_port() -> u16 {
     22
 }
 
+/// A bastion host `ssh` can only read as a DESTINATION: a hostname / IPv4
+/// literal ([`otto_core::network_profiles::valid_host`] — no leading `-`, no
+/// spaces or shell/option syntax) or an IPv6 literal. Profiles can come from
+/// imported third-party connection files, and a "host" that starts with `-`
+/// would otherwise reach `ssh`'s argv as an option.
+pub fn valid_ssh_host(host: &str) -> bool {
+    otto_core::network_profiles::valid_host(host) || host.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
+/// An SSH user name that cannot be read as an option or split the argument:
+/// empty (let ssh resolve it), or no leading `-` and no whitespace / control
+/// characters.
+pub fn valid_ssh_user(user: &str) -> bool {
+    user.is_empty()
+        || (!user.starts_with('-') && !user.chars().any(|c| c.is_whitespace() || c.is_control()))
+}
+
+impl SshTunnelConfig {
+    /// Refuse a host / user `ssh` could misread (see [`valid_ssh_host`],
+    /// [`valid_ssh_user`]). Checked before every tunnel is opened and when a
+    /// profile carrying a tunnel is saved.
+    pub fn validate(&self) -> Result<()> {
+        if !valid_ssh_host(&self.host) {
+            return Err(Error::Invalid(format!(
+                "ssh tunnel host '{}' is not a valid hostname or IP address",
+                self.host
+            )));
+        }
+        if !valid_ssh_user(&self.user) {
+            return Err(Error::Invalid(format!(
+                "ssh tunnel user '{}' is not a valid user name",
+                self.user
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// A live SSH port-forward. The `ssh` child is killed on drop, tearing down the
 /// tunnel. The `child` is behind a `Mutex` so a shared, cached tunnel (held as
 /// `Arc<SshTunnel>`) can be liveness-probed via `&self`.
@@ -105,6 +143,7 @@ impl SshTunnel {
         remote_host: &str,
         remote_port: u16,
     ) -> Result<SshTunnel> {
+        cfg.validate()?;
         Self::launch_with_retry(|local_port| {
             local_forward_args(cfg, local_port, remote_host, remote_port)
         })
@@ -116,6 +155,7 @@ impl SshTunnel {
     /// dials arbitrary hosts from the SSH server's network. Returns once the
     /// local SOCKS port accepts a TCP connection.
     pub async fn open_socks(cfg: &SshTunnelConfig) -> Result<SshTunnel> {
+        cfg.validate()?;
         Self::launch_with_retry(|local_port| socks_forward_args(cfg, local_port)).await
     }
 
@@ -293,7 +333,7 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
     args
 }
 
-/// `ssh` args for a local port-forward: `… -L 127.0.0.1:<local>:<remote>:<port> user@host`.
+/// `ssh` args for a local port-forward: `… -L 127.0.0.1:<local>:<remote>:<port> -- user@host`.
 fn local_forward_args(
     cfg: &SshTunnelConfig,
     local_port: u16,
@@ -305,15 +345,18 @@ fn local_forward_args(
     args.push(format!(
         "127.0.0.1:{local_port}:{remote_host}:{remote_port}"
     ));
+    // `--` ends option parsing: the destination is never read as an option.
+    args.push("--".into());
     args.push(ssh_target(cfg));
     args
 }
 
-/// `ssh` args for a dynamic SOCKS5 forward: `… -D 127.0.0.1:<local> user@host`.
+/// `ssh` args for a dynamic SOCKS5 forward: `… -D 127.0.0.1:<local> -- user@host`.
 fn socks_forward_args(cfg: &SshTunnelConfig, local_port: u16) -> Vec<String> {
     let mut args = base_args(cfg);
     args.push("-D".into());
     args.push(format!("127.0.0.1:{local_port}"));
+    args.push("--".into());
     args.push(ssh_target(cfg));
     args
 }
@@ -344,7 +387,8 @@ mod tests {
     #[test]
     fn local_forward_args_shape() {
         let args = local_forward_args(&cfg(), 54321, "db.internal", 3306);
-        assert_eq!(args[args.len() - 2], "127.0.0.1:54321:db.internal:3306");
+        assert_eq!(args[args.len() - 3], "127.0.0.1:54321:db.internal:3306");
+        assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "itziklavon@bastion.example.com");
         let l = args.iter().position(|a| a == "-L").unwrap();
         assert_eq!(args[l + 1], "127.0.0.1:54321:db.internal:3306");
@@ -368,6 +412,7 @@ mod tests {
         let args = socks_forward_args(&cfg(), 1080);
         let d = args.iter().position(|a| a == "-D").unwrap();
         assert_eq!(args[d + 1], "127.0.0.1:1080");
+        assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "itziklavon@bastion.example.com");
         assert!(!args.iter().any(|a| a == "-L"));
     }
@@ -378,6 +423,31 @@ mod tests {
         c.identity_file = None;
         let args = socks_forward_args(&c, 1080);
         assert!(!args.iter().any(|a| a == "-i"));
+    }
+
+    /// A profile (possibly imported) can never smuggle an option into ssh's
+    /// argv through its host or user.
+    #[test]
+    fn tunnel_host_and_user_are_validated() {
+        assert!(cfg().validate().is_ok());
+        let mut bare = cfg();
+        bare.user = String::new();
+        assert!(bare.validate().is_ok());
+        for host in ["10.0.0.5", "bastion-1.internal", "fe80::1", "[fe80::1]"] {
+            let mut c = cfg();
+            c.host = host.into();
+            assert!(c.validate().is_ok(), "{host}");
+        }
+        for host in ["", "-oFoo=bar", "host name", "a;b"] {
+            let mut c = cfg();
+            c.host = host.into();
+            assert!(c.validate().is_err(), "{host:?}");
+        }
+        for user in ["-oFoo=bar", "a b", "a\nb"] {
+            let mut c = cfg();
+            c.user = user.into();
+            assert!(c.validate().is_err(), "{user:?}");
+        }
     }
 
     #[test]

@@ -2,19 +2,25 @@
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { confirmOutward } from '../../lib/confirmOutward';
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
   import DiffViewer from './DiffViewer.svelte';
   import CommentThread from './CommentThread.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
   import PrMergeModal from './PrMergeModal.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
@@ -62,24 +68,41 @@
   const inlineComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path !== null));
   const generalComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path === null));
 
+  // A different PR (back/forward, a notification deep link) reuses this
+  // component: drop the previous PR's data first, so a slow or failed load
+  // never shows PR A's title/diff (or offers its Approve…) under PR B's number.
   $effect(() => {
-    void load(repoId, number);
+    const rid = repoId;
+    const num = number;
+    untrack(() => {
+      pr = null;
+      diff = null;
+      commits = null;
+      prError = null;
+      diffError = null;
+      commitsError = null;
+    });
+    void load(rid, num);
   });
 
-  // Lazy-load diff when switching to Files tab. `diffFailed` stops the effect
+  // Load failures render INLINE with Retry (a toast is for failed actions).
+  let prError = $state<string | null>(null);
+
+  // Lazy-load diff when switching to Files tab. `diffError` stops the effect
   // from re-firing after an error — diff stays null on failure, so without the
-  // latch this loop hammered the daemon with retries (and toast spam) forever.
-  let diffFailed = $state(false);
+  // latch this loop hammered the daemon with retries forever.
+  let diffError = $state<string | null>(null);
   $effect(() => {
-    if (activeTab === 'files' && diff === null && !diffLoading && !diffFailed) {
+    if (activeTab === 'files' && diff === null && !diffLoading && !diffError) {
       void loadDiff(repoId, number);
     }
   });
 
-  // Lazy-load commits when switching to Commits tab (same failure latch).
-  let commitsFailed = $state(false);
+  // Lazy-load commits when switching to Commits tab (same failure latch; the
+  // latch used to leave the tab on "Loading commits…" forever).
+  let commitsError = $state<string | null>(null);
   $effect(() => {
-    if (activeTab === 'commits' && commits === null && !commitsLoading && !commitsFailed) {
+    if (activeTab === 'commits' && commits === null && !commitsLoading && !commitsError) {
       void loadCommits(repoId, number);
     }
   });
@@ -87,9 +110,12 @@
   async function load(rid: string, num: number): Promise<void> {
     loading = true;
     try {
-      pr = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      if (rid !== repoId || num !== number) return; // switched PRs mid-flight
+      pr = next;
+      prError = null;
     } catch (e) {
-      toasts.error('Could not load PR', e instanceof Error ? e.message : String(e));
+      if (rid === repoId && num === number) prError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -97,12 +123,13 @@
 
   async function loadDiff(rid: string, num: number): Promise<void> {
     diffLoading = true;
-    diffFailed = false;
     try {
-      diff = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      const next = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
+      if (rid !== repoId || num !== number) return;
+      diff = next;
+      diffError = null;
     } catch (e) {
-      diffFailed = true;
-      toasts.error('Could not load diff', e instanceof Error ? e.message : String(e));
+      if (rid === repoId && num === number) diffError = loadErrorText(e);
     } finally {
       diffLoading = false;
     }
@@ -110,12 +137,13 @@
 
   async function loadCommits(rid: string, num: number): Promise<void> {
     commitsLoading = true;
-    commitsFailed = false;
     try {
-      commits = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      const next = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
+      if (rid !== repoId || num !== number) return;
+      commits = next;
+      commitsError = null;
     } catch (e) {
-      commitsFailed = true;
-      toasts.error('Could not load commits', e instanceof Error ? e.message : String(e));
+      if (rid === repoId && num === number) commitsError = loadErrorText(e);
     } finally {
       commitsLoading = false;
     }
@@ -212,17 +240,37 @@
     }
   }
 
+  // Approve and Decline are posted to the provider under the user's account and
+  // notify the author + reviewers, so both confirm where / what / who first.
+  const repoLabel = $derived(git.repos.find((r) => r.id === repoId)?.name ?? 'this repository');
+
   async function action(kind: 'approve' | 'decline'): Promise<void> {
+    const approve = kind === 'approve';
+    const ok = await confirmOutward({
+      verb: approve ? 'Approve PR' : 'Decline PR',
+      title: approve ? `Approve PR #${number}?` : `Decline PR #${number}?`,
+      where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
+      what: approve
+        ? 'Your approval, posted under your git account.'
+        : 'The PR is closed without merging. It can be reopened on the provider.',
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      danger: !approve,
+    });
+    if (!ok) return;
     busy = kind;
     try {
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
-      toasts.error(`${kind} failed`, e instanceof Error ? e.message : String(e));
+      toasts.error(approve ? "Couldn't approve the PR" : "Couldn't decline the PR", e instanceof Error ? e.message : String(e));
     } finally {
       busy = '';
     }
+  }
+
+  function moreMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, [{ label: 'Decline PR…', icon: 'x', danger: true, action: () => void action('decline') }]);
   }
 
   async function openAsSession(): Promise<void> {
@@ -253,16 +301,14 @@
   }
 </script>
 
-<div class="prd">
-  {#if loading && !pr}
-    <div style="padding: 16px"><Skeleton rows={5} height={40} /></div>
-  {:else if pr}
-    <header class="prd-head">
-      <button class="btn ghost small" onclick={() => router.go(`git/${repoId}/prs`)}>
-        <span class="back-arrow" aria-hidden="true">←</span> Pull Requests
-      </button>
-      <span class="grow"></span>
-      <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on">
+<div class="prd-page">
+<PageHeader
+  title={pr ? `Pull request #${pr.number}` : 'Pull request'}
+  crumbs={[{ label: 'Pull Requests', onclick: () => router.go(`git/${repoId}/prs`) }]}
+>
+  {#snippet actions()}
+    {#if pr}
+      <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on" aria-label="Review agent">
         {#each agentProviders() as p (p)}
           <option value={p}>{p}</option>
         {/each}
@@ -271,16 +317,30 @@
         <Icon name="terminal" size={11} /> Open as session
       </button>
       <button class="btn small" onclick={() => openExternal(pr?.url)}>View on provider</button>
-    </header>
+    {/if}
+  {/snippet}
+</PageHeader>
+<div class="prd">
+  {#if !pr && (loading || prError)}
+    <LoadState
+      what="this pull request"
+      variant="page"
+      rows={5}
+      {loading}
+      error={prError}
+      empty
+      onretry={() => void load(repoId, number)}
+    />
+  {:else if pr}
 
     <div class="prd-title-block">
       {#if editMode}
         <input class="input prd-title-input" bind:value={editTitle} />
       {:else}
-        <h1 class="prd-title">
+        <h2 class="prd-title">
           <span class="dim">#{pr.number}</span>
           {pr.title}
-        </h1>
+        </h2>
       {/if}
       <div class="prd-meta">
         <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{pr.state}</span>
@@ -316,7 +376,7 @@
         class:active={activeTab === 'commits'}
         onclick={() => selectTab('commits')}
       >
-        <Icon name="git-commit" size={12} /> Commits
+        <Icon name="commit" size={12} /> Commits
       </button>
       <button
         class="tab-btn"
@@ -388,14 +448,14 @@
         <section class="prd-actions card">
           <button class="btn" disabled={busy !== ''} onclick={() => action('approve')}>
             <Icon name="check" size={12} />
-            {busy === 'approve' ? 'Approving…' : 'Approve'}
+            {busy === 'approve' ? 'Approving…' : 'Approve…'}
           </button>
           <button
             class="btn warn"
             disabled={busy !== ''}
             onclick={() => (showRequestChanges = !showRequestChanges)}
           >
-            <Icon name="alert-triangle" size={12} />
+            <Icon name="warning" size={12} />
             Request changes
           </button>
           <div class="row merge-group">
@@ -405,9 +465,17 @@
             </button>
           </div>
           <span class="grow"></span>
-          <button class="btn danger" disabled={busy !== ''} onclick={() => action('decline')}>
-            {busy === 'decline' ? 'Declining…' : 'Decline'}
-          </button>
+          <!-- Decline is destructive + outward: kept out of the primary row
+               (next to Merge) and behind a ⋯ menu that then confirms. -->
+          <button
+            class="icon-btn"
+            disabled={busy !== ''}
+            data-testid="prd-more"
+            aria-label="More PR actions"
+            title="More PR actions"
+            onclick={moreMenu}
+            onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && moreMenu(e)}
+          >⋯</button>
         </section>
         {#if showRequestChanges}
           <section class="prd-request-changes card">
@@ -462,18 +530,15 @@
     <!-- Files tab -->
     {#if activeTab === 'files'}
       <section class="prd-diff">
-        {#if diffFailed}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">
-            Could not load the diff.
-            <button class="btn small ghost" onclick={() => void loadDiff(repoId, number)}>Retry</button>
-          </p>
-        {:else if diffLoading || (!diff && !diffLoading)}
-          {#if diffLoading}
-            <Skeleton rows={4} height={30} />
-          {:else}
-            <p class="dim" style="font-size: 12px; padding: 12px 0">Loading diff…</p>
-          {/if}
-        {:else if diff}
+        {#if diffError || !diff}
+          <LoadState
+            what="the diff"
+            loading={diffLoading || !diffError}
+            error={diffError}
+            empty
+            onretry={() => void loadDiff(repoId, number)}
+          />
+        {:else}
           <DiffViewer
             {diff}
             prMode={true}
@@ -490,14 +555,15 @@
     <!-- Commits tab -->
     {#if activeTab === 'commits'}
       <section class="prd-commits">
-        {#if commitsLoading}
-          <Skeleton rows={4} height={28} />
-        {:else if commits === null}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">Loading commits…</p>
-        {:else if commits.length === 0}
-          <p class="dim" style="font-size: 12px; padding: 12px 0">No commits found.</p>
-        {:else}
-          {#each commits as c (c.sha)}
+        <LoadState
+          what="commits"
+          loading={commitsLoading || (commits === null && !commitsError)}
+          error={commitsError}
+          empty={!commits || commits.length === 0}
+          onretry={() => void loadCommits(repoId, number)}
+        >
+          {#snippet emptyView()}<p class="dim" style="font-size: 12px; padding: 12px 0">No commits found.</p>{/snippet}
+          {#each commits ?? [] as c (c.sha)}
             <div class="commit-row">
               <span class="commit-sha mono">{c.short_sha}</span>
               <span class="commit-subject">{c.subject}</span>
@@ -505,7 +571,7 @@
               <span class="commit-date dim">{formatRelativeDate(c.date)}</span>
             </div>
           {/each}
-        {/if}
+        </LoadState>
       </section>
     {/if}
 
@@ -516,6 +582,7 @@
       </section>
     {/if}
   {/if}
+</div>
 </div>
 
 {#if mergeOpen && pr}
@@ -538,17 +605,18 @@
 {/if}
 
 <style>
-  .prd {
+  .prd-page {
+    display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .prd {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 12px 18px 48px;
-  }
-  .prd-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
+    padding: 14px 20px 48px;
   }
   .prd-provider-select {
     height: 28px;
@@ -603,7 +671,7 @@
     color: var(--text);
   }
   .tab-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
     font-weight: 600;
   }
@@ -636,7 +704,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, var(--dim));
+    color: var(--text-dim);
     margin-bottom: 8px;
   }
   .reviewer-row {
@@ -745,7 +813,7 @@
   }
   .commit-sha {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
   }
   .commit-subject {
@@ -765,13 +833,11 @@
     font-size: 11.5px;
   }
 
-  /* Direction-aware arrows: the back chevron and the source→target separator
-     mirror in place under RTL so they point with the reading direction. */
-  .back-arrow,
+  /* Direction-aware arrow: the source→target separator mirrors in place under
+     RTL so it points with the reading direction. */
   .dir-arrow {
     display: inline-block;
   }
-  :global([dir='rtl']) .back-arrow,
   :global([dir='rtl']) .dir-arrow {
     transform: scaleX(-1);
   }
@@ -781,9 +847,6 @@
   @media (max-width: 1024px) {
     .prd { padding: 12px 12px 48px; }
     /* Header actions wrap instead of overflowing; comfortable touch targets. */
-    .prd-head { flex-wrap: wrap; gap: 6px; }
-    .prd-head .btn { height: 34px; }
-    .prd-head .grow { display: none; }
     .prd-title { font-size: 18px; overflow-wrap: anywhere; }
     .prd-title-input { height: 38px; font-size: 16px; }
     .prd-meta { flex-wrap: wrap; gap: 8px; font-size: 13px; min-width: 0; }

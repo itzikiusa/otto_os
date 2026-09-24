@@ -1,8 +1,12 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Session name themes: pick the theme new agent sessions are auto-named from
   // (e.g. "Ronaldo", "Messi") and manage your own custom name lists (family
   // names, …). Per-user; backed by /name-themes.
   import { api } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
     NameThemesResp,
@@ -80,7 +84,7 @@
   }
 
   async function deleteTheme(t: NameThemeInfo): Promise<void> {
-    if (!confirm(`Delete custom theme “${t.label}”?`)) return;
+    if (!(await confirmer.ask(`Delete custom theme “${t.label}”?`, { title: 'Delete theme' }))) return;
     try {
       await api.del(`/name-themes/${t.id}`);
       await load();
@@ -93,17 +97,10 @@
   const customs = $derived((resp?.themes ?? []).filter((t) => t.kind === 'custom'));
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Session Names</h1>
-      <div class="sub">
-        New agent sessions are auto-named from your active theme (e.g.
-        <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open
-        sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('session-names')} subtitle="New agent sessions are auto-named from your theme" />
+  <PageBody width="readable">
+  <p class="section-intro">New agent sessions are auto-named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code> — unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</p>
 
   {#if loading}
     <div class="card pad dim">Loading…</div>
@@ -199,19 +196,34 @@
       </div>
     </div>
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .section-intro {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .section-intro :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
   .card.pad {
     padding: 14px 16px;
     max-width: 640px;
     margin-bottom: 8px;
-  }
-  .sub code {
-    background: var(--surface-2);
-    border-radius: 4px;
-    padding: 0 4px;
-    font-size: 11px;
   }
   .theme-grid {
     display: grid;
@@ -236,8 +248,8 @@
     border-color: var(--accent);
   }
   .theme-card.active {
-    border-color: #7ee787;
-    background: color-mix(in srgb, #7ee787 12%, var(--surface));
+    border-color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, var(--surface));
   }
   .theme-head {
     display: flex;
@@ -260,10 +272,10 @@
     vertical-align: middle;
   }
   .badge-on {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    color: #052e10;
-    background: #7ee787;
+    color: var(--success);
+    background: var(--success-soft);
     border-radius: 4px;
     padding: 1px 5px;
   }
@@ -274,7 +286,7 @@
     text-overflow: ellipsis;
   }
   .theme-cap {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .custom-list {
     list-style: none;
@@ -303,7 +315,7 @@
   .link-danger {
     background: none;
     border: none;
-    color: var(--danger, #f97583);
+    color: var(--danger);
     cursor: pointer;
     font-size: 11.5px;
   }
@@ -324,7 +336,7 @@
   }
   .names-area {
     resize: vertical;
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     line-height: 1.5;
   }
 </style>

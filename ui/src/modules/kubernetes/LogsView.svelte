@@ -358,7 +358,7 @@
     background: hsl(var(--h) 50% 50% / 0.22);
     color: hsl(var(--h) 70% 72%);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     line-height: 16px;
     cursor: pointer;
     vertical-align: middle;

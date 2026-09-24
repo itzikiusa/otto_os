@@ -6,11 +6,13 @@ interface ImportMetaEnv {
   /** `'1'` → serve the in-memory mock API instead of talking to ottod. */
   readonly VITE_OTTO_MOCK?: string;
   /**
-   * Base URL the Walkthroughs page streams its MP4s from (no trailing slash).
-   * Defaults to the rolling `walkthroughs` GitHub release of itzikiusa/otto_os;
-   * point it at a mirror/CDN for air-gapped or self-hosted builds.
+   * Base URL the Help page streams the tour film (MP4 + poster + captions)
+   * from (no trailing slash). Defaults to the rolling `walkthroughs` GitHub
+   * release of itzikiusa/otto_os; point it at a mirror/CDN for air-gapped or
+   * self-hosted builds. `VITE_WALKTHROUGHS_V2_BASE` wins when both are set.
    */
   readonly VITE_WALKTHROUGHS_BASE?: string;
+  readonly VITE_WALKTHROUGHS_V2_BASE?: string;
 }
 
 interface ImportMeta {

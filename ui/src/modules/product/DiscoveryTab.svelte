@@ -29,9 +29,7 @@
   // ── Swarms ────────────────────────────────────────────────────────────────
   $effect(() => {
     const wsId = ws.currentId;
-    if (wsId && swarm.swarms.length === 0) {
-      void swarm.loadSwarms(wsId);
-    }
+    if (wsId) void swarm.ensureSwarms(wsId);
   });
 
   // ── Load on mount / story change ──────────────────────────────────────────
@@ -152,7 +150,7 @@
     {/if}
 
     <button
-      class="toolbar-btn primary"
+      class="btn small primary"
       onclick={runDiscovery}
       disabled={running}
       title="Launch a new discovery swarm run for this story"
@@ -161,7 +159,7 @@
     </button>
 
     <button
-      class="toolbar-btn"
+      class="btn small"
       onclick={loadRuns}
       disabled={loading}
       title="Reload discovery runs"
@@ -265,7 +263,7 @@
                 <!-- Footer: View in Swarm -->
                 <div class="run-footer">
                   <button
-                    class="toolbar-btn"
+                    class="btn small"
                     onclick={() => viewInSwarm(summary)}
                   >
                     View in Swarm →
@@ -319,36 +317,6 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .toolbar-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 110ms, border-color 110ms;
-  }
-  .toolbar-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .toolbar-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .toolbar-btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .toolbar-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 
   /* ── States ──────────────────────────────────────────────────────── */
   .muted {
@@ -360,7 +328,7 @@
     padding: 12px 14px;
   }
   .error-msg {
-    color: #ef4444;
+    color: var(--danger);
     font-size: 13px;
     padding: 8px 0;
   }
@@ -412,14 +380,14 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .coll-arrow {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-shrink: 0;
   }
 
   /* Status badges */
   .status-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -429,15 +397,15 @@
   }
   .status-done {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .status-running {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #b45309;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .status-error {
-    background: color-mix(in srgb, #ef4444 18%, transparent);
-    color: #dc2626;
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+    color: var(--danger);
   }
   .status-other {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
@@ -459,7 +427,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     font-weight: 500;
     cursor: pointer;
@@ -481,7 +449,7 @@
   }
 
   .section-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -549,10 +517,10 @@
     background: var(--accent);
   }
   .task-status-dot.status-running {
-    background: #f59e0b;
+    background: var(--status-warn);
   }
   .task-status-dot.status-error {
-    background: #ef4444;
+    background: var(--status-exited);
   }
   .task-status-dot.status-other {
     background: var(--text-dim);

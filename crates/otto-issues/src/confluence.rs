@@ -144,7 +144,7 @@ impl ConfluenceClient {
     /// Uses `?expand=body.storage,version,space`.
     pub async fn get_page(&self, id: &str) -> Result<ConfluencePage> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{id}"));
+        let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
         let resp = self
             .http
             .get(&url)
@@ -239,7 +239,10 @@ impl ConfluenceClient {
     /// Best-effort and silent: never fails the caller's publish.
     async fn set_full_width(&self, page_id: &str) {
         for key in ["content-appearance-published", "content-appearance-draft"] {
-            let url = self.api(&format!("/content/{page_id}/property"));
+            let url = self.api(&format!(
+                "/content/{}/property",
+                crate::jira::path_seg(page_id)
+            ));
             let _ = self
                 .http
                 .post(&url)
@@ -261,7 +264,7 @@ impl ConfluenceClient {
         version: i64,
     ) -> Result<ConfluencePage> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{id}"));
+        let url = self.api(&format!("/content/{}", crate::jira::path_seg(id)));
         let payload = serde_json::json!({
             "version": { "number": version + 1 },
             "type": "page",
@@ -288,6 +291,14 @@ impl ConfluenceClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // 409 = someone saved a newer version between our read and this
+            // write (`version + 1` is taken). Surface it as a conflict, not an
+            // upstream outage, so callers can tell the user to re-read.
+            if status == reqwest::StatusCode::CONFLICT {
+                return Err(Error::Conflict(format!(
+                    "confluence page {id} was changed by someone else — re-read it and re-apply the edit ({body})"
+                )));
+            }
             return Err(Error::Upstream(format!(
                 "confluence update_page {id} failed ({status}): {body}"
             )));
@@ -511,7 +522,10 @@ impl ConfluenceClient {
     /// storage XHTML to Markdown via [`storage_to_markdown`].
     pub async fn list_comments(&self, page_id: &str) -> Result<Vec<PageComment>> {
         self.ensure_tls()?;
-        let url = self.api(&format!("/content/{page_id}/child/comment"));
+        let url = self.api(&format!(
+            "/content/{}/child/comment",
+            crate::jira::path_seg(page_id)
+        ));
 
         // Paginate with start/limit to the last page: the endpoint returns one
         // default-sized page, so newer comments past it were silently invisible
@@ -749,13 +763,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // ── Helper functions ───────────────────────────────────────────────────
 
     fn decode_entities(s: &str) -> String {
-        s.replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
+        decode_html_entities(s)
     }
 
     macro_rules! push_block_sep {
@@ -774,13 +782,15 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     // matching `</table>` and returns (gfm_string, bytes_consumed).
     fn convert_table(input: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
-        // Locate </table>
-        let end_offset = src
-            .to_ascii_lowercase()
-            .find("</table>")
-            .unwrap_or(src.len());
-        let table_src = &src[..end_offset + "</table>".len()];
-        let consumed = end_offset + "</table>".len();
+        // Locate </table>. A truncated table (no closing tag) runs to the end of
+        // the input — `end_offset + "</table>".len()` used to slice past it and panic.
+        let (table_src, consumed) = match src.to_ascii_lowercase().find("</table>") {
+            Some(end_offset) => {
+                let consumed = end_offset + "</table>".len();
+                (&src[..consumed], consumed)
+            }
+            None => (src, src.len()),
+        };
 
         // Extract rows: split on <tr / </tr> boundaries.
         // Very lightweight: find each <tr...>...</tr> segment.
@@ -807,17 +817,17 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             let mut cells: Vec<String> = Vec::new();
             let mut cell_pos = 0usize;
             while cell_pos < row_src.len() {
-                if let Some(cell_start_rel) = row_src_lc[cell_pos..].find("<td").or_else(|| {
-                    row_src_lc[cell_pos..].find("<th").map(|i| {
-                        // Use whichever is earlier if both present.
-                        let td = row_src_lc[cell_pos..].find("<td").unwrap_or(usize::MAX);
-                        if i <= td {
-                            i
-                        } else {
-                            td
-                        }
-                    })
-                }) {
+                // The EARLIER of the next `<td` / `<th`. The old
+                // `find("<td").or_else(find("<th"))` only looked for `<th` once no
+                // `<td` remained, so a row-header cell (`<th>Status</th><td>Done</td>`)
+                // was skipped and the row lost a column.
+                let td = row_src_lc[cell_pos..].find("<td");
+                let th = row_src_lc[cell_pos..].find("<th");
+                let next_cell = match (td, th) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                if let Some(cell_start_rel) = next_cell {
                     let cell_start = cell_pos + cell_start_rel;
                     let tag_end = row_src_lc[cell_start..]
                         .find('>')
@@ -848,7 +858,9 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             if !cells.is_empty() {
                 rows.push(cells);
             }
-            search_from = tr_end + "</tr>".len();
+            // An unclosed last row (`tr_end == len`) would push this past the
+            // end and panic on the next `src_lc[search_from..]`.
+            search_from = (tr_end + "</tr>".len()).min(src_lc.len());
         }
 
         if rows.is_empty() {
@@ -951,7 +963,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 let body = extract_body_tag(macro_src, "ac:plain-text-body")
                     .or_else(|| extract_body_tag(macro_src, "ac:rich-text-body"))
                     .unwrap_or("");
-                format!("\n```{}\n{}\n```\n", lang, body.trim())
+                // Confluence wraps plain-text bodies in CDATA; the literal
+                // `<![CDATA[` / `]]>` used to leak into the Markdown (and from
+                // there, escaped, back into the page on publish).
+                format!("\n```{}\n{}\n```\n", lang, unwrap_cdata(body.trim()))
             }
             // ── Panel macros (info / note / warning / tip) → blockquote ──
             "info" | "note" | "warning" | "tip" => {
@@ -993,14 +1008,17 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         let src = &input[start_pos..];
         let src_lc = src.to_ascii_lowercase();
 
-        // Find the end: either `/>` (self-closing) or `</ac:image>`.
-        let self_close = src_lc.find("/>").unwrap_or(usize::MAX);
-        let close_tag = src_lc.find("</ac:image>").unwrap_or(usize::MAX);
-        let (end_offset, consumed) = if self_close <= close_tag {
-            (self_close + 2, self_close + 2)
-        } else {
-            let ct_len = "</ac:image>".len();
-            (close_tag + ct_len, close_tag + ct_len)
+        // Find the end: either `/>` (self-closing) or `</ac:image>`. With
+        // neither (truncated input) consume the rest — `usize::MAX + len`
+        // overflowed and the slice below panicked.
+        let self_close = src_lc.find("/>");
+        let close_tag = src_lc.find("</ac:image>");
+        let ct_len = "</ac:image>".len();
+        let (end_offset, consumed) = match (self_close, close_tag) {
+            (Some(s), Some(c)) if c < s => (c + ct_len, c + ct_len),
+            (Some(s), _) => (s + 2, s + 2),
+            (None, Some(c)) => (c + ct_len, c + ct_len),
+            (None, None) => (src.len(), src.len()),
         };
 
         let macro_src = &src[..end_offset];
@@ -1013,7 +1031,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                     .find('>')
                     .map(|i| att_start + i + 1)
                     .unwrap_or(att_start + 1);
-                let tag_inner = &macro_src[att_start + 1..tag_end.saturating_sub(1)];
+                // `.max(att_start + 1)`: with no `>` the end fell BEFORE the
+                // start and the range panicked.
+                let tag_inner =
+                    &macro_src[att_start + 1..tag_end.saturating_sub(1).max(att_start + 1)];
                 extract_attr(tag_inner, "ri:filename")
             } else {
                 None
@@ -1033,11 +1054,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             // before doing the standard single-tag parse.
 
             // ── Table look-ahead ──────────────────────────────────────────
-            if input[pos..].len() >= 6
-                && input[pos..pos + 6]
-                    .to_ascii_lowercase()
-                    .starts_with("<table")
-            {
+            // Byte-level, case-insensitive prefix tests: slicing `input[pos..pos + 6]`
+            // panicked whenever a multibyte char straddled byte 6 (`<li>✅`,
+            // `<p>👍`, `<em>—`), taking down page reads and the story watcher.
+            if starts_with_ci(input, pos, "<table") {
                 push_block_sep!();
                 let (gfm, consumed) = convert_table(input, pos);
                 out.push_str(&gfm);
@@ -1047,10 +1067,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             }
 
             // ── ac:structured-macro look-ahead ────────────────────────────
-            if input[pos..]
-                .to_ascii_lowercase()
-                .starts_with("<ac:structured-macro")
-            {
+            if starts_with_ci(input, pos, "<ac:structured-macro") {
                 push_block_sep!();
                 let (md, consumed) = convert_ac_macro(input, pos);
                 out.push_str(&md);
@@ -1060,7 +1077,7 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             }
 
             // ── ac:image look-ahead ────────────────────────────────────────
-            if input[pos..].to_ascii_lowercase().starts_with("<ac:image") {
+            if starts_with_ci(input, pos, "<ac:image") {
                 let (md, consumed) = convert_ac_image(input, pos);
                 out.push_str(&md);
                 pos += consumed;
@@ -1260,6 +1277,153 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     collapse_excess_newlines(&result)
 }
 
+/// Decode HTML/XML character references in ONE pass: named (`&amp;`, `&lt;`,
+/// `&rsquo;`, `&mdash;`, …) and numeric (`&#8217;`, `&#x2019;`). The old chain
+/// of `replace`s decoded `&amp;lt;` twice (to `<`, not the literal `&lt;`) and
+/// left `&rsquo;`/`&#8217;` alone — which the publish path then re-escaped
+/// into a visible "don&amp;rsquo;t". Unknown references are kept verbatim.
+fn decode_html_entities(s: &str) -> String {
+    fn named(name: &str) -> Option<char> {
+        if let Some(num) = name.strip_prefix('#') {
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse::<u32>().ok()?,
+            };
+            return char::from_u32(code);
+        }
+        Some(match name {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            "nbsp" => ' ',
+            "lsquo" => '\u{2018}',
+            "rsquo" => '\u{2019}',
+            "ldquo" => '\u{201C}',
+            "rdquo" => '\u{201D}',
+            "ndash" => '\u{2013}',
+            "mdash" => '\u{2014}',
+            "hellip" => '\u{2026}',
+            "bull" => '\u{2022}',
+            "middot" => '\u{00B7}',
+            "larr" => '\u{2190}',
+            "rarr" => '\u{2192}',
+            "times" => '\u{00D7}',
+            "deg" => '\u{00B0}',
+            "copy" => '\u{00A9}',
+            "reg" => '\u{00AE}',
+            "trade" => '\u{2122}',
+            _ => return None,
+        })
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let decoded = after
+            .find(';')
+            .filter(|&semi| semi <= 10)
+            .and_then(|semi| named(&after[..semi]).map(|c| (c, semi)));
+        match decoded {
+            Some((c, semi)) => {
+                out.push(c);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Join the CDATA sections of a storage text body into plain text
+/// (`<![CDATA[a]]>` → `a`; a `]]>` inside code is split by Confluence into
+/// `]]]]><![CDATA[>`, which this rejoins). Text without CDATA is returned as-is.
+fn unwrap_cdata(s: &str) -> String {
+    if !s.contains("<![CDATA[") {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("<![CDATA[") {
+        out.push_str(&rest[..open]);
+        let body = &rest[open + "<![CDATA[".len()..];
+        match body.find("]]>") {
+            Some(close) => {
+                out.push_str(&body[..close]);
+                rest = &body[close + "]]>".len()..];
+            }
+            None => {
+                out.push_str(body);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Storage elements that the Markdown round-trip (import → `storage_to_markdown`
+/// → edit → `markdown_to_storage` → publish) cannot carry and would DELETE
+/// from the page: images, links to pages/users, mentions, task lists,
+/// emoticons, inline-comment anchors, and any macro other than the handful the
+/// converter understands (code / panels / status). Empty ⇒ publishing the
+/// Markdown back loses no page content. Labels are deduplicated, in first-seen
+/// order, for the refusal message.
+pub fn storage_lossy_elements(storage: &str) -> Vec<String> {
+    const LOSSY_TAGS: [&str; 6] = [
+        "ac:image",
+        "ac:link",
+        "ri:user",
+        "ac:task-list",
+        "ac:emoticon",
+        "ac:inline-comment-marker",
+    ];
+    const KNOWN_MACROS: [&str; 6] = ["code", "info", "note", "warning", "tip", "status"];
+    let lc = storage.to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for tag in LOSSY_TAGS {
+        if lc.contains(&format!("<{tag}")) {
+            out.push(tag.to_string());
+        }
+    }
+    let mut from = 0;
+    while let Some(rel) = lc[from..].find("<ac:structured-macro") {
+        let start = from + rel;
+        let end = lc[start..].find('>').map(|i| start + i).unwrap_or(lc.len());
+        let name = extract_attr(&storage[start..end], "ac:name")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !KNOWN_MACROS.contains(&name.as_str()) {
+            let label = if name.is_empty() {
+                "unnamed macro".to_string()
+            } else {
+                format!("{name} macro")
+            };
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        from = end;
+    }
+    out
+}
+
+/// Case-insensitive ASCII prefix test at byte offset `pos`. Compares BYTES and
+/// never slices the `&str`, so it cannot panic on a char boundary, and it does
+/// not lowercase the whole rest of the document at every `<` (quadratic).
+fn starts_with_ci(input: &str, pos: usize, needle: &str) -> bool {
+    input
+        .as_bytes()
+        .get(pos..pos.saturating_add(needle.len()))
+        .is_some_and(|b| b.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Strip all `<tag>` / `</tag>` sequences from a string (keep text content).
 fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1325,6 +1489,12 @@ fn collapse_excess_newlines(s: &str) -> String {
 /// `**bold**`, `*italic*`, `[text](url)`.  Escapes `&`, `<`, `>` in plain text.
 pub fn markdown_to_storage(md: &str) -> String {
     let mut out = String::new();
+    // Control characters (an ANSI escape pasted from a terminal, a stray NUL)
+    // are invalid in XML 1.0 and make Confluence reject the whole page (400).
+    let md: String = md
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect();
     let lines: Vec<&str> = md.lines().collect();
     let mut i = 0;
 
@@ -1408,9 +1578,11 @@ pub fn markdown_to_storage(md: &str) -> String {
                     let after_start = j + close_bracket + 2;
                     if let Some(close_paren) = find_ch(after_start, ')') {
                         let url_part = span(after_start, after_start + close_paren);
+                        // `"` must be escaped inside the attribute — a raw one
+                        // ended it early and Confluence rejected the page (400).
                         out.push_str(&format!(
                             "<a href=\"{}\">{}</a>",
-                            escape_xml_char_str(&url_part),
+                            escape_xml_char_str(&url_part).replace('"', "&quot;"),
                             escape_xml_char_str(&text_part)
                         ));
                         j += close_bracket + 2 + close_paren + 1;
@@ -2061,6 +2233,101 @@ mod tests {
         assert!(md.contains("| Bob |"), "Bob row; got: {md:?}");
         assert!(md.contains("| 30 |"), "30 cell; got: {md:?}");
         assert!(md.contains("| 25 |"), "25 cell; got: {md:?}");
+    }
+
+    #[test]
+    fn storage_to_markdown_survives_multibyte_text_after_a_short_tag() {
+        // Each of these used to panic: `input[pos..pos + 6]` ended inside the
+        // multibyte char that follows a 3–5 byte tag.
+        for (storage, text) in [
+            ("<ul><li>✅ Done</li></ul>", "✅ Done"),
+            ("<p>👍</p>", "👍"),
+            ("<p><em>—</em></p>", "—"),
+            ("<ul><li>“quoted”</li></ul>", "“quoted”"),
+            ("<p>éé</p>", "éé"),
+        ] {
+            let md = storage_to_markdown(storage);
+            assert!(md.contains(text), "{storage:?} → {md:?}");
+        }
+    }
+
+    #[test]
+    fn storage_to_markdown_survives_truncated_markup() {
+        // No `</table>`, no `</tr>`, an unterminated image — never a panic.
+        let md = storage_to_markdown("<p>a</p><table><tr><td>x</td>");
+        assert!(md.contains("| x |"), "got: {md:?}");
+        let _ = storage_to_markdown("<table><tr><td>x</td></tr><tr><td>y");
+        let _ = storage_to_markdown(
+            "<p>b</p><ac:image ac:alt=\"z\"><ri:attachment ri:filename=\"f.png\"",
+        );
+        let _ = storage_to_markdown("<ac:image");
+    }
+
+    #[test]
+    fn entities_decode_once_and_cover_typographic_quotes() {
+        assert_eq!(decode_html_entities("&amp;lt;b&amp;gt;"), "&lt;b&gt;");
+        assert_eq!(
+            decode_html_entities("don&rsquo;t &#8217; &#x2019;"),
+            "don’t ’ ’"
+        );
+        assert_eq!(decode_html_entities("a &mdash; b&nbsp;c"), "a — b c");
+        // Unknown / unterminated references are kept verbatim.
+        assert_eq!(decode_html_entities("AT&T & &bogus; &"), "AT&T & &bogus; &");
+        let md = storage_to_markdown("<p>don&rsquo;t &amp;lt;tag&amp;gt;</p>");
+        assert_eq!(md, "don’t &lt;tag&gt;");
+    }
+
+    #[test]
+    fn markdown_to_storage_escapes_href_quotes_and_drops_control_chars() {
+        let s = markdown_to_storage("see [x](https://e.x/?q=\"a\")");
+        assert!(
+            s.contains("href=\"https://e.x/?q=&quot;a&quot;\""),
+            "got: {s:?}"
+        );
+        let s = markdown_to_storage("red \u{1b}[31mtext\u{0}");
+        assert!(!s.contains('\u{1b}') && !s.contains('\u{0}'), "got: {s:?}");
+        assert!(s.contains("red [31mtext"), "got: {s:?}");
+    }
+
+    #[test]
+    fn code_macro_body_is_unwrapped_from_cdata() {
+        let storage = "<ac:structured-macro ac:name=\"code\">\
+            <ac:parameter ac:name=\"language\">rust</ac:parameter>\
+            <ac:plain-text-body><![CDATA[let a = b[0]; // x < y]]></ac:plain-text-body>\
+            </ac:structured-macro>";
+        let md = storage_to_markdown(storage);
+        assert!(
+            md.contains("```rust\nlet a = b[0]; // x < y\n```"),
+            "got: {md:?}"
+        );
+        assert!(!md.contains("CDATA"), "got: {md:?}");
+        // Confluence splits a literal `]]>` across two sections.
+        assert_eq!(unwrap_cdata("<![CDATA[a]]]]><![CDATA[>b]]>"), "a]]>b");
+    }
+
+    #[test]
+    fn lossy_elements_are_reported_and_known_macros_are_not() {
+        let safe = "<p>x</p><ac:structured-macro ac:name=\"code\"></ac:structured-macro>\
+                    <ac:structured-macro ac:name=\"info\"></ac:structured-macro>";
+        assert!(storage_lossy_elements(safe).is_empty());
+        let lossy = "<p><ac:link><ri:user ri:account-id=\"1\"/></ac:link></p>\
+                     <ac:structured-macro ac:name=\"toc\"/>\
+                     <ac:structured-macro ac:name=\"jira\"></ac:structured-macro>\
+                     <ac:structured-macro ac:name=\"toc\"/>\
+                     <ac:image><ri:attachment ri:filename=\"a.png\"/></ac:image>";
+        assert_eq!(
+            storage_lossy_elements(lossy),
+            vec!["ac:image", "ac:link", "ri:user", "toc macro", "jira macro"]
+        );
+    }
+
+    #[test]
+    fn storage_to_markdown_keeps_row_header_cells() {
+        let md = storage_to_markdown(
+            "<table><tr><th>Field</th><th>Value</th></tr>\
+             <tr><th>Status</th><td>Done</td></tr></table>",
+        );
+        assert!(md.contains("| Status | Done |"), "got: {md:?}");
     }
 
     #[test]

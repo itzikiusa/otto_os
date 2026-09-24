@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Personal Access Tokens (PAT) management — mint long-lived API tokens,
   // view existing ones (prefix + last-seen), and revoke them individually.
   // Routes: POST/GET/DELETE /api/v1/auth/tokens  (api.md #87-89).
@@ -117,17 +121,10 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Personal Access Tokens</h1>
-      <div class="sub">
-        Long-lived tokens for scripts, CI, and the Otto CLI API.
-        Tokens are scoped to your account and inherit your permissions.
-        Impersonation sessions cannot mint PATs.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('tokens')} subtitle="Long-lived tokens for scripts, CI and the Otto CLI" />
+  <PageBody width="readable">
+  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions cannot create tokens.</SectionIntro>
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}
@@ -234,9 +231,17 @@
     </p>
     <pre class="code-block">curl -H "Authorization: Bearer &lt;token&gt;" http://127.0.0.1:7700/api/v1/auth/me</pre>
   </div>
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .token-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
   .session-badge { display: block; color: var(--text-dim); font-size: 11px; }
   .empty {
@@ -250,8 +255,8 @@
     margin-bottom: 18px;
     padding: 12px 14px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, #22c55e 10%, var(--surface));
-    border: 1px solid color-mix(in srgb, #22c55e 30%, transparent);
+    background: color-mix(in srgb, var(--success) 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -314,7 +319,7 @@
   }
 
   .token-head {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -346,7 +351,7 @@
   }
 
   .warn {
-    color: #ef4444;
+    color: var(--danger);
     font-weight: 500;
   }
 

@@ -111,10 +111,10 @@
   .step.now .bubble {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 18%, var(--bg));
-    color: var(--accent);
+    color: var(--accent-text);
     animation: rail-pulse 1.6s ease-in-out infinite;
   }
-  .step.now { color: var(--accent); font-weight: 600; }
+  .step.now { color: var(--accent-text); font-weight: 600; }
   .step.bad .bubble {
     border-color: color-mix(in srgb, var(--status-exited) 60%, var(--border));
     background: color-mix(in srgb, var(--status-exited) 15%, var(--bg));

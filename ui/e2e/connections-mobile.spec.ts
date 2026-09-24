@@ -126,19 +126,25 @@ test.describe('connections hub — responsive', () => {
     await gotoPage(page);
     const bastion = page.locator('.conn-row', { hasText: 'prod-web-bastion' }).first();
     await expect(bastion.locator('.kind-tag')).toHaveText('ssh');
-    await expect(bastion.locator('.env-badge')).toHaveText('PROD');
+    await expect(bastion.locator('.env-badge')).toHaveText('prod');
     const custom = page.locator('.conn-row', { hasText: 'my-custom-cli' }).first();
     await expect(custom.locator('.kind-tag')).toHaveText('custom');
     await assertFitsWidth(page);
   });
 
-  test('type-filter chips narrow the tree and hide empty sections', async ({ page }) => {
+  test('type-filter chips narrow the tree and hide non-matching sections', async ({ page }) => {
     await gotoPage(page);
     await page.locator('[data-testid="connhub-filter-ssh"]').click();
     await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
     await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' })).toHaveCount(0);
-    // Sections with no matching descendants disappear while filtering.
-    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i })).toHaveCount(0);
+    // A truly empty folder has nothing to filter out — it stays visible (a
+    // drop target) under every type filter.
+    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
+
+    // A folder whose contents are all another kind disappears while filtering.
+    await page.locator('[data-testid="connhub-filter-mysql"]').click();
+    await expect(page.locator('.sec-name', { hasText: /Production servers/i })).toHaveCount(0);
+    await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
 
     await page.locator('[data-testid="connhub-filter-custom"]').click();
     await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();

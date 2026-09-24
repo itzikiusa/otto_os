@@ -2,11 +2,13 @@
   // MCP Control Plane — three focused sections: Otto's built-in server,
   // governed external servers, and approval/audit activity.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
   import ApprovalsTab from './ApprovalsTab.svelte';
@@ -40,12 +42,15 @@
       accessRevision++;
       loadGeneration++;
       servers = [];
+      loadError = null;
       selectedServerId = null;
       void loadServers();
     }),
   );
   let servers = $state<McpServerDetail[]>([]);
   let loading = $state(false);
+  /** Failed server-list load — ServersTab renders it inline with Retry. */
+  let loadError = $state<string | null>(null);
   let selectedServerId = $state<string | null>(null);
   let pending = $state(0);
 
@@ -62,12 +67,13 @@
       const result = await mcpCpApi.cpList(id);
       if (generation !== loadGeneration) return;
       servers = result;
+      loadError = null;
       if (selectedServerId && !servers.some((server) => server.id === selectedServerId)) {
         selectedServerId = null;
       }
       if (!selectedServerId && servers.length > 0) selectedServerId = servers[0].id;
     } catch (e) {
-      toasts.error('Failed to load MCP servers', e instanceof Error ? e.message : String(e));
+      if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -103,51 +109,52 @@
 </script>
 
 <div class="mcp-page">
-  <header class="mcp-head">
-    <div class="title">
-      <Icon name="plug" size={16} />
-      <span class="h">MCP Control Plane</span>
+  <PageHeader title="MCP Control Plane" icon="plug">
+    {#snippet badge()}
       {#if ws.current}<span class="wsname">{ws.current.name}</span>{/if}
-    </div>
-  </header>
+    {/snippet}
+    {#snippet tabs()}
+      <nav class="tabs" aria-label="MCP sections">
+        <button
+          class:on={section === 'otto'}
+          data-testid="mcp-nav-otto"
+          onclick={() => go('otto')}
+        >Otto server</button>
+        <button
+          class:on={section === 'servers'}
+          data-testid="mcp-nav-servers"
+          onclick={() => go('servers')}
+        >External servers{wsId ? ` (${servers.length})` : ''}</button>
+        <button
+          class:on={section === 'activity'}
+          data-testid="mcp-nav-activity"
+          onclick={() => go('activity')}
+        >
+          Activity
+          {#if pending > 0}<span class="badge" data-testid="mcp-pending-badge">{pending}</span>{/if}
+        </button>
+      </nav>
+    {/snippet}
+  </PageHeader>
 
-  <nav class="tabs" aria-label="MCP sections">
-    <button
-      class:on={section === 'otto'}
-      data-testid="mcp-nav-otto"
-      onclick={() => go('otto')}
-    >Otto server</button>
-    <button
-      class:on={section === 'servers'}
-      data-testid="mcp-nav-servers"
-      onclick={() => go('servers')}
-    >External servers{wsId ? ` (${servers.length})` : ''}</button>
-    <button
-      class:on={section === 'activity'}
-      data-testid="mcp-nav-activity"
-      onclick={() => go('activity')}
-    >
-      Activity
-      {#if pending > 0}<span class="badge" data-testid="mcp-pending-badge">{pending}</span>{/if}
-    </button>
-  </nav>
-
-  <div class="tab-body">
+  <PageBody padded={false}>
     {#key accessRevision}
       {#if section === 'otto'}
         <OttoServerHome {wsId} />
       {:else if section === 'servers'}
         {#if !wsId}
-          <div class="empty">
-            <Icon name="plug" size={30} />
-            <h3>No workspace selected</h3>
-            <p>Select a workspace to manage its governed MCP servers and tools.</p>
-          </div>
+          <EmptyState
+            variant="page"
+            icon="plug"
+            title="No workspace selected"
+            body="Select a workspace to manage its governed MCP servers and tools."
+          />
         {:else}
           <ServersTab
             {wsId}
             {servers}
             {loading}
+            error={loadError}
             selectedServerId={null}
             onReload={loadServers}
             onPatch={patchServer}
@@ -161,7 +168,7 @@
         </div>
       {/if}
     {/key}
-  </div>
+  </PageBody>
 </div>
 
 <style>
@@ -171,25 +178,6 @@
     height: 100%;
     min-height: 0;
   }
-  .mcp-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    flex: none;
-  }
-  .title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-dim);
-  }
-  .title .h {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-  }
   .wsname {
     font-size: 11px;
     color: var(--text-dim);
@@ -197,74 +185,57 @@
     border-radius: 6px;
     padding: 1px 8px;
   }
+  /* Section switch: a segmented control in the page header (native toolbar). */
   .tabs {
-    display: flex;
+    display: inline-flex;
     gap: 2px;
-    padding: 6px 14px 0;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    padding: 2px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
     flex-wrap: nowrap;
     flex: none;
-    -webkit-overflow-scrolling: touch;
   }
   .tabs button {
     display: flex;
     align-items: center;
     gap: 6px;
+    height: 24px;
     border: none;
+    border-radius: 4px;
     background: transparent;
     color: var(--text-dim);
-    padding: 8px 14px;
+    padding: 0 10px;
     cursor: pointer;
-    font-size: 13px;
-    border-bottom: 2px solid transparent;
+    font-size: 12px;
     white-space: nowrap;
     flex: none;
   }
   .tabs button.on {
+    background: var(--surface);
     color: var(--text);
-    border-bottom-color: var(--accent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   .badge {
     min-width: 16px;
     padding: 1px 5px;
     border-radius: 999px;
-    background: var(--danger, #c0392b);
+    background: var(--danger-solid);
     color: white;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 14px;
     text-align: center;
-  }
-  .tab-body {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
   }
   .activity {
     display: flex;
     flex-direction: column;
     gap: 18px;
   }
-  .empty {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 24px;
-  }
-  .empty h3 {
-    margin: 4px 0 0;
-    color: var(--text);
-  }
-
   @media (max-width: 640px) {
     .tabs button {
-      padding: 10px 12px;
-      font-size: 14px;
+      height: 30px;
+      padding: 0 10px;
+      font-size: 13px;
     }
   }
 </style>

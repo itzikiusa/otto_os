@@ -2,7 +2,7 @@
   // Work-in-progress DAG (GitHub-Actions-style): task/run nodes with status
   // badges + dependency edges, laid out left→right by depth. Pan (drag bg),
   // zoom (wheel), click a node with a session → open it. Live via events.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -101,7 +101,7 @@
     return { w, h };
   });
 
-  function statusIcon(s: string): { icon: string; cls: string } {
+  function statusIcon(s: string): { icon: IconName; cls: string } {
     if (s === 'done') return { icon: 'check', cls: 'done' };
     if (s === 'in_progress' || s === 'running' || s === 'waiting') return { icon: 'play', cls: 'run' };
     if (s === 'error' || s === 'blocked') return { icon: 'x', cls: 'err' };
@@ -329,7 +329,7 @@
   }
   .node-badge.done {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .node-badge.run {
     background: color-mix(in srgb, var(--status-working) 24%, transparent);
@@ -353,6 +353,6 @@
     text-overflow: ellipsis;
   }
   .node-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

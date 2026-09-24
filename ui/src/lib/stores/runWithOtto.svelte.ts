@@ -7,6 +7,7 @@
 // — keep it that way to avoid the reactive-loop CPU footgun.
 
 import { runWithOttoApi } from '../api/runWithOtto';
+import { loadErrorText } from '../loadError';
 import type {
   ApproveRunReq,
   LaunchRunReq,
@@ -19,10 +20,14 @@ class RunWithOttoStore {
   /** The current workspace's runs (newest first). */
   list: OttoRun[] = $state([]);
   loadingList = $state(false);
+  /** Last list-load failure (human text) — shown inline with Retry, never as "no runs". */
+  listError = $state<string | null>(null);
   /** run_id → its full record (the open detail reads from here). */
   byId: Record<string, OttoRun> = $state({});
   /** run_id → its stage timeline (loaded when a run is opened). */
   eventsByRun: Record<string, RunEvent[]> = $state({});
+  /** run_id → why its stage timeline failed to load (absent = ok). */
+  eventsError: Record<string, string> = $state({});
   /** The run id whose detail panel is open, or null. */
   openId: string | null = $state(null);
   private wsId = '';
@@ -33,18 +38,23 @@ class RunWithOttoStore {
   }
 
   async loadList(workspaceId: string): Promise<void> {
+    // Another workspace's runs are not "stale data" for this one.
+    if (this.wsId !== workspaceId) this.list = [];
     this.wsId = workspaceId;
     this.loadingList = true;
     try {
       const runs = await runWithOttoApi.list(workspaceId);
+      // A slower load for a workspace we've since left must not land here.
+      if (this.wsId !== workspaceId) return;
       this.list = runs;
       const next = { ...this.byId };
       for (const r of runs) next[r.id] = r;
       this.byId = next;
-    } catch {
-      this.list = [];
+      this.listError = null;
+    } catch (e) {
+      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
     } finally {
-      this.loadingList = false;
+      if (this.wsId === workspaceId) this.loadingList = false;
     }
   }
 
@@ -72,8 +82,10 @@ class RunWithOttoStore {
   async loadEvents(id: string): Promise<void> {
     try {
       this.eventsByRun = { ...this.eventsByRun, [id]: await runWithOttoApi.events(id) };
-    } catch {
-      this.eventsByRun = { ...this.eventsByRun, [id]: [] };
+      const { [id]: _drop, ...rest } = this.eventsError;
+      this.eventsError = rest;
+    } catch (e) {
+      this.eventsError = { ...this.eventsError, [id]: loadErrorText(e) };
     }
   }
 

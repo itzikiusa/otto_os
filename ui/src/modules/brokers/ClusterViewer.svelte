@@ -7,6 +7,7 @@
   // + warm-tunnel state and does the Test call itself; Edit/Remove are delegated
   // to the host via callbacks so each page can wire them to its own flow.
   import Icon from '../../lib/components/Icon.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { BrokerCluster, TestClusterResp } from '../../lib/api/types';
@@ -73,7 +74,7 @@
     <div class="cv-title">
       <span class="dot" style="background: {cluster.color || 'var(--accent)'}"></span>
       <span class="name ellipsis">{cluster.name}</span>
-      <span class="env {cluster.environment}">{cluster.environment}</span>
+      <EnvBadge env={cluster.environment} />
       {#if cluster.read_only}<span class="ro">read-only</span>{/if}
       {#if cluster.ssh}
         <span
@@ -156,22 +157,9 @@
     border-radius: 50%;
     flex: 0 0 auto;
   }
-  .env {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--muted);
-  }
-  .env.prod {
-    color: #ff9800;
-    border-color: #ff980055;
-  }
   .ro {
-    font-size: 10px;
-    color: var(--muted);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 6px;
@@ -180,19 +168,19 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
-    color: var(--muted);
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 6px;
   }
   .tunnel-pill.ready {
-    color: #7ee787;
-    border-color: #7ee78755;
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .boot {
     font-size: 11px;
-    color: var(--muted);
+    color: var(--text-dim);
     max-width: 380px;
   }
   .cv-actions {
@@ -212,7 +200,7 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    color: var(--muted);
+    color: var(--text-dim);
     font: inherit;
     font-size: 12px;
     padding: 6px 10px;
@@ -220,10 +208,10 @@
     white-space: nowrap;
   }
   .cv-tabs button:hover {
-    color: var(--fg);
+    color: var(--text);
   }
   .cv-tabs button.on {
-    color: var(--fg);
+    color: var(--text);
     border-bottom-color: var(--accent);
   }
   .cv-body {
@@ -238,7 +226,7 @@
   }
   .btn {
     background: var(--surface-2, var(--surface));
-    color: var(--fg);
+    color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px;
     font: inherit;
@@ -256,7 +244,7 @@
     cursor: default;
   }
   .btn.danger:hover {
-    border-color: #ff6b6b;
-    color: #ff6b6b;
+    border-color: var(--danger);
+    color: var(--danger);
   }
 </style>

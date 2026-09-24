@@ -396,9 +396,17 @@ pub async fn run(integ: Integration, token: String, bridge: Arc<Bridge>, cancel:
                         update_id = update.update_id,
                         "telegram: inbound text update received"
                     );
-                    bridge
-                        .handle(&integ, Arc::clone(&adapter) as Arc<dyn Adapter>, inbound)
-                        .await;
+                    // Handle OFF the poll loop (as Slack does): a slow trigger
+                    // (workflow / swarm / run launch, session spawn) must not
+                    // stall polling for every other chat of this bot. Same-
+                    // conversation routing stays serialized by the bridge's
+                    // find-or-create lock.
+                    let bridge = Arc::clone(&bridge);
+                    let integ = integ.clone();
+                    let adapter = Arc::clone(&adapter) as Arc<dyn Adapter>;
+                    tokio::spawn(async move {
+                        bridge.handle(&integ, adapter, inbound).await;
+                    });
                 }
             }
             // Advance offset past this update so we don't re-process it.

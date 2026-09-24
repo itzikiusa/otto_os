@@ -232,7 +232,7 @@
       </label>
       {#if !emailSenderLoading && !hasSender}
         <div class="sm-sender-warn">
-          <Icon name="warn" size={12} />
+          <Icon name="warning" size={12} />
           No verified email sender.
           <!-- svelte-ignore a11y_invalid_attribute -->
           <a
@@ -414,11 +414,11 @@
     align-items: center;
     gap: 5px;
     font-size: 11.5px;
-    color: #f59e0b;
+    color: var(--warning);
     padding: 4px 0;
   }
   .sm-sender-warn a {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;
   }
@@ -481,7 +481,7 @@
     flex: 1;
     min-width: 0;
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -519,7 +519,7 @@
     margin: 0;
   }
   .sm-role-note.editor {
-    color: color-mix(in srgb, #f59e0b 80%, var(--text));
+    color: color-mix(in srgb, var(--warning) 80%, var(--text));
   }
 
   /* ── Shares section header ── */
@@ -545,17 +545,17 @@
     cursor: pointer;
     padding: 2px 4px;
     border-radius: var(--radius-s);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sm-link-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
   .sm-link-btn.danger {
-    color: #ef4444;
+    color: var(--danger);
   }
   .sm-link-btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 12%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
 
   /* ── Shares list ── */
@@ -609,7 +609,7 @@
   }
   .sm-share-role {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -619,8 +619,8 @@
     color: var(--text-dim);
   }
   .sm-share-role.editor {
-    background: color-mix(in srgb, #f59e0b 18%, transparent);
-    color: #f59e0b;
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+    color: var(--warning);
   }
   .sm-share-meta {
     display: flex;
@@ -636,11 +636,11 @@
   .sm-revoke-btn {
     font-size: 11px;
     padding: 3px 8px;
-    color: #ef4444;
-    border-color: color-mix(in srgb, #ef4444 35%, transparent);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
   .sm-revoke-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 10%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .sm-revoke-btn:disabled {
     opacity: 0.5;

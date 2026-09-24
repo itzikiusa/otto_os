@@ -321,7 +321,7 @@
   }
   .tick {
     fill: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono, ui-monospace, monospace);
   }
   .cursor {

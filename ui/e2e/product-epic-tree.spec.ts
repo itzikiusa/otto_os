@@ -125,16 +125,17 @@ test('epic tree: child breadcrumb + epic Overview children board + Add child men
   test.setTimeout(60_000);
   await openProduct(page);
 
-  // Open a child → breadcrumb `Epic › Folder › Title`.
+  // Open a child → the page header reads `Epic / Title` with the folder chip.
   await page.locator('.story-row', { hasText: CHILD_A }).first().click();
-  const crumbs = page.locator('.crumbs');
-  await expect(crumbs).toBeVisible({ timeout: 15_000 });
-  await expect(crumbs.locator('.crumb').first()).toContainText(EPIC_TITLE);
-  await expect(crumbs).toContainText('Design');
-  await expect(crumbs.locator('.crumb.cur')).toContainText(CHILD_A);
+  const header = page.getByTestId('page-header');
+  const epicCrumb = header.locator('.ph-crumb').first();
+  await expect(epicCrumb).toBeVisible({ timeout: 15_000 });
+  await expect(epicCrumb).toContainText(EPIC_TITLE);
+  await expect(header.locator('.ph-badge')).toContainText('Design');
+  await expect(header.locator('.ph-title')).toContainText(CHILD_A);
 
   // Clicking the epic crumb opens the epic; its Overview shows the Children board.
-  await crumbs.locator('.crumb').first().click();
+  await epicCrumb.click();
   await expect(page.locator('.overview')).toBeVisible({ timeout: 15_000 });
   const board = page.locator('.children-board');
   await expect(board).toBeVisible({ timeout: 15_000 });

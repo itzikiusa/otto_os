@@ -296,6 +296,88 @@ pub enum Event {
         /// re-fetch `GET /product/attachments/{aid}` instead.
         content: Option<String>,
     },
+    /// Design Hall: an artifact in the design graph changed — a new committed
+    /// version (content save, named commit, legacy import/sync) or a
+    /// metadata-only change (title/status/tags/approve/archive). Supersedes
+    /// `MockupUpdated`/`CanvasUpdated` for graph-aware clients; both legacy
+    /// events keep firing for their own routes.
+    DesignArtifactUpdated {
+        workspace_id: Id,
+        artifact_id: Id,
+        /// The artifact's format (`html` | `scene3d` | `otto-canvas` | `png` …).
+        format: String,
+        /// `created` | `content` | `meta` | `approved` | `archived` | `deleted`,
+        /// or `live` — an UNCOMMITTED, validated edit a design-assist agent
+        /// just saved mid-turn (`version_id: null`; the turn's commit follows).
+        change: String,
+        /// The newly committed version, when the change created one.
+        version_id: Option<Id>,
+        /// The new source for text formats ≤ 4 MB; an explicit `null` (never
+        /// omitted) for binaries, oversized payloads and metadata-only changes —
+        /// clients re-fetch `GET /design/artifacts/{id}/content` then.
+        content: Option<String>,
+    },
+    /// Design Hall: a link touching `artifact_id` changed — an explicit link was
+    /// created/deleted, the document's extracted links were rebuilt, or the
+    /// link's TARGET moved (a new approved version for `follow_approved`
+    /// consumers, a new head for `follow_latest` ones). Consumers show a pulse +
+    /// "now vN" badge and re-fetch `GET /design/artifacts/{id}/links`.
+    DesignLinkUpdated {
+        workspace_id: Id,
+        /// The consumer (link source) artifact.
+        artifact_id: Id,
+        link_id: Option<Id>,
+        target_artifact_id: Option<Id>,
+        target_version_id: Option<Id>,
+        /// `created` | `deleted` | `extracted` | `target_approved` | `target_updated`.
+        reason: String,
+    },
+    /// Design Hall learning loop: a design signal was captured (Phase 0 only
+    /// captures; later phases also emit this when a learned rule is proposed).
+    DesignLearningUpdate {
+        workspace_id: Id,
+        /// The signal kind (`variant_chosen`, `edit_after_draft`, …).
+        kind: String,
+        signal_id: Option<Id>,
+        artifact_id: Option<Id>,
+    },
+    /// Design Hall: a unified design-assist agent turn (`POST
+    /// /design/artifacts/{id}/assist`, or one variant of `…/variants`) changed
+    /// state — `running` once its agent session is live (attach the shell),
+    /// then exactly one terminal state. A committed turn ALSO produces the
+    /// usual `design_artifact_updated` (main branch only; variants never touch
+    /// the head).
+    DesignAssistUpdated {
+        workspace_id: Id,
+        artifact_id: Id,
+        turn_id: Id,
+        /// `starting` (accepted, session not live yet) | `running` | `done` (a
+        /// version was committed) | `unchanged` (the agent changed nothing —
+        /// e.g. a critique) | `conflict` (the head moved meanwhile: the draft
+        /// was kept as a side version `variant/<turn>/1`) | `failed`.
+        status: String,
+        /// `generate` | `refine` | `critique` | `a11y` | `variant`.
+        mode: String,
+        /// `main`, or `variant/<run>/<k>` for a variant turn.
+        branch: String,
+        session_id: Option<Id>,
+        /// The version this turn committed, when it committed one.
+        version_id: Option<Id>,
+        error: Option<String>,
+    },
+    /// Design Hall: every turn of a variants run (`POST
+    /// /design/artifacts/{id}/variants`) finished. `version_ids` are the
+    /// committed variant versions (branch `variant/<run_id>/<k>`, head
+    /// untouched); `failed` turns produced nothing. Accept one with `POST
+    /// …/variants/{version}/accept`.
+    DesignVariantsReady {
+        workspace_id: Id,
+        artifact_id: Id,
+        run_id: Id,
+        base_version_id: Option<Id>,
+        version_ids: Vec<Id>,
+        failed: usize,
+    },
     /// A mockup agent session just became live (at the START of a turn). Lets the
     /// Mockups Assistant panel attach the agent's shell/Terminal immediately,
     /// instead of only after the turn finishes.
@@ -433,6 +515,26 @@ pub enum Event {
         workspace_id: Id,
         annotation: serde_json::Value,
     },
+    /// A tab's remote live session (daemon Chromium) opened / became ready /
+    /// crashed / closed (`state` ∈ `starting|ready|crashed|closed`). Carries no
+    /// URL or title — the session is private to its owner; the Browser page
+    /// only badges the tab and re-fetches `GET /browser/tabs/{id}/live`.
+    BrowserLiveSessionUpdated {
+        workspace_id: Id,
+        tab_id: Id,
+        owner_id: Id,
+        state: String,
+    },
+    /// The Chromium download job ticked (`state` ∈
+    /// `downloading|verifying|extracting|installed|failed`). Machine-wide.
+    BrowserEngineInstallUpdated {
+        build: String,
+        version: String,
+        state: String,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+        error: Option<String>,
+    },
     /// AWS console: an account row was created/updated/deleted. Accounts are a
     /// global library (no workspace axis) — delivered to everyone; the client
     /// re-lists (RBAC filtering happens on the list call).
@@ -502,6 +604,42 @@ pub enum Event {
         pods_failed: u32,
         cycle_ms: u64,
     },
+    /// Otto Assistant: a turn was indexed into a thread (a user send echo, a
+    /// landed reply with its provider badge, or a system line — memory chip,
+    /// delegation, reminder, route/limit notice). `turn` / `thread` are the
+    /// serialized `otto_state::AssistantTurn` / `AssistantThread` (otto-core
+    /// can't depend on otto-state); `thread` is `null` when it didn't change.
+    /// OWNER-scoped: delivered only to `user_id`'s connections.
+    AssistantTurn {
+        user_id: Id,
+        thread_id: Id,
+        turn: serde_json::Value,
+        thread: Option<serde_json::Value>,
+    },
+    /// Otto Assistant: a task was created or changed state. Owner-scoped.
+    AssistantTaskUpdate {
+        user_id: Id,
+        task: serde_json::Value,
+    },
+    /// Otto Assistant: a task entered or left the needs-you queue;
+    /// `open_count` is the queue size after the change. Owner-scoped.
+    AssistantNeedsYou {
+        user_id: Id,
+        task: serde_json::Value,
+        open_count: i64,
+    },
+    /// Otto Assistant: a provider usage limit was detected on a thread's
+    /// route. `suggestion` is the route to continue on (null when none);
+    /// `task_id` the "continue on X?" needs-you item; `auto_switched` means
+    /// auto-failover already moved the thread. Owner-scoped.
+    AssistantLimit {
+        user_id: Id,
+        thread_id: Option<Id>,
+        limit: serde_json::Value,
+        suggestion: Option<serde_json::Value>,
+        task_id: Option<Id>,
+        auto_switched: bool,
+    },
 }
 
 #[cfg(test)]
@@ -560,5 +698,125 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
+    }
+
+    /// Otto Assistant events: snake_case tags; `thread` / `thread_id` /
+    /// `suggestion` / `task_id` travel as explicit `null` (the contract's
+    /// `| null`), never omitted.
+    #[test]
+    fn assistant_event_wire_shapes() {
+        let v = serde_json::to_value(Event::AssistantTurn {
+            user_id: "u1".into(),
+            thread_id: "t1".into(),
+            turn: serde_json::json!({"id":"x","role":"assistant","provider":"claude"}),
+            thread: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_turn");
+        assert_eq!(v["user_id"], "u1");
+        assert_eq!(v["turn"]["provider"], "claude");
+        assert!(v.get("thread").is_some_and(|t| t.is_null()));
+
+        let v = serde_json::to_value(Event::AssistantTaskUpdate {
+            user_id: "u1".into(),
+            task: serde_json::json!({"id":"k1","state":"running"}),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_task_update");
+        assert_eq!(v["task"]["state"], "running");
+
+        let v = serde_json::to_value(Event::AssistantNeedsYou {
+            user_id: "u1".into(),
+            task: serde_json::json!({"id":"k1","state":"needs_you"}),
+            open_count: 2,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_needs_you");
+        assert_eq!(v["open_count"], 2);
+
+        let v = serde_json::to_value(Event::AssistantLimit {
+            user_id: "u1".into(),
+            thread_id: Some("t1".into()),
+            limit: serde_json::json!({"provider":"claude","limited":true}),
+            suggestion: None,
+            task_id: None,
+            auto_switched: false,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "assistant_limit");
+        assert_eq!(v["limit"]["provider"], "claude");
+        assert!(v.get("suggestion").is_some_and(|s| s.is_null()));
+        assert!(v.get("task_id").is_some_and(|s| s.is_null()));
+        assert_eq!(v["auto_switched"], false);
+    }
+
+    /// Design Hall events: snake_case tags, and the optional ids / `content`
+    /// travel as explicit `null` (never omitted), like `mockup_updated`.
+    #[test]
+    fn design_event_wire_shapes() {
+        let v = serde_json::to_value(Event::DesignArtifactUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            format: "png".into(),
+            change: "meta".into(),
+            version_id: None,
+            content: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_artifact_updated");
+        assert!(v.get("content").is_some_and(|c| c.is_null()));
+        assert!(v.get("version_id").is_some_and(|c| c.is_null()));
+
+        let v = serde_json::to_value(Event::DesignLinkUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            link_id: Some("l1".into()),
+            target_artifact_id: Some("a2".into()),
+            target_version_id: None,
+            reason: "target_approved".into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_link_updated");
+        assert_eq!(v["target_artifact_id"], "a2");
+
+        let v = serde_json::to_value(Event::DesignLearningUpdate {
+            workspace_id: "ws1".into(),
+            kind: "variant_chosen".into(),
+            signal_id: Some("s1".into()),
+            artifact_id: Some("a1".into()),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_learning_update");
+        assert_eq!(v["kind"], "variant_chosen");
+
+        let v = serde_json::to_value(Event::DesignAssistUpdated {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            turn_id: "t1".into(),
+            status: "running".into(),
+            mode: "refine".into(),
+            branch: "main".into(),
+            session_id: Some("s1".into()),
+            version_id: None,
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_assist_updated");
+        assert_eq!(v["session_id"], "s1");
+        assert!(v.get("version_id").is_some_and(|c| c.is_null()));
+        assert!(v.get("error").is_some_and(|c| c.is_null()));
+
+        let v = serde_json::to_value(Event::DesignVariantsReady {
+            workspace_id: "ws1".into(),
+            artifact_id: "a1".into(),
+            run_id: "r1".into(),
+            base_version_id: Some("v1".into()),
+            version_ids: vec!["v2".into(), "v3".into()],
+            failed: 1,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "design_variants_ready");
+        assert_eq!(v["version_ids"][1], "v3");
+        assert_eq!(v["failed"], 1);
     }
 }

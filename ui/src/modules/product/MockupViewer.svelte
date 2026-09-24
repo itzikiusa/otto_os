@@ -256,7 +256,7 @@
     max-width: 50%;
   }
   .vt-mime {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-family: var(--font-mono, monospace);
   }
@@ -279,9 +279,9 @@
     gap: 6px;
     padding: 6px 10px;
     font-size: 11.5px;
-    color: #b45309;
-    background: color-mix(in srgb, #f59e0b 14%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 14%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
     flex-shrink: 0;
     line-height: 1.4;
   }
@@ -309,7 +309,7 @@
     text-align: center;
   }
   .render-msg.err {
-    color: #ef4444;
+    color: var(--danger);
   }
   .mockup-img {
     display: block;

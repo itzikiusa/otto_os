@@ -48,5 +48,6 @@ pub use types::{
     Capabilities, Column, ColumnDef, CompletionContext, CompletionItem, CompletionKind,
     CompletionResponse, DbQueryPlan, Engine, ForeignKey, GraphColumn, GraphEdge, GraphTable,
     IndexDef, NodeKind, NodePath, ObjectDetail, PlanNode, QueryRequest, QueryResult, QueryStats,
-    ResolvedConfig, SchemaGraph, SchemaNode, SshTunnelConfig, TestResult, TlsConfig, TlsMode,
+    ResolvedConfig, SchemaGraph, SchemaNode, Scope, SshTunnelConfig, TestResult, TlsConfig,
+    TlsMode,
 };

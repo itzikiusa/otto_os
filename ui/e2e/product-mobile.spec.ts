@@ -21,6 +21,10 @@ let workspaceId = '';
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
+  // One blank draft so the story-list pane exists: a workspace with NO stories
+  // hides the (empty) list pane on ≥641px and shows the page empty state.
+  const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`, { data: {} });
+  if (!r.ok()) throw new Error(`draft seed failed: ${r.status()} ${await r.text()}`);
   await ctx.dispose();
 });
 
@@ -36,7 +40,7 @@ async function openProduct(page: Page): Promise<void> {
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   // A Stories|Learnings toggle is always present in some copy.
   await expect(
-    page.locator('.product-header-row1 .vt:visible, .m-view-toggle .vt:visible').first(),
+    page.locator('.m-view-toggle > button:visible').first(),
   ).toBeVisible({ timeout: 20_000 });
 }
 

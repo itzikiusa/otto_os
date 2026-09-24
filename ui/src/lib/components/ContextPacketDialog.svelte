@@ -179,28 +179,28 @@
   label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--fg-muted);
+    color: var(--text-dim);
   }
   select {
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-m);
     background: var(--surface);
-    color: var(--fg);
+    color: var(--text);
     font-size: 13px;
   }
   .no-sessions {
     font-size: 13px;
-    color: var(--fg-muted);
+    color: var(--text-dim);
     margin-bottom: 12px;
   }
   .preview-loading,
   .preview-err {
     font-size: 13px;
-    color: var(--fg-muted);
+    color: var(--text-dim);
     margin-bottom: 8px;
   }
-  .preview-err { color: var(--red); }
+  .preview-err { color: var(--danger); }
   .badge {
     display: inline-block;
     font-size: 11px;
@@ -209,44 +209,44 @@
     border-radius: 999px;
     margin-bottom: 8px;
   }
-  .badge-ok  { background: var(--green-bg, #d1fae5); color: var(--green, #065f46); }
-  .badge-warn { background: var(--yellow-bg, #fef3c7); color: var(--yellow, #92400e); }
+  .badge-ok  { background: var(--success-soft); color: var(--success); }
+  .badge-warn { background: var(--warning-soft); color: var(--warning); }
   .preview-wrap {
     max-height: 260px;
     overflow-y: auto;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface-raised, var(--surface));
+    border-radius: var(--radius-m);
+    background: var(--surface);
   }
   .preview-code {
     margin: 0;
     padding: 10px 12px;
     font-size: 11.5px;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     white-space: pre-wrap;
     word-break: break-all;
   }
   .size-hint {
     font-size: 11px;
-    color: var(--fg-muted);
+    color: var(--text-dim);
     margin-top: 6px;
     text-align: end;
   }
   .btn-ghost {
     padding: 6px 14px;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-m);
     background: transparent;
-    color: var(--fg);
+    color: var(--text);
     cursor: pointer;
     font-size: 13px;
   }
   .btn-primary {
     padding: 6px 14px;
     border: none;
-    border-radius: var(--radius);
+    border-radius: var(--radius-m);
     background: var(--accent);
-    color: var(--accent-fg, #fff);
+    color: var(--accent-contrast);
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;

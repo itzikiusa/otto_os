@@ -2,6 +2,7 @@
 
 import { api } from '../api/client';
 import { listActiveWorkflowRuns } from '../api/workflows';
+import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
 import type {
   ActiveWorkflowRun,
@@ -18,6 +19,7 @@ import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
+import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES } from './splitLayout';
 
@@ -68,6 +70,7 @@ const BACKGROUND_SOURCES = new Set([
   'discovery_chat',
   'scheduled_task',
   'finding',
+  'assistant',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */
@@ -108,7 +111,7 @@ class WorkspaceStore {
   /** view mode for Agent Mode: tabbed (one at a time), tiled (grid), or the
    *  Mission Control work-queue surface. */
   viewMode: 'tabs' | 'tiled' | 'mission' = $state(
-    (localStorage.getItem(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
+    (lsGet(winKey('otto_view_mode')) as 'tabs' | 'tiled' | 'mission') ?? 'tabs',
   );
 
   /** In tiled view, a session id to show maximized (zoomed) on its own. */
@@ -235,11 +238,11 @@ class WorkspaceStore {
 
   /** Sidebar toggle: also list sessions from every OTHER workspace, grouped by
    *  workspace name. Persisted app-wide; default ON. */
-  allWorkspaces = $state(localStorage.getItem(LS_ALL_WS) !== '0');
+  allWorkspaces = $state(lsGet(LS_ALL_WS) !== '0');
 
   setAllWorkspaces(on: boolean): void {
     this.allWorkspaces = on;
-    localStorage.setItem(LS_ALL_WS, on ? '1' : '0');
+    lsSet(LS_ALL_WS, on ? '1' : '0');
     if (on) void this.refreshOtherSessions();
   }
 
@@ -424,7 +427,7 @@ class WorkspaceStore {
     } catch {
       this.scratch = null;
     }
-    const saved = localStorage.getItem(winKey(LS_CURRENT));
+    const saved = lsGet(winKey(LS_CURRENT));
     const found = this.workspaces.find((w) => w.id === saved);
     const target = found ?? this.workspaces[0] ?? null;
     if (target) await this.select(target.id);
@@ -435,7 +438,7 @@ class WorkspaceStore {
     if (this.currentId === id && this.sessions.length > 0) return;
     const generation = ++this.selectionGeneration;
     this.currentId = id;
-    localStorage.setItem(winKey(LS_CURRENT), id);
+    lsSet(winKey(LS_CURRENT), id);
     // Pin both persistence keys NOW, before the await below: the route→store
     // effect may `openSession` while sessions are still loading, and that
     // persist must land under this workspace so `restoreLayout` sees it.
@@ -477,6 +480,7 @@ class WorkspaceStore {
   private bindTabsKey(key: string): void {
     this.tabsKey = key;
     this.tabsHydrated = false;
+    this.layoutReady = false;
     this.pendingTabs = [];
     layout.bindKey(key);
   }
@@ -491,7 +495,7 @@ class WorkspaceStore {
     // otherwise write the OLD workspace's tabs under the NEW id.
     this.tabsKey = key;
     // restore tabs for this workspace
-    const raw = localStorage.getItem(winKey(LS_TABS + key));
+    const raw = lsGet(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
@@ -508,6 +512,7 @@ class WorkspaceStore {
     // {panes, axis} payload migrated through the old window fractions).
     const open = this.openTabs;
     layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
+    this.layoutReady = true;
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -610,12 +615,16 @@ class WorkspaceStore {
   /** Mirrors the layout store's own gate: false between {@link bindTabsKey} and
    *  the {@link restoreLayout} that reads the key. */
   private tabsHydrated = true;
+  /** True once the current workspace's tabs + split layout have been restored
+   *  (false from {@link bindTabsKey} until {@link restoreLayout}). Reactive, so
+   *  a page can tell "no panes yet" apart from "nothing open". */
+  layoutReady = $state(false);
   /** Tabs opened during that window, replayed by {@link restoreLayout}. */
   private pendingTabs: Id[] = [];
 
   private persistTabs(): void {
     if (!this.tabsHydrated) return;
-    localStorage.setItem(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
+    lsSet(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
   }
 
   /** Persist the split layout per workspace, so an arrangement of up to
@@ -885,16 +894,41 @@ class WorkspaceStore {
 
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
-   *  null for cancel. Applies (and records) the remembered preference. */
+   *  null for cancel. Applies (and records) the remembered preference, with
+   *  two guards so a remembered choice can't destroy work silently:
+   *   - a remembered **Delete** only picks the action — the delete itself is
+   *     always confirmed (it can't be undone);
+   *   - a close that ends **more than one** session (Close others / to the
+   *     right / all) always confirms once, naming the count, whatever the
+   *     preference. A single remembered Archive stays silent (resumable). */
   private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
-    if (ui.closeTabPref === 'archive' || ui.closeTabPref === 'delete') return ui.closeTabPref;
-    const many = ending.length > 1;
     const n = ending.length;
+    const many = n > 1;
+    const pref = ui.closeTabPref;
+    if (pref === 'archive' && !many) return 'archive';
+    const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
+    if (pref === 'archive' || pref === 'delete') {
+      const del = pref === 'delete';
+      const what = many
+        ? del
+          ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can't be undone.`
+          : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`
+        : `Closing this tab deletes “${name}”: it stops and its history is removed for good. This can't be undone.`;
+      const ok = await confirmer.ask(
+        `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
+        {
+          title: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions?` : 'Delete session?',
+          confirmLabel: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions` : 'Delete session',
+          danger: del,
+        },
+      );
+      return ok ? pref : null;
+    }
     const message = many
       ? `Closing these tabs ends ${n} sessions. Archive stops them and keeps their history (resumable from the Archived list); Delete stops them and removes their history for good.`
-      : `Closing this tab ends the session. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
+      : `Closing this tab ends “${name}”. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
     const picked = await confirmer.choose(message, {
       title: many ? `Close ${n} sessions?` : 'Close session?',
       options: [
@@ -906,6 +940,16 @@ class WorkspaceStore {
     if (picked.value !== 'archive' && picked.value !== 'delete') return null;
     if (picked.remember) ui.setCloseTabPref(picked.value);
     return picked.value;
+  }
+
+  /** Tooltip for a session tab's × (and the split pane ×): says what closing
+   *  it will actually do under the current remembered preference. */
+  closeTabTitle(id: Id, noun: 'tab' | 'session' = 'tab'): string {
+    const base = `Close ${noun} (⌘W)`;
+    if (!this.isEndable(id)) return base;
+    if (ui.closeTabPref === 'archive') return `${base} — archives the session (resumable)`;
+    if (ui.closeTabPref === 'delete') return `${base} — deletes the session (asks first)`;
+    return `${base} — asks to archive or delete the session`;
   }
 
   /** Reopen the most recently closed tab (⌘⇧T). Skips ids whose session no
@@ -999,7 +1043,7 @@ class WorkspaceStore {
   setViewMode(mode: 'tabs' | 'tiled' | 'mission'): void {
     this.viewMode = mode;
     if (mode === 'tabs') this.maximizedId = null;
-    localStorage.setItem(winKey('otto_view_mode'), mode);
+    lsSet(winKey('otto_view_mode'), mode);
   }
 
   /**
@@ -1128,11 +1172,16 @@ class WorkspaceStore {
           this.unread = { ...this.unread, [ev.session_id]: true };
         }
         this.statusMap[ev.session_id] = ev.status;
+        // The daemon stamps `last_active_at` on every status write; mirror it so
+        // the idle "suspends in N" countdown starts from THIS transition instead
+        // of whatever the row said when the list loaded (a session that just
+        // went working → idle showed "37m idle · suspending…").
+        const lastActiveAt = new Date().toISOString();
         this.sessions = this.sessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status } : s,
+          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
         );
         this.otherWsSessions = this.otherWsSessions.map((s) =>
-          s.id === ev.session_id ? { ...s, status: ev.status } : s,
+          s.id === ev.session_id ? { ...s, status: ev.status, last_active_at: lastActiveAt } : s,
         );
         // The agent resuming work means the operator already responded to
         // whatever it was blocked on — clear the sticky "needs you" flag. Also
@@ -1259,10 +1308,14 @@ class WorkspaceStore {
     this.statusMap[sessionId] = restarted.status;
   }
 
-  async saveNotes(notes: string): Promise<void> {
-    if (!this.currentId || !this.current) return;
-    const settings = { ...this.current.settings, notes };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+  /** Save `notes` into workspace `wsId` (default: current). The PATCH replaces
+   *  the whole settings object, so merge into a FRESH read — a cached copy
+   *  could revert keys changed since (e.g. api_client.allow_local). */
+  async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
+    if (!wsId) return;
+    const fresh = await fetchWorkspace(wsId);
+    const settings = { ...fresh.settings, notes };
+    const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,
     );
@@ -1281,6 +1334,34 @@ class WorkspaceStore {
     if (!this.currentId || !this.current) return;
     const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
     const settings = { ...this.current.settings, api_client: { ...prev, allow_local: allow } };
+    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+    this.workspaces = this.workspaces.map((w) =>
+      w.id === updated.id ? { ...w, ...updated } : w,
+    );
+  }
+
+  /** API-client history retention for this workspace (the daemon trims after
+   *  every run): `settings.api_client.history_max_rows` / `history_max_days`,
+   *  default 0 / 0 = keep everything (opt-in); 0 disables that limit. */
+  get apiHistoryRetention(): { rows: number; days: number } {
+    const api = this.current?.settings?.api_client as
+      | { history_max_rows?: number; history_max_days?: number }
+      | undefined;
+    const pick = (v: unknown, fallback: number): number =>
+      typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
+    // 0 = no limit: retention is opt-in (pruning deletes recorded runs).
+    return { rows: pick(api?.history_max_rows, 0), days: pick(api?.history_max_days, 0) };
+  }
+
+  /** Set the API-client history retention (admin-gated by the workspaces
+   *  PATCH route). Shallow-merges into the settings JSON. */
+  async setApiHistoryRetention(rows: number, days: number): Promise<void> {
+    if (!this.currentId || !this.current) return;
+    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
+    const settings = {
+      ...this.current.settings,
+      api_client: { ...prev, history_max_rows: rows, history_max_days: days },
+    };
     const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
     this.workspaces = this.workspaces.map((w) =>
       w.id === updated.id ? { ...w, ...updated } : w,

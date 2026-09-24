@@ -13,9 +13,13 @@
   import { k8sApi } from '../../../lib/api/k8s';
   import type { K8sCluster, K8sMonitorEvent, K8sMonitorSeries, K8sMonitorStatus, K8sMonitorWorkloadRow } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
+  import PageHeader from '../../../lib/components/PageHeader.svelte';
+  import PageBody from '../../../lib/components/PageBody.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
-  import { envBadge, formatAge, formatBytes } from '../k8s-util';
+  import { formatAge, formatBytes } from '../k8s-util';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
+  import { envTone } from '../../../lib/status';
   import Sparkline from './Sparkline.svelte';
   import MonitorSettings from './MonitorSettings.svelte';
   import MonitorInsights from './MonitorInsights.svelte';
@@ -67,7 +71,7 @@
     ctxMenu.show(
       e,
       k8s.clusters.map((c) => ({
-        label: `${c.name} · ${envBadge(c.environment)}`,
+        label: `${c.name} · ${envTone(c.environment).label}`,
         icon: 'helm',
         disabled: c.id === cluster.id,
         action: () => router.go(`kubernetes/monitor/${encodeURIComponent(c.id)}/${activeTab}`),
@@ -218,40 +222,44 @@
   }
 </script>
 
-<div class="page mon" data-testid="k8s-monitor-cluster">
-  <div class="page-header">
-    <div class="titles">
-      <h1>
-        <button class="crumb" onclick={() => router.go('kubernetes')}>Kubernetes</button>
-        <span class="sep">/</span>
-        <button class="crumb" onclick={() => router.go('kubernetes/monitor')}>Monitor</button>
-        <span class="sep">/</span>
-        <button class="cluster-pick" onclick={clusterMenu} title="Switch cluster" data-testid="k8s-monitor-cluster-pick">
-          <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
-          {cluster.name}
-          <span class="env-badge" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
-          <Icon name="dot" size={10} />
-        </button>
-      </h1>
-      <div class="sub" title={status?.last_error || ''}>{collectorLine(status, enabled)}</div>
-    </div>
-    <div class="actions">
-      {#if activeTab === 'workloads' || activeTab === 'events'}
-        <div class="seg" role="radiogroup" aria-label="Window">
-          {#each WINDOWS as w (w)}
-            <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
-          {/each}
-        </div>
-      {/if}
-      <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(cluster.id)}`)} title="Open the console for this cluster"><Icon name="helm" size={12} /> Console</button>
-    </div>
-  </div>
-
-  <nav class="tabs" aria-label="Monitor sections">
-    {#each TABS as t (t.id)}
-      <button class="tab" class:active={activeTab === t.id} onclick={() => goTab(t.id)} aria-current={activeTab === t.id ? 'page' : undefined} data-testid="k8s-monitor-tab-{t.id}">{t.label}</button>
-    {/each}
-  </nav>
+<div class="mon-page" data-testid="k8s-monitor-cluster">
+<PageHeader
+  title={cluster.name}
+  crumbs={[
+    { label: 'Kubernetes', onclick: () => router.go('kubernetes') },
+    { label: 'Monitor', onclick: () => router.go('kubernetes/monitor') },
+  ]}
+  subtitle={collectorLine(status, enabled)}
+  tabsPlacement="below"
+>
+  {#snippet titleContent()}
+    <button class="cluster-pick" onclick={clusterMenu} title="Switch cluster" data-testid="k8s-monitor-cluster-pick">
+      <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
+      {cluster.name}
+      <EnvBadge env={cluster.environment} />
+      <Icon name="chevronDown" size={11} />
+    </button>
+  {/snippet}
+  {#snippet actions()}
+    {#if activeTab === 'workloads' || activeTab === 'events'}
+      <div class="seg" role="radiogroup" aria-label="Window" data-keep>
+        {#each WINDOWS as w (w)}
+          <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
+        {/each}
+      </div>
+    {/if}
+    <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(cluster.id)}`)} title="Open the console for this cluster"><Icon name="helm" size={12} /> Console</button>
+  {/snippet}
+  {#snippet tabs()}
+    <nav class="tabs" aria-label="Monitor sections">
+      {#each TABS as t (t.id)}
+        <button class="tab" class:active={activeTab === t.id} onclick={() => goTab(t.id)} aria-current={activeTab === t.id ? 'page' : undefined} data-testid="k8s-monitor-tab-{t.id}">{t.label}</button>
+      {/each}
+    </nav>
+  {/snippet}
+</PageHeader>
+<PageBody>
+<div class="mon">
 
   {#if activeTab === 'settings'}
     <MonitorSettings {cluster} {canEdit} onsaved={(c, s) => { enabled = c.enabled; status = s; }} />
@@ -422,29 +430,20 @@
     {/if}
   {/if}
 </div>
+</PageBody>
+</div>
 
 <style>
+  .mon-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .mon {
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .titles h1 {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .crumb {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--text-dim);
-    font: inherit;
-    cursor: pointer;
-  }
-  .crumb:hover {
-    color: var(--accent);
   }
   .cluster-pick {
     display: inline-flex;
@@ -462,31 +461,10 @@
     border-color: var(--border);
     background: var(--surface-2);
   }
-  .sep {
-    color: var(--text-dim);
-  }
   .dot {
     width: 9px;
     height: 9px;
     border-radius: 50%;
-  }
-  .env-badge {
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 999px;
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .env-badge.prod {
-    color: var(--status-exited);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-  }
-  .actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
   .seg {
     display: inline-flex;
@@ -510,7 +488,6 @@
   .tabs {
     display: flex;
     gap: 2px;
-    border-bottom: 1px solid var(--border);
   }
   .tab {
     background: none;
@@ -548,7 +525,7 @@
   }
   .wl th {
     text-align: left;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -598,7 +575,7 @@
     width: 120px;
   }
   .pct {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pct.warn {
@@ -624,7 +601,7 @@
   }
   .pods th {
     text-align: left;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);

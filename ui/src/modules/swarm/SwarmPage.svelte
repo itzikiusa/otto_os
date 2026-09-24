@@ -2,9 +2,13 @@
   import PathField from '../../lib/components/PathField.svelte';
   // Agent Swarm section: swarm list + the open swarm (org tree, run graph,
   // kanban, runs, board) with an inline session panel (reuses SessionView).
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { sentenceCase, type Tone } from '../../lib/status';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import SessionView from '../agents/SessionView.svelte';
   import OrgTree from './OrgTree.svelte';
   import AgentGraph from './AgentGraph.svelte';
@@ -25,16 +29,17 @@
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
   let view = $state<View>('tree');
+  /** Swarm lifecycle → the shared badge tone (patterns.md §1). */
+  const SWARM_TONE: Record<string, Tone> = { active: 'success', paused: 'neutral', aborted: 'danger' };
 
   // --- Phone chrome (≤640px) ----------------------------------------------
   // On a phone the Swarms rail + the swarm header would eat most of the screen
   // before the chosen view even starts. Both become collapsible sections so the
   // view gets the room; desktop/tablet keep the original always-open chrome.
   // `railOpen` defaults closed once a swarm is open (you've made your pick);
-  // `headOpen` keeps the title + primary lifecycle action visible while tucking
-  // the budget/parallel/secondary controls away until tapped.
+  // (The swarm's secondary actions live in the shared PageHeader, which
+  // collapses whatever doesn't fit into its "⋯" menu — no header toggle.)
   let railOpen = $state(true);
-  let headOpen = $state(false);
   // Auto-collapse the rail when a swarm opens on a phone (one-time per open).
   let lastOpenedId = $state<string | null>(null);
   $effect(() => {
@@ -155,11 +160,35 @@
   });
 
   const detail = $derived(swarm.detail);
+
+  // Never open onto a big empty "Pick a swarm" pane when the workspace has
+  // swarms: restore the last-opened one (or the first) once per workspace load.
+  // Skipped on a phone, where opening a swarm collapses the rail — the list is
+  // the first screen there.
+  let autoPickedFor = $state<string | null>(null);
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (swarm.detail || swarm.loading) {
+      autoPickedFor = wsId;
+      return;
+    }
+    if (swarm.swarms.length === 0) return;
+    autoPickedFor = wsId;
+    const id = initialSelection('swarm', swarm.swarms, (s) => s.id);
+    if (id) void swarm.openSwarm(id);
+  });
+  $effect(() => {
+    if (detail?.id) rememberSelection('swarm', detail.id);
+  });
+  // The rail is pointless while there is nothing to list (and no load error to
+  // retry): the page-level empty state owns the page then.
+  const showRail = $derived(swarm.swarms.length > 0 || !!swarm.swarmsError);
   const queued = $derived(swarm.runs.filter((r) => r.status === 'queued').length);
   const running = $derived(swarm.runs.filter((r) => r.status === 'running' || r.status === 'waiting').length);
   const cap = $derived(detail?.config.max_parallel_sessions ?? 4);
 
-  const VIEWS: { id: View; label: string; icon: string }[] = [
+  const VIEWS: { id: View; label: string; icon: IconName }[] = [
     { id: 'tree', label: 'Org', icon: 'user' },
     { id: 'graph', label: 'Graph', icon: 'split' },
     { id: 'kanban', label: 'Board', icon: 'note' },
@@ -167,12 +196,30 @@
     { id: 'board', label: 'Feed', icon: 'comment' },
   ];
 
+  const LIFECYCLE_FAILED: Record<'start' | 'pause' | 'abort' | 'resume', string> = {
+    start: "Couldn't start the swarm",
+    pause: "Couldn't pause the swarm",
+    abort: "Couldn't abort the swarm",
+    resume: "Couldn't resume the swarm",
+  };
+
   async function lifecycle(action: 'start' | 'pause' | 'abort' | 'resume') {
     if (!detail) return;
+    // Abort kills every swarm session and cancels queued/running runs — the
+    // in-flight work is lost, so it names the blast radius and asks first.
+    if (action === 'abort') {
+      const agents = running === 1 ? '1 running agent is' : `${running} running agents are`;
+      const q = queued === 1 ? '1 queued run is' : `${queued} queued runs are`;
+      const ok = await confirmer.ask(
+        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} cancelled. Work in progress is lost.`,
+        { title: 'Abort swarm', confirmLabel: 'Abort all' },
+      );
+      if (!ok) return;
+    }
     try {
       await swarm.lifecycle(action, detail.id);
     } catch (e) {
-      toasts.error(`${action} failed`, e instanceof Error ? e.message : String(e));
+      toasts.error(LIFECYCLE_FAILED[action], e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -346,8 +393,47 @@
 </script>
 
 <div class="swarm-page" class:phone={viewport.isPhone}>
+  <PageHeader
+    class="swarm-head"
+    title={detail?.name ?? 'Swarm'}
+    subtitle={detail ? `${detail.counts.agents} agents · ${detail.counts.projects} projects · ${running} running · ${queued} queued` : undefined}
+  >
+    {#snippet badge()}
+      {#if detail}
+        <span class="status-pill" data-status={detail.status}>
+          <StatusBadge tone={SWARM_TONE[detail.status] ?? 'neutral'} label={sentenceCase(detail.status)} />
+        </span>
+        {#if detail.pause_reason}
+          <span class="pause-reason" title={detail.pause_reason}>Paused: {detail.pause_reason}</span>
+        {/if}
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      {#if detail}
+        <button class="btn small" onclick={() => (showRecruit = true)} data-icon="plus"><Icon name="plus" size={12} /> Recruit</button>
+        <button class="btn small" onclick={openProjectCreate} data-icon="note"><Icon name="note" size={12} /> Project</button>
+        <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
+        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete swarm" onclick={deleteSwarm} aria-label="delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
+        {#if detail.status === 'active'}
+          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
+          <button class="btn small" data-keep onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
+        {:else if detail.status === 'paused'}
+          <button class="btn small danger" data-overflow="1" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
+          {#if detail.pause_reason}
+            <button class="btn small" data-overflow="1" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume</button>
+          {/if}
+          <button class="btn small primary" onclick={() => lifecycle('resume')}><Icon name="play" size={12} /> Resume</button>
+        {:else}
+          <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
+        {/if}
+      {/if}
+    {/snippet}
+  </PageHeader>
+
+  <div class="swarm-split">
   <!-- Swarms rail — a plain sidebar on desktop/tablet; a collapsible accordion
        section on a phone (tap the header to toggle the list). -->
+  {#if showRail}
   <aside class="rail" class:collapsed={viewport.isPhone && !railOpen} style={viewport.isPhone ? '' : `width:${railW}px`}>
     <div class="rail-head">
       <button
@@ -385,7 +471,9 @@
     </div>
   </aside>
 
-  {#if !viewport.isPhone}
+  {/if}
+
+  {#if !viewport.isPhone && showRail}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="side-resizer"
@@ -403,7 +491,8 @@
     {#if !detail}
       {#if swarm.swarms.length > 0}
         <EmptyState
-          icon="user"
+          variant="page"
+          icon="grid"
           title="Pick a swarm"
           body="Open one from the list to see its org tree, board, runs and feed."
         />
@@ -412,7 +501,9 @@
              workspace and offer to go looking in the others before concluding
              the team was lost. -->
         <EmptyState
-          icon="user"
+          variant="page"
+          icon="grid"
+          actionIcon="plus"
           title="No swarms in {ws.current?.name ?? 'this workspace'}"
           body="A swarm is a team of role-specialized agents that work projects together — pick a preset or start blank. Swarms belong to the workspace they were created in."
           actionLabel="New swarm"
@@ -443,75 +534,41 @@
         </EmptyState>
       {/if}
     {:else}
-      <header class="page-header swarm-head" class:head-collapsed={viewport.isPhone && !headOpen}>
-        <div class="title-wrap">
-          {#if viewport.isPhone}
-            <button class="head-toggle" onclick={() => (headOpen = !headOpen)} aria-expanded={headOpen} aria-label="Toggle swarm controls">
-              <Icon name={headOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-            </button>
-          {/if}
-          <h2 class="ellipsis">{detail.name}</h2>
-          <span class="status-pill {detail.status}">{detail.status}</span>
-          <span class="dim counts">{detail.counts.agents} agents · {detail.counts.projects} projects · {running} running · {queued} queued</span>
-        </div>
-        {#if detail.pause_reason}
-          <span class="pause-reason" title={detail.pause_reason}>Paused: {detail.pause_reason}</span>
-        {/if}
-        <!-- Collapsible-on-phone controls: budget meters, parallel cap, lifecycle
-             + recruit/project/delete. Always shown on desktop/tablet. -->
-        <div class="head-controls">
-          <div class="budget-bars">
-            <button class="budget-label dim cap-edit" onclick={setRunsCap} title="Click to change the run budget (blank = unlimited)">
-              {#if detail.max_total_runs != null}
-                runs {detail.counts.total_runs}/{detail.max_total_runs}
-              {:else}
-                runs {detail.counts.total_runs} · ∞
-              {/if}
-            </button>
-            {#if detail.max_total_runs != null}
-              {@const pct = Math.min(100, (detail.counts.total_runs / detail.max_total_runs) * 100)}
-              <div class="budget-bar" title="Run budget: {detail.counts.total_runs}/{detail.max_total_runs}">
-                <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
-              </div>
-            {/if}
-            {#if detail.max_cost_usd != null}
-              {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
-              <span class="budget-label dim">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
-              <div class="budget-bar" title="Cost budget: ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}">
-                <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
-              </div>
-            {/if}
-          </div>
-          <div class="grow"></div>
-          <div class="cap">
-            <label for="cap">parallel</label>
-            <input id="cap" class="input small num" type="number" min="1" value={cap} onchange={(e) => setCap(Number((e.target as HTMLInputElement).value))} />
-          </div>
-          {#if detail.status === 'active'}
-            <button class="btn small" onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
-            <button class="btn small danger" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
-          {:else if detail.status === 'paused'}
-            <button class="btn small primary" onclick={() => lifecycle('resume')}><Icon name="play" size={12} /> Resume</button>
-            {#if detail.pause_reason}
-              <button class="btn small" onclick={() => (showBudgetModal = true)}><Icon name="play" size={12} /> Raise budget & resume</button>
-            {/if}
-            <button class="btn small danger" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all</button>
-          {:else}
-            <button class="btn small primary" onclick={() => lifecycle('start')}><Icon name="play" size={12} /> Start</button>
-          {/if}
-          <button class="btn small" onclick={() => (showRecruit = true)}><Icon name="plus" size={12} /> Recruit</button>
-          <button class="btn small" onclick={openProjectCreate}><Icon name="note" size={12} /> Project</button>
-          <button class="btn small" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers"><Icon name="gear" size={12} /> Settings</button>
-          <button class="icon-btn" onclick={deleteSwarm} aria-label="delete swarm"><Icon name="trash" size={14} /></button>
-        </div>
-      </header>
-
       <div class="switcher">
         {#each VIEWS as v (v.id)}
           <button class="seg" class:active={view === v.id} onclick={() => (view = v.id)}>
             <Icon name={v.icon} size={13} /> {v.label}
           </button>
         {/each}
+        <span class="grow"></span>
+        <!-- Budget meters + parallel cap: swarm-level status/settings that sit
+             with the views rather than crowding the page header's actions. -->
+        <div class="budget-bars">
+          <button class="budget-label dim cap-edit" onclick={setRunsCap} title="Click to change the run budget (blank = unlimited)">
+            {#if detail.max_total_runs != null}
+              runs {detail.counts.total_runs}/{detail.max_total_runs}
+            {:else}
+              runs {detail.counts.total_runs} · ∞
+            {/if}
+          </button>
+          {#if detail.max_total_runs != null}
+            {@const pct = Math.min(100, (detail.counts.total_runs / detail.max_total_runs) * 100)}
+            <div class="budget-bar" title="Run budget: {detail.counts.total_runs}/{detail.max_total_runs}">
+              <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
+            </div>
+          {/if}
+          {#if detail.max_cost_usd != null}
+            {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
+            <span class="budget-label dim">cost ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}</span>
+            <div class="budget-bar" title="Cost budget: ${detail.counts.cost_usd.toFixed(2)}/${detail.max_cost_usd.toFixed(2)}">
+              <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
+            </div>
+          {/if}
+        </div>
+        <div class="cap">
+          <label for="cap">parallel</label>
+          <input id="cap" class="input small num" type="number" min="1" value={cap} onchange={(e) => setCap(Number((e.target as HTMLInputElement).value))} />
+        </div>
       </div>
 
       <div
@@ -555,6 +612,7 @@
       </div>
     {/if}
   </section>
+  </div>
 </div>
 
 {#if showNew}
@@ -624,7 +682,13 @@
 <style>
   .swarm-page {
     display: flex;
+    flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .swarm-split {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .rail {
@@ -685,7 +749,7 @@
   }
   .swarm-item.active {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .empty {
     padding: 12px;
@@ -738,24 +802,6 @@
     min-width: 0;
     min-height: 0;
   }
-  .swarm-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .title-wrap h2 {
-    margin: 0;
-    font-size: 16px;
-  }
-  .counts {
-    font-size: 11.5px;
-  }
   .pause-reason {
     font-size: 11px;
     color: var(--status-exited);
@@ -774,7 +820,7 @@
     flex-wrap: wrap;
   }
   .budget-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
   .cap-edit {
@@ -805,21 +851,8 @@
     background: var(--status-exited);
   }
   .status-pill {
-    font-size: 10.5px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .status-pill.active {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
-  }
-  .status-pill.aborted {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
+    display: inline-flex;
+    align-items: center;
   }
   .cap {
     display: flex;
@@ -833,6 +866,7 @@
   }
   .switcher {
     display: flex;
+    align-items: center;
     gap: 4px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -855,7 +889,7 @@
   }
   .seg.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .body {
     flex: 1;
@@ -905,8 +939,7 @@
 
   /* Toggles — invisible chrome on desktop (the rail/header are always open);
      they only carry the chevron + tappable target on a phone. */
-  .rail-toggle,
-  .head-toggle {
+  .rail-toggle {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -917,21 +950,14 @@
     cursor: pointer;
     min-width: 0;
   }
-  .head-toggle {
-    flex: none;
-    color: var(--text-dim);
-  }
   .rail-current {
     font-size: 11.5px;
     color: var(--text-dim);
     max-width: 160px;
   }
-  .head-controls {
-    display: contents;
-  }
 
   @media (max-width: 640px) {
-    .swarm-page.phone {
+    .swarm-page.phone .swarm-split {
       flex-direction: column;
     }
     /* Rail = collapsible accordion. Header is a tappable toggle; the list
@@ -965,51 +991,13 @@
       padding: 11px 12px;
     }
 
-    /* Header: title row always visible; the controls block collapses behind the
-       title's toggle so the chosen view gets the vertical room back. */
-    .swarm-page.phone .swarm-head {
-      padding: 10px 14px;
-      gap: 8px 10px;
-      align-items: flex-start;
-    }
-    .swarm-page.phone .title-wrap {
-      flex: 1 1 100%;
-      min-width: 0;
-      flex-wrap: wrap;
-      row-gap: 4px;
-    }
-    .swarm-page.phone .title-wrap h2 {
-      font-size: 16px;
-      flex: 1 1 auto;
-      min-width: 0;
-      max-width: 100%;
-    }
-    /* Counts move to their own full-width line so the swarm name keeps its room. */
-    .swarm-page.phone .title-wrap .counts {
-      flex: 1 1 100%;
-    }
-    .swarm-page.phone .head-controls {
-      display: flex;
-      flex: 1 1 100%;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px 8px;
-    }
-    .swarm-page.phone .head-collapsed .head-controls {
-      display: none;
-    }
-    .swarm-page.phone .head-controls .btn.small {
-      font-size: 13px;
-      padding: 7px 10px;
-    }
     .swarm-page.phone .cap {
       font-size: 12px;
+      flex: none;
     }
     .swarm-page.phone .budget-bars {
-      flex: 1 1 100%;
-    }
-    .swarm-page.phone .budget-bar {
-      flex: 1;
+      flex: none;
+      flex-wrap: nowrap;
     }
 
     /* View switcher: horizontally scrollable so all 5 tabs are reachable on a

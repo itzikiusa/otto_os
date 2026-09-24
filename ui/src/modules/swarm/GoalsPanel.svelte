@@ -157,7 +157,7 @@
     align-items: center;
     gap: 6px;
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .spinner-xs {
     width: 11px;
@@ -193,7 +193,7 @@
     font-weight: 600;
   }
   .kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -202,7 +202,7 @@
     padding: 0 6px;
   }
   .blocking {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     border: 1px solid color-mix(in srgb, var(--status-exited) 40%, transparent);
     border-radius: 999px;
@@ -232,7 +232,7 @@
     font-weight: 600;
   }
   .pair.cmd {
-    font-family: var(--mono, monospace);
+    font-family: var(--font-mono);
     max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -253,7 +253,7 @@
   /* Status chips — colours per the goal lifecycle. `passed` is the high-contrast
      light-green + black selection colour; verifying pulses. */
   .status {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 8px;
     border-radius: 999px;
@@ -263,16 +263,16 @@
     color: var(--text-dim);
   }
   .status.verifying {
-    background: color-mix(in srgb, #0a84ff 22%, transparent);
-    color: #0a84ff;
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .status.passed {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
   }
   .status.warned {
-    background: color-mix(in srgb, #e3b341 26%, transparent);
-    color: #e3b341;
+    background: color-mix(in srgb, var(--warning) 26%, transparent);
+    color: var(--warning);
   }
   .status.unmet,
   .status.error {

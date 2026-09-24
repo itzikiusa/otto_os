@@ -181,12 +181,12 @@
     font-weight: 600;
   }
   .time {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .reply-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: 11px;
     padding: 0 4px;

@@ -1,6 +1,8 @@
 <script lang="ts">
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RunInspector from './RunInspector.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
@@ -54,7 +56,7 @@
     <div class="chips">
       <button class="chip" class:accent={statusFilter === ''} onclick={() => (statusFilter = '')}>all</button>
       {#each STATUSES as s (s)}
-        <button class="chip" class:accent={statusFilter === s} onclick={() => (statusFilter = s)}>{s}</button>
+        <button class="chip" class:accent={statusFilter === s} onclick={() => (statusFilter = s)}>{runStatus(s).label}</button>
       {/each}
     </div>
     <span class="grow"></span>
@@ -84,7 +86,7 @@
               {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
             </span>
             <span class="c-kind dim">{r.kind}{r.summary ? ` · ${r.summary}` : ''}</span>
-            <span class="c-status"><span class="badge {r.status}">{r.status}</span></span>
+            <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
             <span class="c-tok mono dim">
               {r.tokens_input != null || r.tokens_output != null
@@ -147,7 +149,8 @@
     flex: 1;
     min-height: 0;
   }
-  .vlist-runs {
+  /* Passed to VirtualList as its class — global so it reaches the child. */
+  :global(.vlist-runs) {
     flex: 1;
     min-height: 0;
   }
@@ -184,25 +187,5 @@
     display: flex;
     gap: 4px;
     justify-content: flex-end;
-  }
-  .badge {
-    font-size: 10.5px;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-  }
-  .badge.running,
-  .badge.waiting {
-    background: color-mix(in srgb, var(--status-working) 22%, transparent);
-    color: var(--status-working);
-  }
-  .badge.done {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
-  }
-  .badge.error {
-    background: color-mix(in srgb, var(--status-exited) 22%, transparent);
-    color: var(--status-exited);
   }
 </style>

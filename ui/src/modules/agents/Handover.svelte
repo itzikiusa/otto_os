@@ -5,6 +5,8 @@
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  import { events } from '../../lib/events.svelte';
+  import { sessionState } from '../../lib/status';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
@@ -219,7 +221,7 @@
                 class:selected={existingId === a.id}
                 onclick={() => (existingId = a.id)}
               >
-                <StatusDot status={ws.statusMap[a.id] ?? a.status} />
+                <StatusDot state={sessionState(a, ws.statusMap[a.id], ws.needsYou[a.id] === true, { stale: events.state !== 'connected' })} />
                 <span class="agent-title">{a.title}</span>
                 <span class="chip">{a.provider}</span>
               </button>
@@ -334,8 +336,8 @@
     padding: 0 5px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
-    font-size: 10.5px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     vertical-align: middle;

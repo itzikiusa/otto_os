@@ -1,4 +1,8 @@
 <script lang="ts">
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Skills: the catalogue of skills that ship with Otto ("bundled"),
   // shown grouped by category with their state relative to the installed library
   // copy. Installing/updating writes into the Otto library; the backend always
@@ -212,17 +216,10 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
-    <div>
-      <h1>Skills</h1>
-      <div class="sub">
-        Skills that ship with Otto. Installing adds them to your library and to each agent CLI's
-        global skills folder, so Claude, Codex and agy can all use them. Your edited copies are
-        always backed up before being replaced.
-      </div>
-    </div>
-  </div>
+<div class="settings-section">
+  <PageHeader title={sectionLabel('skills')} subtitle="Skills that ship with Otto" />
+  <PageBody width="readable">
+  <SectionIntro>Installing a skill adds it to your library and to each agent CLI's global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
 
   {#if loading}
     <Skeleton rows={4} height={52} />
@@ -294,9 +291,17 @@
       </section>
     {/each}
   {/if}
+  </PageBody>
 </div>
 
 <style>
+  /* Section chrome: shared PageHeader bar + scrolling PageBody. */
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
   .cat {
     max-width: min(720px, 92vw);
     margin-bottom: 22px;

@@ -154,18 +154,18 @@
     stroke: var(--text);
   }
   .node.selected > circle {
-    stroke: #7ee787;
+    stroke: var(--success);
     stroke-width: 3;
   }
   .approve-ring {
     fill: none;
-    stroke: #ffd33d;
+    stroke: var(--warning);
     stroke-width: 1.6;
     stroke-dasharray: 3 3;
   }
   .node-label {
     fill: var(--text);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     pointer-events: none;
   }
 </style>

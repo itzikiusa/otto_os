@@ -1,5 +1,14 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { authedText } from '../../lib/api/client';
@@ -9,6 +18,7 @@
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -264,7 +274,7 @@
   }
 
   async function remove(t: ScheduledTask): Promise<void> {
-    if (!confirm(`Delete scheduled task "${t.name}"?`)) return;
+    if (!(await confirmer.ask(`Delete scheduled task "${t.name}"?`, { title: 'Delete scheduled task' }))) return;
     try {
       await scheduledTasks.remove(t.id);
     } catch (e) {
@@ -314,25 +324,29 @@
     return ((t.destination?.type as string) ?? 'none') as string;
   }
 
-  function statusClass(status: string | null | undefined): string {
-    switch (status) {
-      case 'ok':
-        return 'pill ok';
-      case 'error':
-        return 'pill bad';
-      case 'running':
-        return 'pill working';
-      default:
-        return 'pill';
-    }
-  }
 </script>
 
+<div class="sched-page">
+<PageHeader
+  title={creating || editId ? (editId ? 'Edit scheduled task' : 'New scheduled task') : 'Scheduled Tasks'}
+  subtitle={creating || editId ? undefined : 'Recurring agent jobs — run a prompt on a cadence, produce a report, and deliver it to Slack, email, or a webhook. Also driveable over MCP.'}
+>
+  {#snippet leading()}
+    {#if creating || editId}
+      <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={() => { creating = false; editId = null; }}>
+        <Icon name="chevronLeft" size={15} />
+      </button>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    {#if !(creating || editId) && list.length > 0}
+      <button class="btn primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
+    {/if}
+  {/snippet}
+</PageHeader>
+<PageBody width="readable">
 <div class="sched">
   {#if creating || editId}
-    <header class="head">
-      <h1>{editId ? 'Edit scheduled task' : 'New scheduled task'}</h1>
-    </header>
     <div class="form">
       {#if error}<div class="err" role="alert">{error}</div>{/if}
 
@@ -521,17 +535,6 @@
       </div>
     </div>
   {:else}
-    <header class="head">
-      <div>
-        <h1>Scheduled Tasks</h1>
-        <p class="sub">
-          Recurring agent jobs — run a prompt on a cadence, produce a report, and deliver it to
-          Slack, email, or a webhook. Also driveable over MCP.
-        </p>
-      </div>
-      <button class="btn primary" onclick={startCreate}>New task</button>
-    </header>
-
     {#if error}<div class="err" role="alert">{error}</div>{/if}
 
     {#if convertedWfId}
@@ -543,9 +546,25 @@
       </div>
     {/if}
 
-    {#if list.length === 0}
-      <div class="empty">No scheduled tasks yet. Create one to run an agent on a cadence.</div>
-    {:else}
+    <LoadState
+      what="scheduled tasks"
+      variant="page"
+      loading={scheduledTasks.loadingList}
+      error={scheduledTasks.listError}
+      empty={list.length === 0}
+      onretry={() => ws.currentId && void scheduledTasks.loadList(ws.currentId)}
+    >
+      {#snippet emptyView()}
+        <EmptyState
+          variant="page"
+          icon="clock"
+          title="No scheduled tasks yet"
+          body="Create one to run an agent on a cadence and deliver its report."
+          actionLabel="New task"
+          actionIcon="plus"
+          onaction={startCreate}
+        />
+      {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}
           <li class="task">
@@ -553,26 +572,37 @@
               <div class="task-info">
                 <strong class="name">{t.name}</strong>
                 <span class="meta">{cadenceLabel(t)} · → {destLabel(t)}</span>
-                {#if t.last_status}<span class={statusClass(t.last_status)}>{t.last_status}</span>{/if}
-                {#if !t.enabled}<span class="pill">paused</span>{/if}
+                <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed. -->
+                {#if t.last_status}<StatusBadge status={runStatus(t.last_status)} />{/if}
+                {#if !t.enabled}<span class="pill">Paused</span>{/if}
               </div>
               <div class="task-actions">
                 <button class="btn small" onclick={() => runNow(t)} disabled={busy}>Run now</button>
-                <button class="btn small" onclick={() => toggleRuns(t)}>
+                <button class="btn small ghost" onclick={() => toggleRuns(t)}>
                   {expandedId === t.id ? 'Hide runs' : 'Runs'}
                 </button>
-                <button class="btn small" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
-                <button class="btn small" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
-                <button class="btn small" onclick={() => startEdit(t)}>Edit</button>
-                <button class="btn small danger" onclick={() => remove(t)}>Delete</button>
+                <button class="btn small ghost" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn small ghost" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
+                <button class="btn small ghost" onclick={() => startEdit(t)}>Edit</button>
+                <!-- Destructive: quiet icon at the end of the row, confirmed by confirmer.ask(). -->
+                <button class="icon-btn del" onclick={() => remove(t)} aria-label="Delete task" title="Delete task"><Icon name="trash" size={14} /></button>
               </div>
             </div>
             {#if expandedId === t.id}
               <div class="runs">
+                <LoadState
+                  what="runs"
+                  variant="compact"
+                  loading={!scheduledTasks.runsByTask[t.id] && !scheduledTasks.runsError[t.id]}
+                  error={scheduledTasks.runsError[t.id]}
+                  empty={(scheduledTasks.runsByTask[t.id] ?? []).length === 0}
+                  onretry={() => void scheduledTasks.loadRuns(t.id)}
+                >
+                  {#snippet emptyView()}<div class="muted">No runs yet.</div>{/snippet}
                 {#each scheduledTasks.runsByTask[t.id] ?? [] as r (r.id)}
                   <div class="run">
-                    <span class={statusClass(r.status)}>{r.status}</span>
-                    <span class="run-when">{r.started_at}</span>
+                    <StatusBadge status={runStatus(r.status)} />
+                    <span class="run-when"><RelTime iso={r.started_at} /></span>
                     <span class="run-sum">{r.summary || '(no summary)'}</span>
                     {#if r.report_rel}
                       <button class="btn small" onclick={() => viewReport(r)}>View report</button>
@@ -587,50 +617,37 @@
                     {#if r.proof_pack_id}<span class="pill ok" title="proof pack attached">proof</span>{/if}
                     {#if r.workflow_run_id}<span class="pill" title={r.workflow_run_id}>workflow</span>{/if}
                   </div>
-                {:else}
-                  <div class="muted">No runs yet.</div>
                 {/each}
+                </LoadState>
               </div>
             {/if}
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   {/if}
 
   {#if reportOpen}
-    <div
-      class="modal-bg"
-      onclick={(e) => { if (e.target === e.currentTarget) reportOpen = false; }}
-      onkeydown={(e) => { if (e.key === 'Escape') reportOpen = false; }}
-      role="presentation"
-    >
-      <div class="modal" role="dialog" aria-label="Report" aria-modal="true" tabindex="-1">
-        <header class="modal-head">
-          <strong>Report</strong>
-          <button class="btn small" onclick={() => (reportOpen = false)}>Close</button>
-        </header>
-        {#if reportLoading}
-          <div class="muted">Loading…</div>
-        {:else}
-          <pre class="report">{reportText}</pre>
-        {/if}
-      </div>
-    </div>
+    <Modal title="Report" width={760} onclose={() => (reportOpen = false)}>
+      {#if reportLoading}
+        <div class="muted">Loading…</div>
+      {:else}
+        <pre class="report">{reportText}</pre>
+      {/if}
+    </Modal>
   {/if}
+</div>
+</PageBody>
 </div>
 
 <style>
   /* Colors come from the app theme tokens (tokens.css) so the page adapts to
      light + dark. Buttons reuse the global `.btn`/`.btn.small/.primary/.danger`. */
-  .sched { padding: 1rem 1.25rem; max-width: 980px; margin: 0 auto; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 0.75rem; }
-  .head h1 { margin: 0; font-size: 1.25rem; color: var(--text); }
-  .sub { margin: 0.25rem 0 0; color: var(--text-dim); font-size: 0.85rem; max-width: 60ch; }
-  .empty, .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
+  .sched-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); margin-bottom: 0.75rem; font-size: 0.85rem;
   }
   .notice {
@@ -644,18 +661,17 @@
   .task { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 0.6rem 0.75rem; color: var(--text); }
   .task-main { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .task-info { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .name { font-size: 0.95rem; color: var(--text); }
-  .meta { color: var(--text-dim); font-size: 0.8rem; }
-  .task-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
+  .meta { color: var(--text-dim); font-size: var(--fs-s); }
+  .task-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+  .task-actions .del:hover { color: var(--danger); background: var(--danger-soft); }
   .runs { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
   .run { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; flex-wrap: wrap; color: var(--text); }
   .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
-  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-color: transparent; }
-  .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); border-color: transparent; }
-  .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); border-color: transparent; }
-  .pill.working { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); border-color: transparent; }
+  .pill { font-size: var(--fs-xs); padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
+  .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 720px; }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }
@@ -673,8 +689,5 @@
   .toggles { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.25rem 0; }
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0 0 0.25rem; }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-  .modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .modal { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-l); width: min(760px, 92vw); max-height: 82vh; overflow: auto; padding: 0.85rem 1rem; box-shadow: var(--shadow); }
-  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
-  .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
+  .report { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; color: var(--text); }
 </style>

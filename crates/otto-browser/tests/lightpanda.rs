@@ -11,8 +11,9 @@
 //! fetching a real internet host — a machine with the binary installed but no
 //! network access (this sandbox, some CI-adjacent environments) must still
 //! be able to run this. `otto_netguard` is never in this path (this drives
-//! `LightpandaEngine` directly, not the HTTP route), so a loopback target is
-//! fine here.
+//! an UNGUARDED `LightpandaEngine::new_unguarded` directly, not the HTTP route
+//! or the request-intercepting daemon engine), so a loopback target is fine
+//! here.
 
 use otto_browser::BrowserEngine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -58,7 +59,7 @@ async fn sidecar_serves_a_page_over_cdp() {
     let lp = otto_browser::Lightpanda::start(bin, tmp.path().into())
         .await
         .unwrap();
-    let engine = otto_browser::LightpandaEngine::new(lp.cdp_url());
+    let engine = otto_browser::LightpandaEngine::new_unguarded(lp.cdp_url());
 
     let addr = spawn_fixture().await;
     let url = format!("http://{addr}/");

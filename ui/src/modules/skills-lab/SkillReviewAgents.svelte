@@ -8,6 +8,8 @@
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { toasts } from '../../lib/toast.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import { runStatus } from '../../lib/status';
 
   interface Props {
     review: SkillReview;
@@ -77,12 +79,7 @@
             {agentExpanded[agent.name] ? 'Hide' : `${agent.findings.length} finding${agent.findings.length === 1 ? '' : 's'}`}
           </button>
         {/if}
-        <span class="rp-status-pill rp-status-{agent.status}">
-          {#if agent.status === 'running' || agent.status === 'waiting'}
-            <span class="spinner-xs"></span>
-          {/if}
-          {agent.status}
-        </span>
+        <span class="rp-status-pill" data-status={agent.status}><StatusBadge status={runStatus(agent.status)} /></span>
       </div>
       {#if agent.note && (view === 'running' || agent.status !== 'done')}
         <p class="rp-agent-note">{agent.note}</p>
@@ -119,20 +116,13 @@
   .rp-agent { padding: 8px 12px; }
   .rp-agent-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .rp-agent-name { font-size: 12.5px; font-weight: 600; }
-  .rp-agent-chip { font-size: 10.5px; }
+  .rp-agent-chip { font-size: var(--fs-xs); }
   .rp-agent-note { margin: 4px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
 
-  .rp-status-pill {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-    padding: 2px 6px; border-radius: var(--radius-s, 4px); display: inline-flex; align-items: center; gap: 3px;
-  }
-  .rp-status-pending { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
-  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
-  .rp-status-done { background: color-mix(in srgb, var(--status-working) 15%, transparent); color: var(--status-working); }
-  .rp-status-error { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
-  .rp-status-waiting { background: var(--status-warn-soft); color: var(--status-warn); }
+  /* Status pill: the shared StatusBadge; this wrapper is the layout hook. */
+  .rp-status-pill { display: inline-flex; align-items: center; }
 
-  .rp-agent-waiting { margin: 6px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--status-warn); }
+  .rp-agent-waiting { margin: 6px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--warning); }
   .rp-term {
     height: min(360px, 65vh); margin: 8px 0 2px; border: 1px solid var(--border);
     border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
@@ -144,19 +134,13 @@
 
   .severity-chip {
     display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px);
-    font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   }
-  .sev-critical { background: color-mix(in srgb, var(--status-exited) 22%, transparent); color: var(--status-exited); }
-  .sev-high { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
-  .sev-medium { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
-  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .sev-critical { background: var(--danger-soft); color: var(--danger); }
+  .sev-high { background: var(--danger-soft); color: var(--danger); }
+  .sev-medium { background: var(--warning-soft); color: var(--warning); }
+  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
 
-  .spinner-xs {
-    display: inline-block; width: 9px; height: 9px; border: 1.5px solid currentColor;
-    border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite;
-    vertical-align: middle; margin-inline-end: 3px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
   .grow { flex: 1; }
   .mono { font-family: var(--font-mono, monospace); }
 

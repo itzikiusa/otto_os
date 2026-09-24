@@ -7,6 +7,7 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -20,12 +21,14 @@
     wsId: string;
     servers: McpServerDetail[];
     loading: boolean;
+    /** Last list-load failure (human text) — inline with Retry, never "no servers". */
+    error?: string | null;
     selectedServerId: string | null;
     onReload: () => Promise<void> | void;
     onPatch: (s: McpServerDetail) => void;
     onSelect: (id: string) => void;
   }
-  let { wsId, servers, loading, onReload, onPatch }: Props = $props();
+  let { wsId, servers, loading, error = null, onReload, onPatch }: Props = $props();
 
   let accessId = $state<string | null>(null);
   const can = (id: string, op: string) => resourceAccess.can('mcp_server',id,op,'mcp','admin');
@@ -131,7 +134,13 @@
     </button>
   </div>
 
-  {#if loading && servers.length === 0}
+  {#if error}
+    <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
+    <LoadState what="MCP servers" {loading} {error} empty={servers.length === 0} onretry={() => void onReload()} />
+  {/if}
+  {#if error && servers.length === 0}
+    <!-- rendered above -->
+  {:else if loading && servers.length === 0}
     <p class="muted pad">Loading…</p>
   {:else if servers.length === 0}
     <div class="empty">
@@ -289,7 +298,7 @@
     font-size: 13px;
   }
   .name:hover .nm {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .desc {
     font-size: 11px;
@@ -300,7 +309,7 @@
     max-width: 100%;
   }
   .endpoint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     opacity: 0.8;
     overflow: hidden;
@@ -320,7 +329,7 @@
     color: var(--text-dim);
   }
   .lat {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .actions {

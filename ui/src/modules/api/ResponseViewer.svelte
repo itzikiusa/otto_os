@@ -1,43 +1,45 @@
 <script lang="ts">
-  // Shared response viewer: status pill (colored by class) + duration + size +
-  // content-type, then Body / Headers tabs. Pretty-prints JSON bodies.
+  // Response viewer shared by the page and the compact panel: status / time /
+  // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
+  // Timeline · Tests. A failed send shows inline with the reason and what to
+  // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
+  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
+  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
+  import StatusChip from './StatusChip.svelte';
+  import JsonTree from './JsonTree.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
+  import { apiStream } from '../../lib/stores/apiStream.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { formatBytes, formatSeconds } from '../../lib/metric-format';
+  import { parseSetCookies } from '../../lib/api/apiVars';
 
   interface Props {
     compact?: boolean;
+    /** Open the request's Settings tab (from the error hints). */
+    onsettings?: () => void;
   }
-  let { compact = false }: Props = $props();
+  let { compact = false, onsettings }: Props = $props();
 
-  import { toasts } from '../../lib/toast.svelte';
-  import { apiStream } from '../../lib/stores/apiStream.svelte';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
-  import VirtualList from '../../lib/components/VirtualList.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
-  import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
-
-  // ── Send-to-agent dialog ────────────────────────────────────────────────────
   let sendToAgentOpen = $state(false);
-
   const resp = $derived(apiClient.lastResponse);
+  const failure = $derived(apiClient.lastError);
 
   // ── Pretty-print: memoized + size-gated ────────────────────────────────────
   // Bodies over 256 KB are shown raw (re-parsing would block the main thread).
   const PRETTY_SIZE_LIMIT = 256 * 1024;
   const STREAM_RING_MAX = 500;
 
-  // JSONPath-ish filter ($.a.b[0].c) applied to JSON bodies.
-  let jsonFilter = $state('');
-  // Debounced version applied to $derived so the parser doesn't run every keystroke.
-  let jsonFilterDebounced = $state('');
-  let _filterTimer: ReturnType<typeof setTimeout> | undefined;
-  $effect(() => {
-    const v = jsonFilter;
-    clearTimeout(_filterTimer);
-    _filterTimer = setTimeout(() => { jsonFilterDebounced = v; }, 150);
-  });
-
-  const isJsonResp = $derived(!!resp && isJson(resp.content_type, resp.body));
+  function isJson(ct: string | null, body: string): boolean {
+    if (ct && /\bjson\b/i.test(ct)) return true;
+    const t = body.trim();
+    return (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'));
+  }
   function respExt(ct: string | null, body: string): string {
     const c = (ct ?? '').toLowerCase();
     const t = body.trim();
@@ -48,8 +50,23 @@
     if (c.includes('css')) return 'css';
     return 'txt';
   }
+  const isJsonResp = $derived(!!resp && isJson(resp.content_type, resp.body));
+  const isHtml = $derived(!!resp && /html/i.test(resp.content_type ?? ''));
+  const isImage = $derived(!!resp?.content_type && /^image\//i.test(resp.content_type));
   const respPath = $derived(resp ? `response.${respExt(resp.content_type, resp.body)}` : 'response.txt');
   const respLang = $derived(resp ? respExt(resp.content_type, resp.body) : '');
+
+  // Memoize the parsed JSON so filters / the tree don't re-parse each time.
+  let _parsedCache: { body: string; parsed: unknown } | null = null;
+  function getCachedParsed(body: string): unknown {
+    if (_parsedCache?.body !== body) {
+      try { _parsedCache = { body, parsed: JSON.parse(body) }; }
+      catch { _parsedCache = null; }
+    }
+    return _parsedCache?.parsed;
+  }
+  const parsed = $derived(resp && isJsonResp && resp.body.length <= PRETTY_SIZE_LIMIT ? getCachedParsed(resp.body) : undefined);
+
   function evalJsonPath(root: unknown, path: string): unknown {
     let p = path.trim();
     if (p === '' || p === '$') return root;
@@ -64,53 +81,48 @@
     return cur;
   }
 
-  // Memoize the parsed JSON object so JSONPath queries don't re-parse each time.
-  // Key is the body string; cleared when the response changes.
-  let _parsedCache: { body: string; parsed: unknown } | null = null;
-  function getCachedParsed(body: string): unknown {
-    if (_parsedCache?.body !== body) {
-      try { _parsedCache = { body, parsed: JSON.parse(body) }; }
-      catch { _parsedCache = null; }
-    }
-    return _parsedCache?.parsed;
-  }
+  type BodyView = 'pretty' | 'raw' | 'tree' | 'preview';
+  let bodyView: BodyView = $state('pretty');
+  // Keep the view valid for the current response.
+  $effect(() => {
+    if (bodyView === 'tree' && parsed === undefined) bodyView = 'pretty';
+    if (bodyView === 'preview' && !isHtml && !isImage) bodyView = 'pretty';
+    if (isImage && bodyView !== 'preview') bodyView = 'preview';
+  });
+
+  // Filter (JSONPath in Pretty) / search (Tree) — debounced.
+  let filter = $state('');
+  let filterDebounced = $state('');
+  let _filterTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const v = filter;
+    clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(() => { filterDebounced = v; }, 150);
+  });
 
   const prettyBody = $derived.by(() => {
     if (!resp) return '';
-    if (resp.body.length > PRETTY_SIZE_LIMIT) return resp.body; // size-gate
-    if (isJson(resp.content_type, resp.body)) {
-      const parsed = getCachedParsed(resp.body);
-      if (parsed !== undefined) {
-        try { return JSON.stringify(parsed, null, 2); } catch { /* fall through */ }
-      }
+    if (resp.body.length > PRETTY_SIZE_LIMIT) return resp.body;
+    if (parsed !== undefined) {
+      try { return JSON.stringify(parsed, null, 2); } catch { /* fall through */ }
     }
     return resp.body;
   });
-
   const displayBody = $derived.by(() => {
     if (!resp) return '';
-    const base = bodyView === 'pretty' ? prettyBody : resp.body;
-    const f = jsonFilterDebounced.trim(); // use debounced value
-    if (f && isJsonResp && resp.body.length <= PRETTY_SIZE_LIMIT) {
-      try {
-        const parsed = getCachedParsed(resp.body);
-        const result = evalJsonPath(parsed, f);
-        return result === undefined ? `// no match for ${f}` : JSON.stringify(result, null, 2);
-      } catch {
-        return base;
-      }
+    const base = bodyView === 'raw' ? resp.body : prettyBody;
+    const f = filterDebounced.trim();
+    if (bodyView === 'pretty' && f && parsed !== undefined) {
+      const result = evalJsonPath(parsed, f);
+      return result === undefined ? `// Nothing at ${f}` : JSON.stringify(result, null, 2);
     }
     return base;
   });
 
-  // ── Capped stream ring-buffer ───────────────────────────────────────────────
-  // Cap visible stream items so the DOM never grows unbounded (T2).
+  // ── Streams ─────────────────────────────────────────────────────────────────
   const streamItems = $derived(
-    apiStream.items.length > STREAM_RING_MAX
-      ? apiStream.items.slice(apiStream.items.length - STREAM_RING_MAX)
-      : apiStream.items,
+    apiStream.items.length > STREAM_RING_MAX ? apiStream.items.slice(apiStream.items.length - STREAM_RING_MAX) : apiStream.items,
   );
-
   const streamKind = $derived(apiClient.draft.kind);
   const isStream = $derived(streamKind === 'sse' || streamKind === 'websocket');
   let wsSend = $state('');
@@ -119,41 +131,45 @@
     apiStream.send(wsSend);
     wsSend = '';
   }
+  const STREAM_STATUS: Record<string, string> = { idle: 'Not connected', connecting: 'Connecting…', open: 'Connected', closed: 'Disconnected', error: 'Connection error' };
 
-  type Tab = 'body' | 'headers' | 'trace' | 'tests';
+  // ── Tabs ────────────────────────────────────────────────────────────────────
+  type Tab = 'body' | 'headers' | 'cookies' | 'trace' | 'tests';
   let tab: Tab = $state('body');
   const tests = $derived(apiClient.testResults);
   const scriptLogs = $derived(apiClient.scriptLogs);
   const hasTests = $derived(tests.length > 0 || scriptLogs.length > 0);
   const testsPassed = $derived(tests.filter((t) => t.passed).length);
-  type BodyView = 'pretty' | 'raw';
-  let bodyView: BodyView = $state('pretty');
+  const cookies = $derived(resp ? parseSetCookies(resp.headers) : []);
+  const tabs = $derived.by(() => {
+    const out: { id: Tab; label: string; count?: string }[] = [{ id: 'body', label: 'Body' }];
+    if (!resp) return out;
+    out.push({ id: 'headers', label: 'Headers', count: String(resp.headers.length) });
+    if (cookies.length) out.push({ id: 'cookies', label: 'Cookies', count: String(cookies.length) });
+    if (resp.trace?.length) out.push({ id: 'trace', label: 'Timeline' });
+    if (hasTests) out.push({ id: 'tests', label: 'Tests', count: tests.length ? `${testsPassed}/${tests.length}` : undefined });
+    return out;
+  });
+  $effect(() => {
+    if (!tabs.some((t) => t.id === tab)) tab = 'body';
+  });
+  function onTabKey(e: KeyboardEvent, i: number): void {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    tab = next.id;
+    (e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[tabs.indexOf(next)]?.focus();
+  }
 
-  const isImage = $derived(!!resp?.content_type && /^image\//i.test(resp.content_type));
-  const previewUrl = $derived(
-    resp && isImage && resp.body_base64
-      ? `data:${resp.content_type};base64,${resp.body_base64}`
-      : '',
-  );
+  const previewUrl = $derived(resp && isImage && resp.body_base64 ? `data:${resp.content_type};base64,${resp.body_base64}` : '');
 
-  // ── Save response to disk ──────────────────────────────────────────────────
+  // ── Actions ─────────────────────────────────────────────────────────────────
   function extForCt(ct: string | null): string {
     if (!ct) return 'bin';
     const c = ct.toLowerCase();
-    if (c.includes('json')) return 'json';
-    if (c.includes('html')) return 'html';
-    if (c.includes('xml')) return 'xml';
-    if (c.includes('png')) return 'png';
-    if (c.includes('jpeg') || c.includes('jpg')) return 'jpg';
-    if (c.includes('gif')) return 'gif';
-    if (c.includes('webp')) return 'webp';
-    if (c.includes('svg')) return 'svg';
-    if (c.includes('pdf')) return 'pdf';
-    if (c.includes('csv')) return 'csv';
-    if (c.includes('javascript')) return 'js';
-    if (c.includes('zip')) return 'zip';
-    if (c.includes('octet-stream')) return 'bin';
-    if (c.includes('text/')) return 'txt';
+    for (const [needle, ext] of [['json', 'json'], ['html', 'html'], ['xml', 'xml'], ['png', 'png'], ['jpeg', 'jpg'], ['jpg', 'jpg'], ['gif', 'gif'], ['webp', 'webp'], ['svg', 'svg'], ['pdf', 'pdf'], ['csv', 'csv'], ['javascript', 'js'], ['zip', 'zip'], ['octet-stream', 'bin'], ['text/', 'txt']] as const) {
+      if (c.includes(needle)) return ext;
+    }
     return 'bin';
   }
   function fileName(): string {
@@ -182,56 +198,90 @@
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1500);
-      toasts.success('Saved response', a.download);
+      toasts.success('Response downloaded', a.download);
     } catch {
-      toasts.error('Save failed', 'Could not write the response to disk.');
+      toasts.error('Couldn’t save the response', 'The file could not be written.');
     }
   }
-  const canSave = $derived(!!resp && (!!resp.body_base64 || (!!resp.body && !resp.too_large)));
+  const canDownload = $derived(!!resp && (!!resp.body_base64 || (!!resp.body && !resp.too_large)));
 
-  function statusClass(status: number): string {
-    if (status >= 200 && status < 300) return 'ok';
-    if (status >= 300 && status < 400) return 'redirect';
-    if (status >= 400 && status < 500) return 'client';
-    if (status >= 500) return 'server';
-    return 'none';
+  async function copyBody(): Promise<void> {
+    if (!resp) return;
+    try {
+      await copyTextOrThrow(bodyView === 'raw' ? resp.body : displayBody);
+      toasts.success('Response body copied');
+    } catch {
+      toasts.error('Couldn’t copy', 'The clipboard isn’t available.');
+    }
   }
 
-  function isJson(ct: string | null, body: string): boolean {
-    if (ct && /\bjson\b/i.test(ct)) return true;
-    const t = body.trim();
-    return (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'));
+  /** Append this response to the request's Docs as an example (a draft edit;
+   *  it is kept once the request is saved). */
+  function addAsExample(): void {
+    if (!resp) return;
+    const MAX = 20_000;
+    const body = prettyBody.length > MAX ? `${prettyBody.slice(0, MAX)}\n… (truncated)` : prettyBody;
+    const lang = respExt(resp.content_type, resp.body);
+    const block = `\n\n## Example response\n\n\`${resp.status}${resp.status_text ? ` ${resp.status_text}` : ''}\`${resp.content_type ? ` · ${resp.content_type}` : ''}\n\n\`\`\`${lang === 'txt' ? '' : lang}\n${body}\n\`\`\`\n`;
+    const d = apiClient.draft;
+    apiClient.draft = { ...d, docs: `${(d.docs ?? '').trimEnd()}${block}`.trimStart() };
+    toasts.success('Added to the request’s Docs', 'Save the request (⌘S) to keep it.');
   }
 
-  function fmtSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  function moreMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [
+      { label: 'Add to Docs as example', icon: 'note', action: addAsExample, disabled: !resp || resp.too_large || isImage },
+      { label: 'Download response…', icon: 'download', action: saveToDisk, disabled: !canDownload },
+    ];
+    if (ws.current) items.push({ separator: true }, { label: 'Send to an agent…', icon: 'send', action: () => (sendToAgentOpen = true) });
+    ctxMenu.show(e, items);
+  }
+
+  // ── Failure hints ───────────────────────────────────────────────────────────
+  const blockedPrivate = $derived(!!failure && /ssrf|blocked address|private|loopback/i.test(failure));
+  const timedOut = $derived(!!failure && /timed? ?out/i.test(failure));
+  const failureTitle = $derived(
+    blockedPrivate ? 'Blocked: this address is on a private network'
+      : timedOut ? 'The request timed out'
+      : failure && /script/i.test(failure) ? 'A script failed, so nothing was sent'
+      : 'The request didn’t get a response',
+  );
+  async function allowPrivate(): Promise<void> {
+    if (!(await confirmer.ask(
+      'API requests in this workspace will be able to reach localhost and private-network addresses (10.x, 192.168.x, …). Use this for local development servers. Everyone in the workspace is affected; you can block them again from a request’s Settings tab.',
+      { title: 'Allow private addresses?', confirmLabel: 'Allow private addresses', danger: false },
+    ))) return;
+    try {
+      await ws.setApiAllowLocal(true);
+      toasts.success('Private addresses allowed', 'Send the request again.');
+    } catch (e) {
+      toasts.error('Couldn’t change the setting', e instanceof Error ? e.message : 'Only a workspace admin can change it.');
+    }
   }
 </script>
 
 <div class="viewer" class:compact>
   {#if isStream}
     <div class="stream-console">
-      <div class="stream-head">
-        <span class="status-pill {apiStream.status === 'open' ? 'ok' : apiStream.status === 'error' ? 'server' : 'none'}">{apiStream.status}</span>
-        <span class="meta">{apiStream.items.length} message(s){apiStream.dropped ? ` · ${apiStream.dropped} older messages discarded` : ''}</span>
+      <div class="head">
+        <span class="chip" class:ok={apiStream.status === 'open'} class:bad={apiStream.status === 'error'}>{STREAM_STATUS[apiStream.status] ?? apiStream.status}</span>
+        <span class="meta">{apiStream.items.length} message{apiStream.items.length === 1 ? '' : 's'}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
         <span class="grow"></span>
-        <button class="save-btn" onclick={() => apiStream.clear()} title="Clear log">Clear</button>
+        <button class="btn small ghost" onclick={() => apiStream.clear()} disabled={apiStream.items.length === 0}>Clear</button>
       </div>
       <div class="stream-log mono">
         {#if apiStream.items.length === 0}
-          <div class="empty-mini">{streamKind === 'sse' ? 'Connect to start receiving events.' : 'Connect, then send messages.'}</div>
+          <p class="empty-line">{streamKind === 'sse' ? 'Connect to start receiving server-sent events.' : 'Connect, then send and receive WebSocket messages here.'}</p>
         {:else}
           {#if apiStream.items.length > STREAM_RING_MAX}
-            <div class="ring-note">Showing last {STREAM_RING_MAX} of {apiStream.items.length} messages.</div>
+            <div class="ring-note">Showing the last {STREAM_RING_MAX} of {apiStream.items.length} messages.</div>
           {/if}
           <VirtualList items={streamItems} estimateHeight={28} class="stream-vlist">
             {#snippet row(it)}
               <div class="stream-item {it.kind} {it.dir ?? ''}">
                 <span class="si-tag">
                   {#if it.kind === 'event'}{it.event || 'event'}
-                  {:else if it.kind === 'message'}{it.dir === 'out' ? '▲ sent' : '▼ recv'}
+                  {:else if it.kind === 'message'}{it.dir === 'out' ? 'Sent' : 'Received'}
                   {:else}{it.kind}{/if}
                 </span>
                 <span class="si-data">{it.data}</span>
@@ -242,63 +292,75 @@
       </div>
       {#if streamKind === 'websocket'}
         <div class="ws-send">
-          <input
-            class="input mono grow"
-            placeholder={apiStream.status === 'open' ? 'Message to send…' : 'Connect first'}
-            bind:value={wsSend}
-            disabled={apiStream.status !== 'open'}
-            onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }}
-          />
-          <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send</button>
+          <input class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? 'Message to send' : 'Connect first'}
+            bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
+          <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>
       {/if}
     </div>
+  {:else if failure}
+    <div class="failure" role="alert">
+      <Icon name="warning" size={16} />
+      <div class="f-body">
+        <div class="f-title">{failureTitle}</div>
+        <p class="f-detail mono">{failure}</p>
+        {#if blockedPrivate}
+          <p class="f-hint">Otto blocks localhost and private-network addresses by default, so a request can’t reach internal services by accident.</p>
+          <div class="f-actions"><button class="btn small" onclick={allowPrivate}>Allow private addresses…</button></div>
+        {:else if timedOut}
+          <p class="f-hint">Requests give up after 60 seconds unless you set a timeout.</p>
+          {#if onsettings}<div class="f-actions"><button class="btn small" onclick={onsettings}>Open Settings</button></div>{/if}
+        {:else}
+          <p class="f-hint">Check the URL and the active environment, then send again. The request is recorded in History.</p>
+        {/if}
+      </div>
+    </div>
   {:else if !resp}
     <div class="empty">
-      <Icon name="send" size={compact ? 20 : 26} />
-      <span>Send a request to see the response.</span>
+      {#if apiClient.sending}
+        <p class="empty-title" role="status">Sending…</p>
+      {:else}
+        <Icon name="send" size={compact ? 20 : 24} />
+        <p class="empty-title">Send the request to see the response here</p>
+        {#if !compact}
+          <p class="empty-sub">Press <kbd>⌘</kbd><kbd>↵</kbd> or click Send. You’ll see the status, timing, headers and body.</p>
+        {/if}
+      {/if}
     </div>
   {:else}
-    <div class="resp-head">
-      <span class="status-pill {statusClass(resp.status)}">
-        {resp.status}{#if resp.status_text}&nbsp;{resp.status_text}{/if}
-      </span>
-      <span class="meta"><Icon name="clock" size={11} />{resp.duration_ms} ms</span>
-      <span class="meta"><Icon name="box" size={11} />{fmtSize(resp.size_bytes)}</span>
-      {#if resp.content_type}
-        <span class="meta mono ellipsis ct" title={resp.content_type}>{resp.content_type}</span>
-      {/if}
+    <div class="head">
+      <StatusChip status={resp.status} text={resp.status_text} />
+      <span class="chip" title="Total time">{formatSeconds(resp.duration_ms / 1000)}</span>
+      <span class="chip" title="Response size">{formatBytes(resp.size_bytes)}</span>
+      {#if resp.content_type}<span class="meta mono ct" title={resp.content_type}>{resp.content_type}</span>{/if}
+      {#if apiClient.sending}<span class="meta" role="status">Sending again…</span>{/if}
       <span class="grow"></span>
-      {#if canSave}
-        <button class="save-btn" onclick={saveToDisk} title="Save response to disk">
-          <Icon name="check" size={11} />Save
-        </button>
-      {/if}
-      {#if resp && ws.current}
-        <button class="save-btn" onclick={() => (sendToAgentOpen = true)} title="Send response to a running agent">
-          <Icon name="send" size={11} />To agent
-        </button>
-      {/if}
+      <button class="btn small ghost" onclick={copyBody} disabled={resp.too_large || isImage} title="Copy the body as shown">
+        <Icon name="copy" size={12} />Copy
+      </button>
+      <button class="icon-btn" onclick={moreMenu} aria-label="More response actions" title="More response actions"><Icon name="more" size={14} /></button>
     </div>
 
-    <div class="rtabs" role="tablist">
-      <button class="rtab" class:active={tab === 'body'} role="tab" aria-selected={tab === 'body'} onclick={() => (tab = 'body')}>Body</button>
-      <button class="rtab" class:active={tab === 'headers'} role="tab" aria-selected={tab === 'headers'} onclick={() => (tab = 'headers')}>
-        Headers <span class="hcount">{resp.headers.length}</span>
-      </button>
-      {#if resp.trace && resp.trace.length > 0}
-        <button class="rtab" class:active={tab === 'trace'} role="tab" aria-selected={tab === 'trace'} onclick={() => (tab = 'trace')}>Trace</button>
-      {/if}
-      {#if hasTests}
-        <button class="rtab" class:active={tab === 'tests'} role="tab" aria-selected={tab === 'tests'} onclick={() => (tab = 'tests')}>
-          Tests {#if tests.length}<span class="hcount {testsPassed === tests.length ? 'ok-c' : 'fail-c'}">{testsPassed}/{tests.length}</span>{/if}
+    <div class="rtabs" role="tablist" aria-label="Response">
+      {#each tabs as t, i (t.id)}
+        <button class="rtab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
+          onclick={() => (tab = t.id)} onkeydown={(e) => onTabKey(e, i)}>
+          {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
         </button>
-      {/if}
-      {#if tab === 'body' && !isImage && !resp.too_large}
+      {/each}
+      {#if tab === 'body' && !resp.too_large}
         <span class="grow"></span>
-        <div class="view-toggle">
-          <button class="vt" class:active={bodyView === 'pretty'} onclick={() => (bodyView = 'pretty')}>Pretty</button>
-          <button class="vt" class:active={bodyView === 'raw'} onclick={() => (bodyView = 'raw')}>Raw</button>
+        <div class="segmented view" role="group" aria-label="Body view">
+          {#if !isImage}
+            <button class:active={bodyView === 'pretty'} aria-pressed={bodyView === 'pretty'} onclick={() => (bodyView = 'pretty')}>Pretty</button>
+            <button class:active={bodyView === 'raw'} aria-pressed={bodyView === 'raw'} onclick={() => (bodyView = 'raw')}>Raw</button>
+          {/if}
+          {#if parsed !== undefined}
+            <button class:active={bodyView === 'tree'} aria-pressed={bodyView === 'tree'} onclick={() => (bodyView = 'tree')}>Tree</button>
+          {/if}
+          {#if isHtml || isImage}
+            <button class:active={bodyView === 'preview'} aria-pressed={bodyView === 'preview'} onclick={() => (bodyView = 'preview')}>Preview</button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -306,44 +368,64 @@
     <div class="rbody">
       {#if tab === 'body'}
         {#if resp.too_large}
-          <div class="big-body">
-            <Icon name="box" size={22} />
-            <div class="big-title">Response is {fmtSize(resp.size_bytes)} — too large to display</div>
-            <div class="big-sub">Bodies over 25&nbsp;MB aren't loaded inline. Re-run against a smaller payload to inspect it here.</div>
+          <div class="notice">
+            <Icon name="box" size={16} />
+            <div>
+              <div class="n-title">This response is {formatBytes(resp.size_bytes)}, too large to show</div>
+              <div class="n-sub">Bodies over 25 MB aren’t loaded. Try a smaller page of data.</div>
+            </div>
           </div>
-        {:else if isImage && previewUrl}
-          <div class="img-wrap">
-            <img class="img-preview" src={previewUrl} alt="Response preview" />
-            <div class="img-meta">{fmtSize(resp.size_bytes)} · {resp.content_type}</div>
-          </div>
-        {:else if prettyBody.trim() === '' && resp.body.trim() === ''}
-          <div class="empty-mini">Empty response body.</div>
+        {:else if bodyView === 'preview' && isImage && previewUrl}
+          <div class="img-wrap"><img class="img-preview" src={previewUrl} alt="Response preview" /></div>
+        {:else if bodyView === 'preview' && isHtml}
+          <!-- sandbox="" : no scripts, forms, or same-origin access -->
+          <iframe class="html-preview" title="HTML preview of the response" sandbox="" srcdoc={resp.body}></iframe>
+        {:else if resp.body.trim() === ''}
+          <p class="empty-line">The response has no body.</p>
         {:else}
           {#if resp.truncated}
-            <div class="trunc-banner">
-              <Icon name="box" size={12} />
-              <span>Showing the first 512&nbsp;KB of {fmtSize(resp.size_bytes)}. Use <strong>Save</strong> to get the full response.</span>
+            <div class="notice warn">
+              <Icon name="info" size={14} />
+              <span>Showing the first 512 KB of {formatBytes(resp.size_bytes)}. Download the response from ⋯ to get all of it.</span>
             </div>
           {/if}
-          {#if isJsonResp}
-            <div class="resp-filter">
+          {#if parsed !== undefined && (bodyView === 'pretty' || bodyView === 'tree')}
+            <label class="filter">
               <Icon name="search" size={12} />
-              <input class="input mono grow" placeholder="JSONPath filter — e.g. $.data[0].id  (⌘F searches)" bind:value={jsonFilter} spellcheck="false" />
-              {#if jsonFilter}<button class="link-clear" onclick={() => (jsonFilter = '')} aria-label="Clear filter">✕</button>{/if}
+              <input
+                class="mono"
+                placeholder={bodyView === 'tree' ? 'Find a key or value' : 'Filter with a JSONPath, e.g. $.data[0].id'}
+                aria-label={bodyView === 'tree' ? 'Find in the response' : 'JSONPath filter'}
+                bind:value={filter}
+                spellcheck="false"
+              />
+              {#if filter}<button class="icon-btn clear" onclick={() => (filter = '')} aria-label="Clear" title="Clear"><Icon name="x" size={12} /></button>{/if}
+            </label>
+          {/if}
+          {#if bodyView === 'tree' && parsed !== undefined}
+            <div class="tree-wrap"><JsonTree value={parsed} query={filterDebounced} /></div>
+          {:else}
+            <div class="resp-editor">
+              <CodeEditor path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
             </div>
           {/if}
-          <div class="resp-editor">
-            <CodeEditor path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
-          </div>
         {/if}
       {:else if tab === 'headers'}
-        <table class="htable mono">
+        <table class="htable">
+          <thead><tr><th>Name</th><th>Value</th></tr></thead>
           <tbody>
             {#each resp.headers as h, i (i)}
-              <tr>
-                <td class="hkey">{h.key}</td>
-                <td class="hval">{h.value}</td>
-              </tr>
+              <tr><td class="hkey mono">{h.key}</td><td class="hval mono">{h.value}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else if tab === 'cookies'}
+        <p class="tab-lead">Cookies this response set. Otto keeps them in the workspace’s cookie jar and sends them on later requests to the same site.</p>
+        <table class="htable">
+          <thead><tr><th>Name</th><th>Value</th><th>Attributes</th></tr></thead>
+          <tbody>
+            {#each cookies as c, i (i)}
+              <tr><td class="hkey mono">{c.name}</td><td class="hval mono">{c.value}</td><td class="hval dim">{c.attributes || '—'}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -351,7 +433,7 @@
         <ol class="trace">
           {#each resp.trace as step, i (i)}
             <li class="trace-step {step.level}">
-              <span class="trace-dot"></span>
+              <span class="trace-dot" aria-hidden="true"></span>
               <span class="trace-label">{step.label}</span>
               <span class="trace-detail mono">{step.detail}</span>
               {#if step.ms != null}<span class="trace-ms">{step.ms} ms</span>{/if}
@@ -361,12 +443,12 @@
       {:else}
         <div class="tests-pane">
           {#if tests.length === 0}
-            <div class="empty-mini">No tests. Add a post-response script with <code>pm.test(...)</code>.</div>
+            <p class="empty-line">No tests ran. Add <code>pm.test(…)</code> calls to the request’s post-response script.</p>
           {:else}
             <ul class="test-list">
               {#each tests as t, i (i)}
                 <li class="test-item {t.passed ? 'pass' : 'fail'}">
-                  <span class="test-icon">{t.passed ? '✓' : '✕'}</span>
+                  <span class="test-word">{t.passed ? 'Passed' : 'Failed'}</span>
                   <span class="test-name">{t.name}</span>
                   {#if !t.passed && t.error}<span class="test-err mono">{t.error}</span>{/if}
                 </li>
@@ -374,7 +456,7 @@
             </ul>
           {/if}
           {#if scriptLogs.length > 0}
-            <div class="console-title">Console</div>
+            <div class="section-title">Console</div>
             <pre class="console-log mono">{scriptLogs.join('\n')}</pre>
           {/if}
         </div>
@@ -406,78 +488,134 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
     color: var(--text-dim);
-    font-size: 12.5px;
+    text-align: center;
+    padding: 16px;
   }
-  .resp-head {
+  .empty-title {
+    margin: 0;
+    font-size: var(--fs-m);
+    color: var(--text);
+  }
+  .empty-sub {
+    margin: 0;
+    font-size: var(--fs-s);
+  }
+  kbd {
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs);
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+  }
+  .empty-line {
+    margin: 0;
+    padding: 8px 2px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .failure {
+    display: flex;
+    gap: 10px;
+    padding: 14px;
+    margin-top: 4px;
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+  }
+  .failure > :global(svg) {
+    color: var(--danger);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .f-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .f-title {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .f-detail {
+    margin: 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .f-hint {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .f-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .head {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 2px 8px;
+    gap: 8px;
+    padding: 2px 0 8px;
     flex-wrap: wrap;
   }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    height: 20px;
-    padding: 0 9px;
-    border-radius: 999px;
-    font-size: 11.5px;
-    font-weight: 700;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .status-pill.ok {
-    background: color-mix(in srgb, var(--status-working) 18%, transparent);
-    color: var(--status-working);
-  }
-  .status-pill.redirect {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-  .status-pill.client {
-    background: color-mix(in srgb, #d2691e 20%, transparent);
-    color: #d2691e;
-  }
-  .status-pill.server {
-    background: color-mix(in srgb, var(--status-exited) 18%, transparent);
-    color: var(--status-exited);
+  .chip.ok {
+    color: var(--success);
   }
   .meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  @media (max-width: 640px) {
+    .ct {
+      display: none;
+    }
+  }
   .ct {
-    max-width: 220px;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .rtabs {
     display: flex;
+    align-items: flex-end;
     gap: 2px;
     border-bottom: 1px solid var(--border);
+    min-width: 0;
   }
   .rtab {
-    height: 26px;
-    padding: 0 12px;
+    height: 28px;
+    padding: 0 10px;
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
+    white-space: nowrap;
+  }
+  .rtab:hover {
+    color: var(--text);
   }
   .rtab.active {
-    color: var(--accent);
+    color: var(--text);
     border-bottom-color: var(--accent);
   }
-  .hcount {
-    font-size: 10px;
+  .count {
+    margin-inline-start: 5px;
     color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .segmented.view {
+    align-self: center;
+    margin-bottom: 3px;
   }
   .rbody {
     flex: 1;
@@ -486,113 +624,115 @@
     padding-top: 8px;
     display: flex;
     flex-direction: column;
+    gap: 8px;
   }
-  .resp-filter {
+  .filter {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 2px 0 8px;
-    color: var(--text-dim);
-  }
-  .link-clear {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .resp-editor {
-    flex: 1;
-    min-height: 180px;
+    height: 27px;
+    padding: 0 4px 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .filter:focus-within {
+    border-color: var(--accent);
+  }
+  .filter input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    outline: none;
+  }
+  .clear {
+    width: 20px;
+    height: 20px;
+  }
+  .resp-editor,
+  .tree-wrap {
+    flex: 1;
+    min-height: 160px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: auto;
+  }
+  .resp-editor {
     overflow: hidden;
   }
-  .body-pre {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    user-select: text;
-    font-size: 11.5px;
-    line-height: 1.55;
-    color: var(--text);
-  }
-  .empty-mini {
-    font-size: 12px;
-    color: var(--text-dim);
-    padding: 8px 2px;
+  .html-preview {
+    flex: 1;
+    min-height: 240px;
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
   }
   .htable {
     width: 100%;
     border-collapse: collapse;
     user-select: text;
+    font-size: var(--fs-s);
+  }
+  .htable th {
+    position: sticky;
+    top: 0;
+    text-align: start;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--bg);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
   }
   .htable td {
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
-    font-size: 11.5px;
     vertical-align: top;
-    word-break: break-word;
+    overflow-wrap: anywhere;
   }
   .hkey {
-    color: var(--accent);
-    width: 34%;
-    font-weight: 600;
+    width: 32%;
+    color: var(--text);
+    font-weight: 500;
   }
   .hval {
     color: var(--text);
   }
-  .ellipsis {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .grow {
-    flex: 1;
-  }
-  .save-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 9px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .save-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
-  }
-  .view-toggle {
-    display: inline-flex;
-    gap: 2px;
-    align-self: center;
-    margin-bottom: 2px;
-  }
-  .vt {
-    height: 20px;
-    padding: 0 8px;
-    border: none;
-    background: transparent;
+  .hval.dim {
     color: var(--text-dim);
-    font-size: 11px;
-    cursor: pointer;
-    border-radius: var(--radius-s);
   }
-  .vt.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+  .tab-lead {
+    margin: 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
-  .img-wrap {
+  .notice {
     display: flex;
-    flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+    padding: 10px 12px;
+    border-radius: var(--radius-m);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
+  .notice.warn {
+    background: var(--warning-soft);
+    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  }
+  .n-title {
+    font-weight: 600;
+  }
+  .n-sub {
+    color: var(--text-dim);
+  }
+  .img-wrap {
     padding: 4px 0;
   }
   .img-preview {
@@ -601,45 +741,7 @@
     object-fit: contain;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    background:
-      repeating-conic-gradient(var(--surface-2) 0% 25%, transparent 0% 50%) 50% / 18px 18px;
-  }
-  .img-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .big-body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    text-align: center;
-    padding: 32px 16px;
-    color: var(--text-dim);
-  }
-  .big-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .big-sub {
-    font-size: 12px;
-    max-width: 360px;
-  }
-  .trunc-banner {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    margin-bottom: 8px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, #d2691e 14%, transparent);
-    color: #d2691e;
-    font-size: 11.5px;
-  }
-  .trunc-banner strong {
-    font-weight: 700;
+    background: repeating-conic-gradient(var(--surface-2) 0% 25%, transparent 0% 50%) 50% / 18px 18px;
   }
   .trace {
     list-style: none;
@@ -656,22 +758,20 @@
     padding: 5px 8px;
     border-inline-start: 2px solid var(--border);
     margin-inline-start: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .trace-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: var(--text-dim);
-    margin-inline-start: -10px;
+    margin-inline-start: -12px;
     flex-shrink: 0;
   }
   .trace-step.timing .trace-dot { background: var(--accent); }
-  .trace-step.success { border-inline-start-color: color-mix(in srgb, var(--status-working) 55%, transparent); }
-  .trace-step.success .trace-dot { background: var(--status-working); }
-  .trace-step.error { border-inline-start-color: color-mix(in srgb, var(--status-exited) 55%, transparent); }
-  .trace-step.error .trace-dot { background: var(--status-exited); }
-  .trace-step.redirect .trace-dot { background: #d2691e; }
+  .trace-step.success .trace-dot { background: var(--success); }
+  .trace-step.error .trace-dot { background: var(--danger); }
+  .trace-step.redirect .trace-dot { background: var(--warning); }
   .trace-label {
     font-weight: 600;
     color: var(--text);
@@ -680,47 +780,58 @@
   .trace-detail {
     flex: 1;
     color: var(--text-dim);
-    font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .trace-ms {
     font-variant-numeric: tabular-nums;
-    color: var(--accent);
+    color: var(--text);
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--fs-xs);
   }
-  .hcount.ok-c { color: var(--status-working); font-weight: 700; }
-  .hcount.fail-c { color: var(--status-exited); font-weight: 700; }
-  .tests-pane { display: flex; flex-direction: column; gap: 8px; }
-  .test-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .tests-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tests-pane .section-title {
+    margin: 4px 0 0;
+  }
+  .test-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
   .test-item {
     display: flex;
     align-items: baseline;
     gap: 8px;
     padding: 4px 8px;
     border-radius: var(--radius-s);
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
-  .test-item.pass { background: color-mix(in srgb, var(--status-working) 12%, transparent); }
-  .test-item.fail { background: color-mix(in srgb, var(--status-exited) 12%, transparent); }
-  .test-icon { font-weight: 700; }
-  .test-item.pass .test-icon { color: var(--status-working); }
-  .test-item.fail .test-icon { color: var(--status-exited); }
-  .test-name { flex: 0 0 auto; }
-  .test-err { color: var(--status-exited); font-size: 11px; }
-  .console-title { font-size: 11px; color: var(--text-dim); font-weight: 600; margin-top: 4px; }
+  .test-item.pass { background: var(--success-soft); }
+  .test-item.fail { background: var(--danger-soft); }
+  .test-word { font-weight: 600; }
+  .test-item.pass .test-word { color: var(--success); }
+  .test-item.fail .test-word { color: var(--danger); }
+  .test-err { color: var(--danger); }
   .console-log {
     margin: 0;
     background: var(--surface-2);
     border-radius: var(--radius-s);
     padding: 8px;
-    font-size: 11px;
     max-height: 160px;
     overflow: auto;
     white-space: pre-wrap;
     user-select: text;
+  }
+  code {
+    font-family: var(--font-mono);
   }
   .stream-console {
     display: flex;
@@ -728,16 +839,10 @@
     height: 100%;
     min-height: 0;
   }
-  .stream-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 2px 8px;
-  }
   .stream-log {
     flex: 1;
     min-height: 0;
-    overflow: hidden; /* VirtualList owns the scroll */
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -749,9 +854,8 @@
     height: 100%;
   }
   .ring-note {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
-    font-style: italic;
     padding: 2px 8px 4px;
     flex-shrink: 0;
   }
@@ -760,23 +864,22 @@
     gap: 8px;
     padding: 4px 8px;
     border-radius: var(--radius-s);
-    font-size: 11.5px;
     align-items: baseline;
   }
-  .stream-item.event { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .stream-item.message.out { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .stream-item.event { background: var(--surface-2); }
+  .stream-item.message.out { background: var(--accent-soft); }
   .stream-item.message.in { background: var(--surface-2); }
-  .stream-item.error { background: color-mix(in srgb, var(--status-exited) 14%, transparent); }
-  .stream-item.open, .stream-item.closed { color: var(--text-dim); font-style: italic; }
+  .stream-item.error { background: var(--danger-soft); }
+  .stream-item.open,
+  .stream-item.closed { color: var(--text-dim); font-style: italic; }
   .si-tag {
     flex: 0 0 auto;
-    min-width: 56px;
-    font-weight: 700;
-    font-size: 10px;
-    text-transform: uppercase;
-    color: var(--accent);
+    min-width: 64px;
+    font-weight: 600;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
-  .stream-item.error .si-tag { color: var(--status-exited); }
+  .stream-item.error .si-tag { color: var(--danger); }
   .si-data {
     flex: 1;
     white-space: pre-wrap;
