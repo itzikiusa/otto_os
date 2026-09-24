@@ -140,6 +140,17 @@
     }
     historyRun = null;
     await apiClient.runAutomation(automation.id, { environment_id: environmentId || null, stop_on_failure: stopOnFailure, dataset });
+    showReport();
+  }
+
+  // The report sits below the steps: bring it into view when a run finishes
+  // (or from the header's result chip) so a Run never ends off-screen.
+  let reportEl = $state<HTMLElement | null>(null);
+  function showReport(): void {
+    requestAnimationFrame(() => {
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      reportEl?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+    });
   }
 
   async function rename(): Promise<void> {
@@ -178,6 +189,11 @@
         <p>Runs saved requests in order. Each step can <strong>check</strong> the response and <strong>save values</strong> from it (like a token or an id) as <code>{'{{variables}}'}</code> for the steps after it. Saved values only live for the run; environments aren’t changed.</p>
       </div>
       <div class="vh-actions">
+        {#if showRun}
+          <button class="chip result" class:ok={!apiClient.running && showRun.passed} class:bad={!apiClient.running && !showRun.passed} onclick={showReport} title="Show the last run’s results">
+            {apiClient.running ? 'Running…' : showRun.passed ? 'Last run passed' : 'Last run failed'} · {showRun.steps.filter((s) => s.ok).length}/{showRun.steps.length}
+          </button>
+        {/if}
         <button class="icon-btn" onclick={menu} aria-label="Automation options" title="Automation options"><Icon name="more" size={14} /></button>
         <button class="btn small" onclick={() => void save()} disabled={!canEdit || !dirty || apiClient.running}>Save</button>
         {#if runDetails?.status === 'running' && runDetails.automation_id === automationId}
@@ -289,7 +305,7 @@
     {/if}
 
     {#if showRun}
-      <section class="report" aria-label="Last run">
+      <section class="report" aria-label="Last run" bind:this={reportEl}>
         <div class="report-banner" class:ok={showRun.passed} class:fail={!showRun.passed}>
           <Icon name={showRun.passed ? 'check' : 'warning'} size={14} />
           {apiClient.running ? 'Running…' : showRun.passed ? 'All steps passed' : 'Run failed'}
@@ -394,6 +410,9 @@
     font-family: var(--font-mono);
     font-size: var(--fs-s);
     color: var(--text);
+  }
+  .result {
+    cursor: pointer;
   }
   .run-opts {
     display: flex;
