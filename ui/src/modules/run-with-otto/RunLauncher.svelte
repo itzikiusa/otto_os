@@ -164,7 +164,6 @@
       <button
         type="button"
         class="src-chip"
-        style="--src: {s.color}"
         title={s.example}
         onclick={() => useTemplate(s.template)}
       >
@@ -289,11 +288,6 @@
     flex-direction: column;
     gap: 0.6rem;
     margin-bottom: 1rem;
-    background-image: radial-gradient(
-      circle at top right,
-      color-mix(in srgb, var(--accent) 6%, transparent),
-      transparent 55%
-    );
   }
   .sources {
     display: flex;
@@ -306,19 +300,20 @@
     align-items: center;
     gap: 0.3rem;
     font: inherit;
-    font-size: 0.72rem;
-    padding: 0.14rem 0.55rem;
+    font-size: var(--fs-xs);
+    height: 22px;
+    padding: 0 9px;
     border-radius: 999px;
     cursor: pointer;
-    color: var(--src);
-    border: 1px solid color-mix(in srgb, var(--src) 35%, var(--border));
-    background: color-mix(in srgb, var(--src) 9%, transparent);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
   }
   .src-chip:hover {
-    border-color: var(--src);
-    background: color-mix(in srgb, var(--src) 16%, transparent);
+    color: var(--text);
+    background: var(--hover);
   }
-  .src-free { font-size: 0.72rem; color: var(--text-dim); margin-left: 0.2rem; }
+  .src-free { font-size: var(--fs-xs); color: var(--text-dim); margin-inline-start: 0.2rem; }
   .big-input textarea {
     width: 100%;
     box-sizing: border-box;
@@ -338,7 +333,7 @@
   }
   .detect { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; min-height: 1.2rem; flex-wrap: wrap; }
   .ref { color: var(--text); font-variant-numeric: tabular-nums; }
-  .link { color: var(--accent); font-size: 0.78rem; }
+  .link { color: var(--accent-text); font-size: var(--fs-s); }
   .muted { color: var(--text-dim); }
   .controls { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-s); overflow: hidden; }
@@ -346,7 +341,7 @@
     background: var(--bg); color: var(--text-dim); border: none;
     padding: 0.4rem 0.7rem; font: inherit; font-size: 0.82rem; cursor: pointer;
   }
-  .seg-btn.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .seg-btn.active { background: var(--accent-soft); color: var(--text); font-weight: 600; }
   .ctl { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text-dim); }
   .ctl select {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -355,7 +350,7 @@
   }
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text); }
   .model-ctl { min-width: 12rem; max-width: 18rem; }
-  .run { margin-left: auto; font-size: 0.95rem; padding: 0.5rem 1.1rem; }
+  .run { margin-inline-start: auto; }
   .badge {
     font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;
     border: 1px solid var(--border); color: var(--text-dim); text-transform: capitalize;
@@ -373,10 +368,10 @@
     gap: 0.35rem;
   }
   .how-note { margin: 0; font-size: 0.75rem; color: var(--text-dim); }
-  .how-note a { color: var(--accent); }
+  .how-note a { color: var(--accent-text); }
   .err {
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    color: var(--status-exited); padding: 0.5rem 0.75rem;
+    background: var(--danger-soft);
+    color: var(--danger); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); font-size: 0.85rem;
   }
 </style>

@@ -2086,10 +2086,10 @@
     gap: 3px;
     padding: 2px 8px 2px 9px;
     border-radius: 999px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 500;
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .tag-remove {
@@ -2099,7 +2099,7 @@
     cursor: pointer;
     font-size: 12px;
     line-height: 1;
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0.6;
     transition: opacity 100ms;
   }
@@ -2114,7 +2114,7 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 9px;
     width: 72px;
     outline: none;
@@ -2137,7 +2137,7 @@
     border-top: 1px solid var(--border);
   }
   .section-label-sm {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -2184,7 +2184,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   }
 
@@ -2267,10 +2267,9 @@
     border-color: var(--accent);
   }
   .stage-badge {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: capitalize;
     padding: 2px 8px;
     border-radius: 999px;
     flex-shrink: 0;
@@ -2280,6 +2279,8 @@
     cursor: pointer;
     appearance: none;
     padding-inline: 8px 8px;
+    /* Hug the current stage, not the longest option (where supported). */
+    field-sizing: content;
   }
   .stage-draft {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -2295,14 +2296,14 @@
   }
   .stage-done {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .stage-other {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
   }
   .chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -2313,7 +2314,7 @@
     align-items: center;
     gap: 4px;
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .source-link:hover {
@@ -2403,7 +2404,7 @@
   }
   .toolbar-btn.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   /* Discovery swarm picker (toolbar) — matches PlanTab .swarm-pick style */
@@ -2491,7 +2492,7 @@
     font-style: italic;
   }
   .md-body :global(a) {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .md-body :global(a:hover) {
@@ -2591,7 +2592,7 @@
     padding: 2px 10px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Assignee control ──────────────────────────────────────── */
@@ -2630,7 +2631,7 @@
     height: 24px;
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 700;
     display: flex;
@@ -2714,7 +2715,7 @@
   }
   .dropdown-item:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .dropdown-item-sub {
     font-size: 11px;
@@ -2751,7 +2752,7 @@
     gap: 4px;
   }
   .label-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -2832,7 +2833,7 @@
     cursor: pointer;
   }
   .field-raw-note {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
   }
@@ -2950,7 +2951,7 @@
     flex-wrap: wrap;
   }
   .link-rel {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
@@ -2959,11 +2960,11 @@
   }
   .link-key {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-family: var(--font-mono, monospace);
   }
   .chip-sm {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
@@ -2976,11 +2977,11 @@
     min-width: 120px;
   }
   .status-sm {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mono-sm {
     font-family: var(--font-mono, monospace);
@@ -3000,7 +3001,7 @@
     gap: 0;
   }
   .dev-group-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
@@ -3029,7 +3030,7 @@
   }
   .dev-branch-name,
   .dev-commit-id {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .dev-pr-status {
     text-transform: uppercase;
@@ -3225,7 +3226,7 @@
   }
   .att-load-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .att-load-btn:disabled {
@@ -3234,7 +3235,7 @@
   }
   .att-dl-link {
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
   }
   .att-dl-link:hover {
@@ -3304,14 +3305,8 @@
     display: flex;
     justify-content: flex-end;
   }
-  .save-btn {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .save-btn:hover:not(:disabled) {
-    opacity: 0.88;
-  }
+  /* Save is a quiet, neutral action; the publish bar below owns the one
+     filled button in this pane. */
 
   /* ── Transcripts (right column in draft mode) ──────────────── */
   .transcripts-section {
@@ -3427,27 +3422,27 @@
     flex-wrap: wrap;
   }
   .publish-btn {
-    height: 32px;
-    padding: 0 16px;
+    height: 28px;
+    padding: 0 14px;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     cursor: pointer;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    transition: opacity 110ms;
+    border: 1px solid transparent;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    transition: background 130ms ease-out;
     white-space: nowrap;
   }
   .publish-btn:hover {
-    opacity: 0.88;
+    background: color-mix(in srgb, var(--accent-solid) 88%, black);
   }
   .publish-btn.secondary {
-    background: transparent;
-    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
   }
   .publish-btn.secondary:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    opacity: 1;
+    background: var(--surface-2);
   }
 </style>

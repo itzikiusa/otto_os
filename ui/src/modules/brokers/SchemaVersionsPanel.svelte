@@ -197,7 +197,7 @@
   .btn.active {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .diff-section {
     margin-top: 10px;

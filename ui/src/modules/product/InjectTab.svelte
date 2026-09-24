@@ -304,7 +304,7 @@
   }
   .action-btn.primary {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .action-btn.primary:hover:not(:disabled) {
@@ -459,6 +459,6 @@
     margin: 0 0 0.7em;
     font-style: italic;
   }
-  .md-body :global(a) { color: var(--accent); text-decoration: none; }
+  .md-body :global(a) { color: var(--accent-text); text-decoration: none; }
   .md-body :global(a:hover) { text-decoration: underline; }
 </style>

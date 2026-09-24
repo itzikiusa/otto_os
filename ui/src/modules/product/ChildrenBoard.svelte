@@ -150,7 +150,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -190,7 +190,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .stage-badge {
@@ -204,7 +204,7 @@
   .stage-draft { background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-dim); }
   .stage-review { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
   .stage-approved { background: color-mix(in srgb, var(--status-working) 18%, transparent); color: var(--status-working); }
-  .stage-done { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .stage-done { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .stage-other { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
   .doc-badge {
     font-size: 9px;

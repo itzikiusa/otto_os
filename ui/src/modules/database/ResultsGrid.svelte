@@ -1245,7 +1245,7 @@
   .rg-seg.on {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rg-seg.err {
     border-color: color-mix(in srgb, var(--status-exited) 45%, transparent);
@@ -1289,7 +1289,7 @@
   .rg-spin {
     display: grid;
     place-items: center;
-    color: var(--accent);
+    color: var(--accent-text);
     animation: rg-spin 0.9s linear infinite;
   }
   @keyframes rg-spin {
@@ -1333,7 +1333,7 @@
   }
   .pg-btn:hover:not(:disabled) {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .pg-btn:disabled {
     opacity: 0.4;
@@ -1440,7 +1440,7 @@
     border: none;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 700;
     cursor: pointer;
   }
@@ -1540,7 +1540,7 @@
   }
   .gt-search:focus-within {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .gt-search-input {
     flex: 1;
@@ -1582,7 +1582,7 @@
     font-weight: 700;
     letter-spacing: 0.03em;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     cursor: help;
   }
@@ -1612,7 +1612,7 @@
   }
   .vs.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* "Auto" is an escape hatch, not a fourth view — dimmed and italic so it
      reads as "clear my pick" next to the three real modes. */
@@ -1623,7 +1623,7 @@
   }
   .vs.auto:hover {
     opacity: 1;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn {
     display: inline-flex;
@@ -1641,16 +1641,16 @@
   .tb-btn.on {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Nudge the user toward the full export when the shown result is capped. */
   .tb-btn.accent {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Server-side masking badge — shown in toolbar when result.masked is true. */
   .tb-masked {
@@ -1662,7 +1662,7 @@
     border-radius: var(--radius-s);
     border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     font-weight: 600;
   }
@@ -1678,7 +1678,7 @@
   }
   .sel-count {
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sel-del {
     display: inline-flex;
@@ -1771,7 +1771,7 @@
     border-radius: 999px;
     font-size: 10px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     cursor: pointer;
   }

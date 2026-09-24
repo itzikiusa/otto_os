@@ -329,7 +329,7 @@
   }
   .node-badge.done {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .node-badge.run {
     background: color-mix(in srgb, var(--status-working) 24%, transparent);
@@ -353,6 +353,6 @@
     text-overflow: ellipsis;
   }
   .node-sub {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

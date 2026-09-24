@@ -278,7 +278,7 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 600;
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -316,20 +316,25 @@
     color: var(--text-dim);
   }
   .dot.add:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .rot {
     gap: 4px;
   }
   .rot.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .progress {
     height: 2px;
     flex: none;
     background: color-mix(in srgb, var(--border) 60%, transparent);
     overflow: hidden;
+  }
+  /* Only a rotating view shows a track; idle, it would read as a second,
+     heavier header border. */
+  .progress.idle {
+    background: transparent;
   }
   .progress i {
     display: block;
@@ -360,7 +365,8 @@
     position: absolute;
     inset: 0;
     overflow-y: auto;
-    padding: 12px;
+    /* Box edges line up with the header title (20px inset). */
+    padding: 16px 20px 20px;
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
     grid-auto-rows: var(--row);
@@ -374,7 +380,7 @@
   .zoom {
     position: absolute;
     inset: 0;
-    padding: 12px;
+    padding: 16px;
   }
   .empty {
     grid-column: 1 / -1;
@@ -409,7 +415,7 @@
     flex: none;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .kt {
     display: flex;

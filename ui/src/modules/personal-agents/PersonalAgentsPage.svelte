@@ -199,6 +199,6 @@
   .card-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .meta { color: var(--text-dim); font-size: 0.75rem; }
   .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
-  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-color: transparent; }
+  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); border-color: transparent; }
   .card-actions { display: flex; gap: 0.35rem; margin-top: auto; }
 </style>

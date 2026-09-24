@@ -423,7 +423,7 @@
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tool-body {
     display: flex;
@@ -441,7 +441,7 @@
     color: var(--text-dim);
   }
   .tool-sub.found {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tool-caret {
     color: var(--text-dim);
@@ -534,7 +534,7 @@
   .link-btn {
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     cursor: pointer;
     padding: 2px 4px;
@@ -587,7 +587,7 @@
     display: grid;
     place-items: center;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .row.disabled .row-kind {
     background: var(--surface-2);
@@ -624,7 +624,7 @@
     flex-shrink: 0;
   }
   .pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
     flex-shrink: 0;

@@ -238,7 +238,7 @@
   .hb-title {
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
   }
@@ -276,11 +276,14 @@
     border-inline-end: 2px solid var(--text-dim);
     border-bottom: 2px solid var(--text-dim);
     border-end-end-radius: 2px;
-    opacity: 0.45;
+    /* Revealed on hover/focus only: a permanent corner mark on every box was
+       visual noise. */
+    opacity: 0;
+    transition: opacity 130ms ease-out;
   }
   .hbox:hover .resize::after,
   .resize:focus-visible::after {
-    opacity: 1;
+    opacity: 0.7;
   }
   .resize:focus-visible {
     outline: 2px solid var(--accent);

@@ -401,7 +401,7 @@
   }
   .mt.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .note-list {
     max-height: 200px;
@@ -433,7 +433,7 @@
     border-radius: 999px;
     background: var(--accent);
     color: #fff;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;

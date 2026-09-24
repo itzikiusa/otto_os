@@ -415,7 +415,7 @@
     color: var(--text-dim);
   }
   .chip.fmt-d2 {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ref-time {
     font-size: 9.5px;
@@ -476,7 +476,7 @@
     border-color: var(--accent);
   }
   .footer-btn.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .footer-btn:disabled {

@@ -365,7 +365,7 @@
     border-radius: var(--radius-l);
     display: grid;
     place-items: center;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .coach-head h2 {
@@ -528,7 +528,7 @@
     background: none;
     border: none;
     padding: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font-size: inherit;
   }

@@ -108,7 +108,7 @@
     font-size: 12.5px;
   }
   .dr-kind {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -130,7 +130,7 @@
   }
   .pill {
     display: inline-block;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;

@@ -753,7 +753,7 @@
     color: var(--text);
   }
   .ph-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 </style>

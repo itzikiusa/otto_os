@@ -126,7 +126,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 4px 10px 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);

@@ -463,7 +463,8 @@
           {#if s.tree_kind === 'doc'}
             <span class="draft-badge doc">DOC</span>
           {:else if s.source_kind === 'draft'}
-            <span class="draft-badge">DRAFT</span>
+            <!-- A draft story's stage badge already says "draft". -->
+            {#if s.stage !== 'draft'}<span class="draft-badge">Draft</span>{/if}
           {:else}
             <span class="story-key mono">{s.source_key}</span>
           {/if}
@@ -847,17 +848,15 @@
     flex-shrink: 0;
   }
   .draft-badge {
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 1px 5px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    padding: 0 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .side-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -906,8 +905,9 @@
     cursor: pointer;
     text-align: start;
   }
-  .story-row.active {
-    color: var(--accent);
+  /* Selection is the row tint (set on the wrap); text stays --text. */
+  .story-row.active .story-title {
+    font-weight: 600;
   }
   /* Delete button — hidden until row is hovered or active */
   .delete-btn {
@@ -954,7 +954,7 @@
   }
   .row-menu-btn:hover {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tree-toggle {
     display: grid;
@@ -992,7 +992,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.03em;
     cursor: pointer;
@@ -1013,14 +1013,14 @@
     opacity: 0.8;
   }
   .epic-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .draft-badge.doc {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -1050,7 +1050,7 @@
     gap: 4px;
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     padding: 0;
     cursor: pointer;
@@ -1080,7 +1080,7 @@
     margin-top: 2px;
   }
   .story-row-wrap.active .story-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .story-info {
     flex: 1;
@@ -1090,7 +1090,7 @@
     gap: 3px;
   }
   .story-title {
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     font-weight: 500;
     line-height: 1.3;
     display: -webkit-box;
@@ -1105,15 +1105,14 @@
     gap: 6px;
   }
   .story-key {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   /* Stage badges */
   .stage-badge {
-    font-size: 9.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: capitalize;
     padding: 1px 6px;
     border-radius: 999px;
   }
@@ -1131,7 +1130,7 @@
   }
   .stage-done {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .stage-other {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -1153,19 +1152,19 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms, color 100ms, border-color 100ms;
     white-space: nowrap;
   }
   .tag-filter-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tag-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -1176,13 +1175,13 @@
     gap: 3px;
     margin-top: 1px;
   }
+  /* Tags are metadata, not selection: neutral chips. */
   .story-tag-chip {
-    font-size: 9px;
-    padding: 1px 5px;
+    font-size: var(--fs-xs);
+    padding: 0 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-    opacity: 0.85;
+    background: var(--surface-2);
+    color: var(--text-dim);
   }
 
 
@@ -1245,7 +1244,7 @@
   }
   .tab-strip .st.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1276,7 +1275,7 @@
     border-color: var(--border);
   }
   .sub-tab-strip .st.active {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
@@ -1321,7 +1320,7 @@
   }
   .learn-filter-btn.active {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -1358,7 +1357,7 @@
   }
   .m-view-toggle .vt.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   @media (max-width: 640px) {

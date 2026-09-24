@@ -589,7 +589,7 @@
     white-space: nowrap;
   }
   .cnt {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .tables .node {
     padding-left: 22px;
@@ -677,7 +677,7 @@
     background: var(--surface);
   }
   .st {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 1px 7px;
     border-radius: 999px;
@@ -767,7 +767,7 @@
   .link {
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 0;
     font: inherit;

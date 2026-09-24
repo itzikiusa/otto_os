@@ -223,7 +223,7 @@
   }
   .side-tab.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .side-dot {
     width: 6px;
@@ -283,8 +283,8 @@
   .req-tab-method {
     font-family: var(--font-mono, monospace);
     font-weight: 700;
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
   }
   .req-tab-method.post { color: var(--status-working); }
   .req-tab-method.delete { color: var(--status-exited); }
@@ -320,7 +320,7 @@
     padding: 0 10px;
     border-radius: var(--radius-s);
   }
-  .req-tab-new:hover { background: var(--surface-2); color: var(--accent); }
+  .req-tab-new:hover { background: var(--surface-2); color: var(--accent-text); }
   .builder-pane {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);

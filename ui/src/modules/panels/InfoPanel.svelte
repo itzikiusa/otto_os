@@ -226,7 +226,7 @@
     gap: 4px;
   }
   .section-title {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -268,12 +268,12 @@
   }
   .hint {
     margin: 4px 0 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-dim);
   }
   .cwd {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -298,7 +298,7 @@
     font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
     display: flex;
     align-items: center;
@@ -350,7 +350,7 @@
   .dir-path {
     flex: 1;
     min-width: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -362,7 +362,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border-radius: 3px;
     line-height: 1;

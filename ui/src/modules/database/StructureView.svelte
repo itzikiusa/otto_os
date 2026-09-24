@@ -1142,7 +1142,7 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .st-title h2 {
     margin: 0;
@@ -1151,7 +1151,7 @@
     color: var(--text);
   }
   .kind-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -1197,7 +1197,7 @@
   }
   .mini-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .idx-builder {
     margin-top: 8px;
@@ -1274,7 +1274,7 @@
   }
   .ib-row.on {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ib-fname {
     min-width: 0;
@@ -1288,9 +1288,9 @@
     flex-shrink: 0;
     width: 16px;
     text-align: end;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* The selected row is a flex CONTAINER now (name + direction + remove), so the
      name itself is the clickable part rather than the whole row. */
@@ -1310,10 +1310,10 @@
   .ib-dir {
     flex-shrink: 0;
     padding: 1px 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
@@ -1340,7 +1340,7 @@
   }
   .ib-custom-tag {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--success);
   }
   .ib-sep {
@@ -1362,7 +1362,7 @@
     white-space: nowrap;
   }
   .hint {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 400;
   }
   .ib-empty {
@@ -1410,7 +1410,7 @@
     padding-inline-start: 8px;
   }
   .ib-warn code {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     padding: 0 3px;
     border-radius: 3px;
@@ -1488,7 +1488,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
     border: none;
@@ -1496,7 +1496,7 @@
     font-weight: 500;
   }
   .copy-ddl:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .count {
     color: var(--text-dim);
@@ -1517,7 +1517,7 @@
     padding: 6px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);
@@ -1545,13 +1545,13 @@
   }
   .nullable {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .pk {
     margin-inline-start: 6px;
     font-size: 9px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 0 4px;
     border-radius: 3px;
@@ -1645,7 +1645,7 @@
   }
   .idx-act:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .idx-act.danger:hover:not(:disabled) {
     background: color-mix(in srgb, var(--danger) 18%, transparent);
@@ -1717,7 +1717,7 @@
     border-radius: 999px;
   }
   .tag.unique {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .ddl {
@@ -1769,7 +1769,7 @@
     border: none;
     background: transparent;
     padding: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     font: inherit;
     font-size: inherit;

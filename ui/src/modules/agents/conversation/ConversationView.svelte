@@ -521,7 +521,7 @@
     min-width: 0;
   }
   .search-n {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     min-width: 28px;
     text-align: center;
     white-space: nowrap;

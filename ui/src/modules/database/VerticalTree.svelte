@@ -260,13 +260,13 @@
     color: var(--text-dim);
   }
   .vv.bson {
-    color: var(--accent);
+    color: var(--accent-text);
     font-style: italic;
   }
   .vv.pend em {
     color: var(--status-warn);
     font-style: normal;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     margin-left: 6px;
   }
   .vsum {

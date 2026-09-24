@@ -987,7 +987,7 @@
     overflow: hidden;
   }
   .pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 7px;
     border-radius: 999px;
@@ -1038,7 +1038,7 @@
   }
   .btn.active {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .btn.primary {
     background: var(--accent);
@@ -1272,7 +1272,7 @@
   }
   .axis-label {
     fill: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .y-label {
@@ -1406,7 +1406,7 @@
   }
   .kind-product {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .kind-channel {
     background: color-mix(in srgb, var(--status-working, #4a9eff) 20%, transparent);
@@ -1553,7 +1553,7 @@
   .link-btn {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     cursor: pointer;
     padding: 0;
@@ -1834,7 +1834,7 @@
     gap: 1px;
   }
   .model-name {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     overflow: hidden;
     text-overflow: ellipsis;
