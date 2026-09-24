@@ -291,6 +291,31 @@ These appear in your Context Library (editable, self-improvable) but **not** in 
 
 ---
 
+### Skills Lab → Skills (one view of every copy)
+
+**Skills Lab** (`#/skills-eval`) shows every skill an agent can load, grouped by
+**name**: one row per skill with a badge per copy — the Otto **Library**, the
+**Claude / Codex / Antigravity** provider dirs (`~/.claude|.codex|.agy/skills`)
+and the **Bundled** catalog — and a sync dot:
+
+| Dot | Meaning |
+|---|---|
+| In sync (green) | Every copy that could be compared has the same `SKILL.md` (line endings and trailing spaces ignored), and the library copy matches the bundled version. |
+| Drifted (amber) | A copy's `SKILL.md` differs from the reference copy (Library when present), or the catalog reports `update_available` / `ahead`. The detail pane lists what differs, with **Compare** (a word diff). |
+| One copy (hollow) | It lives in one place only (bundled-but-not-installed counts as catalog, not a copy). |
+
+Provider bodies are read in the background (four at a time), only for skills
+with more than one editable copy. The list filters by source, category and
+"Drifted", and searches name + description. The detail pane opens on the
+last-viewed skill and has **Overview** (frontmatter as a metadata card + the
+rendered `SKILL.md` + files), **Edit** (the multi-file editor; library copies
+only — bundled copies offer *Install to library*, provider copies *Copy to
+library*), **Evals** (Evaluator runs of this skill: latest score, trend, runs)
+and **Usage** (where each copy lives, what loads it, and Otto's own reviews /
+evaluations / golden tasks of it — agents' mid-session skill loads aren't
+recorded). **New skill** (the header primary) starts from a blank scaffold, a
+bundled skill under a new name, or an imported `.zip`.
+
 ## 7. How skills drive Review, Product & Insights
 
 ### Review lenses (`review` category)
