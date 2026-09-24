@@ -5,7 +5,7 @@ A TablePlus/Navicat-class database browser built into Otto. It connects to
 or an SSH tunnel — and gives you a lazy schema tree, per-engine autocomplete,
 multiple query tabs (with true multi-statement batches, auto-pagination, and a
 structured query-plan panel), a virtualized results grid with approval-gated
-inline editing, a visual JOIN builder, a read-only relationship diagram (ERD),
+inline editing, a visual query builder (joins, filters, GROUP BY, HAVING, sort), a read-only relationship diagram (ERD),
 Superset-style ClickHouse dashboards/widgets, and an "examine this with an
 agent" hand-off.
 Every connection runs locally through the `ottod` daemon; **database credentials
@@ -34,8 +34,10 @@ connection tab shows a green **health dot** with server version + connect
 latency once ready. Results render in one of three views — **Grid**, **Vertical**
 (one record per block) or **JSON** — and the view is chosen for you unless you
 pick one: **MongoDB opens in Vertical**, the SQL engines and Redis in Grid, and
-any result **wider than N columns** (a user setting, default 10) switches to
-Vertical so a record is readable without a horizontal scroll (§5).
+a MongoDB result **wider than N columns** (a per-engine user setting: MongoDB on
+at 10, the SQL engines and Redis off) switches to Vertical so a document is
+readable without a horizontal scroll (§5). A wide SQL table stays a grid unless
+you opt that engine in.
 You can also dock a connection's full explorer *beside an agent* in the Agents
 split ("Open beside agents (split)" from a connection's right-click menu), so an
 agent and a live DB sit side by side.
@@ -62,7 +64,9 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 | SSH tunnel (`-L` local forward / `-D` SOCKS5) | `crates/otto-ssh/src/lib.rs` |
 | Shared types (engine, schema tree, query req/res, capabilities) | `crates/otto-dbviewer/src/types.rs` |
 | UI page + components | `ui/src/modules/database/*.svelte` |
-| Results orchestrator (toolbar, view switch, filter/sort, pager) + the three views | `ResultsGrid.svelte` → `GridView.svelte` / `VerticalView.svelte` / `JsonView.svelte` |
+| Results orchestrator (toolbar, view switch, filter/sort, pager) + the three views | `ResultsGrid.svelte` → `GridView.svelte` / `VerticalView.svelte` / `JsonView.svelte` (+ `RowDetail.svelte`, `grid-format.ts`) |
+| Visual query builder: UI · canvas ↔ model · SQL generator / validator / parser | `QueryBuilder.svelte` · `builder/canvas-model.ts` · `builder/sql-builder.ts` |
+| Auto-Vertical per-engine preference (+ legacy migration) | `ui/src/lib/db-view-prefs.ts` (stored by `ui.dbAutoVertical`) |
 | Edit flow (pending changes, review modal, doc editor, cell viewer) + per-engine statement builders | `EditFlow.svelte.ts`, `edit-{sql,mongo,redis}.ts` |
 | View-mode precedence, tab/pin persistence, connection view memory | `ui/src/lib/stores/database.svelte.ts` (`effectiveViewMode`) |
 | API client types (mirror the contract) | `ui/src/lib/api/types.ts` |
@@ -83,7 +87,7 @@ affordances appear) plus the introspection each driver actually performs.
 | `default_port` | 3306 | 5432 | 6379 | 27017 | 8123 |
 | `query_language` (editor mode) | `sql` | `sql` | `redis` | `mongo` | `sql` |
 | Schema-tree levels (`schema_levels`) | Database → Table → Column | Schema → Table → Column | Database → Namespace → Key | Database → Collection → Field | Database → Table → Column |
-| Builder tab (visual JOIN) | yes | yes | — | — | yes |
+| Builder tab (visual query builder, §6) | yes | yes | — | — (use **Aggregate pipeline…**) | yes |
 | Diagram tab (ERD) | yes (FK edges) | yes (FK edges) | — (no Diagram) | yes (cards, no edges) | yes (FK edges) |
 | Visual JOIN / FK relationships | yes | yes | no | no | yes |
 | Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | yes (single-table SELECT w/ PK) | yes (`GET`/`HGETALL`/`HGET`/`LRANGE`/`SMEMBERS`/`ZRANGE` results) | yes (single-collection find by `_id`; nested fields via dotted `$set`/`$unset`/`$rename`) | yes (`ALTER … UPDATE`) |
@@ -96,6 +100,7 @@ affordances appear) plus the introspection each driver actually performs.
 | Keyset pagination (Next = `_id > last`) | no (`OFFSET`) | no (`OFFSET`) | n/a | yes (`_id` sort only; Prev is offset-based) | no (`OFFSET`) |
 | Type fidelity (typed round-trip) | native | native | strings | ObjectId / Date / Decimal128 / Long > 2⁵³ / UUID / Binary / Timestamp | native |
 | Default result view | Grid | Grid | Grid | **Vertical** | Grid |
+| Auto-Vertical past N columns (default) | off | off | off | **on, 10** | off |
 
 > **Honesty notes.** `transactions` is `false` for **every** engine: the explorer
 > acquires each query from a connection pool, so there is no pinned session to hold
@@ -592,9 +597,16 @@ switch, client-side filter/sort, selection bar, pending-edits bar, footer pager)
 over three interchangeable views of the same rows:
 
 - **Grid** (`GridView.svelte`) — a **virtualized** columnar table: only the rows
-  in view are in the DOM, so 100k-row results scroll smoothly. Complex cells
-  (objects/arrays) show as compact JSON with click-to-expand (or **Expand JSON**
-  for all of them); `NULL` renders as a dimmed `∅`.
+  in view are in the DOM, so 100k-row results scroll smoothly. The sticky
+  header has two lines (name, then type); numbers are right-aligned in tabular
+  figures; `NULL` renders as a dim italic **NULL**. Drag a header's edge to
+  resize (double-click to fit), drag the header itself to **reorder** columns.
+  Complex cells (objects/arrays) show as compact JSON with click-to-expand (or
+  *Expand JSON cells* in the ⋯ menu for all of them). Two toolbar toggles:
+  **Filter row** (a box under every header — contains, `=exact`, `>n`/`<n`,
+  `NULL`/`!NULL`, client-side over the loaded rows) and **Row detail** (a side
+  panel with the record under the grid cursor, one field per line, with copy and
+  ‹ › stepping).
 - **Vertical** (`VerticalView.svelte`) — **one record per block**, each field on
   its own `field: value` row, nested documents rendered as nested rows (below).
   The Postgres `\x` / ClickHouse `FORMAT Vertical` way of reading a wide or
@@ -607,9 +619,22 @@ The server payload is identical in all three — only the rendering differs. The
 Vertical and JSON views are not virtualized (one document can be enormous on its
 own), so they draw records in **batches** (a "Show N more" button grows the
 window; 500 is the hard ceiling per view). A **Search rows…** box filters the
-current view in every mode. The footer shows the row count (annotated
-"(filtered)" / "(sorted)" when active) and the query duration in ms, plus the
-**truncated** and **🔒 Masked** badges when applicable.
+current view in every mode. The status bar under the result is one fixed-height
+line: row count ("N of M rows" while filtered), duration, bytes read, rows
+affected, the **capped** badge, the pager, and — at its trailing edge — the
+**Masked** badge and whether the result is editable (or why not).
+
+**The view never jumps while a table loads.** Three things used to shift it:
+a fresh tab's editor filled the pane and only shrank when the result *arrived*
+(it now shrinks when the run starts, sized to the statement); the first run
+drew a centred card and then swapped in toolbar + grid + footer (it now draws
+the final frame — toolbar, header band, row skeletons, status bar — at the
+loaded geometry); and the asynchronous editability probe widened the row-number
+column for the selection checkbox and added toolbar buttons that re-wrapped the
+strip (the checkbox slot is always reserved; the toolbar is one fixed row whose
+rarer verbs live in **Copy ▾ / Export ▾ / ⋯** menus; the edit verdict lands in
+the status bar). `desktop-db-layout-stability.spec.ts` pins the grid frame and
+first row from the loading frame through the probe.
 
 ### View mode & auto-Vertical
 
@@ -621,9 +646,14 @@ precedence — first match wins:
 1. **Your explicit pick for this tab** (the switch, or **⇧⌘V** which cycles
    Grid → Vertical → JSON → Grid) — stored on the tab, persisted with it, never
    reset by switching tabs or reloading.
-2. **The auto-Vertical threshold** — a result with **more than N columns**
-   renders in Vertical (N is *Settings → Appearance → Database Explorer*,
-   default **10**, `0` = never). It never overrides a pick made on the tab.
+2. **The auto-Vertical threshold, per engine** — a result with **more than N
+   columns** renders in Vertical, where N is set per engine in *Settings →
+   Appearance → Database Explorer*: **MongoDB on at 10**, **MySQL / PostgreSQL /
+   ClickHouse / Redis off** (a wide SQL table is what the grid is for). It never
+   overrides a pick made on the tab. The old single threshold (one number for
+   every engine) migrates once: a custom value carries to every engine (you
+   chose vertical on purpose), `0` stays never, the old default takes the new
+   per-engine defaults.
 3. **The view remembered for the connection** — the last explicit pick made on
    any tab of that connection (persisted in its `otto_db_view` entry next to its
    main/side pane), so the next tab you open there starts the same way.
@@ -634,9 +664,9 @@ The switch's tooltip names the rule in force ("your pick for this tab",
 "auto: 12 columns > 10", "remembered for this connection", "engine default").
 Once you have picked a view on a tab a dimmed **Auto** chip appears next to the
 three modes; it clears **that tab's pick only** (the connection memory stays)
-and its tooltip says which view that would restore. The threshold lives in the
-browser profile (localStorage), like the other Appearance preferences — it is
-not synced through `PUT /settings`. Dashboard widget mini-grids and the AWS
+and its tooltip says which view that would restore. The thresholds live in the
+browser profile (localStorage key `otto_db_auto_vertical_by_engine`), like the
+other Appearance preferences — they are not synced through `PUT /settings`. Dashboard widget mini-grids and the AWS
 Athena view mount the same component without a query tab and keep a local
 Grid-first switch.
 
@@ -813,12 +843,14 @@ first (see §13).
 
 ### Copy & export from the grid
 
-Toolbar actions reflect the **current filtered + sorted view**: **Copy** (TSV to
-clipboard), **CSV**, and **JSON** (browser downloads of the in-memory rows).
-When a result was capped, a **Full Export** button re-runs the statement
-uncapped server-side and downloads it. **Download…** opens the streaming
-local-file export (see §10). A **→ Agent** button pastes the query + result into
-a running agent. **Import file…** opens the file→table import dialog (see §10b).
+Toolbar actions reflect the **current filtered + sorted view**. **Copy ▾**:
+TSV / CSV / JSON to the clipboard, the column names, and (for a single-table
+result) *Open as INSERT statements* in a new tab. **Export ▾**: Download CSV /
+JSON (browser downloads of the in-memory rows), **Export all rows…** (the
+streaming, uncapped local-file export — §10; flagged when the result is
+capped) and **Import file…** (§10b). **⋯**: Aggregate pipeline (Mongo),
+Compare two records (Vertical/JSON), Insert from JSON (editable results),
+Expand JSON cells (Grid), *Send to running agent…* and *Examine with AI*.
 
 ### Foreign-key navigation
 
@@ -841,29 +873,72 @@ ANDs). Both reuse the same identifier/literal escaping as inline edits.
 
 ---
 
-## 6. Visual JOIN builder
+## 6. Visual query builder
 
-The **Builder** tab (`QueryBuilder.svelte`, available for SQL engines only) is a
-Navicat-style visual JOIN canvas:
+The **Builder** tab (`QueryBuilder.svelte`; MySQL, PostgreSQL and ClickHouse)
+builds a full `SELECT` without typing SQL — joins, filters, grouping,
+aggregates, having, sort and paging — and shows the exact statement it will
+run, live, in the engine's dialect. MongoDB has its own stage builder instead:
+**Aggregate pipeline…** in the results toolbar's ⋯ menu (`$match` / `$project`
+/ `$sort` / `$limit` / `$skip` / `$group` / `$unwind` / `$lookup` / … — §5).
 
-- **Palette** (left): a database selector, a **Filter tables…** search, and a list
-  of tables (a **+** adds a card). You can add **any** table from **any** database.
-- **Canvas** (center): draggable **table cards** (header = editable alias + source
-  name; body = a checkbox per column to include it in the SELECT, with a type hint
-  and PK/FK badges). **Draw a join** by dragging from one column's connector
-  handle to another column's handle. Click a join edge to open a popover that
-  switches the join type (**INNER / LEFT / RIGHT / OUTER …**) or deletes it. A
-  pinned **Suggested joins** bar offers FK-derived chips (e.g.
-  `orders.user_id → users.id`) you can click to add — FK suggestions are an
-  optional helper, not required.
-- **Bottom panel**: **Filters** (WHERE rows across any canvas column),
-  **Sort** (ORDER BY), a **Limit** input (default 100), an **Expressions** section
-  (add `IF` / `CASE` / function columns with `AS` aliases), and the **Generated
-  SQL** preview. SQL is generated **live** by walking the edge graph from the
-  first-added (base) table; tables left unconnected are flagged ("Not connected —
-  excluded from SQL") and dropped.
-- **Actions**: **Open in Query** (sends the generated SQL to a new Query tab
-  without running) or **Run** (executes it immediately).
+- **Tables** (left): a database selector, **Filter tables…**, and the list —
+  click a table to put it on the canvas (any table from any database). The first
+  card is the `FROM` table (badged **FROM**).
+- **Canvas** (top): draggable cards — an editable **alias** (every clause that
+  referenced the old alias follows a rename), a *select all* checkbox, and one
+  row per column with a checkbox (adds/removes it in **Columns**), its type and
+  PK/FK badges. **Join** by dragging from one column's dot to a column on
+  another card; several edges between the same two cards become one `ON … AND
+  …` (composite keys). Each join has a badge — click it to switch **INNER /
+  LEFT / RIGHT / FULL OUTER** or remove it. When a card you add has exactly one
+  foreign-key partner already on the canvas, the join is drawn for you; other
+  FK joins are offered as chips. A card with no path to the `FROM` card is
+  flagged and left out of the SQL (so is every clause that names it).
+- **Columns**: the ordered output list — plain columns, **aggregates**
+  (`COUNT`, `COUNT DISTINCT`, `SUM`, `AVG`, `MIN`, `MAX`, plus `GROUP_CONCAT`
+  on MySQL, `STRING_AGG` on PostgreSQL, `uniq` / `groupArray` on ClickHouse;
+  `COUNT DISTINCT` is `uniqExact` there) and raw **expressions**, each with an
+  output name (`AS`), reorderable; **Distinct**. None ticked = `SELECT *`.
+- **Filters** (`WHERE`): conditions in nested **AND / OR** groups. Operators
+  follow the column's type — text: `=`, `≠`, contains / does not contain /
+  starts with / ends with (wildcards in your text are escaped, so `50%` means
+  the characters `50%`), `in` / `not in` (comma list; quote an item that
+  contains a comma), `LIKE` (your pattern verbatim), comparisons, `between`;
+  numbers and dates: comparisons, `between`, `in`; booleans: is true / is
+  false; everything: is NULL / is not NULL. A half-typed row is simply left out
+  of the SQL until it's complete.
+- **Group by**: columns as chips. Adding the first aggregate groups by the
+  other selected columns automatically (visible and editable).
+- **Having**: conditions on aggregates (`COUNT(*) > 10`, `SUM(total) >= 1000`).
+- **Sort**: output columns or table columns, **Asc / Desc**, **NULLs first /
+  last** (native on PostgreSQL and ClickHouse; on MySQL, which has no `NULLS
+  FIRST/LAST`, emulated with an `x IS NULL` sort key first).
+- **Limit / Offset** (default limit 100).
+- **SQL** (right, or below on a narrow window): the live, highlighted statement
+  with its dialect. Problems the server would reject are listed above it in
+  words — a column selected but neither grouped nor aggregated (with a **Group
+  by it** fix), `SELECT *` with `GROUP BY`, a duplicate output name, `SUM` of a
+  text column, `OFFSET` without `ORDER BY`; **Run** stays disabled while there
+  is an error. **Open in editor** puts the SQL in a new query tab to keep
+  editing by hand (not run); **Run** runs it in a new tab.
+
+**Safety.** The SQL comes from one pure module (`builder/sql-builder.ts`):
+identifiers are quoted per dialect (backticks on MySQL/ClickHouse, double
+quotes on PostgreSQL, the quote character escaped), and every value you type is
+a literal escaped for the dialect (`'` doubled or backslash-escaped, `\` doubled
+where the engine treats it as an escape). A value on a numeric column stays bare
+only when it parses as a number; anything else — and every value on a text
+column — is quoted. The only text passed through verbatim is an **expression**
+column, which is raw SQL by design. Unit tests (`unit/dbQueryBuilder.test.ts`)
+cover each dialect, including injection attempts.
+
+**Round trip.** Right-click a query tab → **Open in Builder** parses its
+`SELECT` back into the builder (cards, joins, columns, filters, group/having,
+sort, limit). It reads everything the builder writes plus the common
+hand-written subset; anything else — `UNION`, sub-queries, CTEs, functions in
+`WHERE`, unqualified names across a join — is refused with the reason shown in
+the builder, and nothing on the canvas changes.
 
 ---
 

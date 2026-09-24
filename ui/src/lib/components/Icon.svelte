@@ -32,6 +32,12 @@
     sparkle: 'M7 2l1.2 3.3L11.5 6.5 8.2 7.7 7 11 5.8 7.7 2.5 6.5l3.3-1.2L7 2Zm5 7.5.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5.5-1.5Z',
     // three dots — a "More actions" menu (ringed dots so they read at 12–14px)
     more: 'M3.2 8a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0m4 0a.8.8 0 1 0 1.6 0 .8.8 0 1 0-1.6 0',
+    // funnel — filter rows / a filter row under a grid header
+    filter: 'M2.5 3.5h11L9.2 8.6v4.4l-2.4-1.3V8.6L2.5 3.5Z',
+    // indented lines — Format / beautify a query
+    format: 'M2.5 4h11M5 7h8.5M5 10h6M2.5 13h11',
+    // sigma — aggregate (GROUP BY / COUNT / SUM) in the query builder
+    sigma: 'M12 3.5H4.5L8.6 8l-4.1 4.5H12',
     // two side-by-side panes — Compare
     columns: 'M2.5 3h4.5v10H2.5V3Zm6.5 0h4.5v10H9V3Z',
     // stored procedure — a runnable block (rounded card + play glyph)

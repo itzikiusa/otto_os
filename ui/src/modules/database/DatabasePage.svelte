@@ -2,7 +2,7 @@
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import SchemaTree from './SchemaTree.svelte';
@@ -610,15 +610,29 @@
     return parts.join(' · ');
   }
 
-  const mainTabs: { id: DbMainTab; label: string; show: () => boolean }[] = [
-    { id: 'query', label: 'Query', show: () => true },
-    { id: 'builder', label: 'Builder', show: () => database.supportsBuilder },
-    { id: 'structure', label: 'Structure', show: () => true },
+  const mainTabs: { id: DbMainTab; label: string; icon: IconName; show: () => boolean }[] = [
+    { id: 'query', label: 'Query', icon: 'terminal', show: () => true },
+    { id: 'builder', label: 'Builder', icon: 'layers', show: () => database.supportsBuilder },
+    { id: 'structure', label: 'Structure', icon: 'columns', show: () => true },
     // ERD is table/collection-oriented; Redis (keys, no table model) is excluded.
-    { id: 'diagram', label: 'Diagram', show: () => database.capabilities?.engine !== 'redis' },
-    { id: 'dashboards', label: 'Dashboards', show: () => true },
+    { id: 'diagram', label: 'Diagram', icon: 'shapes', show: () => database.capabilities?.engine !== 'redis' },
+    { id: 'dashboards', label: 'Dashboards', icon: 'chart', show: () => true },
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
+  /** ←/→ (and Home/End) between the workbench views, focus following. */
+  function onViewKey(e: KeyboardEvent): void {
+    const i = visibleTabs.findIndex((t) => t.id === database.mainTab);
+    let j = i;
+    if (e.key === 'ArrowRight') j = (i + 1) % visibleTabs.length;
+    else if (e.key === 'ArrowLeft') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = visibleTabs.length - 1;
+    else return;
+    e.preventDefault();
+    database.setMainTab(visibleTabs[j].id);
+    const bar = e.currentTarget as HTMLElement;
+    queueMicrotask(() => bar.querySelectorAll<HTMLButtonElement>('.mt')[j]?.focus());
+  }
 
   // ── DB Assistant split (resizable, persisted) ────────────────────────────────
   // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
@@ -1010,12 +1024,22 @@
       {/if}
 
       <div class="main-tabs">
-        {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}<button class="mt" onclick={()=>changesOpen=true}>Changes</button>{/if}
-        {#each visibleTabs as t (t.id)}
-          <button class="mt" class:active={database.mainTab === t.id} role="tab" aria-selected={database.mainTab === t.id} onclick={() => database.setMainTab(t.id)}>
-            {t.label}
-          </button>
-        {/each}
+        <!-- The workbench views: a segmented control (selection = surface
+             lift), ←/→ move between them like any tablist. -->
+        <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onViewKey}>
+          {#each visibleTabs as t (t.id)}
+            <button
+              class="mt"
+              class:active={database.mainTab === t.id}
+              role="tab"
+              aria-selected={database.mainTab === t.id}
+              tabindex={database.mainTab === t.id ? 0 : -1}
+              onclick={() => database.setMainTab(t.id)}
+            >
+              <Icon name={t.icon} size={12} />{t.label}
+            </button>
+          {/each}
+        </div>
         <span class="grow"></span>
         <div class="conn-status">
           {#if database.capabilities}
@@ -1035,6 +1059,11 @@
                 <span class="health-lat">{database.activeConnStatus.latencyMs} ms</span>
               {/if}
             </span>
+          {/if}
+          {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
+            <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection">
+              <Icon name="branch" size={11} />Changes
+            </button>
           {/if}
           <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing}>
             <Icon name="plug" size={11} />{database.testing ? 'Testing…' : 'Test'}
@@ -1407,6 +1436,16 @@
       {/if}
     {/if}
   {:else}
+    {@const sc = database.connections.find((c) => c.id === database.selectedConnId)}
+    {#if sc}
+      <!-- Which server this tree is: engine mark, name, environment. -->
+      <div class="schema-conn" title="{sc.name} · {sc.kind}">
+        <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
+        <span class="schema-conn-name ellipsis">{sc.name}</span>
+        {#if envBadge(sc)}<span class="env-badge mono" class:prod={isProdConn(sc)}>{envBadge(sc)}</span>{/if}
+        <span class="kind-tag mono">{sc.kind}</span>
+      </div>
+    {/if}
     <SchemaTree />
   {/if}
 {/snippet}
@@ -1889,6 +1928,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    container: dbmain / inline-size;
   }
   /* Production connection → a persistent red rail down the main area. */
   .db-main.danger-rail {
@@ -1929,9 +1969,25 @@
   }
   /* Per-row connection-type tag (mysql / ssh / kafka / …) — neutral, so the
      env badge keeps the color signal. */
+  .schema-conn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 6px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    min-width: 0;
+  }
+  .schema-conn-name {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-s);
+    font-weight: 600;
+  }
   .kind-tag {
     flex-shrink: 0;
-    font-size: 8.5px;
+    font-size: var(--fs-xs);
     letter-spacing: 0.03em;
     padding: 1px 5px;
     border-radius: 999px;
@@ -2089,37 +2145,59 @@
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);
     color: var(--text);
   }
+  /* Workbench toolbar: the view switch (segmented) + connection status/actions. */
   .main-tabs {
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 8px 14px 0;
+    gap: 8px;
+    height: 44px;
+    box-sizing: border-box;
+    padding: 0 16px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
-  .mt {
-    height: 30px;
-    padding: 0 13px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 12.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+  .view-switch {
+    flex-shrink: 0;
   }
-  .mt:hover {
-    color: var(--text);
+  .view-switch .mt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 11px;
   }
-  .mt.active {
-    color: var(--accent-text);
-    border-bottom-color: var(--accent);
+  .view-switch .mt :global(svg) {
+    opacity: 0.75;
+  }
+  .view-switch .mt.active :global(svg) {
+    opacity: 1;
+  }
+  .view-switch .mt:focus-visible {
+    outline: 1.5px solid var(--accent);
+    outline-offset: 1px;
   }
   .conn-status {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-bottom: 4px;
+    min-width: 0;
+  }
+  /* A narrower workbench first sheds the redundant status (the engine is on
+     the schema header too, the version is in the dot's tooltip); only a
+     phone-narrow one drops the view words and keeps the icons. */
+  @container dbmain (max-width: 900px) {
+    .cap-chip,
+    .health-ver,
+    .health-lat {
+      display: none;
+    }
+  }
+  @container dbmain (max-width: 600px) {
+    .view-switch .mt {
+      font-size: 0;
+      gap: 0;
+      padding: 0 9px;
+    }
   }
   .cap-chip {
     font-size: var(--fs-xs);
@@ -2249,7 +2327,7 @@
     gap: 8px;
     padding: 6px 0;
     border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-    background: var(--surface, #1c1c1e);
+    background: var(--surface);
   }
   .rail-btn {
     display: flex;
@@ -2259,18 +2337,18 @@
     height: 22px;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: var(--radius-s, 5px);
-    background: var(--surface-2, #323238);
-    color: var(--text, #f2f2f5);
+    background: var(--surface-2);
+    color: var(--text);
     cursor: pointer;
   }
   .rail-btn:hover {
-    border-color: var(--accent, #0a84ff);
+    border-color: var(--accent);
   }
   .rail-label {
     writing-mode: vertical-rl;
     font-size: 9px;
     letter-spacing: 0.12em;
-    color: var(--text-dim, #98989f);
+    color: var(--text-dim);
     user-select: none;
   }
   .db-side.collapsed {
@@ -2439,9 +2517,15 @@
     /* Let the tab row wrap so the engine chip + Test button drop to their own
        line on the narrowest phones instead of jutting past the edge. */
     .main-tabs {
-      padding: 8px 12px 0;
+      height: auto;
+      min-height: 44px;
+      padding: 6px 12px;
       flex-wrap: wrap;
       row-gap: 4px;
+    }
+    .view-switch {
+      max-width: 100%;
+      overflow-x: auto;
     }
     /* The flexible spacer would push conn-status onto an overflowing line —
        make it a full-width break so the status wraps cleanly below the tabs. */
@@ -2449,13 +2533,10 @@
       flex-basis: 100%;
       height: 0;
     }
-    .conn-status {
-      padding-bottom: 8px;
-    }
-    .mt {
-      height: 36px;
-      font-size: 13.5px;
-      padding: 0 12px;
+    .view-switch .mt {
+      height: 30px;
+      font-size: var(--fs-m);
+      padding: 0 10px;
     }
     .conn-name {
       font-size: 14px;
@@ -2487,6 +2568,9 @@
       max-width: 45vw;
     }
     .main-tabs {
+      height: auto;
+      min-height: 44px;
+      padding: 6px 12px;
       flex-wrap: wrap;
       row-gap: 4px;
     }

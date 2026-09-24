@@ -10,6 +10,7 @@
     type Direction,
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { AMBIENT_MODES, ambientImage, type AmbientMode } from '../../lib/ambient';
@@ -283,26 +284,49 @@
   </div>
 
   <div class="section-title">Database Explorer</div>
-  <label class="row num-row">
-    <span>Switch to Vertical view when a result has more than</span>
-    <input
-      type="number"
-      class="input num-input mono"
-      min="0"
-      max="500"
-      step="1"
-      value={ui.dbAutoVerticalCols}
-      oninput={(e) => {
-        // A cleared box is mid-edit, not "0" — leave the setting until a number lands.
-        if (e.currentTarget.value !== '') ui.setDbAutoVerticalCols(Number(e.currentTarget.value));
-      }}
-      aria-label="Auto-Vertical column threshold"
-    />
-    <span>columns</span>
-  </label>
   <p class="hint-line">
-    0 = never. Applies unless you picked a view for that tab (the Grid / Vertical / JSON switch
-    or ⇧⌘V); MongoDB results open in Vertical by default. Saved per device.
+    Open wide results in the Vertical view (one record per block) instead of the grid. Set per
+    engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
+    table is what the grid is for.
+  </p>
+  <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
+    {#each AUTO_VERTICAL_ENGINES as eng (eng.id)}
+      {@const n = ui.dbAutoVertical[eng.id]}
+      <div class="av-row">
+        <label class="switch-row av-toggle">
+          <input
+            type="checkbox"
+            checked={n > 0}
+            onchange={(e) => ui.setDbAutoVertical(eng.id, e.currentTarget.checked ? 10 : 0)}
+          />
+          <span>{eng.label}</span>
+        </label>
+        <label class="av-num" class:off={n === 0}>
+          <span>more than</span>
+          <input
+            type="number"
+            class="input num-input mono"
+            min="1"
+            max="500"
+            step="1"
+            disabled={n === 0}
+            value={n === 0 ? '' : n}
+            placeholder="—"
+            oninput={(e) => {
+              // A cleared box is mid-edit, not "off" — keep the setting until a number lands.
+              const v = e.currentTarget.value;
+              if (v !== '' && Number(v) > 0) ui.setDbAutoVertical(eng.id, Number(v));
+            }}
+            aria-label="{eng.label}: column threshold"
+          />
+          <span>columns</span>
+        </label>
+      </div>
+    {/each}
+  </div>
+  <p class="hint-line">
+    A view you pick on a tab (the Grid / Vertical / JSON switch or ⇧⌘V) always wins. Saved per
+    device.
   </p>
 
   <div class="section-title">Sidebar</div>
@@ -505,14 +529,36 @@
     margin-inline-start: 6px;
     vertical-align: middle;
   }
-  .num-row {
-    font-size: 12.5px;
-    color: var(--text);
-    margin-top: 8px;
-  }
   .num-input {
     width: 64px;
     text-align: end;
+  }
+  /* Auto-Vertical per engine: toggle · "more than N columns", one row each. */
+  .av-table {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+    max-width: min(460px, 92vw);
+  }
+  .av-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 30px;
+  }
+  .av-toggle {
+    min-width: 120px;
+  }
+  .av-num {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .av-num.off {
+    opacity: 0.55;
   }
   .accent-input {
     width: 36px;

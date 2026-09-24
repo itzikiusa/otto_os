@@ -3,6 +3,13 @@
 
 import { accentFill } from '../accent';
 import { ambientImage, isAmbientMode, type AmbientMode } from '../ambient';
+import {
+  autoVerticalFor,
+  clampAutoVertical,
+  resolveAutoVertical,
+  type AutoVerticalEngine,
+  type AutoVerticalPrefs,
+} from '../db-view-prefs';
 
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
@@ -66,7 +73,9 @@ const LS = {
   browserAgentOpen: 'otto_browser_agent_open',
   browserAgentH: 'otto_browser_agent_h',
   dbDockWidth: 'otto_db_dock_width',
+  /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
+  dbAutoVertical: 'otto_db_auto_vertical_by_engine',
   wfCtx: 'otto_wf_ctx_open',
   wfCtxWidth: 'otto_wf_ctx_width',
   wfCtxTab: 'otto_wf_ctx_tab',
@@ -157,9 +166,6 @@ function clampRail(px: number): number {
 }
 /** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
  *  a typo can't disable the feature by accident; NaN → the default (10). */
-function clampCols(n: number): number {
-  return Number.isNaN(n) ? 10 : Math.max(0, Math.min(500, Math.round(n)));
-}
 function clampWfCtx(px: number): number {
   return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
 }
@@ -344,16 +350,34 @@ class UiStore {
     })(),
   );
 
-  /** DB Explorer: a result with MORE than this many columns opens in Vertical
-   *  view unless the tab has an explicit view pick (0 = never). Default 10 —
-   *  past that a grid needs horizontal scrolling to read one record. Per device
-   *  (localStorage), like the other appearance preferences. */
-  dbAutoVerticalCols = $state(
-    ((): number => {
-      const raw = lsGet(LS.dbAutoVerticalCols);
-      return raw === null ? 10 : clampCols(Number(raw));
+  /** DB Explorer: per ENGINE, a result with MORE than N columns opens in the
+   *  Vertical view unless the tab has an explicit pick (0 = never). MongoDB is
+   *  on (10) by default — nested, ragged documents read best one record at a
+   *  time — while the SQL engines and Redis stay on the grid however wide the
+   *  result is. Per device (localStorage). The first read migrates the old
+   *  single-threshold key (see `resolveAutoVertical`). */
+  dbAutoVertical = $state<AutoVerticalPrefs>(
+    ((): AutoVerticalPrefs => {
+      const { value, migrated } = resolveAutoVertical(
+        lsGet(LS.dbAutoVertical),
+        lsGet(LS.dbAutoVerticalCols),
+      );
+      if (migrated) {
+        lsSet(LS.dbAutoVertical, JSON.stringify(value));
+        try {
+          localStorage.removeItem(LS.dbAutoVerticalCols);
+        } catch {
+          /* private mode */
+        }
+      }
+      return value;
     })(),
   );
+
+  /** The auto-Vertical threshold for one engine (0 = never). */
+  dbAutoVerticalFor(engine: string | null | undefined): number {
+    return autoVerticalFor(this.dbAutoVertical, engine);
+  }
 
   /** Resolved CSS font-family stack for the terminal, per the current choice. */
   get termFontStack(): string {
@@ -716,9 +740,9 @@ class UiStore {
     lsSet(LS.closeTabPref, pref);
   }
 
-  setDbAutoVerticalCols(n: number): void {
-    this.dbAutoVerticalCols = clampCols(n);
-    lsSet(LS.dbAutoVerticalCols, String(this.dbAutoVerticalCols));
+  setDbAutoVertical(engine: AutoVerticalEngine, n: number): void {
+    this.dbAutoVertical = { ...this.dbAutoVertical, [engine]: clampAutoVertical(n) };
+    lsSet(LS.dbAutoVertical, JSON.stringify(this.dbAutoVertical));
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */
