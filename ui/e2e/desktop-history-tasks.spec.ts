@@ -161,7 +161,9 @@ test.describe('history page', () => {
   test('is reachable from the Agents header and the sidebar', async ({ page }) => {
     await openPage(page, 'agents');
     await page.getByTestId('agents-history-btn').click();
-    await expect(page).toHaveURL(/#\/history$/);
+    // History opens on an item (the last one viewed, else the first) instead
+    // of an empty "pick one" pane, so the route may carry that item's id.
+    await expect(page).toHaveURL(/#\/history(\/[^/]+)?$/);
     await expect(page.getByTestId('history-page')).toBeVisible();
   });
 });
