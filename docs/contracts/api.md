@@ -3648,7 +3648,7 @@ writes) + the workspace-role axis on the agent's workspace.
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
-| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks) | PersonalAgentSchedule |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
 | POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent is already in progress |
@@ -3764,7 +3764,7 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 | POST /api/v1/assistant/threads | agents edit | `{title?, space_slot?, provider?, model?, account_id?, incognito?}` — `provider` given ⇒ the thread starts **pinned** | `AssistantThread` (no session yet — the first turn starts it) |
 | GET /api/v1/assistant/threads/{id} | agents view | — | `AssistantThread` |
 | PATCH /api/v1/assistant/threads/{id} | agents edit | `{title?, space_slot?}` (`space_slot: null` unslots) | `AssistantThread` |
-| DELETE /api/v1/assistant/threads/{id} | agents edit | — | `{ok:true}` — drops the thread, its turn index and open tasks; kills a live backing session. Provider transcripts on disk are NOT deleted |
+| DELETE /api/v1/assistant/threads/{id} | agents edit | — | `{ok:true}` — drops the thread, its turn index, attachments rows and tasks, and removes its current backing Otto session (PTY killed, row deleted). Provider transcripts on disk are NOT deleted |
 | GET /api/v1/assistant/threads/{id}/turns | agents view | query `before?` (turn id), `limit?` (default 100, max 500) | `AssistantTurn[]`, oldest first |
 | POST /api/v1/assistant/threads/{id}/turns | agents edit | `AssistantSendReq {text, attachment_ids?, origin?, voice?}` — `text` 1..32 KiB | `AssistantSendResp {turn, route, thread}`. 409 while the backing session is still answering the previous turn (`thread.status == "working"`) |
 | POST /api/v1/assistant/threads/{id}/attachments | agents edit | `{name, content_base64, mime?}` — ≤ 20 MiB decoded; `name` is sanitised to one path segment | `AssistantAttachment` (written to `<cwd>/inbox/`, referenced by path in the next turn) |
@@ -3775,7 +3775,7 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 | GET /api/v1/assistant/tasks | agents view | query `state?`, `thread_id?`, `limit?` (default 100, max 500) | `AssistantTask[]`, newest first |
 | POST /api/v1/assistant/tasks | agents edit | `AssistantCreateTaskReq {kind: "task" \| "reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}` — a reminder needs `run_at` | `AssistantTask` (reminder: `queued` until `run_at`) |
 | GET /api/v1/assistant/tasks/{id} | agents view | — | `AssistantTask` |
-| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item (`answer` for a question, `provider` for a limit choice, `always_allow` for an approval — 400 for `purchase`/`prod`); `takeover` pauses the agent (task → `needs_you`, kind `takeover`) until `handback`; `cancel` ends a queued/running task. 409 when the action does not fit the task's state |
+| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body (optional) `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item: an **approval** settles `done` either way (`result.decision`; `always_allow` records a tool+destination grant — 400 for `purchase`/`prod` or without a tool+destination; the linked MCP approvals row is decided too); a **question** on an agent task resumes it (`running`, the `answer` is sent into the thread as the next turn) or cancels it on deny; a **limit** item's approve (`provider`, default the suggestion) re-sends the thread's last message there and remembers "switch" for the thread, deny remembers "stay"; a **memory** item accepts or forgets the memory. `takeover` interrupts the agent (Esc) and parks the task as a `takeover` item until `handback` (which sends "continue" into the thread); `cancel` ends a queued/running/needs-you task. Unknown action → 404; an action that does not fit the task's state → 409 |
 | GET /api/v1/assistant/memory | agents view | query `q?` (FTS recall), `limit?` (default 200) | `AssistantMemoryView {profile, memories, pending, memory_approval}` |
 | PUT /api/v1/assistant/memory | agents edit | `{profile: {content, version}}` — `profile.md`, ≤ 256 KiB | `AssistantProfileDoc`; 409 on a stale `version` |
 | POST /api/v1/assistant/memory | agents edit | `{text, kind?, tags?}` — the user adds a memory by hand (accepted at once) | `AssistantMemory` |
@@ -3791,10 +3791,17 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 | POST /api/v1/assistant/agent/{tool} | agents edit (the calling session's per-session token ⇒ its owner) | `{session_id, …tool args}` — see below | per tool |
 
 **Agent tools** (`POST /assistant/agent/{tool}`) are the back-ends of the
-assistant's MCP tools (stdio `ottod mcp-tools` + the governed `otto.assistant_*`
-catalog). `session_id` must name a session owned by the caller whose
-`meta.assistant_thread` names one of the caller's threads (else 403). An
-**incognito** thread refuses `remember` / `recall` / `forget` (400).
+assistant's MCP tools: the native stdio tools of `ottod mcp-tools` (advertised
+ONLY to `meta.source == "assistant"` sessions) and, for the three memory tools,
+the governed `otto.assistant_remember` / `otto.assistant_forget` (DANGEROUS,
+approval-gated, off by default) and `otto.assistant_recall` (opt-in read). The
+calling session decides the thread: an Otto-issued per-session token's own
+session binding OVERRIDES any `session_id` in the body; otherwise `session_id`
+may name one of the caller's own sessions. That session must be owned by the
+caller and carry `meta.assistant_thread` naming one of the caller's threads
+(else 403; unknown session → 400). Without any session (an outward MCP client)
+only user-level effects happen (no chip, no thread on tasks). An **incognito**
+thread refuses `remember` / `recall` / `forget` (400). Unknown `{tool}` → 404.
 
 | `{tool}` | MCP tool | Args (besides `session_id`) | Response |
 |---|---|---|---|
@@ -3813,7 +3820,8 @@ instant or a local wall-clock time in the schedule's `timezone`, DST-safe: a tim
 in the spring-forward gap fires at the first valid instant after it, an ambiguous
 fall-back time fires at the earlier one). `once` is also accepted by Personal
 Agent schedules (`POST /personal-agents/{id}/schedules`): it fires one run and the
-scheduler then disables the schedule. Delivery goes to the origin: a `reminder`
+scheduler then disables the schedule. (The cadence validator is shared, so a
+Scheduled Task may also use `once`; it fires once and then has no next run.) Delivery goes to the origin: a `reminder`
 turn in the thread plus a user-targeted `notification` (macOS / phone).
 
 **Memory.** Three layers: `profile.md` (the user's own facts, edited here; the
@@ -3823,8 +3831,9 @@ recall), and each Personal Agent's own `memory/notes.md` (unchanged). With
 `memory_approval: true` agent writes land `pending` (state `suggested`) and need
 `accept`; otherwise they are `accepted` and shown as a chip with Undo.
 
-**DTOs** (Rust: `crates/otto-server/src/assistant/types.rs`; TS: `ui/src/lib/api/types.ts`
-`// ── Otto Assistant`):
+**DTOs** (Rust: stored rows in `crates/otto-state/src/assistant.rs`, request/response
+shapes in `crates/otto-server/src/assistant/{types,router,limits}.rs`; TS:
+`ui/src/lib/api/types.ts` `// ── Otto Assistant`):
 
 ```text
 AssistantThread   {id, space_slot: 1..4|null, title, provider, model|null, account_id|null,

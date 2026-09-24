@@ -7302,7 +7302,9 @@ export interface PersonalAgent {
 export interface PersonalAgentSchedule {
   id: Id;
   agent_id: Id;
-  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`. */
+  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`,
+   *  or the one-shot `{cadence:'once', run_at}` (RFC3339 or local
+   *  `YYYY-MM-DDTHH:MM` in `timezone`; the schedule disables itself after its run). */
   schedule: Record<string, unknown>;
   timezone: string;
   /** The run's task prompt for this schedule. */
