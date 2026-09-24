@@ -15,6 +15,7 @@
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { popoutItems } from '../lib/popoutMenu';
   import { sessionOrder, applyOrder } from '../lib/stores/sessionOrder.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { confirmer } from '../lib/confirm.svelte';
@@ -1009,6 +1010,7 @@
           ...(reorderable && fAgents.length > 1
             ? [{ label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
             : []),
+          ...(otherWs ? [] : popoutItems(`agents/${s.id}`, s.title)),
           { separator: true },
           ...(ws.canEditSession(s) ? [
             // In-progress agent only: respawn a stuck PTY (provider resume when

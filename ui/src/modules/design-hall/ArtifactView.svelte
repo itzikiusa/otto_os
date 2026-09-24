@@ -25,6 +25,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { popoutItems } from '../../lib/popoutMenu';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
@@ -661,6 +662,7 @@
       { label: 'Move to project…', icon: 'folder', disabled: !canEdit, action: () => queueMicrotask(() => moveMenu(e)) },
       { label: 'Make an editable copy', icon: 'copy', action: () => void duplicateHere() },
       { label: 'Download', icon: 'download', action: download },
+      ...(artifact ? popoutItems(`design/a/${encodeURIComponent(artifact.id)}`, artifact.title) : []),
       { separator: true },
       { label: 'Archive…', icon: 'archive', danger: true, disabled: !canEdit, action: () => void archive() },
     ];
