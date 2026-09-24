@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Jira / issue-tracking accounts settings page.
   import { api } from '../../lib/api/client';
@@ -156,9 +157,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Jira Accounts" subtitle="Connect Jira to attach issues to sessions and track work in progress.">
+  <PageHeader title={sectionLabel('jira')} subtitle="Attach issues to sessions and track work in progress">
     {#snippet actions()}
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
@@ -170,7 +171,7 @@
       <p class="dim" style="margin: 0 0 10px">
         No Jira accounts yet. Add one to search and attach issues to your sessions.
       </p>
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     </div>
   {:else}
     <div class="acct-list">
@@ -202,10 +203,10 @@
               {/if}
             </div>
           </div>
-          <button class="icon-btn" title="Edit" onclick={() => openEdit(a)}>
+          <button class="icon-btn" title="Edit account" aria-label="Edit account" onclick={() => openEdit(a)}>
             <Icon name="edit" size={13} />
           </button>
-          <button class="icon-btn" title="Delete" onclick={() => remove(a)}>
+          <button class="icon-btn" title="Delete account" aria-label="Delete account" onclick={() => remove(a)}>
             <Icon name="trash" size={13} />
           </button>
         </div>
@@ -277,7 +278,7 @@
           disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === ''}
           onclick={save}
         >
-          {busy ? 'Saving…' : 'Save Changes'}
+          {busy ? 'Saving…' : 'Save changes'}
         </button>
       {:else}
         <button
@@ -285,7 +286,7 @@
           disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || token === ''}
           onclick={create}
         >
-          {busy ? 'Adding…' : 'Add Account'}
+          {busy ? 'Adding…' : 'Add account'}
         </button>
       {/if}
     {/snippet}

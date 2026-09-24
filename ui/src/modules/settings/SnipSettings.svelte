@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Snipping: the system-wide capture shortcut (desktop app only —
   // the chord is registered by the Tauri shell via tauri-plugin-global-shortcut
@@ -79,7 +80,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Snipping" subtitle="One-gesture screenshots: capture, annotate, paste." />
+  <PageHeader title={sectionLabel('snipping')} subtitle="One-gesture screenshots: capture, annotate, paste" />
   <PageBody width="readable">
   <p class="section-intro">Capture a screen region, annotate it (text, boxes, arrows, colors), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</p>
 

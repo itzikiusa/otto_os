@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Channels settings page: per-workspace Slack + Telegram + Webhook integration config.
   import { api, baseUrl } from '../../lib/api/client';
@@ -245,8 +247,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Channels" subtitle="Configure Slack, Telegram and inbound Webhook integrations for this workspace. Tokens and webhook keys are stored in the macOS Keychain." />
+  <PageHeader title={sectionLabel('channels')} subtitle="Slack, Telegram and webhook bridges for this workspace" />
   <PageBody width="readable">
+  <SectionIntro>Configure Slack, Telegram and inbound webhook integrations per workspace. Tokens and webhook keys are stored in the <strong>macOS Keychain</strong>, never in Otto’s database.</SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->

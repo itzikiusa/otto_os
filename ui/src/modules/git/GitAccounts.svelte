@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from '../settings/sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Git accounts settings page: provider, label, username, token (write-only),
   // api_base_url for self-hosted GitLab.
@@ -220,9 +221,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Git Accounts" subtitle="Tokens live in the macOS Keychain and authenticate PR actions + https pushes.">
+  <PageHeader title={sectionLabel('git-accounts')} subtitle="Keychain tokens for PR actions and HTTPS pushes">
     {#snippet actions()}
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
@@ -234,7 +235,7 @@
       <p class="dim" style="margin: 0 0 10px">
         No git accounts yet. Add one to list pull requests and push over https.
       </p>
-      <button class="btn primary" onclick={openAdd}>Add Account</button>
+      <button class="btn primary" onclick={openAdd}>Add account</button>
     </div>
   {:else}
     <div class="acct-list">
@@ -377,7 +378,7 @@
           disabled={busy || label.trim() === '' || username.trim() === ''}
           onclick={save}
         >
-          {busy ? 'Saving…' : 'Save Changes'}
+          {busy ? 'Saving…' : 'Save changes'}
         </button>
       {:else}
         <button
@@ -385,7 +386,7 @@
           disabled={busy || label.trim() === '' || username.trim() === '' || token === ''}
           onclick={create}
         >
-          {busy ? 'Adding…' : 'Add Account'}
+          {busy ? 'Adding…' : 'Add account'}
         </button>
       {/if}
     {/snippet}

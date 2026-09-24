@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Personal Access Tokens (PAT) management — mint long-lived API tokens,
   // view existing ones (prefix + last-seen), and revoke them individually.
@@ -120,8 +122,9 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Personal Access Tokens" subtitle="Long-lived tokens for scripts, CI, and the Otto CLI API. Tokens are scoped to your account and inherit your permissions. Impersonation sessions cannot mint PATs." />
+  <PageHeader title={sectionLabel('tokens')} subtitle="Long-lived tokens for scripts, CI and the Otto CLI" />
   <PageBody width="readable">
+  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions cannot create tokens.</SectionIntro>
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}

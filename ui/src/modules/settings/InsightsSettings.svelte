@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Insights: opt-in toggles for scheduled HTML insight reports.
   // All three are OFF by default. Runs are catch-up — if the app was closed at
@@ -92,7 +93,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Insights" subtitle="Scheduled HTML insight reports about your Otto activity." />
+  <PageHeader title={sectionLabel('insights')} subtitle="Scheduled HTML reports about your Otto activity" />
   <PageBody width="readable">
   <p class="section-intro">These are <strong>opt-in</strong> and <strong>off by default</strong> — turn on only the cadences you want. Runs are <strong>catch-up</strong>: if the app was closed at the scheduled time, the report is generated the next time the app is open, so a scheduled report is never missed.</p>
 

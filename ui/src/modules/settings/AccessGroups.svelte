@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
+  import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { onMount } from 'svelte';
   import { accessApi } from '../../lib/api/access';
@@ -181,10 +183,11 @@
 
 <div class="settings-section">
   <PageHeader
-    title="Groups & access roles"
-    subtitle="Groups apply reusable access rules across resources. Users still need page access in Settings → Users."
+    title={sectionLabel('access-groups')}
+    subtitle="Reusable access rules across resources"
   />
   <PageBody width="readable">
+  <SectionIntro>Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong></SectionIntro>
 <section class="access-groups">
   {#if !auth.isRoot}<p>Only root can manage groups and role presets.</p>
   {:else if loading}<p>Loading groups…</p>

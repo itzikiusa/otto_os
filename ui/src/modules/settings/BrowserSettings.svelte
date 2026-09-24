@@ -6,6 +6,7 @@
   // The Chromium download is never silent: choosing a build that isn't
   // installed only offers a Download button that says how big it is.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
@@ -59,7 +60,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title="Browser" subtitle="Live tabs and the browser engine that runs them." />
+  <PageHeader title={sectionLabel('browser')} subtitle="Live tabs and the browser engine that runs them" />
   <PageBody width="readable">
     <p class="section-intro">
       A live tab is a real browser. In the desktop app it can use this Mac's web view; everywhere

@@ -4,6 +4,7 @@
   // a leading @claude / @codex always wins, and a usage limit asks first
   // unless you turn on automatic switching. One form, one Save.
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -95,7 +96,7 @@
 </script>
 
 <div class="page">
-  <PageHeader title="Assistant" subtitle="How Otto Assistant routes each turn between your Claude and Codex subscriptions">
+  <PageHeader title={sectionLabel('assistant')} subtitle="How each turn routes between Claude and Codex plans">
     {#snippet actions()}
       <button class="btn small ghost" data-icon="assistant" onclick={() => router.go('assistant')}><Icon name="assistant" size={12} /> Open Assistant</button>
       {#if routing.data}
