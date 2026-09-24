@@ -696,9 +696,15 @@ async fn events<S: K8sCtx>(
 /// `GET /k8s/clusters/{id}/monitor/health?window=` — the `k8s_health` payload.
 async fn health_digest<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<WindowQuery>,
 ) -> ApiResult<Json<Value>> {
+    // Per-cluster resource grant, like every other cluster read: this digest
+    // is what the `k8s_health` agent tool returns (pod names, restarts,
+    // memory), so the feature grant alone must not reach a cluster the
+    // caller was never given.
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let label = q.window.clone().unwrap_or_else(|| "1h".into());
     let window = queries::parse_window(&label)?;
     let (cluster, cfg, status) = load(&ctx, &id).await?;
