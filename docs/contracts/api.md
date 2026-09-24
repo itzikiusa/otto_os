@@ -3713,6 +3713,170 @@ without `session_id` is a user post. Posts are capped at 16 KB.
 | GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `limit?`, `session_id?` | `AgentRoomMessage[]` (agent reads via `session_id` are membership-checked) |
 | POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
 
+## Otto Assistant (`/assistant/*`)
+
+The personal assistant: ONE front door that chats in threads, remembers the
+user, runs tasks and reminders, delegates to Personal Agents, and asks before
+anything outward. Everything under `/assistant/*` is **per user**: every row
+carries the caller's `owner_user_id`, lists return only the caller's rows, and a
+by-id route on another user's row answers **404** (root included — the assistant
+is personal, not an admin surface). Feature axis: `Agents` (`View` for GET,
+`Edit` for every write). There is no workspace axis: threads run as sessions in
+the caller's system-owned **scratch** workspace (row #16a), cwd
+`<data_dir>/personal/assistant/<user_id>/` (attachments land in its `inbox/`).
+
+**Threads.** A thread is one resumable CLI session (claude / codex) with
+`meta.assistant_thread = <thread_id>`, `meta.source = "assistant"`. Threads are
+**resumed on demand, not kept alive**: sending a turn resumes the backing session
+(`--resume` / codex rollout) when it was suspended or reaped, pastes the text with
+the bracketed-paste path, and returns. The reply streams over the existing
+session-family WS events for `thread.session_id` (`transcript_live` /
+`transcript_appended`); once the reply turn lands the daemon indexes it and emits
+`assistant_turn` (see ws.md). `space_slot` 1–4 pins a thread to a floating-bar
+space (unique per user; assigning a taken slot moves it). Up to 4 slotted threads,
+unlimited unslotted ones.
+
+**Routing** (no LLM call). Each user turn is routed at the turn boundary:
+explicit **pin** on the thread (`POST …/route`) wins; else a leading `@claude` /
+`@codex` mention routes that ONE turn (the mention is stripped before pasting);
+else local keyword rules classify the text as `chat | code | hard | voice` and the
+user's `targets[kind]` picks provider + model + account. A provider change starts
+a NEW backing session seeded with a hand-off packet (thread summary + last turns +
+profile), so the visible history stays one thread; each assistant turn carries
+its provider badge. The router **never switches silently**: when the provider's
+usage limit is detected (PTY / transcript text), the daemon emits
+`assistant_limit` and opens a `limit` needs-you task ("continue on Codex?");
+only with `auto_failover: true` (default **false**) does it switch by itself, and
+it then posts a `route` system turn saying so.
+
+**Needs you.** One queue for approvals, clarifying questions, takeover requests,
+limit choices and memory reviews: every item is an `AssistantTask` in state
+`needs_you` with a `needs_you` payload. Outward actions (send, post, publish,
+purchase, delete, submit, prod) open an `approval` item in the guideline shape —
+**where** it goes, **what** is sent, **who sees it**, and the agent's **reason**.
+"Always allow" is recorded per destination + tool only (listed as an
+`agent_grants` row of the user's assistant principal) and is refused for
+`purchase` / `prod` categories.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/assistant/threads | agents view | — | `AssistantThread[]` — slotted threads first (by slot), then `updated_at` desc |
+| POST /api/v1/assistant/threads | agents edit | `{title?, space_slot?, provider?, model?, account_id?, incognito?}` — `provider` given ⇒ the thread starts **pinned** | `AssistantThread` (no session yet — the first turn starts it) |
+| GET /api/v1/assistant/threads/{id} | agents view | — | `AssistantThread` |
+| PATCH /api/v1/assistant/threads/{id} | agents edit | `{title?, space_slot?}` (`space_slot: null` unslots) | `AssistantThread` |
+| DELETE /api/v1/assistant/threads/{id} | agents edit | — | `{ok:true}` — drops the thread, its turn index and open tasks; kills a live backing session. Provider transcripts on disk are NOT deleted |
+| GET /api/v1/assistant/threads/{id}/turns | agents view | query `before?` (turn id), `limit?` (default 100, max 500) | `AssistantTurn[]`, oldest first |
+| POST /api/v1/assistant/threads/{id}/turns | agents edit | `AssistantSendReq {text, attachment_ids?, origin?, voice?}` — `text` 1..32 KiB | `AssistantSendResp {turn, route, thread}`. 409 while the backing session is still answering the previous turn (`thread.status == "working"`) |
+| POST /api/v1/assistant/threads/{id}/attachments | agents edit | `{name, content_base64, mime?}` — ≤ 20 MiB decoded; `name` is sanitised to one path segment | `AssistantAttachment` (written to `<cwd>/inbox/`, referenced by path in the next turn) |
+| POST /api/v1/assistant/threads/{id}/route | agents edit | `{provider: string \| null, model?, account_id?}` — `provider: null` clears the pin (back to rules) | `AssistantThread` (+ a `route` system turn) |
+| POST /api/v1/assistant/threads/{id}/delegate | agents edit + scheduled_tasks edit on the agent's workspace (editor) | `{agent_id, directive}` | `AssistantTask` (`kind:"delegation"`, `state:"running"`) + a `delegation` turn ("Asked *Daily Recap*…"); the run's summary is posted back into the thread when it settles |
+| POST /api/v1/assistant/route/preview | agents view | `{text, thread_id?}` | `AssistantRouteDecision` — what a send would pick right now (the bar's badge) |
+| GET /api/v1/assistant/needs-you | agents view | — | `AssistantTask[]` in state `needs_you`, oldest first |
+| GET /api/v1/assistant/tasks | agents view | query `state?`, `thread_id?`, `limit?` (default 100, max 500) | `AssistantTask[]`, newest first |
+| POST /api/v1/assistant/tasks | agents edit | `AssistantCreateTaskReq {kind: "task" \| "reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}` — a reminder needs `run_at` | `AssistantTask` (reminder: `queued` until `run_at`) |
+| GET /api/v1/assistant/tasks/{id} | agents view | — | `AssistantTask` |
+| POST /api/v1/assistant/tasks/{id}/{action} | agents edit | `action` ∈ `approve \| deny \| takeover \| handback \| cancel`; body `AssistantDecisionReq {reason?, answer?, always_allow?, provider?}` | `AssistantTask`. `approve`/`deny` resolve a `needs_you` item (`answer` for a question, `provider` for a limit choice, `always_allow` for an approval — 400 for `purchase`/`prod`); `takeover` pauses the agent (task → `needs_you`, kind `takeover`) until `handback`; `cancel` ends a queued/running task. 409 when the action does not fit the task's state |
+| GET /api/v1/assistant/memory | agents view | query `q?` (FTS recall), `limit?` (default 200) | `AssistantMemoryView {profile, memories, pending, memory_approval}` |
+| PUT /api/v1/assistant/memory | agents edit | `{profile: {content, version}}` — `profile.md`, ≤ 256 KiB | `AssistantProfileDoc`; 409 on a stale `version` |
+| POST /api/v1/assistant/memory | agents edit | `{text, kind?, tags?}` — the user adds a memory by hand (accepted at once) | `AssistantMemory` |
+| DELETE /api/v1/assistant/memory/{id} | agents edit | — | `{ok:true, undo_token}` — soft-forget (the chip's Undo of a "Remembered", or rejecting a pending one) |
+| POST /api/v1/assistant/memory/{id}/accept | agents edit | — | `AssistantMemory` — a `pending` memory (approval queue / Hermes import) becomes `accepted` |
+| POST /api/v1/assistant/memory/undo | agents edit | `{undo_token}` | `AssistantMemory` — restores a forgotten memory |
+| POST /api/v1/assistant/forget | agents edit | `{query, thread_id?}` — "forget X": every accepted/pending memory matching `query` | `AssistantForgetResp {forgotten, undo_tokens}` (+ a `memory` turn in `thread_id` when given) |
+| GET /api/v1/assistant/memory/import/hermes | agents view | — | `AssistantHermesPreview` — READ-ONLY scan of `~/.hermes/memories/*.md` split on `§`; nothing is written |
+| POST /api/v1/assistant/memory/import/hermes | agents edit | — | `AssistantHermesImportResp {queued, duplicates, files}` — each entry becomes a `pending` memory for review (never auto-accepted). One-time: a second call only queues entries not already imported. The daemon never writes to `~/.hermes` |
+| GET /api/v1/assistant/routing | agents view | — | `AssistantRoutingSettings` (defaults when never saved) |
+| PUT /api/v1/assistant/routing | agents edit | any subset of `AssistantRoutingSettings` (minus `updated_at`) | `AssistantRoutingSettings` |
+| GET /api/v1/assistant/limits | agents view | — | `AssistantLimitState[]` — the last detected limit per provider/account (empty = none seen) |
+| POST /api/v1/assistant/agent/{tool} | agents edit (the calling session's per-session token ⇒ its owner) | `{session_id, …tool args}` — see below | per tool |
+
+**Agent tools** (`POST /assistant/agent/{tool}`) are the back-ends of the
+assistant's MCP tools (stdio `ottod mcp-tools` + the governed `otto.assistant_*`
+catalog). `session_id` must name a session owned by the caller whose
+`meta.assistant_thread` names one of the caller's threads (else 403). An
+**incognito** thread refuses `remember` / `recall` / `forget` (400).
+
+| `{tool}` | MCP tool | Args (besides `session_id`) | Response |
+|---|---|---|---|
+| `remember` | `assistant_remember` | `{text, kind?, tags?}` | `{memory: AssistantMemory, pending: bool}` — `pending` when `memory_approval` is on; a `memory` chip turn (with Undo) is posted |
+| `forget` | `assistant_forget` | `{query}` | `AssistantForgetResp` (+ a `memory` chip turn) |
+| `recall` | `assistant_recall` | `{query?, k?}` (k ≤ 20) | `{profile: string, memories: AssistantMemory[]}` — accepted only |
+| `reminder` | `assistant_create_reminder` | `{text, run_at, timezone?}` — `run_at` RFC3339, or local `YYYY-MM-DDTHH:MM` in `timezone` (default the user's) | `AssistantTask` (`kind:"reminder"`, delivered to the thread + a notification at `run_at`) |
+| `task` | `assistant_create_task` | `{title, detail?}` | `AssistantTask` (`state:"running"`) |
+| `task_update` | `assistant_update_task` | `{task_id, state, result?, question?, options?}` — `state` ∈ `running \| needs_you \| done \| failed`; `needs_you` needs `question` | `AssistantTask` |
+| `delegate` | `assistant_delegate` | `{agent, directive}` — `agent` = Personal Agent id or exact name the owner can edit | `AssistantTask` (`kind:"delegation"`) |
+| `approval` | `assistant_request_approval` | `{where, what, who_sees, reason, tool?, destination?, category?, wait_seconds?}` — `category` ∈ `send \| post \| publish \| purchase \| delete \| submit \| prod \| other`; `wait_seconds` ≤ 30 | `{task: AssistantTask, decision: "approved" \| "denied" \| "pending", reason?}` — an existing always-allow grant for `tool`+`destination` answers `approved` at once (never for `purchase`/`prod`) |
+
+**Reminders and `once`.** Reminders fire from the assistant tick (30 s) using the
+shared cadence engine's new `once` kind (`{cadence:"once", run_at}` — an RFC3339
+instant or a local wall-clock time in the schedule's `timezone`, DST-safe: a time
+in the spring-forward gap fires at the first valid instant after it, an ambiguous
+fall-back time fires at the earlier one). `once` is also accepted by Personal
+Agent schedules (`POST /personal-agents/{id}/schedules`): it fires one run and the
+scheduler then disables the schedule. Delivery goes to the origin: a `reminder`
+turn in the thread plus a user-targeted `notification` (macOS / phone).
+
+**Memory.** Three layers: `profile.md` (the user's own facts, edited here; the
+agent only proposes), atomic memories in `otto-memory` (collection `assistant`,
+workspace `scratch`, `visibility: private`, `created_by` = the user — FTS5
+recall), and each Personal Agent's own `memory/notes.md` (unchanged). With
+`memory_approval: true` agent writes land `pending` (state `suggested`) and need
+`accept`; otherwise they are `accepted` and shown as a chip with Undo.
+
+**DTOs** (Rust: `crates/otto-server/src/assistant/types.rs`; TS: `ui/src/lib/api/types.ts`
+`// ── Otto Assistant`):
+
+```text
+AssistantThread   {id, space_slot: 1..4|null, title, provider, model|null, account_id|null,
+                   route_pinned: bool, session_id|null, incognito: bool,
+                   failover_choice: "ask"|"switch"|"stay", status: "asleep"|"idle"|"working",
+                   last_turn_at|null, created_at, updated_at}
+AssistantTurn     {id, thread_id, role: "user"|"assistant"|"system",
+                   kind: "message"|"memory"|"delegation"|"task"|"reminder"|"route"|"limit"|"approval",
+                   text, provider|null, model|null, route_reason|null, session_id|null,
+                   attachments: AssistantAttachment[], data: object|null, created_at}
+                   // memory chip data: {action:"remembered"|"forgot"|"pending", memory_ids:[…],
+                   //   undo: {kind:"delete", memory_id} | {kind:"restore", undo_tokens:[…]} | null}
+AssistantAttachment {id, name, path, mime, size}
+AssistantSendReq  {text, attachment_ids?: string[], origin?: AssistantOrigin, voice?: bool}
+AssistantSendResp {turn: AssistantTurn, route: AssistantRouteDecision, thread: AssistantThread}
+AssistantRouteDecision {provider, model|null, account_id|null, kind: "chat"|"code"|"hard"|"voice",
+                   reason: "pin"|"mention"|"rule"|"default"|"failover", matched: string[], text}
+AssistantRouteTarget {provider, model|null, account_id|null}
+AssistantRoutingSettings {targets: {chat, code, hard, voice: AssistantRouteTarget},
+                   extra_keywords: {code: string[], hard: string[]},
+                   auto_failover: bool (default false), memory_approval: bool (default false),
+                   updated_at|null}
+AssistantLimitState {provider, account_id|null, limited: bool, until|null, message,
+                   source: "pty"|"transcript"|"probe", detected_at}
+AssistantTask     {id, thread_id|null, kind: "task"|"reminder"|"approval"|"question"|"takeover"
+                   |"limit"|"delegation"|"memory_review",
+                   state: "queued"|"running"|"needs_you"|"done"|"failed"|"cancelled",
+                   title, detail, origin: AssistantOrigin, run_at|null, timezone,
+                   schedule_id|null, agent_id|null, agent_run_id|null,
+                   needs_you: AssistantNeedsYou|null, result: object|null,
+                   created_at, updated_at, finished_at|null}
+AssistantOrigin   "app"|"thread"|"bar"|"phone"|"channel"
+AssistantNeedsYou {kind: "approval"|"question"|"takeover"|"limit"|"memory", prompt,
+                   approval?: AssistantApprovalCard, options?: string[],
+                   limit?: AssistantLimitState, suggestion?: AssistantRouteTarget,
+                   memory_id?: string}
+AssistantApprovalCard {where, what, who_sees, reason, tool|null, destination|null,
+                   category, always_allow_allowed: bool}
+AssistantDecisionReq {reason?, answer?, always_allow?: bool, provider?}
+AssistantCreateTaskReq {kind: "task"|"reminder", title, detail?, thread_id?, run_at?, timezone?, origin?}
+AssistantMemory   {id, text, kind, tags: string[], state: "accepted"|"pending",
+                   source: {kind: "agent"|"user"|"hermes", thread_id|null, file|null},
+                   created_at, updated_at}
+AssistantProfileDoc {content, version, exists: bool}
+AssistantMemoryView {profile: AssistantProfileDoc, memories: AssistantMemory[],
+                   pending: AssistantMemory[], memory_approval: bool}
+AssistantForgetResp {forgotten: AssistantMemory[], undo_tokens: string[]}
+AssistantHermesPreview {available: bool, files: {name, entries}[],
+                   entries: {file, text, duplicate: bool}[]}
+AssistantHermesImportResp {queued, duplicates, files: string[]}
+```
+
 ## Model catalog
 
 Per-provider model lists, refreshed hourly (and on demand) with **no API
