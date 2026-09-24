@@ -161,6 +161,7 @@ test('IME composition keystrokes are ignored (text arrives via compositionend)',
   assert.equal(routeKey(key('a', 'KeyA', { isComposing: true }), true), 'ignore');
   assert.equal(routeKey(key('Process', 'KeyA'), true), 'ignore');
   assert.equal(routeKey(key('Dead', 'Quote'), true), 'ignore');
+  assert.equal(routeKey(key('Unidentified', ''), true), 'ignore');
 });
 
 test('plain typing, editing and copy chords are forwarded', () => {
@@ -344,12 +345,16 @@ test('duplicate connect / stray open / frame-while-not-live are no-ops', () => {
   assert.equal(reduce(c, { type: 'frame', at: 5 }), c);
 });
 
-test('isStale dims an old frame while live and any frame while reconnecting', () => {
+test('isStale: a quiet page is not stale; a silent pipe and any reconnect are', () => {
   let s = reduce(reduce(INITIAL, { type: 'connect' }), { type: 'open' });
-  assert.equal(isStale(s, 10_000), false, 'no frame yet: nothing to dim');
+  assert.equal(isStale(s, 10_000), false, 'nothing seen yet: nothing to dim');
   s = reduce(s, { type: 'frame', at: 10_000 });
   assert.equal(isStale(s, 10_000 + STALE_MS - 1), false);
-  assert.equal(isStale(s, 10_000 + STALE_MS + 1), true);
+  // no new frames (static page) but the ping keeps answering → still fresh
+  s = reduce(s, { type: 'heartbeat', at: 10_000 + STALE_MS });
+  assert.equal(isStale(s, 10_000 + STALE_MS + 1), false);
+  assert.equal(s.hasFrame, true);
+  assert.equal(isStale(s, 10_000 + 2 * STALE_MS + 1), true, 'neither frames nor pongs → wedged');
   s = reduce(s, { type: 'close', code: 1006 });
   assert.equal(isStale(s, 10_001), true);
 });

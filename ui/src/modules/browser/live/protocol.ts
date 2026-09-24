@@ -69,7 +69,7 @@ export interface FrameMeta extends FrameGeometry {
 /** Server → client. JSON text messages; frames may instead arrive as binary
  *  messages (see `parseBinaryFrame`). */
 export type ServerMsg =
-  | { type: 'hello'; session_id: string; engine: string; engine_version?: string; nav: NavState; lock: LiveLock; viewport?: { width: number; height: number; device_scale_factor: number } }
+  | { type: 'hello'; session_id: string; engine: string; engine_version?: string; nav: NavState; lock: LiveLock; capabilities?: string[]; viewport?: { width: number; height: number; device_scale_factor: number } }
   | { type: 'frame'; seq: number; data: string; mime?: string; meta: FrameGeometry & { timestamp?: number } }
   | { type: 'nav'; nav: NavState }
   | { type: 'cursor'; cursor: string }
@@ -96,9 +96,18 @@ export type ClientMsg =
   | { type: 'ping'; t: number }
   | { type: 'take_over' }
   | { type: 'hand_back' }
-  | { type: 'approval'; id: string; decision: ApprovalDecision }
+  | { type: 'approval'; id: string; decision: ApprovalDecision; reason?: string }
   | { type: 'pick'; x: number; y: number }
   | { type: 'focus'; focused: boolean };
+
+/** What the live view reports up to the Browser page's toolbar. */
+export interface LiveViewState {
+  status: 'idle' | 'connecting' | 'live' | 'reconnecting' | 'ended';
+  nav: NavState | null;
+  lock: LiveLock;
+  /** The engine supports remote element picking. */
+  canPick: boolean;
+}
 
 export function encode(msg: ClientMsg): string {
   return JSON.stringify(msg);

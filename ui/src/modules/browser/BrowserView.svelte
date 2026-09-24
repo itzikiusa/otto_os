@@ -19,6 +19,10 @@
   import NotesRail from './NotesRail.svelte';
   import AgentDock from './AgentDock.svelte';
   import AskBar from './AskBar.svelte';
+  import RemoteLiveView from './live/RemoteLiveView.svelte';
+  import type { LiveViewState } from './live/protocol';
+  import LiveEngineSetup from './live/LiveEngineSetup.svelte';
+  import { browserLive } from '../../lib/stores/browserLive.svelte';
   // Raw source text of the picker overlay — `eval`'d into the live tab's own
   // JS context via `browser_eval`, never bundled/imported as a module (see
   // overlay.js's header for why).
@@ -53,13 +57,94 @@
     if (!urlFocused) urlInput = browser.activeTab?.url ?? urlInput;
   });
 
-  // ── Live tab: native (Tauri) child webview overlaid on `liveHostEl` ────────
-  // Off Tauri (remote/PWA), a tab flagged mode:"live" simply falls back to
-  // reader — `nativeBrowserAvailable` is false there so none of this fires.
+  // ── Live tab: two renderers (browserLive.renderer) ─────────────────────
+  //   native — the desktop app's Tauri child webview overlaid on `liveHostEl`
+  //            (only inside Otto.app; the default there);
+  //   otto   — the daemon-run Chromium streamed into RemoteLiveView (any
+  //            device: remote web session, PWA, phone — and agent-drivable).
+  // Only a daemon that predates live streaming leaves a remote live tab on
+  // the old honest fallback (Reader + "Open in new tab").
   let liveHostEl = $state<HTMLDivElement | null>(null);
   const activeLive = $derived(
-    nativeBrowserAvailable && browser.activeTab?.mode === 'live' ? browser.activeTab : null,
+    nativeBrowserAvailable && browserLive.renderer === 'native' && browser.activeTab?.mode === 'live'
+      ? browser.activeTab
+      : null,
   );
+  const activeRemote = $derived(
+    browserLive.renderer === 'otto' && browserLive.supported !== false && browser.activeTab?.mode === 'live'
+      ? browser.activeTab
+      : null,
+  );
+
+  // Learn whether the daemon engine exists (and is installed) once a live
+  // tab needs it. Never installs anything — that's an explicit click.
+  $effect(() => {
+    if (!activeRemote) return;
+    if (browserLive.status || browserLive.loading || browserLive.supported === false) return;
+    void browserLive.load();
+  });
+
+  // The daemon turned out to predate live streaming: the active live tab
+  // needs its reader page after all (the store skipped it while unknown).
+  $effect(() => {
+    const tab = browser.activeTab;
+    if (browserLive.supported !== false || !tab || tab.mode !== 'live' || activeLive) return;
+    if (!browser.page && !browser.loadingPage && !browser.pageError) void browser.loadPage(tab.url);
+  });
+
+  // ── Remote live view state (nav buttons, pick, ⌘L) ─────────────────────
+  let remoteView = $state<ReturnType<typeof RemoteLiveView> | null>(null);
+  let remoteState: LiveViewState | null = $state(null);
+  let remotePick = $state(false);
+  let urlEl = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    // Pick mode and the reported state belong to one tab's session.
+    const _id = activeRemote?.id;
+    remotePick = false;
+    remoteState = null;
+  });
+
+  function onRemoteNav(url: string, title: string): void {
+    const tab = activeRemote;
+    if (!tab) return;
+    browser.trackLiveNav(tab.id, url, title);
+    if (!urlFocused) urlInput = url;
+  }
+
+  async function onRemotePick(p: { selector: string; outerHtml: string; text: string; url: string }): Promise<void> {
+    try {
+      await browser.createAnnotation({
+        url: p.url,
+        selector: p.selector,
+        excerpt: (p.outerHtml || '').slice(0, 2000),
+        text: (p.text || '').slice(0, 2000),
+        comment: '',
+      });
+    } catch (e) {
+      toasts.error("Couldn't save the mark", e instanceof Error ? e.message : undefined);
+    }
+  }
+
+  function focusUrl(): void {
+    urlEl?.focus();
+    urlEl?.select();
+  }
+
+  function chooseRenderer(e: MouseEvent): void {
+    const cur = browserLive.renderer;
+    ctxMenu.show(e, [
+      {
+        label: "This Mac's web view",
+        icon: cur === 'native' ? 'check' : 'globe',
+        action: () => browserLive.setPref('native'),
+      },
+      {
+        label: "Otto's Chromium (streams anywhere, agents can drive it)",
+        icon: cur === 'otto' ? 'check' : 'compass',
+        action: () => browserLive.setPref('otto'),
+      },
+    ]);
+  }
   // Per-tab last-navigated URL, so the driver effect only calls `open` (which
   // re-navigates) when the URL actually changed — switching tabs just
   // shows/hides, preserving each tab's scroll/form state.
@@ -462,10 +547,11 @@
     browser.deselect();
   }
 
-  // A tab can be in live mode only where the native webview exists (the
-  // desktop app). In a remote/web session it shows Reader instead, so say so
-  // rather than highlighting a mode that isn't running.
-  const liveUnavailable = $derived(!nativeBrowserAvailable && browser.activeTab?.mode === 'live');
+  // A live tab with no renderer here (an older daemon without live
+  // streaming, off the desktop app) shows Reader instead — say so rather than
+  // highlighting a mode that isn't running.
+  const liveUnavailable = $derived(browser.activeTab?.mode === 'live' && !activeLive && !activeRemote);
+  const liveCapable = $derived(nativeBrowserAvailable || browserLive.supported !== false);
 
   /** Open the page in a real tab of the viewer's own browser — the useful
    *  "live" view in a remote session (sites refuse to be framed). */
@@ -477,7 +563,7 @@
   function toggleMode(mode: 'reader' | 'live'): void {
     const tab = browser.activeTab;
     if (!tab) return;
-    if (mode === 'live' && !nativeBrowserAvailable) {
+    if (mode === 'live' && !liveCapable) {
       openInOwnBrowser();
       return;
     }
@@ -550,15 +636,46 @@
   {/if}
 
   <div class="urlbar">
+    {#if activeRemote && browserLive.ready}
+      <button
+        class="icon-btn tool"
+        onclick={() => remoteView?.back()}
+        disabled={!remoteState?.nav?.can_go_back}
+        aria-label="Back"
+        title="Back"
+      >
+        <Icon name="chevronLeft" size={14} />
+      </button>
+      <button
+        class="icon-btn tool"
+        onclick={() => remoteView?.forward()}
+        disabled={!remoteState?.nav?.can_go_forward}
+        aria-label="Forward"
+        title="Forward"
+      >
+        <Icon name="chevronRight" size={14} />
+      </button>
+      <button
+        class="icon-btn tool"
+        onclick={() => remoteView?.reload()}
+        disabled={remoteState?.status !== 'live'}
+        aria-label="Reload page"
+        title="Reload page (⌘R)"
+      >
+        <Icon name="refresh" size={14} />
+      </button>
+    {/if}
     <input
       type="text"
       placeholder="Enter URL"
+      aria-label="Address"
+      bind:this={urlEl}
       bind:value={urlInput}
       onkeydown={onkeydown}
       onfocus={() => (urlFocused = true)}
       onblur={() => (urlFocused = false)}
     />
-    <button class="btn" onclick={go} title="Go">
+    <button class="icon-btn tool" onclick={go} title="Go" aria-label="Go">
       <Icon name="external" size={14} />
     </button>
     {#if browser.activeTab}
@@ -573,50 +690,80 @@
         </button>
         <button
           class="seg"
-          class:active={nativeBrowserAvailable && browser.activeTab.mode === 'live'}
+          class:active={liveCapable && browser.activeTab.mode === 'live'}
           onclick={() => toggleMode('live')}
-          aria-label={nativeBrowserAvailable ? 'Live mode' : 'Open in a new browser tab'}
-          title={nativeBrowserAvailable
-            ? 'Live mode — a real embedded browser'
-            : 'Open this page in a new browser tab. The embedded live browser needs the Otto desktop app.'}
+          aria-label={liveCapable ? 'Live mode' : 'Open in a new browser tab'}
+          aria-pressed={liveCapable && browser.activeTab.mode === 'live'}
+          title={liveCapable
+            ? 'Live mode — a real browser'
+            : 'Open this page in a new browser tab. This Otto daemon has no live browser.'}
         >
           <Icon name="globe" size={13} />
         </button>
       </div>
+      {#if nativeBrowserAvailable && browser.activeTab.mode === 'live'}
+        <button
+          class="icon-btn tool"
+          onclick={chooseRenderer}
+          aria-label="Live engine"
+          title={browserLive.renderer === 'native'
+            ? "Live engine: this Mac's web view"
+            : "Live engine: Otto's Chromium"}
+        >
+          <Icon name="chevronDown" size={14} />
+        </button>
+      {/if}
     {/if}
     {#if activeLive}
       <button
-        class="btn"
+        class="icon-btn tool"
         class:active={pickMode}
         onclick={togglePick}
         title={pickMode ? 'Picking… click an element in the page' : 'Pick an element to mark'}
+        aria-label="Pick an element to mark"
         aria-pressed={pickMode}
+      >
+        <Icon name="target" size={14} />
+      </button>
+    {:else if activeRemote && remoteState?.canPick}
+      <!-- Remote pick only where the engine supports it; otherwise the
+           button is simply absent (no dead control). -->
+      <button
+        class="icon-btn tool"
+        class:active={remotePick}
+        onclick={() => (remotePick = !remotePick)}
+        title={remotePick ? 'Picking… click an element in the page' : 'Pick an element to mark'}
+        aria-label="Pick an element to mark"
+        aria-pressed={remotePick}
       >
         <Icon name="target" size={14} />
       </button>
     {/if}
     {#if canAutofill}
       <button
-        class="btn"
+        class="icon-btn tool"
         onclick={autofill}
         disabled={filling}
+        aria-label="Autofill saved credentials"
         title={`Autofill ${matchedCredential?.username ?? ''} for ${matchedCredential?.domain ?? ''}`}
       >
         <Icon name="key" size={14} />
       </button>
     {/if}
     <button
-      class="btn"
+      class="icon-btn tool"
       onclick={doSummarize}
       disabled={!browser.activeTab || summarizing}
+      aria-label="Summarize"
       title="Summarize"
     >
       <Icon name="zap" size={14} />
     </button>
     <button
-      class="btn"
+      class="icon-btn tool"
       onclick={doVaultSave}
       disabled={!browser.activeTab || vaultSaving}
+      aria-label="Save to vault"
       title="Save to vault"
     >
       <Icon name="folder" size={14} />
@@ -627,7 +774,7 @@
     <div class="summary">
       <div class="summary-head">
         <span>Summary</span>
-        <button class="close" onclick={() => (summary = '')}><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
       </div>
       <p>{summary}</p>
     </div>
@@ -638,11 +785,25 @@
       <!-- The native child webview paints ABOVE this div's rect — the div
            itself just holds the geometry the ResizeObserver above tracks. -->
       <div class="live-host" bind:this={liveHostEl}></div>
+    {:else if activeRemote && browserLive.ready}
+      <RemoteLiveView
+        bind:this={remoteView}
+        tab={activeRemote}
+        pickMode={remotePick}
+        onnav={onRemoteNav}
+        onstate={(st) => (remoteState = st)}
+        onfocusurl={focusUrl}
+        onpick={(p) => void onRemotePick(p)}
+        onnewtab={(url) => void browser.openLiveTab(url)}
+        onreader={() => activeRemote && void browser.setMode(activeRemote.id, 'reader')}
+      />
+    {:else if activeRemote}
+      <LiveEngineSetup onreader={() => activeRemote && void browser.setMode(activeRemote.id, 'reader')} />
     {:else}
       {#if liveUnavailable}
         <div class="live-note" role="status">
           <Icon name="globe" size={13} />
-          <span>This tab is in live mode, which runs only in the Otto desktop app. You're seeing Reader view here.</span>
+          <span>This tab is in live mode, but this Otto daemon has no live browser. You're seeing Reader view here.</span>
           <span class="grow"></span>
           <button class="btn" onclick={openInOwnBrowser}>Open in new tab</button>
           <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
@@ -717,7 +878,7 @@
     cursor: pointer;
   }
   .seg + .seg {
-    border-left: 1px solid var(--border);
+    border-inline-start: 1px solid var(--border);
   }
   .seg:hover {
     color: var(--text);
@@ -729,73 +890,75 @@
   .urlbar {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.5rem 0.75rem;
+    gap: 6px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border);
+    min-width: 0;
   }
   .urlbar input {
     flex: 1;
+    min-width: 0;
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 0.4rem 0.6rem;
+    padding: 6px 10px;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--fs-m);
   }
-  .btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  /* Urlbar tools: the shared .icon-btn, framed like the address field. */
+  .icon-btn.tool {
+    flex: none;
     width: 30px;
     height: 30px;
-    padding: 0;
-    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
-    cursor: pointer;
   }
-  .btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-  }
-  .btn:disabled {
+  .icon-btn.tool:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .btn.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+  .icon-btn.tool.active {
+    background: var(--accent-soft);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
+  @media (max-width: 640px) {
+    .urlbar {
+      flex-wrap: wrap;
+    }
+    .urlbar input {
+      flex-basis: 100%;
+      order: -1;
+    }
+    .icon-btn.tool {
+      width: 36px;
+      height: 36px;
+    }
+  }
   .summary {
-    margin: 0.6rem 0.75rem 0;
-    padding: 0.6rem 0.75rem;
+    margin: 10px 12px 0;
+    padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    font-size: 0.85rem;
+    font-size: var(--fs-m);
   }
   .summary-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     color: var(--text-dim);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 0.35rem;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
   }
   .summary p {
     margin: 0;
     color: var(--text);
     line-height: 1.5;
-  }
-  .close {
-    display: flex;
-    background: transparent;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
   }
 </style>

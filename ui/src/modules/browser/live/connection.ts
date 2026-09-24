@@ -13,9 +13,10 @@
 //                              closed, engine stopped, kicked — don't retry)
 //   reconnecting ──give up──▶ ended (after maxAttempts)
 //
-// "live" also tracks frame freshness: `stale` flips on when no frame arrived
-// for STALE_MS while the socket is open (the page is static — or the pipe
-// is wedged); the view dims the last frame and says "No new frames".
+// "live" also tracks freshness. Chromium only sends a screencast frame when
+// the page CHANGES, so a quiet page is not a stale one: liveness comes from
+// any sign of life — a frame or a ping reply (`heartbeat`). When neither
+// arrived for STALE_MS the pipe is wedged and the view dims the last frame.
 
 export type LiveStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 
@@ -27,8 +28,8 @@ export interface ConnState {
   retryInMs: number;
   /** Why it ended / what the last failure was — human-readable. */
   reason: string;
-  /** Wall-clock ms of the last frame (0 = none yet). */
-  lastFrameAt: number;
+  /** Wall-clock ms of the last sign of life — frame or pong (0 = none yet). */
+  lastSeenAt: number;
   /** True once any frame arrived on this connection generation. */
   hasFrame: boolean;
 }
@@ -37,6 +38,7 @@ export type ConnEvent =
   | { type: 'connect' }
   | { type: 'open' }
   | { type: 'frame'; at: number }
+  | { type: 'heartbeat'; at: number }
   | { type: 'close'; code: number; reason?: string }
   | { type: 'retry' }
   | { type: 'ended'; reason: string }
@@ -47,7 +49,7 @@ export const INITIAL: ConnState = {
   attempt: 0,
   retryInMs: 0,
   reason: '',
-  lastFrameAt: 0,
+  lastSeenAt: 0,
   hasFrame: false,
 };
 
@@ -78,10 +80,13 @@ export function reduce(s: ConnState, ev: ConnEvent, jitter = 0.5): ConnState {
       return { ...s, status: 'connecting', retryInMs: 0, hasFrame: false };
     case 'open':
       if (s.status !== 'connecting') return s;
-      return { ...s, status: 'live', attempt: 0, retryInMs: 0, reason: '' };
+      return { ...s, status: 'live', attempt: 0, retryInMs: 0, reason: '', lastSeenAt: 0 };
     case 'frame':
       if (s.status !== 'live') return s;
-      return { ...s, lastFrameAt: ev.at, hasFrame: true };
+      return { ...s, lastSeenAt: ev.at, hasFrame: true };
+    case 'heartbeat':
+      if (s.status !== 'live') return s;
+      return { ...s, lastSeenAt: ev.at };
     case 'close': {
       if (s.status === 'ended' || s.status === 'idle') return s;
       if (isTerminalClose(ev.code)) {
@@ -111,9 +116,9 @@ export const STALE_MS = 4000;
 
 /** Whether the picture on screen should be dimmed as out of date. */
 export function isStale(s: ConnState, now: number): boolean {
-  if (s.status === 'reconnecting' || s.status === 'connecting' || s.status === 'ended') return s.hasFrame || s.lastFrameAt > 0;
-  if (s.status !== 'live' || !s.hasFrame) return false;
-  return now - s.lastFrameAt > STALE_MS;
+  if (s.status === 'reconnecting' || s.status === 'connecting' || s.status === 'ended') return true;
+  if (s.status !== 'live' || s.lastSeenAt === 0) return false;
+  return now - s.lastSeenAt > STALE_MS;
 }
 
 // ── fps / latency meter ─────────────────────────────────────────────────

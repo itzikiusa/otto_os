@@ -47,8 +47,9 @@ export function routeKey(e: KeyLike, isMac: boolean): KeyRoute {
   if (e.defaultPrevented) return 'app';
   // Composition keystrokes belong to the IME; the composed text arrives via
   // compositionend → insert text. (Safari reports keyCode 229 as key
-  // "Process" instead of setting isComposing.)
-  if (e.isComposing || e.key === 'Process' || e.key === 'Dead') return 'ignore';
+  // "Process" instead of setting isComposing; a phone's soft keyboard sends
+  // "Unidentified" keydowns and the real text via the `input` event.)
+  if (e.isComposing || e.key === 'Process' || e.key === 'Dead' || e.key === 'Unidentified') return 'ignore';
   const k = e.key.toLowerCase();
   if (e.key === 'Escape') return e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey ? 'forward' : 'release';
   if (e.metaKey && SYSTEM_META_KEYS.has(k)) return 'app';
