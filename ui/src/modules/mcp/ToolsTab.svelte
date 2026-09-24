@@ -5,6 +5,8 @@
   // dry-run) and see the decision + preview / content / pending-approval id.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -27,6 +29,8 @@
   const can = (operation:string, child?:string) => !!selectedServerId && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
   let tools = $state<McpToolView[]>([]);
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
   let busyTool = $state<Record<string, boolean>>({});
   const loadedAccessIds = new Set<string>();
 
@@ -57,8 +61,9 @@
     loading = true;
     try {
       tools = await mcpCpApi.cpTools(id);
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load tools', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -186,6 +191,8 @@
 
   {#if !server}
     <p class="muted pad">Pick a server above (or add one on the Servers tab) to manage its tools.</p>
+  {:else if loadError && tools.length === 0}
+    <LoadState what="tools" {loading} error={loadError} empty onretry={() => void loadTools()} />
   {:else if loading && tools.length === 0}
     <p class="muted pad">Loading tools…</p>
   {:else if tools.length === 0}

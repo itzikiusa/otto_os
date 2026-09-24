@@ -4,6 +4,8 @@
   // replace), and an Evaluate preview that shows the decision a (server, tool)
   // would get under the current rules.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -24,6 +26,8 @@
 
   let policies = $state<McpPolicy[]>([]);
   let loading = $state(false);
+  /** Failed load — inline with Retry, never the empty state. */
+  let loadError = $state<string | null>(null);
   let editing = $state<McpPolicy | null>(null);
   let formOpen = $state(false);
 
@@ -31,8 +35,9 @@
     loading = true;
     try {
       policies = await mcpCpApi.cpPolicies(wsId);
+      loadError = null;
     } catch (e) {
-      toasts.error('Failed to load policies', e instanceof Error ? e.message : String(e));
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -213,7 +218,9 @@
     </div>
   </div>
 
-  {#if loading && policies.length === 0}
+  {#if loadError && policies.length === 0}
+    <LoadState what="policies" {loading} error={loadError} empty onretry={() => void load()} />
+  {:else if loading && policies.length === 0}
     <p class="muted pad">Loading…</p>
   {:else if policies.length === 0}
     <div class="empty">

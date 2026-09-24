@@ -8,7 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
-  import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
   import ApprovalsTab from './ApprovalsTab.svelte';
@@ -42,12 +42,15 @@
       accessRevision++;
       loadGeneration++;
       servers = [];
+      loadError = null;
       selectedServerId = null;
       void loadServers();
     }),
   );
   let servers = $state<McpServerDetail[]>([]);
   let loading = $state(false);
+  /** Failed server-list load — ServersTab renders it inline with Retry. */
+  let loadError = $state<string | null>(null);
   let selectedServerId = $state<string | null>(null);
   let pending = $state(0);
 
@@ -64,12 +67,13 @@
       const result = await mcpCpApi.cpList(id);
       if (generation !== loadGeneration) return;
       servers = result;
+      loadError = null;
       if (selectedServerId && !servers.some((server) => server.id === selectedServerId)) {
         selectedServerId = null;
       }
       if (!selectedServerId && servers.length > 0) selectedServerId = servers[0].id;
     } catch (e) {
-      toasts.error('Failed to load MCP servers', e instanceof Error ? e.message : String(e));
+      if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
       if (generation === loadGeneration) loading = false;
     }
@@ -150,6 +154,7 @@
             {wsId}
             {servers}
             {loading}
+            error={loadError}
             selectedServerId={null}
             onReload={loadServers}
             onPatch={patchServer}
