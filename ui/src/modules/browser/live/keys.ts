@@ -96,56 +96,19 @@ export function keyText(e: KeyLike): string | undefined {
   return undefined;
 }
 
-/**
- * macOS editing commands for a chord. Headless Chromium on a Mac does NOT
- * turn ⌘A into select-all on its own (the NSResponder layer that normally
- * maps it isn't there), so the key event must name the command — the same
- * approach Playwright takes. A non-Mac viewer's Ctrl chords map to the same
- * commands so Ctrl+C on Windows copies in the (macOS) remote page.
- */
-export function editingCommands(e: KeyLike, isMac: boolean): string[] {
-  const cmd = primary(e, isMac);
-  const sel = e.shiftKey ? 'AndModifySelection' : '';
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (cmd && !e.altKey) {
-    switch (k) {
-      case 'a': return e.shiftKey ? [] : ['selectAll'];
-      case 'c': return e.shiftKey ? [] : ['copy'];
-      case 'x': return e.shiftKey ? [] : ['cut'];
-      case 'z': return [e.shiftKey ? 'redo' : 'undo'];
-      case 'y': return isMac || e.shiftKey ? [] : ['redo'];
-      case 'Backspace': return ['deleteToBeginningOfLine'];
-      case 'Delete': return ['deleteToEndOfLine'];
-      case 'ArrowLeft': return [`moveToBeginningOfLine${sel}`];
-      case 'ArrowRight': return [`moveToEndOfLine${sel}`];
-      case 'ArrowUp': return [`moveToBeginningOfDocument${sel}`];
-      case 'ArrowDown': return [`moveToEndOfDocument${sel}`];
-    }
-    return [];
-  }
-  if (e.altKey && !e.metaKey && !e.ctrlKey) {
-    switch (k) {
-      case 'Backspace': return ['deleteWordBackward'];
-      case 'Delete': return ['deleteWordForward'];
-      case 'ArrowLeft': return [`moveWordLeft${sel}`];
-      case 'ArrowRight': return [`moveWordRight${sel}`];
-    }
-  }
-  return [];
-}
-
-/** A key message body (sans envelope), ready for `protocol.keyMessage`. */
+/** A key message body (sans `type`/`action`) — the contract's `key` frame.
+ *  The daemon maps ⌘A/⌘C/⌘V/⌘X/⌘Z onto Chromium's editing commands itself. */
 export interface KeyPayload {
   key: string;
   code: string;
   text?: string;
   modifiers: number;
   key_code: number;
+  location: number;
   repeat: boolean;
-  commands?: string[];
 }
 
-export function keyPayload(e: KeyLike, isMac: boolean, action: 'down' | 'up'): KeyPayload {
+export function keyPayload(e: KeyLike & { location?: number }, action: 'down' | 'up'): KeyPayload {
   // ⇧Esc is "send Escape to the page": strip the shift that routed it here.
   const ev = e.key === 'Escape' ? { ...e, shiftKey: false } : e;
   const out: KeyPayload = {
@@ -153,13 +116,12 @@ export function keyPayload(e: KeyLike, isMac: boolean, action: 'down' | 'up'): K
     code: ev.code,
     modifiers: modifierMask(ev),
     key_code: virtualKeyCode(ev),
+    location: ev.location ?? 0,
     repeat: !!ev.repeat,
   };
   if (action === 'down') {
     const text = keyText(ev);
     if (text !== undefined) out.text = text;
-    const commands = editingCommands(ev, isMac);
-    if (commands.length) out.commands = commands;
   }
   return out;
 }

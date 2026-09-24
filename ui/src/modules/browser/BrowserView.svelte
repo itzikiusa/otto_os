@@ -23,6 +23,7 @@
   import type { LiveViewState } from './live/protocol';
   import LiveEngineSetup from './live/LiveEngineSetup.svelte';
   import { browserLive } from '../../lib/stores/browserLive.svelte';
+  import * as liveApi from '../../lib/api/browserLive';
   // Raw source text of the picker overlay — `eval`'d into the live tab's own
   // JS context via `browser_eval`, never bundled/imported as a module (see
   // overlay.js's header for why).
@@ -60,7 +61,7 @@
   // ── Live tab: two renderers (browserLive.renderer) ─────────────────────
   //   native — the desktop app's Tauri child webview overlaid on `liveHostEl`
   //            (only inside Otto.app; the default there);
-  //   otto   — the daemon-run Chromium streamed into RemoteLiveView (any
+  //   remote — the daemon-owned Chromium streamed into RemoteLiveView (any
   //            device: remote web session, PWA, phone — and agent-drivable).
   // Only a daemon that predates live streaming leaves a remote live tab on
   // the old honest fallback (Reader + "Open in new tab").
@@ -71,7 +72,7 @@
       : null,
   );
   const activeRemote = $derived(
-    browserLive.renderer === 'otto' && browserLive.supported !== false && browser.activeTab?.mode === 'live'
+    browserLive.renderer === 'remote' && browserLive.supported !== false && browser.activeTab?.mode === 'live'
       ? browser.activeTab
       : null,
   );
@@ -92,15 +93,15 @@
     if (!browser.page && !browser.loadingPage && !browser.pageError) void browser.loadPage(tab.url);
   });
 
-  // ── Remote live view state (nav buttons, pick, ⌘L) ─────────────────────
+  // ── Remote live view state (nav buttons, ⌘L) ───────────────────────────
+  // Element picking has no remote counterpart in the live protocol yet, so
+  // the target button is simply absent for a remote tab (no dead control).
   let remoteView = $state<ReturnType<typeof RemoteLiveView> | null>(null);
   let remoteState: LiveViewState | null = $state(null);
-  let remotePick = $state(false);
   let urlEl = $state<HTMLInputElement | null>(null);
   $effect(() => {
-    // Pick mode and the reported state belong to one tab's session.
+    // The reported state belongs to one tab's session.
     const _id = activeRemote?.id;
-    remotePick = false;
     remoteState = null;
   });
 
@@ -109,20 +110,6 @@
     if (!tab) return;
     browser.trackLiveNav(tab.id, url, title);
     if (!urlFocused) urlInput = url;
-  }
-
-  async function onRemotePick(p: { selector: string; outerHtml: string; text: string; url: string }): Promise<void> {
-    try {
-      await browser.createAnnotation({
-        url: p.url,
-        selector: p.selector,
-        excerpt: (p.outerHtml || '').slice(0, 2000),
-        text: (p.text || '').slice(0, 2000),
-        comment: '',
-      });
-    } catch (e) {
-      toasts.error("Couldn't save the mark", e instanceof Error ? e.message : undefined);
-    }
   }
 
   function focusUrl(): void {
@@ -140,8 +127,8 @@
       },
       {
         label: "Otto's Chromium (streams anywhere, agents can drive it)",
-        icon: cur === 'otto' ? 'check' : 'compass',
-        action: () => browserLive.setPref('otto'),
+        icon: cur === 'remote' ? 'check' : 'compass',
+        action: () => browserLive.setPref('remote'),
       },
     ]);
   }
@@ -567,6 +554,13 @@
       openInOwnBrowser();
       return;
     }
+    // Leaving live on the daemon engine frees its Chromium session (the
+    // daemon would idle-reap it anyway; this just doesn't make it wait).
+    if (mode === 'reader' && activeRemote?.id === tab.id) {
+      void liveApi.closeLive(tab.id).catch(() => {
+        /* no session / already gone: nothing to free */
+      });
+    }
     void browser.setMode(tab.id, mode);
   }
 
@@ -640,7 +634,7 @@
       <button
         class="icon-btn tool"
         onclick={() => remoteView?.back()}
-        disabled={!remoteState?.nav?.can_go_back}
+        disabled={remoteState?.status !== 'live' || !remoteState?.session?.can_go_back}
         aria-label="Back"
         title="Back"
       >
@@ -649,7 +643,7 @@
       <button
         class="icon-btn tool"
         onclick={() => remoteView?.forward()}
-        disabled={!remoteState?.nav?.can_go_forward}
+        disabled={remoteState?.status !== 'live' || !remoteState?.session?.can_go_forward}
         aria-label="Forward"
         title="Forward"
       >
@@ -725,19 +719,6 @@
       >
         <Icon name="target" size={14} />
       </button>
-    {:else if activeRemote && remoteState?.canPick}
-      <!-- Remote pick only where the engine supports it; otherwise the
-           button is simply absent (no dead control). -->
-      <button
-        class="icon-btn tool"
-        class:active={remotePick}
-        onclick={() => (remotePick = !remotePick)}
-        title={remotePick ? 'Picking… click an element in the page' : 'Pick an element to mark'}
-        aria-label="Pick an element to mark"
-        aria-pressed={remotePick}
-      >
-        <Icon name="target" size={14} />
-      </button>
     {/if}
     {#if canAutofill}
       <button
@@ -789,16 +770,14 @@
       <RemoteLiveView
         bind:this={remoteView}
         tab={activeRemote}
-        pickMode={remotePick}
         onnav={onRemoteNav}
         onstate={(st) => (remoteState = st)}
         onfocusurl={focusUrl}
-        onpick={(p) => void onRemotePick(p)}
         onnewtab={(url) => void browser.openLiveTab(url)}
-        onreader={() => activeRemote && void browser.setMode(activeRemote.id, 'reader')}
+        onreader={() => toggleMode('reader')}
       />
     {:else if activeRemote}
-      <LiveEngineSetup onreader={() => activeRemote && void browser.setMode(activeRemote.id, 'reader')} />
+      <LiveEngineSetup onreader={() => toggleMode('reader')} />
     {:else}
       {#if liveUnavailable}
         <div class="live-note" role="status">

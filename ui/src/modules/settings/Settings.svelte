@@ -16,6 +16,7 @@
   import McpServers from './McpServers.svelte';
   import InsightsSettings from './InsightsSettings.svelte';
   import SnipSettings from './SnipSettings.svelte';
+  import BrowserSettings from './BrowserSettings.svelte';
   import SkillEvalSettings from './SkillEvalSettings.svelte';
   import ContextSoul from './ContextSoul.svelte';
   import ContextLibrary from './ContextLibrary.svelte';
@@ -51,6 +52,7 @@
     { id: 'mcp-servers', label: 'MCP Servers' },
     { id: 'insights', label: 'Insights' },
     { id: 'snipping', label: 'Snipping' },
+    ...(auth.can('browser', 'view') ? [{ id: 'browser', label: 'Browser' }] : []),
     { id: 'context-soul', label: 'Workspace context' },
     { id: 'language-servers', label: 'Language Servers' },
     { id: 'sharing', label: 'Sharing' },
@@ -122,6 +124,8 @@
       <InsightsSettings />
     {:else if page === 'snipping'}
       <SnipSettings />
+    {:else if page === 'browser' && auth.can('browser', 'view')}
+      <BrowserSettings />
     {:else if page === 'skills' && auth.can('settings', 'admin')}
       <SkillsLibrary />
     {:else if page === 'skill-eval' && auth.can('settings', 'admin')}

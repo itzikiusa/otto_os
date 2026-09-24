@@ -12,8 +12,9 @@
 //               own metadata (`device_width/height`) says how big that is.
 //
 // The frame is drawn CONTAINED in the panel (letterboxed while a resize is
-// in flight and the remote hasn't caught up), so a click on a bar outside the
-// picture maps to nothing rather than to a clamped edge pixel.
+// in flight and the remote hasn't caught up — or when the panel is outside
+// the daemon's viewport clamp), so a click on a bar outside the picture maps
+// to nothing rather than to a clamped edge pixel.
 
 export interface Size {
   width: number;
@@ -33,8 +34,8 @@ export interface Fit extends Size {
   scale: number;
 }
 
-/** The subset of a frame's metadata the mapping needs (mirrors CDP
- *  `Page.ScreencastFrameMetadata`, snake-cased by the daemon). */
+/** The subset of a frame header the mapping needs (`BrowserLiveFrameHeader`,
+ *  from CDP `Page.ScreencastFrameMetadata`). */
 export interface FrameGeometry {
   /** The remote viewport width in CSS px. */
   device_width: number;
@@ -85,18 +86,6 @@ export function clientToPage(client: Point, box: Box, image: Size, frame: FrameG
   return { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
 }
 
-/** The inverse of `clientToPage`, for drawing things the server reports in
- *  page coordinates (the agent's ghost cursor, a highlighted target) over the
- *  frame. Returns coordinates relative to the box's top-left. */
-export function pageToBox(page: Point, box: Size, image: Size, frame: FrameGeometry): Point | null {
-  const fit = fitContain(image, box);
-  if (fit.scale === 0 || frame.device_width <= 0) return null;
-  const imagePxPerCss = image.width / frame.device_width;
-  const ix = page.x * imagePxPerCss;
-  const iy = (page.y + (frame.offset_top ?? 0)) * imagePxPerCss;
-  return { x: fit.x + ix * fit.scale, y: fit.y + iy * fit.scale };
-}
-
 export interface ViewportRequest extends Size {
   /** Device scale factor to render at (so text stays crisp on Retina). */
   device_scale_factor: number;
@@ -110,10 +99,13 @@ export interface ViewportLimits {
   maxPixels: number;
 }
 
+/** The daemon clamps `resize` to 200..3840 × 200..2160, dsf 1..3 (ws.md
+ *  §1b); asking for the same range keeps the frame's aspect equal to the
+ *  panel's instead of being silently clamped server-side. */
 export const DEFAULT_VIEWPORT_LIMITS: ViewportLimits = {
-  min: { width: 240, height: 160 },
-  max: { width: 3840, height: 2400 },
-  maxPixels: 3840 * 2400,
+  min: { width: 200, height: 200 },
+  max: { width: 3840, height: 2160 },
+  maxPixels: 3840 * 2160,
 };
 
 /**

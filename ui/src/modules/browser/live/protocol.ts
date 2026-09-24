@@ -1,119 +1,37 @@
-// Remote live browser — wire protocol (client side). The ONE place that knows
-// message shapes, so the rest of the view talks in intents (move, click,
-// type, resize, take over…) and a contract change lands here only.
-//
-// PROVISIONAL: written against local fixtures before the daemon contract
-// (docs/contracts/ws.md "Browser live") landed. Keep it in lockstep with
-// that section and ui/src/lib/api/types.ts once it exists.
+// Remote live browser — wire protocol helpers (client side) for
+// `WS /ws/browser/{tab_id}/live` (docs/contracts/ws.md §1b). The message
+// shapes themselves are the contract types in lib/api/types.ts; this file
+// holds the pure pieces around them (binary frame parsing, parsing JSON
+// frames, cursor sanitising, driver/closed copy) so they can be unit-tested
+// in node — type-only imports keep it import-free at runtime.
 
-import type { FrameGeometry } from './geometry';
-import type { KeyPayload } from './keys';
+import type {
+  BrowserLiveClientMsg,
+  BrowserLiveController,
+  BrowserLiveFrameHeader,
+  BrowserLiveServerMsg,
+  BrowserLiveSession,
+} from '../../../lib/api/types';
 
-export type PointerButton = 'none' | 'left' | 'middle' | 'right';
+export type ClientMsg = BrowserLiveClientMsg;
+export type ServerMsg = BrowserLiveServerMsg;
+export type FrameHeader = BrowserLiveFrameHeader;
+export type PointerButton = 'left' | 'middle' | 'right' | 'back' | 'forward' | 'none';
 
-/** Who is steering the remote page. `user` = this viewer (or another human
- *  viewer), `agent` = an agent session holding the input lock. */
-export interface LiveLock {
-  holder: 'none' | 'user' | 'agent';
-  /** The agent session id when an agent holds it. */
-  session_id?: string | null;
-  /** Display name of the agent (session title / persona). */
-  agent_name?: string | null;
-  /** Provider id for `ProviderIcon` (claude, codex…). */
-  provider?: string | null;
-  /** What the agent says it is doing, if anything. */
-  activity?: string | null;
-  /** True when THIS connection holds the lock. */
-  mine?: boolean;
-}
-
-/** An outward action waiting for a person (plan §4.6 approval card). */
-export interface LiveApproval {
-  id: string;
-  /** Short title: "Submit a form on this site?" */
-  title: string;
-  /** Agent's stated intent: "Personal Assistant wants to click Confirm reschedule." */
-  summary: string;
-  /** Why Otto classed it outward ("it submits a POST form"). */
-  reason?: string | null;
-  action_class: 'outward' | 'credential' | 'download' | 'new_origin' | 'eval' | string;
-  where: string;
-  what: string;
-  who_sees: string;
-  as_profile?: string | null;
-  /** Blob URL of the pre-action screenshot with the target boxed. */
-  screenshot_url?: string | null;
-  agent_name?: string | null;
-  provider?: string | null;
-  requested_at: string;
-  /** Page-space box of the target, for the on-frame highlight. */
-  target?: { x: number; y: number; width: number; height: number } | null;
-}
-
-export type ApprovalDecision = 'approve_once' | 'always_site' | 'deny' | 'take_over';
-
-export interface NavState {
-  url: string;
-  title: string;
-  loading: boolean;
-  can_go_back: boolean;
-  can_go_forward: boolean;
-}
-
-export interface FrameMeta extends FrameGeometry {
-  seq: number;
-  /** Page timestamp of the frame (seconds, CDP), for latency. */
-  timestamp?: number;
-}
-
-/** Server → client. JSON text messages; frames may instead arrive as binary
- *  messages (see `parseBinaryFrame`). */
-export type ServerMsg =
-  | { type: 'hello'; session_id: string; engine: string; engine_version?: string; nav: NavState; lock: LiveLock; capabilities?: string[]; viewport?: { width: number; height: number; device_scale_factor: number } }
-  | { type: 'frame'; seq: number; data: string; mime?: string; meta: FrameGeometry & { timestamp?: number } }
-  | { type: 'nav'; nav: NavState }
-  | { type: 'cursor'; cursor: string }
-  | { type: 'lock'; lock: LiveLock }
-  | { type: 'approval'; approval: LiveApproval }
-  | { type: 'approval_resolved'; id: string; decision: string }
-  | { type: 'agent_pointer'; x: number; y: number; label?: string | null }
-  | { type: 'pick_result'; selector: string; outer_html: string; text: string; url: string }
-  | { type: 'new_tab'; url: string }
-  | { type: 'pong'; t: number }
-  | { type: 'error'; code: string; message: string }
-  | { type: 'ended'; reason: string };
-
-/** Client → server. */
-export type ClientMsg =
-  | { type: 'mouse'; action: 'move' | 'down' | 'up'; x: number; y: number; button: PointerButton; buttons: number; click_count: number; modifiers: number; pointer?: 'mouse' | 'touch' | 'pen' }
-  | { type: 'wheel'; x: number; y: number; dx: number; dy: number; modifiers: number }
-  | ({ type: 'key'; action: 'down' | 'up' } & KeyPayload)
-  | { type: 'text'; text: string }
-  | { type: 'resize'; width: number; height: number; device_scale_factor: number }
-  | { type: 'navigate'; url: string }
-  | { type: 'history'; action: 'back' | 'forward' | 'reload' | 'stop' }
-  | { type: 'frame_ack'; seq: number }
-  | { type: 'ping'; t: number }
-  | { type: 'take_over' }
-  | { type: 'hand_back' }
-  | { type: 'approval'; id: string; decision: ApprovalDecision; reason?: string }
-  | { type: 'pick'; x: number; y: number }
-  | { type: 'focus'; focused: boolean };
+/** Binary frame format version this client understands. */
+export const FRAME_VERSION = 1;
 
 /** What the live view reports up to the Browser page's toolbar. */
 export interface LiveViewState {
   status: 'idle' | 'connecting' | 'live' | 'reconnecting' | 'ended';
-  nav: NavState | null;
-  lock: LiveLock;
-  /** The engine supports remote element picking. */
-  canPick: boolean;
+  session: BrowserLiveSession | null;
 }
 
 export function encode(msg: ClientMsg): string {
   return JSON.stringify(msg);
 }
 
-/** Parse one text message; unknown/invalid input yields null (ignored). */
+/** Parse one JSON text frame; unknown/invalid input yields null (ignored). */
 export function parseServer(raw: string): ServerMsg | null {
   let v: unknown;
   try {
@@ -126,23 +44,23 @@ export function parseServer(raw: string): ServerMsg | null {
 }
 
 /**
- * Binary frame layout: a 4-byte big-endian header length, a UTF-8 JSON
- * header (`{seq, meta, mime}`), then the image bytes. Lets the daemon skip
- * base64 (+33%) on the hot path.
+ * Binary screencast frame:
+ *   byte 0      format version (1)
+ *   bytes 1..5  u32 big-endian N = JSON header length
+ *   bytes 5..   N bytes of UTF-8 JSON header (`BrowserLiveFrameHeader`)
+ *   then        the image bytes (JPEG)
+ * A frame with an unknown version or a malformed header is dropped.
  */
-export function parseBinaryFrame(buf: ArrayBuffer): { seq: number; meta: FrameGeometry & { timestamp?: number }; mime: string; bytes: Uint8Array } | null {
-  if (buf.byteLength < 4) return null;
+export function parseBinaryFrame(buf: ArrayBuffer): { header: FrameHeader; bytes: Uint8Array } | null {
+  if (buf.byteLength < 5) return null;
   const view = new DataView(buf);
-  const len = view.getUint32(0);
-  if (len <= 0 || 4 + len > buf.byteLength) return null;
+  if (view.getUint8(0) !== FRAME_VERSION) return null;
+  const len = view.getUint32(1);
+  if (len <= 0 || 5 + len > buf.byteLength) return null;
   try {
-    const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, len)));
-    return {
-      seq: Number(head.seq) || 0,
-      meta: head.meta,
-      mime: typeof head.mime === 'string' ? head.mime : 'image/jpeg',
-      bytes: new Uint8Array(buf, 4 + len),
-    };
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 5, len))) as FrameHeader;
+    if (typeof header.seq !== 'number' || !(header.device_width > 0) || !(header.device_height > 0)) return null;
+    return { header, bytes: new Uint8Array(buf, 5 + len) };
   } catch {
     return null;
   }
@@ -150,12 +68,19 @@ export function parseBinaryFrame(buf: ArrayBuffer): { seq: number; meta: FrameGe
 
 /** DOM `MouseEvent.button` → wire button. */
 export function buttonName(button: number): PointerButton {
-  return button === 0 ? 'left' : button === 1 ? 'middle' : button === 2 ? 'right' : 'none';
+  switch (button) {
+    case 0: return 'left';
+    case 1: return 'middle';
+    case 2: return 'right';
+    case 3: return 'back';
+    case 4: return 'forward';
+    default: return 'none';
+  }
 }
 
-/** CSS cursor values the server may report (CDP/`getComputedStyle` names);
- *  anything else falls back to `default` so a hostile page can't set a
- *  `url(...)` cursor on Otto's own chrome. */
+/** CSS cursor values the daemon may report; anything else falls back to
+ *  `default` so a hostile page can't put a `url(...)` cursor on Otto's own
+ *  chrome. */
 const CURSORS = new Set([
   'auto', 'default', 'none', 'pointer', 'text', 'vertical-text', 'crosshair', 'move', 'grab',
   'grabbing', 'wait', 'progress', 'help', 'not-allowed', 'no-drop', 'copy', 'alias',
@@ -166,4 +91,32 @@ const CURSORS = new Set([
 
 export function safeCursor(c: string | null | undefined): string {
   return c && CURSORS.has(c) ? c : 'default';
+}
+
+/**
+ * Who may send input, from this viewer's point of view.
+ *   agent  — an agent drives; input is refused until the viewer takes over
+ *   other  — another person drives this session right now
+ *   me     — this user drives (or nobody does: the first input claims it)
+ */
+export function driverFor(controller: BrowserLiveController, controllerUserId: string | null, meId: string | null): 'agent' | 'other' | 'me' {
+  if (controller === 'agent') return 'agent';
+  if (controller === 'human' && controllerUserId && meId && controllerUserId !== meId) return 'other';
+  return 'me';
+}
+
+/** Human copy for a `closed` frame's reason. */
+export function closedReason(reason: string): string {
+  switch (reason) {
+    case 'idle': return 'It was closed after a while with no one watching.';
+    case 'crashed': return 'The browser engine stopped unexpectedly.';
+    case 'revoked': return 'Your access to this workspace changed.';
+    case 'replaced': return 'This tab was opened in another window.';
+    default: return 'The live tab was closed.';
+  }
+}
+
+/** Human copy for the SSRF guard's `blocked` frame. */
+export function blockedCopy(host: string): string {
+  return `Otto blocked a request to ${host}. Pages in the live browser can't reach this Mac, your local network or cloud metadata addresses.`;
 }

@@ -1,105 +1,113 @@
 <script lang="ts">
-  // Remote live browser: a daemon-run Chromium tab, streamed to this pane as
-  // screencast frames over a WebSocket and driven back with input messages.
-  // Unlike the desktop app's native child webview it works anywhere the Otto
-  // UI runs — a remote web session, the PWA, a phone — and it is the surface
-  // an agent drives *visibly* (ghost cursor, Take over / Hand back, approval
-  // cards for outward actions).
+  // Remote live browser: a tab's daemon-owned Chromium, streamed into this
+  // pane as screencast frames over `WS /ws/browser/{tab_id}/live` and driven
+  // back with input frames (docs/contracts/ws.md §1b). Unlike the desktop
+  // app's native child webview it works anywhere the Otto UI runs — a remote
+  // web session, the PWA, a phone — and it is the surface an agent drives
+  // *visibly*: Take over / Hand back, and approval cards for the outward
+  // requests the daemon holds while an agent drives.
   //
   // Pure logic lives next door and is unit-tested: geometry.ts (client ↔
   // page coordinates through letterboxing + DPR), keys.ts (which keys stay
-  // with Otto), throttle.ts (move coalescing), connection.ts (reconnect
-  // reducer), protocol.ts (the wire shapes). This file is the DOM glue.
+  // with Otto), throttle.ts (move/wheel coalescing), connection.ts (reconnect
+  // reducer), protocol.ts (frame parsing + copy), approvalFacts.ts. This file
+  // is the DOM glue.
   //
   // Keyboard model: a visually-hidden <textarea> is the focus sink, so IME
-  // composition, soft keyboards and paste all work. Click (or Enter on the
-  // focused surface) gives the page the keyboard; Esc hands it back (⇧Esc
-  // sends Esc to the page). Otto's own chords (⌘K, ⌘T, ⌘J…) never reach the
-  // page — lib/keys.ts handles them first on window capture.
+  // composition, soft keyboards and paste all work. Click (or Tab onto it)
+  // gives the page the keyboard; Esc hands it back (⇧Esc sends Esc to the
+  // page). Otto's own chords (⌘K, ⌘T, ⌘J…) never reach the page — lib/keys.ts
+  // handles them first on window capture.
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
+  import { toasts } from '../../../lib/toast.svelte';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { ApiError } from '../../../lib/api/client';
+  import { mcpCpApi } from '../../../lib/api/mcp';
   import * as liveApi from '../../../lib/api/browserLive';
-  import type { BrowserTab } from '../../../lib/api/types';
+  import { browserLive } from '../../../lib/stores/browserLive.svelte';
+  import { formatBytes } from '../../../lib/metric-format';
+  import type { BrowserLiveSession, BrowserTab, McpApproval } from '../../../lib/api/types';
   import ApprovalCard from './ApprovalCard.svelte';
-  import { clientToPage, pageToBox, viewportChanged, viewportFor, type ViewportRequest } from './geometry';
+  import type { ApprovalChoice } from './approvalFacts';
+  import PageDialogCard from './PageDialogCard.svelte';
+  import { clientToPage, viewportChanged, viewportFor, type ViewportRequest } from './geometry';
   import { keyPayload, routeKey } from './keys';
-  import { coalesce, mergeWheel, wheelPixels, type WheelDelta } from './throttle';
+  import { coalesce, mergeWheel, wheelPixels, type Clock, type WheelDelta } from './throttle';
   import {
     EMPTY_METER,
     INITIAL,
     isStale,
+    latencySample,
     meterFps,
     meterFrame,
-    meterRtt,
+    meterLatency,
     reduce,
     type ConnEvent,
     type ConnState,
   } from './connection';
   import {
+    blockedCopy,
     buttonName,
+    closedReason,
+    driverFor,
     encode,
     parseBinaryFrame,
     parseServer,
     safeCursor,
-    type ApprovalDecision,
     type ClientMsg,
-    type FrameMeta,
-    type LiveApproval,
-    type LiveLock,
+    type FrameHeader,
     type LiveViewState,
-    type NavState,
     type ServerMsg,
   } from './protocol';
 
   interface Props {
     tab: BrowserTab;
-    /** Remote element-pick mode (the urlbar's target button). */
-    pickMode?: boolean;
     /** The remote page navigated (link click, redirect, history). */
     onnav?: (url: string, title: string) => void;
-    /** Connection / nav / lock state for the parent's toolbar. */
+    /** Connection + session state for the parent's toolbar. */
     onstate?: (s: LiveViewState) => void;
     /** ⌘L inside the page: focus Otto's address bar. */
     onfocusurl?: () => void;
-    /** A picked element (pick mode). */
-    onpick?: (p: { selector: string; outerHtml: string; text: string; url: string }) => void;
-    /** The page asked for a new tab (window.open / target=_blank). */
+    /** "Open in new tab" for a page's popup. */
     onnewtab?: (url: string) => void;
     /** "Switch to Reader" from the ended state. */
     onreader?: () => void;
   }
-  let { tab, pickMode = false, onnav, onstate, onfocusurl, onpick, onnewtab, onreader }: Props = $props();
+  let { tab, onnav, onstate, onfocusurl, onnewtab, onreader }: Props = $props();
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  const MOVE_INTERVAL_MS = 33; // ≈30 moves/s — plenty for hover, cheap for CDP
-  const PING_MS = 2000;
+  const MOVE_INTERVAL_MS = 33; // ≈30 moves/s — the daemon coalesces further (≥ 8 ms)
   const RESIZE_DEBOUNCE_MS = 120;
+  const PASTE_CAP = 100_000; // ws.md: paste ≤ 100 000 chars
 
   let surfaceEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let sinkEl = $state<HTMLTextAreaElement | null>(null);
 
-  let conn: ConnState = $state(INITIAL);
+  let conn = $state<ConnState>(INITIAL);
   let meter = $state(EMPTY_METER);
   let now = $state(Date.now());
-  let nav: NavState | null = $state(null);
-  let lock: LiveLock = $state({ holder: 'none' });
-  let engineLabel = $state('');
-  let capabilities: string[] = $state([]);
+  let session = $state<BrowserLiveSession | null>(null);
   let cursor = $state('default');
-  let approval: LiveApproval | null = $state(null);
-  let deciding = $state(false);
-  let ghost: { x: number; y: number; label: string } | null = $state(null);
   let kbdFocused = $state(false);
+  /** Watch-only: this viewer lacks Edit (the daemon said `forbidden`). */
+  let watchOnly = $state(false);
+  /** This viewer took control FROM an agent — offer Hand back. */
+  let tookOverFromAgent = $state(false);
+  let banner = $state<{ tone: 'warn' | 'info'; text: string; action?: { label: string; run: () => void } } | null>(null);
+  let pageDialog = $state<Extract<ServerMsg, { type: 'dialog' }> | null>(null);
+  let approval = $state<{ id: string; title: string; detail: McpApproval | null } | null>(null);
+  let deciding = $state(false);
+  let decideError = $state('');
+  /** Why a (re)connect failed, shown in the reconnecting banner. */
   let errorNote = $state('');
   /** Box of the surface in client px (kept by the ResizeObserver). */
   let box = $state({ width: 0, height: 0 });
-  /** Size of the last decoded frame, for overlay placement. */
+  /** Size of the last decoded frame. */
   let imageSize = $state({ width: 0, height: 0 });
-  let frameMeta: FrameMeta | null = $state(null);
+  let header: FrameHeader | null = null;
 
   let sock: WebSocket | null = null;
   /** Bumped on every (re)connect: late events from an old socket are dropped. */
@@ -107,20 +115,29 @@
   let bitmap: ImageBitmap | null = null;
   let lastViewport: ViewportRequest | null = null;
   /** The URL the remote last reported (or we last asked for): the tab.url
-   *  watcher only sends `navigate` when the address bar changed it. */
+   *  watcher only sends `goto` when the address bar changed it. */
   let knownUrl = '';
-  const downKeys = new Set<string>();
+  const downKeys = new Map<string, { key: string; code: string }>();
   let lastDown = { t: 0, x: 0, y: 0, button: -1, count: 0 };
 
   const dispatch = (ev: ConnEvent) => (conn = reduce(conn, ev, Math.random()));
-  const canDrive = $derived(lock.holder !== 'agent' || !!lock.mine);
-  const canPick = $derived(capabilities.includes('pick'));
-  const stale = $derived(isStale(conn, now));
+  const driver = $derived(session ? driverFor(session.controller, session.controller_user_id, auth.me?.id ?? null) : 'me');
+  const stale = $derived(isStale(conn));
   const fps = $derived(meterFps(meter, now));
   const hasFrame = $derived(imageSize.width > 0);
+  /** Input goes out only while live, while this viewer may drive, and while
+   *  no card needs an answer first. */
+  const inputLive = $derived(conn.status === 'live' && driver !== 'agent' && !watchOnly && !pageDialog);
 
   function send(msg: ClientMsg): void {
     if (sock && sock.readyState === WebSocket.OPEN) sock.send(encode(msg));
+  }
+
+  /** Send a user action (not a hover move): marks the start of a latency
+   *  sample for the next frame. */
+  function act(msg: ClientMsg): void {
+    send(msg);
+    dispatch({ type: 'input', at: Date.now() });
   }
 
   // ── connection ─────────────────────────────────────────────────────────
@@ -129,33 +146,44 @@
     return viewportFor(box.width > 0 ? box : { width: 1280, height: 800 }, window.devicePixelRatio || 1);
   }
 
-  async function connect(tabId: string): Promise<void> {
+  async function connect(t: BrowserTab): Promise<void> {
     const mine = ++gen;
     dispatch({ type: 'connect' });
-    errorNote = '';
-    let wsPath: string;
     try {
       const vp = currentViewport();
-      const r = await liveApi.startLive(tabId, vp);
+      // Opens the session, or re-attaches to this user's existing one.
+      const s = await liveApi.openLive(t.id, { viewport: vp, url: t.url || undefined });
+      if (mine !== gen) return;
       lastViewport = vp;
-      wsPath = r.ws_path;
+      session = s;
+      knownUrl = s.url || t.url;
     } catch (e) {
       if (mine !== gen) return;
-      if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
-        dispatch({ type: 'ended', reason: e.message || 'This tab has no live session.' });
+      const status = e instanceof ApiError ? e.status : 0;
+      const code = e instanceof ApiError ? e.code : '';
+      if (status === 409 && code === 'engine_not_installed') {
+        // The engine went away: back to the enable step.
+        void browserLive.load();
+        dispatch({ type: 'ended', reason: 'The live browser engine is not installed.' });
+      } else if (status === 409) {
+        dispatch({ type: 'ended', reason: 'Someone else has this tab open live. Open the page in a new tab to browse it yourself.' });
+      } else if (status === 429) {
+        dispatch({ type: 'ended', reason: 'Too many live tabs are open on this Mac. Close one, then reconnect.' });
+      } else if (status === 400 || status === 403 || status === 404) {
+        dispatch({ type: 'ended', reason: e instanceof Error && e.message ? e.message : 'This page can’t be opened live.' });
       } else {
         errorNote = e instanceof Error ? e.message : String(e);
-        dispatch({ type: 'close', code: 1006, reason: 'Could not start the live browser.' });
+        dispatch({ type: 'close', code: 1006, reason: 'Couldn’t start the live browser.' });
       }
       return;
     }
-    if (mine !== gen) return;
-    const s = liveApi.openLiveSocket(wsPath);
+    const s = liveApi.openLiveSocket(t.id);
     sock = s;
     s.onopen = () => {
       if (mine !== gen) return;
+      errorNote = '';
       dispatch({ type: 'open' });
-      // The viewport may have changed while the socket was opening.
+      // The pane may have changed size while the session was opening.
       sendResize(true);
     };
     s.onmessage = (ev) => {
@@ -165,10 +193,7 @@
         if (msg) onServer(msg);
       } else if (ev.data instanceof ArrayBuffer) {
         const f = parseBinaryFrame(ev.data);
-        if (f) {
-          const bytes = new Uint8Array(f.bytes); // own the buffer (BlobPart typing)
-          enqueueFrame(new Blob([bytes], { type: f.mime }), { ...f.meta, seq: f.seq });
-        }
+        if (f) enqueueFrame(new Blob([new Uint8Array(f.bytes)], { type: f.header.mime || 'image/jpeg' }), f.header);
       }
     };
     s.onclose = (ev) => {
@@ -182,6 +207,7 @@
   function disconnect(): void {
     gen++;
     moves.cancel();
+    wheels.cancel();
     const s = sock;
     sock = null;
     if (s) {
@@ -194,31 +220,36 @@
     }
   }
 
-  // (Re)connect whenever the tab changes; tear down on unmount.
+  // (Re)connect whenever the tab changes; tear down on unmount. The session
+  // itself stays on the daemon (idle-reaped) so coming back re-attaches.
   $effect(() => {
     const id = tab.id;
     untrack(() => {
       conn = INITIAL;
-      nav = null;
-      lock = { holder: 'none' };
+      session = null;
       approval = null;
-      ghost = null;
+      pageDialog = null;
+      banner = null;
+      watchOnly = false;
+      tookOverFromAgent = false;
       imageSize = { width: 0, height: 0 };
       bitmap?.close();
       bitmap = null;
-      knownUrl = tab.url;
-      void connect(id);
+      header = null;
+      void connect(tab);
     });
-    return () => disconnect();
+    return () => {
+      void id;
+      disconnect();
+    };
   });
 
   // Backoff: schedule the retry the reducer asked for.
   $effect(() => {
     if (conn.status !== 'reconnecting') return;
-    const id = tab.id;
     const t = setTimeout(() => {
       dispatch({ type: 'retry' });
-      untrack(() => void connect(id));
+      untrack(() => void connect(tab));
     }, conn.retryInMs);
     return () => clearTimeout(t);
   });
@@ -226,87 +257,90 @@
   function retryNow(): void {
     disconnect();
     conn = INITIAL;
-    void connect(tab.id);
+    void connect(tab);
   }
 
-  // Ping (latency + liveness) and a 1 s clock for the stale/fps readouts.
+  // A 1 s clock for the fps readout.
   $effect(() => {
     if (conn.status !== 'live') return;
-    const ping = setInterval(() => send({ type: 'ping', t: performance.now() }), PING_MS);
     const tick = setInterval(() => (now = Date.now()), 1000);
-    send({ type: 'ping', t: performance.now() });
-    return () => {
-      clearInterval(ping);
-      clearInterval(tick);
-    };
+    return () => clearInterval(tick);
   });
 
   function onServer(msg: ServerMsg): void {
     switch (msg.type) {
-      case 'hello':
-        engineLabel = msg.engine_version ? `${msg.engine} ${msg.engine_version}` : msg.engine;
-        capabilities = Array.isArray(msg.capabilities) ? msg.capabilities : [];
-        applyNav(msg.nav);
-        lock = msg.lock ?? { holder: 'none' };
-        break;
-      case 'frame': {
-        const bin = atob(msg.data);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        enqueueFrame(new Blob([bytes], { type: msg.mime || 'image/jpeg' }), { ...msg.meta, seq: msg.seq });
+      case 'state': {
+        const prev = session;
+        session = msg.session;
+        if (prev?.controller === 'agent' && msg.session.controller === 'human' && msg.session.controller_user_id === auth.me?.id) {
+          tookOverFromAgent = true;
+        }
+        if (msg.session.controller === 'agent') {
+          tookOverFromAgent = false;
+          releaseKeys();
+        }
+        if (msg.session.state === 'crashed' || msg.session.state === 'closed') {
+          dispatch({ type: 'ended', reason: closedReason(msg.session.state) });
+          disconnect();
+          return;
+        }
+        applyNav(msg.session);
         break;
       }
-      case 'nav':
-        applyNav(msg.nav);
-        break;
       case 'cursor':
         cursor = safeCursor(msg.cursor);
         break;
-      case 'lock':
-        lock = msg.lock;
-        if (lock.holder === 'agent' && !lock.mine) releaseKeys();
+      case 'dialog':
+        pageDialog = msg;
         break;
-      case 'approval':
-        approval = msg.approval;
-        deciding = false;
+      case 'blocked':
+        banner = { tone: 'warn', text: blockedCopy(msg.host) };
         break;
-      case 'approval_resolved':
-        if (approval?.id === msg.id) {
-          approval = null;
-          deciding = false;
+      case 'popup':
+        banner = {
+          tone: 'info',
+          text: 'The page tried to open a new window.',
+          action: onnewtab ? { label: 'Open in new tab', run: () => onnewtab?.(msg.url) } : undefined,
+        };
+        break;
+      case 'download':
+        if (msg.status === 'quarantined') {
+          toasts.info(
+            'Download saved to quarantine',
+            `${msg.filename}${msg.bytes ? ` · ${formatBytes(msg.bytes)}` : ''} — kept on this Mac, never opened.`,
+          );
+        } else {
+          toasts.warn('Download blocked', `${msg.filename} — downloads are turned off in Settings → Browser.`);
         }
         break;
-      case 'agent_pointer':
-        ghost = { x: msg.x, y: msg.y, label: msg.label || lock.agent_name || 'Agent' };
-        break;
-      case 'pick_result':
-        onpick?.({ selector: msg.selector, outerHtml: msg.outer_html, text: msg.text, url: msg.url });
-        break;
-      case 'new_tab':
-        onnewtab?.(msg.url);
-        break;
-      case 'pong':
-        meter = meterRtt(meter, Math.max(0, performance.now() - msg.t));
-        dispatch({ type: 'heartbeat', at: Date.now() });
+      case 'approval':
+        void onApproval(msg.approval_id, msg.status, msg.title);
         break;
       case 'error':
-        errorNote = msg.message;
+        if (msg.code === 'forbidden') {
+          watchOnly = true;
+          releaseKeys();
+        } else if (msg.code === 'nav_failed') {
+          toasts.error("Couldn't open the page", msg.message);
+        } else if (msg.code === 'engine_unavailable') {
+          errorNote = msg.message;
+        }
+        // not_driver: the drive bar already says an agent is driving;
+        // input_failed / bad_frame: transient, nothing for a person to do.
         break;
-      case 'ended':
-        dispatch({ type: 'ended', reason: msg.reason });
+      case 'closed':
+        dispatch({ type: 'ended', reason: closedReason(msg.reason) });
         disconnect();
         break;
     }
   }
 
-  function applyNav(n: NavState | null | undefined): void {
-    if (!n) return;
-    nav = n;
-    if (n.url && n.url !== knownUrl) {
-      knownUrl = n.url;
-      onnav?.(n.url, n.title);
-    } else if (n.title && n.title !== tab.title) {
-      onnav?.(n.url, n.title);
+  function applyNav(s: BrowserLiveSession): void {
+    if (s.url && s.url !== knownUrl) {
+      knownUrl = s.url;
+      onnav?.(s.url, s.title);
+    } else if (s.title && s.title !== tab.title) {
+      onnav?.(s.url || tab.url, s.title);
     }
   }
 
@@ -317,26 +351,83 @@
     untrack(() => {
       if (url && url !== knownUrl) {
         knownUrl = url;
-        send({ type: 'navigate', url });
+        act({ type: 'nav', action: 'goto', url });
       }
     });
   });
 
   $effect(() => {
-    onstate?.({ status: conn.status, nav, lock, canPick });
+    onstate?.({ status: conn.status, session });
   });
+
+  // ── approvals ──────────────────────────────────────────────────────────
+
+  async function onApproval(id: string, status: 'pending' | 'approved' | 'denied', title: string): Promise<void> {
+    if (status !== 'pending') {
+      if (approval?.id === id) {
+        approval = null;
+        deciding = false;
+      }
+      return;
+    }
+    approval = { id, title, detail: null };
+    decideError = '';
+    try {
+      const rows = await mcpCpApi.cpApprovals('pending');
+      const row = rows.find((r) => r.id === id) ?? null;
+      if (approval?.id === id) approval = { id, title, detail: row };
+    } catch {
+      /* no mcp:view — the card still shows the title and the decisions */
+    }
+  }
+
+  async function decide(choice: ApprovalChoice): Promise<void> {
+    const a = approval;
+    if (!a || deciding) return;
+    let note: string | undefined;
+    if (choice === 'deny') {
+      const why = await confirmer.promptText("Tell the agent why (optional). It won't send this request.", {
+        title: 'Deny the request',
+        confirmLabel: 'Deny',
+        placeholder: 'Wrong time slot',
+      });
+      if (why === null) return;
+      note = why.trim() || undefined;
+    } else if (choice === 'take_over') {
+      note = 'Taken over by the user — they will finish this step themselves.';
+    }
+    deciding = true;
+    decideError = '';
+    try {
+      await mcpCpApi.cpDecide(a.id, { approved: choice === 'approve', note });
+      if (choice === 'take_over') takeOver();
+      if (approval?.id === a.id) approval = null;
+    } catch (e) {
+      decideError =
+        e instanceof ApiError && e.status === 403
+          ? 'You can’t decide MCP approvals in this workspace. Ask an admin, or take over the page.'
+          : `Couldn’t record your decision: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      deciding = false;
+    }
+  }
+
+  function answerDialog(accept: boolean, promptText?: string): void {
+    send({ type: 'dialog', accept, ...(promptText !== undefined ? { prompt_text: promptText } : {}) });
+    pageDialog = null;
+  }
 
   // ── frames ─────────────────────────────────────────────────────────────
   // Decode off the main thread (createImageBitmap) and keep only the LATEST
   // pending frame: if the viewer's machine falls behind, intermediate frames
-  // are skipped rather than queued. The ack after each decode is what lets
-  // the daemon pace the screencast to this client.
+  // are skipped rather than queued. The ack goes out after the frame is
+  // DRAWN — that is what paces the daemon's screencast to this viewer.
 
-  let pendingFrame: { blob: Blob; meta: FrameMeta } | null = null;
+  let pendingFrame: { blob: Blob; header: FrameHeader } | null = null;
   let decoding = false;
 
-  function enqueueFrame(blob: Blob, meta: FrameMeta): void {
-    pendingFrame = { blob, meta };
+  function enqueueFrame(blob: Blob, h: FrameHeader): void {
+    pendingFrame = { blob, header: h };
     if (!decoding) void pump();
   }
 
@@ -354,17 +445,19 @@
         }
         bitmap?.close();
         bitmap = bmp;
-        frameMeta = f.meta;
+        header = f.header;
         imageSize = { width: bmp.width, height: bmp.height };
         draw();
         const at = Date.now();
+        const lag = latencySample(conn, at);
+        if (lag !== null) meter = meterLatency(meter, lag);
         dispatch({ type: 'frame', at });
         meter = meterFrame(meter, at);
         now = at;
       } catch {
         /* a corrupt frame: skip it, the next one repaints */
       }
-      send({ type: 'frame_ack', seq: f.meta.seq });
+      send({ type: 'ack', seq: f.header.seq });
     }
     decoding = false;
   }
@@ -390,7 +483,7 @@
   }
 
   // Keep the canvas matched to the pane and the remote viewport matched to
-  // the canvas (debounced — a window drag fires dozens of sizes).
+  // the pane (debounced — a window drag fires dozens of sizes).
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   function sendResize(force = false): void {
     const vp = currentViewport();
@@ -427,36 +520,32 @@
 
   // ── pointer input ───────────────────────────────────────────────────────
 
-  const moves = coalesce<ClientMsg>(send, MOVE_INTERVAL_MS, {
+  const clock: Clock = {
     now: () => performance.now(),
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-  });
+  };
+  const moves = coalesce<ClientMsg>(send, MOVE_INTERVAL_MS, clock);
   let wheelAcc: WheelDelta | null = null;
   const wheels = coalesce<null>(
     () => {
-      if (wheelAcc) send({ type: 'wheel', ...wheelAcc });
+      const w = wheelAcc;
       wheelAcc = null;
+      if (w) act({ type: 'mouse', action: 'wheel', x: w.x, y: w.y, delta_x: w.dx, delta_y: w.dy, modifiers: w.modifiers });
     },
     MOVE_INTERVAL_MS,
-    {
-      now: () => performance.now(),
-      setTimeout: (fn, ms) => setTimeout(fn, ms),
-      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-    },
+    clock,
   );
 
   function toPage(clientX: number, clientY: number): { x: number; y: number } | null {
-    if (!surfaceEl || !frameMeta || !hasFrame) return null;
+    if (!surfaceEl || !header || !hasFrame) return null;
     const r = surfaceEl.getBoundingClientRect();
-    return clientToPage({ x: clientX, y: clientY }, { left: r.left, top: r.top, width: r.width, height: r.height }, imageSize, frameMeta);
+    return clientToPage({ x: clientX, y: clientY }, { left: r.left, top: r.top, width: r.width, height: r.height }, imageSize, header);
   }
 
-  function mods(e: MouseEvent | KeyboardEvent | WheelEvent): number {
+  function mods(e: MouseEvent | WheelEvent): number {
     return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   }
-
-  const inputLive = $derived(conn.status === 'live' && canDrive && !approval);
 
   function clickCount(e: PointerEvent): number {
     const t = performance.now();
@@ -467,7 +556,7 @@
   }
 
   // Touch: tap = click; a one- or two-finger drag scrolls (wheel at the
-  // gesture's centroid). Long presses and pinch are left alone for now.
+  // gesture's centroid). Pinch and long-press are left alone.
   const touches = new Map<number, { x: number; y: number }>();
   let tap: { id: number; x: number; y: number; t: number; moved: boolean } | null = null;
   let lastCentroid: { x: number; y: number } | null = null;
@@ -490,17 +579,13 @@
       surfaceEl?.setPointerCapture(e.pointerId);
       return;
     }
-    e.preventDefault(); // keep focus where we put it (the sink), no text selection
+    e.preventDefault(); // keep focus in the sink, no text selection on Otto
     captureKeyboard();
     const p = toPage(e.clientX, e.clientY);
     if (!p) return;
-    if (pickMode && canPick) {
-      send({ type: 'pick', x: p.x, y: p.y });
-      return;
-    }
     moves.flush();
     surfaceEl?.setPointerCapture(e.pointerId);
-    send({ type: 'mouse', action: 'down', ...p, button: buttonName(e.button), buttons: e.buttons, click_count: clickCount(e), modifiers: mods(e), pointer: e.pointerType === 'pen' ? 'pen' : 'mouse' });
+    act({ type: 'mouse', action: 'down', ...p, button: buttonName(e.button), buttons: e.buttons, click_count: clickCount(e), modifiers: mods(e) });
   }
 
   function onPointerMove(e: PointerEvent): void {
@@ -519,10 +604,9 @@
       lastCentroid = c;
       return;
     }
-    if (pickMode && canPick) return;
     const p = toPage(e.clientX, e.clientY);
     if (!p) return;
-    moves.push({ type: 'mouse', action: 'move', ...p, button: 'none', buttons: e.buttons, click_count: 0, modifiers: mods(e) });
+    moves.push({ type: 'mouse', action: 'move', ...p, button: 'none', buttons: e.buttons, modifiers: mods(e) });
   }
 
   function onPointerUp(e: PointerEvent): void {
@@ -532,14 +616,9 @@
       if (tap && tap.id === e.pointerId && !tap.moved && performance.now() - tap.t < 600 && inputLive) {
         const p = toPage(tap.x, tap.y);
         if (p) {
-          if (pickMode && canPick) {
-            send({ type: 'pick', x: p.x, y: p.y });
-          } else {
-            const base = { ...p, click_count: 1, modifiers: 0, pointer: 'touch' as const };
-            send({ type: 'mouse', action: 'move', ...base, button: 'none', buttons: 0 });
-            send({ type: 'mouse', action: 'down', ...base, button: 'left', buttons: 1 });
-            send({ type: 'mouse', action: 'up', ...base, button: 'left', buttons: 0 });
-          }
+          send({ type: 'mouse', action: 'move', ...p, button: 'none', buttons: 0, modifiers: 0 });
+          act({ type: 'mouse', action: 'down', ...p, button: 'left', buttons: 1, click_count: 1, modifiers: 0 });
+          send({ type: 'mouse', action: 'up', ...p, button: 'left', buttons: 0, click_count: 1, modifiers: 0 });
         }
       }
       if (!touches.size) {
@@ -548,11 +627,11 @@
       }
       return;
     }
-    if (!inputLive || (pickMode && canPick)) return;
+    if (!inputLive) return;
     const p = toPage(e.clientX, e.clientY);
     if (!p) return;
     moves.flush();
-    send({ type: 'mouse', action: 'up', ...p, button: buttonName(e.button), buttons: e.buttons, click_count: lastDown.count || 1, modifiers: mods(e), pointer: e.pointerType === 'pen' ? 'pen' : 'mouse' });
+    act({ type: 'mouse', action: 'up', ...p, button: buttonName(e.button), buttons: e.buttons, click_count: lastDown.count || 1, modifiers: mods(e) });
   }
 
   function onPointerCancel(e: PointerEvent): void {
@@ -564,10 +643,11 @@
   }
 
   // The pointer surface is a picture of the remote screen, not a control of
-  // its own — the accessible control is the keyboard sink below it — so its
+  // its own — the accessible control is the keyboard sink inside it — so its
   // listeners are attached here rather than as element attributes. Wheel
   // must be non-passive anyway to stop the Otto page scrolling (Svelte
-  // attaches `onwheel` passively).
+  // attaches `onwheel` passively). Right-click goes to the page, so the
+  // viewer's own context menu is suppressed.
   $effect(() => {
     const el = surfaceEl;
     if (!el) return;
@@ -576,7 +656,7 @@
       e.preventDefault();
       const p = toPage(e.clientX, e.clientY);
       if (!p) return;
-      const h = frameMeta?.device_height ?? 800;
+      const h = header?.device_height ?? 800;
       wheelAcc = mergeWheel(wheelAcc, {
         ...p,
         dx: wheelPixels(e.deltaX, e.deltaMode, h),
@@ -611,22 +691,22 @@
   }
 
   /** Esc: give the keyboard back to Otto. Blurring keeps the sequential
-   *  focus starting point on the sink, so Tab moves on to the next control
-   *  and Shift+Tab / a click take the page back. */
+   *  focus starting point on the sink, so Tab moves on to the next control. */
   function release(): void {
     sinkEl?.blur();
   }
 
+  /** Key-up for everything still held (blur, lost control, disconnect) so
+   *  the remote never sees a stuck modifier. */
   function releaseKeys(): void {
-    for (const code of downKeys) {
-      send({ type: 'key', action: 'up', key: code, code, modifiers: 0, key_code: 0, repeat: false });
+    for (const k of downKeys.values()) {
+      send({ type: 'key', action: 'up', key: k.key, code: k.code, modifiers: 0 });
     }
     downKeys.clear();
   }
 
   function onSinkKeyDown(e: KeyboardEvent): void {
-    const route = routeKey(e, isMac);
-    switch (route) {
+    switch (routeKey(e, isMac)) {
       case 'app':
       case 'ignore':
       case 'paste':
@@ -648,8 +728,8 @@
         e.stopPropagation();
         if (!inputLive) return;
         moves.flush();
-        downKeys.add(e.code);
-        send({ type: 'key', action: 'down', ...keyPayload(e, isMac, 'down') });
+        downKeys.set(e.code, { key: e.key, code: e.code });
+        act({ type: 'key', action: 'down', ...keyPayload(e, 'down') });
     }
   }
 
@@ -657,11 +737,7 @@
     if (!downKeys.has(e.code)) return;
     e.preventDefault();
     downKeys.delete(e.code);
-    send({ type: 'key', action: 'up', ...keyPayload(e, isMac, 'up') });
-  }
-
-  function sendText(text: string): void {
-    if (text && inputLive) send({ type: 'text', text });
+    send({ type: 'key', action: 'up', ...keyPayload(e, 'up') });
   }
 
   function onSinkInput(e: Event): void {
@@ -669,69 +745,57 @@
     if (ie.isComposing || !sinkEl) return;
     const v = sinkEl.value;
     sinkEl.value = '';
-    sendText(v);
+    if (v && inputLive) act({ type: 'text', text: v });
+  }
+
+  function onCompositionUpdate(e: CompositionEvent): void {
+    if (!inputLive) return;
+    const len = e.data.length;
+    send({ type: 'ime', text: e.data, selection_start: len, selection_end: len });
   }
 
   function onCompositionEnd(e: CompositionEvent): void {
-    sendText(e.data);
     if (sinkEl) sinkEl.value = '';
+    if (e.data && inputLive) act({ type: 'text', text: e.data });
   }
 
   function onPaste(e: ClipboardEvent): void {
     e.preventDefault();
-    sendText(e.clipboardData?.getData('text/plain') ?? '');
+    if (!inputLive) return;
+    let text = e.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
+    if (text.length > PASTE_CAP) {
+      text = text.slice(0, PASTE_CAP);
+      toasts.warn('Paste shortened', `Only the first ${PASTE_CAP.toLocaleString()} characters were sent to the page.`);
+    }
+    act({ type: 'paste', text });
   }
 
   // ── navigation / control (called by the parent's toolbar) ───────────────
 
   export function back(): void {
-    send({ type: 'history', action: 'back' });
+    act({ type: 'nav', action: 'back' });
   }
   export function forward(): void {
-    send({ type: 'history', action: 'forward' });
+    act({ type: 'nav', action: 'forward' });
   }
   export function reload(): void {
-    send({ type: 'history', action: 'reload' });
+    act({ type: 'nav', action: 'reload' });
   }
-  export function focusPage(): void {
-    captureKeyboard();
+  export function stop(): void {
+    send({ type: 'nav', action: 'stop' });
   }
 
   function takeOver(): void {
-    send({ type: 'take_over' });
+    tookOverFromAgent = session?.controller === 'agent' || tookOverFromAgent;
+    send({ type: 'control', action: 'take_over' });
   }
   function handBack(): void {
     releaseKeys();
-    send({ type: 'hand_back' });
+    release();
+    tookOverFromAgent = false;
+    send({ type: 'control', action: 'hand_back' });
   }
-
-  async function decide(decision: ApprovalDecision): Promise<void> {
-    const a = approval;
-    if (!a || deciding) return;
-    if (decision === 'deny') {
-      const why = await confirmer.promptText(`Tell ${a.agent_name || 'the agent'} why (optional). It won't do this action.`, {
-        title: 'Deny this action',
-        confirmLabel: 'Deny',
-        placeholder: 'Wrong time slot',
-      });
-      if (why === null) return;
-      deciding = true;
-      send({ type: 'approval', id: a.id, decision, ...(why.trim() ? { reason: why.trim() } : {}) });
-      return;
-    }
-    deciding = true;
-    send({ type: 'approval', id: a.id, decision });
-  }
-
-  // Overlay positions (page coords → pane coords).
-  const ghostPos = $derived(ghost && frameMeta && hasFrame ? pageToBox(ghost, box, imageSize, frameMeta) : null);
-  const targetBox = $derived.by(() => {
-    const t = approval?.target;
-    if (!t || !frameMeta || !hasFrame) return null;
-    const a = pageToBox({ x: t.x, y: t.y }, box, imageSize, frameMeta);
-    const b = pageToBox({ x: t.x + t.width, y: t.y + t.height }, box, imageSize, frameMeta);
-    return a && b ? { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y } : null;
-  });
 
   const statusText = $derived.by(() => {
     switch (conn.status) {
@@ -739,60 +803,50 @@
       case 'connecting':
         return hasFrame ? 'Reconnecting…' : 'Starting the live browser…';
       case 'live':
-        return 'Live';
+        return session?.state === 'starting' ? 'Starting…' : 'Live';
       case 'reconnecting':
-        return `Connection lost — reconnecting (attempt ${conn.attempt})…`;
+        return `Connection lost. Reconnecting (attempt ${conn.attempt})…`;
       case 'ended':
         return 'Live session ended';
     }
   });
 
+  const engineLabel = $derived(
+    session ? `${session.build === 'chrome' ? 'Chrome' : 'Headless shell'} ${session.version.split('.')[0]}` : '',
+  );
+
   const isTouch = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
 </script>
 
 <div class="rlv" data-testid="remote-live" data-status={conn.status}>
-  {#if lock.holder === 'agent' && !lock.mine}
+  {#if driver === 'agent'}
     <div class="drive-bar" role="status" data-testid="live-drive-bar">
-      {#if lock.provider}<ProviderIcon provider={lock.provider} size={14} />{:else}<Icon name="cursor" size={14} />{/if}
-      <span class="who"><strong>{lock.agent_name || 'An agent'}</strong> is driving this page</span>
-      {#if lock.activity}<span class="activity" title={lock.activity}>{lock.activity}</span>{/if}
+      <Icon name="cursor" size={14} />
+      <span class="who"><span class="chip">Agent</span> An agent is driving this page. Its actions pause while you drive.</span>
       <span class="grow"></span>
-      <button class="btn small primary" onclick={takeOver}>Take over</button>
+      <button class="btn small primary" onclick={takeOver} disabled={watchOnly}>Take over</button>
     </div>
-  {:else if lock.mine && lock.session_id}
+  {:else if tookOverFromAgent}
     <div class="drive-bar mine" role="status" data-testid="live-drive-bar">
       <Icon name="user" size={14} />
-      <span class="who">You have control. <strong>{lock.agent_name || 'The agent'}</strong> is paused.</span>
+      <span class="who">You have control. The agent is paused.</span>
       <span class="grow"></span>
       <button class="btn small" onclick={handBack}>Hand back</button>
     </div>
+  {:else if watchOnly}
+    <div class="drive-bar mine" role="status" data-testid="live-drive-bar">
+      <Icon name="eye" size={14} />
+      <span class="who">You're watching. Driving this page needs Edit access to Browser in this workspace.</span>
+    </div>
   {/if}
 
-  <div
-    class="surface"
-    class:stale
-    class:kbd={kbdFocused}
-    class:blocked={!canDrive}
-    class:picking={pickMode && canPick}
-    style:cursor={pickMode && canPick ? 'crosshair' : canDrive ? cursor : 'default'}
-    bind:this={surfaceEl}
-  >
+  <div class="surface" class:stale class:kbd={kbdFocused} style:cursor={inputLive ? cursor : 'default'} bind:this={surfaceEl}>
     <canvas bind:this={canvasEl} aria-hidden="true"></canvas>
-
-    {#if targetBox}
-      <div class="target" style:inset-inline-start="{targetBox.x}px" style:top="{targetBox.y}px" style:width="{targetBox.w}px" style:height="{targetBox.h}px" aria-hidden="true"></div>
-    {/if}
-    {#if ghostPos && lock.holder === 'agent'}
-      <div class="ghost" style:inset-inline-start="{ghostPos.x}px" style:top="{ghostPos.y}px" aria-hidden="true">
-        <Icon name="cursor" size={16} />
-        <span class="ghost-label">{ghost?.label}</span>
-      </div>
-    {/if}
 
     <textarea
       class="sink"
       bind:this={sinkEl}
-      aria-label={`Live page${nav?.title ? `: ${nav.title}` : ''}. Typing goes to the page; Escape gives the keyboard back to Otto.`}
+      aria-label={`Live page${session?.title ? `: ${session.title}` : ''}. Typing goes to the page; Escape gives the keyboard back to Otto.`}
       aria-roledescription="remote browser"
       autocapitalize="off"
       autocomplete="off"
@@ -801,6 +855,7 @@
       onkeydown={onSinkKeyDown}
       onkeyup={onSinkKeyUp}
       oninput={onSinkInput}
+      oncompositionupdate={onCompositionUpdate}
       oncompositionend={onCompositionEnd}
       onpaste={onPaste}
       onfocus={() => (kbdFocused = true)}
@@ -814,13 +869,14 @@
   <!-- chrome over the frame -->
   <div class="badge" class:warn={conn.status !== 'live'} data-testid="live-badge">
     <span class="dot" aria-hidden="true"></span>
-    <span>{conn.status === 'live' ? 'Live' : statusText}</span>
+    <span>{statusText}</span>
     {#if conn.status === 'live' && engineLabel}<span class="dim">· {engineLabel}</span>{/if}
+    {#if conn.status === 'live' && session && session.viewers > 1}<span class="dim">· {session.viewers} watching</span>{/if}
   </div>
 
   {#if conn.status === 'live' && hasFrame}
-    <div class="meter" aria-hidden="true" title="Frames per second · round-trip latency">
-      {fps} fps{#if meter.rttMs !== null} · {meter.rttMs} ms{/if}
+    <div class="meter" data-testid="live-meter" title="Frames per second · input-to-frame latency">
+      {fps} fps{#if meter.latencyMs !== null} · {meter.latencyMs} ms{/if}
     </div>
   {/if}
 
@@ -836,31 +892,43 @@
     </button>
   {/if}
 
-  {#if !hasFrame && (conn.status === 'connecting' || conn.status === 'idle')}
+  {#if !hasFrame && conn.status !== 'ended' && conn.status !== 'reconnecting'}
     <div class="center" role="status" aria-live="polite">
       <Icon name="globe" size={16} />
-      <span>Starting the live browser…</span>
+      <span>{conn.status === 'live' ? 'Loading the page…' : 'Starting the live browser…'}</span>
     </div>
   {/if}
 
   {#if conn.status === 'reconnecting' || (conn.status === 'connecting' && hasFrame)}
     <div class="banner" role="status" aria-live="polite" data-testid="live-reconnecting">
       <Icon name="warning" size={14} />
-      <span>{statusText}</span>
+      <span class="text">{statusText}</span>
       {#if errorNote}<span class="dim" title={errorNote}>{errorNote}</span>{/if}
       <button class="btn small" onclick={retryNow}>Retry now</button>
     </div>
-  {:else if conn.status === 'live' && stale}
-    <div class="banner" role="status">
-      <Icon name="clock" size={14} />
-      <span>No response from the live browser for a few seconds. The picture may be out of date.</span>
+  {:else if banner}
+    <div class="banner" class:info={banner.tone === 'info'} role="status" data-testid="live-banner">
+      <Icon name={banner.tone === 'info' ? 'info' : 'shield'} size={14} />
+      <span class="text">{banner.text}</span>
+      {#if banner.action}
+        <button
+          class="btn small"
+          onclick={() => {
+            banner?.action?.run();
+            banner = null;
+          }}>{banner.action.label}</button
+        >
+      {/if}
+      <button class="icon-btn" onclick={() => (banner = null)} aria-label="Dismiss" title="Dismiss">
+        <Icon name="x" size={12} />
+      </button>
     </div>
   {/if}
 
   {#if conn.status === 'ended'}
     <div class="center ended" role="status" data-testid="live-ended">
       <h2>The live session ended</h2>
-      <p>{conn.reason || 'The daemon closed this live tab.'}</p>
+      <p>{conn.reason || closedReason('closed')}</p>
       <div class="row">
         <button class="btn primary" onclick={retryNow}><Icon name="refresh" size={13} /> Reconnect</button>
         {#if onreader}<button class="btn ghost" onclick={onreader}>Switch to Reader</button>{/if}
@@ -868,9 +936,28 @@
     </div>
   {/if}
 
-  {#if approval}
-    <div class="approval-host">
-      <ApprovalCard {approval} busy={deciding} ondecide={(d) => void decide(d)} />
+  {#if approval || pageDialog}
+    <div class="card-host">
+      {#if approval}
+        <ApprovalCard
+          id={approval.id}
+          title={approval.title}
+          detail={approval.detail}
+          profile={session?.profile ?? null}
+          busy={deciding}
+          error={decideError}
+          ondecide={(c) => void decide(c)}
+        />
+      {:else if pageDialog}
+        <PageDialogCard
+          kind={pageDialog.dialog_type}
+          message={pageDialog.message}
+          defaultPrompt={pageDialog.default_prompt}
+          url={pageDialog.url}
+          canAnswer={driver !== 'agent' && !watchOnly}
+          onanswer={answerDialog}
+        />
+      {/if}
     </div>
   {/if}
 </div>
@@ -899,15 +986,11 @@
   .drive-bar.mine {
     background: var(--info-soft);
   }
-  .drive-bar .who strong {
-    font-weight: 600;
-  }
-  .drive-bar .activity {
+  .drive-bar .who {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-dim);
+  }
+  .drive-bar .chip {
+    margin-inline-end: 4px;
   }
   .grow {
     flex: 1;
@@ -921,8 +1004,8 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  /* Focus replacement: an inset ring (the frame fills the element, so an
-     outset ring would be clipped by the pane). */
+  /* Keyboard focus lives in the invisible sink: show it as an inset ring on
+     the frame (an outset ring would be clipped by the pane). */
   .surface.kbd {
     box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
   }
@@ -937,9 +1020,6 @@
   .surface.stale canvas {
     opacity: 0.55;
     filter: grayscale(0.6);
-  }
-  .surface.blocked canvas {
-    filter: saturate(0.85);
   }
   .sink {
     position: absolute;
@@ -957,31 +1037,6 @@
        the element is invisible, nothing is read at this size. */
     font-size: 16px;
   }
-  .target {
-    position: absolute;
-    border: 2px solid var(--warning);
-    border-radius: var(--radius-s);
-    box-shadow: 0 0 0 3px var(--warning-soft);
-    pointer-events: none;
-  }
-  .ghost {
-    position: absolute;
-    display: flex;
-    align-items: flex-start;
-    gap: 2px;
-    color: var(--text);
-    pointer-events: none;
-    transition: inset-inline-start 120ms ease-out, top 120ms ease-out;
-  }
-  .ghost-label {
-    margin-top: 12px;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface);
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-  }
   .badge {
     position: absolute;
     inset-inline-start: 10px;
@@ -998,7 +1053,8 @@
     font-size: var(--fs-xs);
     pointer-events: none;
   }
-  .drive-bar ~ .badge {
+  .drive-bar ~ .badge,
+  .drive-bar ~ .kbd-btn {
     top: 46px;
   }
   .badge .dot {
@@ -1019,7 +1075,7 @@
     bottom: 10px;
     padding: 1px 6px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--surface) 85%, transparent);
+    background: var(--surface);
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
@@ -1027,9 +1083,11 @@
   }
   .hint {
     position: absolute;
-    inset-inline-start: 50%;
+    inset-inline: 0;
     bottom: 10px;
-    transform: translateX(-50%);
+    width: fit-content;
+    max-width: calc(100% - 24px);
+    margin-inline: auto;
     padding: 2px 10px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -1037,10 +1095,9 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     pointer-events: none;
-  }
-  :global([dir='rtl']) .hint {
-    transform: translateX(50%);
   }
   kbd {
     font-family: var(--font-mono);
@@ -1056,9 +1113,6 @@
     background: var(--surface);
     border: 1px solid var(--border);
   }
-  .drive-bar ~ .kbd-btn {
-    top: 46px;
-  }
   .center {
     position: absolute;
     inset: 0;
@@ -1073,7 +1127,7 @@
   }
   .center.ended {
     pointer-events: auto;
-    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
     color: var(--text);
     text-align: center;
     padding: 16px;
@@ -1100,19 +1154,29 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 6px 8px 6px 10px;
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-m);
     background: var(--surface);
     color: var(--text);
     font-size: var(--fs-s);
   }
+  .banner.info {
+    border-color: color-mix(in srgb, var(--info) 35%, transparent);
+  }
   .drive-bar ~ .banner {
     top: 78px;
   }
-  .banner :global(svg) {
+  .banner > :global(svg) {
     color: var(--warning);
     flex: none;
+  }
+  .banner.info > :global(svg) {
+    color: var(--info);
+  }
+  .banner .text {
+    flex: 1;
+    min-width: 0;
   }
   .banner .dim {
     min-width: 0;
@@ -1120,41 +1184,37 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .banner .btn {
-    margin-inline-start: auto;
-  }
-  .approval-host {
+  .card-host {
     position: absolute;
     inset-inline-start: 16px;
-    top: 16px;
+    top: 44px;
     bottom: 16px;
     max-width: calc(100% - 32px);
     display: flex;
     align-items: flex-start;
     pointer-events: none;
   }
-  .drive-bar ~ .approval-host {
-    top: 52px;
+  .drive-bar ~ .card-host {
+    top: 80px;
   }
-  .approval-host > :global(*) {
+  .card-host > :global(*) {
     pointer-events: auto;
   }
   @media (max-width: 640px) {
-    .approval-host {
+    .card-host,
+    .drive-bar ~ .card-host {
       inset-inline: 8px;
-      top: auto;
+      top: 8px;
       bottom: 8px;
-      max-height: calc(100% - 16px);
       max-width: none;
       align-items: flex-end;
     }
-    .drive-bar ~ .approval-host {
-      top: auto;
+    .drive-bar {
+      flex-wrap: wrap;
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    canvas,
-    .ghost {
+    canvas {
       transition: none;
     }
   }

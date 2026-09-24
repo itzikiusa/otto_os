@@ -1,36 +1,36 @@
+// Remote live browser — the pure helpers behind RemoteLiveView
+// (ui/src/modules/browser/live/*): coordinate mapping, key routing, input
+// coalescing, the reconnect reducer, frame parsing and approval copy.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  clientToPage,
-  fitContain,
-  pageToBox,
-  viewportChanged,
-  viewportFor,
-} from '../src/modules/browser/live/geometry.ts';
-import {
-  editingCommands,
-  keyPayload,
-  modifierMask,
-  routeKey,
-  virtualKeyCode,
-  type KeyLike,
-} from '../src/modules/browser/live/keys.ts';
+import { clientToPage, fitContain, viewportChanged, viewportFor } from '../src/modules/browser/live/geometry.ts';
+import { keyPayload, modifierMask, routeKey, virtualKeyCode, type KeyLike } from '../src/modules/browser/live/keys.ts';
 import { coalesce, mergeWheel, wheelPixels, type Clock } from '../src/modules/browser/live/throttle.ts';
 import {
   BACKOFF,
+  EMPTY_METER,
   INITIAL,
-  STALE_MS,
+  LATENCY_WINDOW_MS,
   backoffDelay,
   isStale,
   isTerminalClose,
+  latencySample,
   meterFps,
   meterFrame,
-  meterRtt,
-  EMPTY_METER,
+  meterLatency,
   reduce,
   type ConnState,
 } from '../src/modules/browser/live/connection.ts';
-import { buttonName, parseBinaryFrame, parseServer, safeCursor } from '../src/modules/browser/live/protocol.ts';
+import {
+  blockedCopy,
+  buttonName,
+  closedReason,
+  driverFor,
+  parseBinaryFrame,
+  parseServer,
+  safeCursor,
+} from '../src/modules/browser/live/protocol.ts';
+import { approvalFacts } from '../src/modules/browser/live/approvalFacts.ts';
 
 // ── geometry ────────────────────────────────────────────────────────────
 
@@ -89,29 +89,22 @@ test('clientToPage subtracts the frame offset_top and rejects the bar above it',
   assert.deepEqual(clientToPage({ x: 10, y: 60 }, box, image, frame), { x: 10, y: 20 });
 });
 
-test('pageToBox inverts clientToPage (ghost cursor placement)', () => {
-  const box = { left: 0, top: 0, width: 800, height: 600 };
-  const image = { width: 1600, height: 900 };
-  const frame = { device_width: 800, device_height: 450 };
-  const page = clientToPage({ x: 250, y: 200 }, box, image, frame)!;
-  const back = pageToBox(page, box, image, frame)!;
-  assert.ok(Math.abs(back.x - 250) < 0.02 && Math.abs(back.y - 200) < 0.02);
-});
-
-test('viewportFor clamps size and quantises the device scale factor', () => {
+test('viewportFor clamps to the daemon range and quantises the device scale factor', () => {
   assert.deepEqual(viewportFor({ width: 1023.6, height: 700.2 }, 2), { width: 1024, height: 700, device_scale_factor: 2 });
   assert.equal(viewportFor({ width: 800, height: 600 }, 1.1).device_scale_factor, 1);
   assert.equal(viewportFor({ width: 800, height: 600 }, 1.33).device_scale_factor, 1.25);
   assert.equal(viewportFor({ width: 800, height: 600 }, 5).device_scale_factor, 3);
   assert.equal(viewportFor({ width: 800, height: 600 }, NaN).device_scale_factor, 1);
-  assert.deepEqual(viewportFor({ width: 50, height: 20 }, 1), { width: 240, height: 160, device_scale_factor: 1 });
+  // ws.md: resize is clamped to 200..3840 × 200..2160
+  assert.deepEqual(viewportFor({ width: 50, height: 20 }, 1), { width: 200, height: 200, device_scale_factor: 1 });
+  assert.deepEqual(viewportFor({ width: 5000, height: 3000 }, 1), { width: 3840, height: 2160, device_scale_factor: 1 });
 });
 
 test('viewportFor lowers the scale factor to stay inside the pixel budget', () => {
   const v = viewportFor({ width: 2400, height: 1600 }, 2);
-  assert.ok(v.width * v.height * v.device_scale_factor ** 2 <= 3840 * 2400);
-  assert.equal(v.device_scale_factor, 1.5);
-  assert.equal(viewportFor({ width: 3840, height: 2400 }, 2).device_scale_factor, 1);
+  assert.ok(v.width * v.height * v.device_scale_factor ** 2 <= 3840 * 2160);
+  assert.equal(v.device_scale_factor, 1.25);
+  assert.equal(viewportFor({ width: 3840, height: 2160 }, 2).device_scale_factor, 1);
 });
 
 test('viewportChanged ignores 1px wobble but not a dpr change', () => {
@@ -152,12 +145,12 @@ test('browser-convention chords are handled locally', () => {
 test('Esc releases the keyboard; ⇧Esc is sent to the page as Escape', () => {
   assert.equal(routeKey(key('Escape', 'Escape'), true), 'release');
   assert.equal(routeKey(key('Escape', 'Escape', { shiftKey: true }), true), 'forward');
-  const p = keyPayload(key('Escape', 'Escape', { shiftKey: true }), true, 'down');
+  const p = keyPayload(key('Escape', 'Escape', { shiftKey: true }), 'down');
   assert.equal(p.modifiers, 0, 'shift used for routing is stripped');
   assert.equal(p.key_code, 27);
 });
 
-test('IME composition keystrokes are ignored (text arrives via compositionend)', () => {
+test('IME / soft-keyboard keystrokes are ignored (text arrives via input/composition)', () => {
   assert.equal(routeKey(key('a', 'KeyA', { isComposing: true }), true), 'ignore');
   assert.equal(routeKey(key('Process', 'KeyA'), true), 'ignore');
   assert.equal(routeKey(key('Dead', 'Quote'), true), 'ignore');
@@ -184,23 +177,16 @@ test('virtualKeyCode covers letters, digits, punctuation and named keys', () => 
   assert.equal(virtualKeyCode({ key: 'F5', code: 'F5' }), 116);
 });
 
-test('keyPayload: text on keydown only, Enter types \\r, chords type nothing', () => {
-  assert.equal(keyPayload(key('a', 'KeyA'), true, 'down').text, 'a');
-  assert.equal(keyPayload(key('a', 'KeyA'), true, 'up').text, undefined);
-  assert.equal(keyPayload(key('Enter', 'Enter'), true, 'down').text, '\r');
-  assert.equal(keyPayload(key('a', 'KeyA', { metaKey: true }), true, 'down').text, undefined);
-  assert.equal(keyPayload(key('ArrowLeft', 'ArrowLeft'), true, 'down').text, undefined);
-});
-
-test('editingCommands names macOS commands for chords, mapped from Ctrl off-Mac', () => {
-  assert.deepEqual(editingCommands(key('a', 'KeyA', { metaKey: true }), true), ['selectAll']);
-  assert.deepEqual(editingCommands(key('a', 'KeyA', { ctrlKey: true }), false), ['selectAll']);
-  assert.deepEqual(editingCommands(key('a', 'KeyA', { ctrlKey: true }), true), []);
-  assert.deepEqual(editingCommands(key('Z', 'KeyZ', { metaKey: true, shiftKey: true }), true), ['redo']);
-  assert.deepEqual(editingCommands(key('ArrowLeft', 'ArrowLeft', { metaKey: true, shiftKey: true }), true), ['moveToBeginningOfLineAndModifySelection']);
-  assert.deepEqual(editingCommands(key('Backspace', 'Backspace', { altKey: true }), true), ['deleteWordBackward']);
-  assert.deepEqual(keyPayload(key('c', 'KeyC', { metaKey: true }), true, 'down').commands, ['copy']);
-  assert.equal(keyPayload(key('c', 'KeyC', { metaKey: true }), true, 'up').commands, undefined);
+test('keyPayload is the contract key frame: text on keydown only, Enter types \\r, chords type nothing', () => {
+  assert.deepEqual(keyPayload({ ...key('a', 'KeyA'), location: 0 }, 'down'), {
+    key: 'a', code: 'KeyA', modifiers: 0, key_code: 65, location: 0, repeat: false, text: 'a',
+  });
+  assert.equal(keyPayload(key('a', 'KeyA'), 'up').text, undefined);
+  assert.equal(keyPayload(key('Enter', 'Enter'), 'down').text, '\r');
+  assert.equal(keyPayload(key('a', 'KeyA', { metaKey: true }), 'down').text, undefined);
+  assert.equal(keyPayload(key('ArrowLeft', 'ArrowLeft'), 'down').text, undefined);
+  assert.equal(keyPayload({ ...key('Shift', 'ShiftRight', { shiftKey: true }), location: 2 }, 'down').location, 2);
+  assert.equal(keyPayload(key('a', 'KeyA', { repeat: true }), 'down').repeat, true);
 });
 
 // ── throttling ──────────────────────────────────────────────────────────
@@ -313,8 +299,9 @@ test('reducer walks connect → live → reconnecting → connecting → live', 
   assert.equal(s.attempt, 0, 'a successful open resets the backoff');
 });
 
-test('terminal close codes and ended messages end the session without retry', () => {
+test('terminal close codes and closed frames end the session without retry', () => {
   assert.equal(isTerminalClose(1000), true);
+  assert.equal(isTerminalClose(1008), true);
   assert.equal(isTerminalClose(4404), true);
   assert.equal(isTerminalClose(1006), false);
   assert.equal(isTerminalClose(1012), false);
@@ -343,31 +330,39 @@ test('duplicate connect / stray open / frame-while-not-live are no-ops', () => {
   assert.equal(reduce(c, { type: 'connect' }), c);
   assert.equal(reduce(INITIAL, { type: 'open' }), INITIAL);
   assert.equal(reduce(c, { type: 'frame', at: 5 }), c);
+  assert.equal(reduce(c, { type: 'input', at: 5 }), c);
 });
 
-test('isStale: a quiet page is not stale; a silent pipe and any reconnect are', () => {
+test('isStale: a quiet live page is never stale; any non-live socket is', () => {
   let s = reduce(reduce(INITIAL, { type: 'connect' }), { type: 'open' });
-  assert.equal(isStale(s, 10_000), false, 'nothing seen yet: nothing to dim');
+  assert.equal(isStale(s), false);
   s = reduce(s, { type: 'frame', at: 10_000 });
-  assert.equal(isStale(s, 10_000 + STALE_MS - 1), false);
-  // no new frames (static page) but the ping keeps answering → still fresh
-  s = reduce(s, { type: 'heartbeat', at: 10_000 + STALE_MS });
-  assert.equal(isStale(s, 10_000 + STALE_MS + 1), false);
-  assert.equal(s.hasFrame, true);
-  assert.equal(isStale(s, 10_000 + 2 * STALE_MS + 1), true, 'neither frames nor pongs → wedged');
-  s = reduce(s, { type: 'close', code: 1006 });
-  assert.equal(isStale(s, 10_001), true);
+  assert.equal(isStale(s), false, 'no frames for a while is just a static page');
+  assert.equal(isStale(reduce(s, { type: 'close', code: 1006 })), true);
+  assert.equal(isStale(reduce(s, { type: 'ended', reason: 'x' })), true);
 });
 
-test('meter reports frames in the last second and smooths the rtt', () => {
+test('input-to-frame latency: first input starts the sample, the next frame ends it', () => {
+  let s = reduce(reduce(INITIAL, { type: 'connect' }), { type: 'open' });
+  assert.equal(latencySample(s, 100), null, 'no input waiting');
+  s = reduce(s, { type: 'input', at: 1000 });
+  s = reduce(s, { type: 'input', at: 1050 }); // later inputs don't move the start
+  assert.equal(latencySample(s, 1080), 80);
+  assert.equal(latencySample(s, 1000 + LATENCY_WINDOW_MS + 1), null, 'too late to be this input’s answer');
+  s = reduce(s, { type: 'frame', at: 1080 });
+  assert.equal(s.awaitingSince, 0);
+  assert.equal(latencySample(s, 1100), null);
+});
+
+test('meter reports frames in the last second and smooths the latency', () => {
   let m = EMPTY_METER;
   for (let t = 0; t <= 1000; t += 100) m = meterFrame(m, t);
   assert.equal(meterFps(m, 1000), 10);
   assert.equal(meterFps(m, 2500), 0);
-  m = meterRtt(m, 100);
-  assert.equal(m.rttMs, 100);
-  m = meterRtt(m, 200);
-  assert.equal(m.rttMs, 130);
+  m = meterLatency(m, 100);
+  assert.equal(m.latencyMs, 100);
+  m = meterLatency(m, 200);
+  assert.equal(m.latencyMs, 130);
 });
 
 // ── protocol helpers ────────────────────────────────────────────────────
@@ -375,8 +370,8 @@ test('meter reports frames in the last second and smooths the rtt', () => {
 test('parseServer ignores junk; buttonName maps DOM buttons', () => {
   assert.equal(parseServer('nope'), null);
   assert.equal(parseServer('{"no":"type"}'), null);
-  assert.deepEqual(parseServer('{"type":"pong","t":1}'), { type: 'pong', t: 1 });
-  assert.deepEqual([0, 1, 2, 3].map(buttonName), ['left', 'middle', 'right', 'none']);
+  assert.deepEqual(parseServer('{"type":"cursor","cursor":"text"}'), { type: 'cursor', cursor: 'text' });
+  assert.deepEqual([0, 1, 2, 3, 4, 9].map(buttonName), ['left', 'middle', 'right', 'back', 'forward', 'none']);
 });
 
 test('safeCursor only lets known CSS cursor keywords through', () => {
@@ -385,18 +380,82 @@ test('safeCursor only lets known CSS cursor keywords through', () => {
   assert.equal(safeCursor(undefined), 'default');
 });
 
-test('parseBinaryFrame splits the JSON header from the image bytes', () => {
-  const head = new TextEncoder().encode(JSON.stringify({ seq: 7, meta: { device_width: 10, device_height: 5 }, mime: 'image/jpeg' }));
-  const buf = new ArrayBuffer(4 + head.length + 3);
-  new DataView(buf).setUint32(0, head.length);
-  new Uint8Array(buf, 4).set(head);
-  new Uint8Array(buf, 4 + head.length).set([0xff, 0xd8, 0xff]);
-  const f = parseBinaryFrame(buf)!;
-  assert.equal(f.seq, 7);
-  assert.equal(f.meta.device_width, 10);
+function binaryFrame(header: object, image: number[], version = 1): ArrayBuffer {
+  const head = new TextEncoder().encode(JSON.stringify(header));
+  const buf = new ArrayBuffer(5 + head.length + image.length);
+  const dv = new DataView(buf);
+  dv.setUint8(0, version);
+  dv.setUint32(1, head.length);
+  new Uint8Array(buf, 5).set(head);
+  new Uint8Array(buf, 5 + head.length).set(image);
+  return buf;
+}
+
+test('parseBinaryFrame reads the v1 layout: version byte, u32 BE length, JSON header, JPEG', () => {
+  const h = { seq: 7, mime: 'image/jpeg', width: 20, height: 10, device_width: 10, device_height: 5, page_scale_factor: 1, offset_top: 0, scroll_x: 0, scroll_y: 0, timestamp: 1 };
+  const f = parseBinaryFrame(binaryFrame(h, [0xff, 0xd8, 0xff]))!;
+  assert.equal(f.header.seq, 7);
+  assert.equal(f.header.device_width, 10);
   assert.deepEqual([...f.bytes], [0xff, 0xd8, 0xff]);
-  assert.equal(parseBinaryFrame(new ArrayBuffer(2)), null);
-  const bad = new ArrayBuffer(8);
-  new DataView(bad).setUint32(0, 100);
-  assert.equal(parseBinaryFrame(bad), null);
+});
+
+test('parseBinaryFrame drops unknown versions, truncated buffers and bad headers', () => {
+  const h = { seq: 1, device_width: 10, device_height: 5 };
+  assert.equal(parseBinaryFrame(binaryFrame(h, [1], 2)), null, 'unknown version');
+  assert.equal(parseBinaryFrame(new ArrayBuffer(3)), null);
+  const bad = new ArrayBuffer(9);
+  new DataView(bad).setUint8(0, 1);
+  new DataView(bad).setUint32(1, 100);
+  assert.equal(parseBinaryFrame(bad), null, 'length past the end');
+  assert.equal(parseBinaryFrame(binaryFrame({ seq: 1, device_width: 0, device_height: 5 }, [1])), null, 'no viewport size');
+});
+
+test('driverFor: agent blocks, another person is "other", me/nobody may drive', () => {
+  assert.equal(driverFor('agent', null, 'u1'), 'agent');
+  assert.equal(driverFor('human', 'u2', 'u1'), 'other');
+  assert.equal(driverFor('human', 'u1', 'u1'), 'me');
+  assert.equal(driverFor('none', null, 'u1'), 'me');
+});
+
+test('closed reasons and the SSRF note read as sentences', () => {
+  assert.match(closedReason('idle'), /no one watching/);
+  assert.match(closedReason('crashed'), /stopped unexpectedly/);
+  assert.match(closedReason('whatever'), /closed/);
+  assert.match(blockedCopy('10.0.0.1'), /10\.0\.0\.1/);
+});
+
+// ── approval facts ──────────────────────────────────────────────────────
+
+const approvalRow = (args: object | string, extra: object = {}) => ({
+  id: 'a1', workspace_id: 'w', kind: 'browser_action', server_id: null, server_name: null, tool: null,
+  title: 'Submit form on example.com', detail: null,
+  args_redacted_json: typeof args === 'string' ? args : JSON.stringify(args),
+  risk_label: null, status: 'pending' as const, requested_by: 's1', requested_by_kind: 'agent',
+  decided_by: null, decision_note: null, created_at: '2026-09-24T10:00:00Z', decided_at: null,
+  consumed_at: null, expires_at: null, ...extra,
+});
+
+test('approvalFacts builds where / what / who sees it / as from the held request', () => {
+  const f = approvalFacts(
+    approvalRow({ origin: 'https://book.example', method: 'post', target_host: 'api.example', screenshot_path: '/x.png' }, { detail: 'Confirm the new slot' }),
+    'ephemeral',
+  );
+  assert.deepEqual(f.rows.map((r) => r.label), ['Where', 'What', 'Who sees it', 'As']);
+  assert.equal(f.rows[1].value, 'POST request to api.example');
+  assert.match(f.rows[2].value, /api\.example/);
+  assert.match(f.rows[3].value, /private session/);
+  assert.equal(f.why, 'Confirm the new slot');
+  assert.equal(f.screenshot, true);
+  assert.equal(f.requester, 'An agent asked');
+});
+
+test('approvalFacts falls back to the URL host and leaves unknowns out', () => {
+  const f = approvalFacts(approvalRow({ url: 'https://shop.example/pay' }), 'work');
+  assert.deepEqual(f.rows.map((r) => r.label), ['What', 'Who sees it', 'As']);
+  assert.equal(f.rows[0].value, 'A request to shop.example');
+  assert.match(f.rows[2].value, /“work”/);
+  assert.equal(f.screenshot, false);
+  const none = approvalFacts(approvalRow('not json'), null);
+  assert.deepEqual(none.rows, []);
+  assert.deepEqual(approvalFacts(null, null).rows, []);
 });

@@ -1,60 +1,60 @@
-// Remote live browser — REST calls (engine status/install/settings, starting
-// a live session for a tab). PROVISIONAL shapes, written before the daemon
-// contract landed; see modules/browser/live/protocol.ts.
+// Browser — remote live view (daemon-owned Chromium). Mirrors
+// docs/contracts/api.md "Browser — remote live view" + ws.md §1b.
+//
+// Engine status/settings/install are daemon-wide (`/browser/live/*`); the
+// live session is per tab (`/browser/tabs/{id}/live`), private to its owner.
 
 import { api, wsConnect } from './client';
+import type {
+  BrowserChromeBuild,
+  BrowserEngineInstallJob,
+  BrowserLiveControlReq,
+  BrowserLiveCreateReq,
+  BrowserLiveNavReq,
+  BrowserLiveSession,
+  BrowserLiveSettings,
+  BrowserLiveStatus,
+} from './types';
 
-/** Which Chromium build the daemon runs. `chrome` = Chrome for Testing in
- *  new-headless mode (the default, closest to what users see); the lighter
- *  `headless_shell` = chrome-headless-shell. */
-export type LiveEngineKind = 'chrome' | 'headless_shell';
-
-export interface LiveEngineStatus {
-  /** `missing` until the one-time download; `ready` once installed. */
-  state: 'missing' | 'installing' | 'ready' | 'failed' | 'unsupported';
-  /** The installed (or installing) build. */
-  engine: LiveEngineKind | null;
-  version?: string | null;
-  /** Download progress while `installing`. */
-  progress?: { received_bytes: number; total_bytes: number | null } | null;
-  /** Why the last install failed / why it is unsupported. */
-  error?: string | null;
-  /** Approximate download size per build, for the enable step's copy. */
-  download_bytes?: Partial<Record<LiveEngineKind, number>>;
-  /** "Show the window on this Mac" — run headed (off by default). */
-  headed?: boolean;
+export function liveStatus() {
+  return api.get<BrowserLiveStatus>('/browser/live/status');
 }
 
-export interface LiveSessionResp {
-  session_id: string;
-  /** Path of the live WebSocket (auth via the bearer subprotocol). */
-  ws_path: string;
+/** Browser Admin. Partial update; returns the full settings. */
+export function updateLiveSettings(body: Partial<BrowserLiveSettings>) {
+  return api.put<BrowserLiveSettings>('/browser/live/settings', body);
 }
 
-export function engineStatus(): Promise<LiveEngineStatus> {
-  return api.get<LiveEngineStatus>('/browser/live/engine');
+/** Browser Admin. Starts the ONE-TIME Chromium download — only ever called
+ *  from an explicit click. 202 with the job; 200 `installed` when present. */
+export function installEngine(build?: BrowserChromeBuild) {
+  return api.post<BrowserEngineInstallJob>('/browser/live/install', build ? { build } : {});
 }
 
-export function installEngine(engine: LiveEngineKind): Promise<LiveEngineStatus> {
-  return api.post<LiveEngineStatus>('/browser/live/engine/install', { engine });
+/** Open (or re-attach to the caller's existing) remote session for a tab. */
+export function openLive(tabId: string, body: BrowserLiveCreateReq) {
+  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live`, { engine: 'remote', ...body });
 }
 
-export function updateEngineSettings(body: { engine?: LiveEngineKind; headed?: boolean }): Promise<LiveEngineStatus> {
-  return api.patch<LiveEngineStatus>('/browser/live/engine', body);
+export function getLive(tabId: string) {
+  return api.get<BrowserLiveSession>(`/browser/tabs/${tabId}/live`);
 }
 
-export function startLive(tabId: string, viewport: { width: number; height: number; device_scale_factor: number }): Promise<LiveSessionResp> {
-  return api.post<LiveSessionResp>(`/browser/tabs/${tabId}/live`, { viewport });
+export function closeLive(tabId: string) {
+  return api.del<void>(`/browser/tabs/${tabId}/live`);
 }
 
-export function openLiveSocket(wsPath: string): WebSocket {
-  const sock = wsConnect(wsPath);
+export function liveNav(tabId: string, body: BrowserLiveNavReq) {
+  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live/nav`, body);
+}
+
+export function liveControl(tabId: string, body: BrowserLiveControlReq) {
+  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live/control`, body);
+}
+
+/** The screencast + input socket (bearer via the subprotocol, never the URL). */
+export function openLiveSocket(tabId: string): WebSocket {
+  const sock = wsConnect(`/ws/browser/${tabId}/live`);
   sock.binaryType = 'arraybuffer';
   return sock;
 }
-
-/** Fallback sizes for the enable step when the daemon doesn't report them. */
-export const DEFAULT_DOWNLOAD_BYTES: Record<LiveEngineKind, number> = {
-  chrome: 150 * 1024 * 1024,
-  headless_shell: 78 * 1024 * 1024,
-};

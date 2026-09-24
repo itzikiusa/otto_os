@@ -1,19 +1,23 @@
 <script lang="ts">
-  // The one-time "Enable live browsing" step. Otto's live tabs outside the
-  // desktop app run in a daemon-managed Chromium, which is downloaded once —
-  // never silently: this pane says what is downloaded, how big it is, and
-  // where it runs, and nothing happens until the user clicks.
+  // The one-time "Enable live browsing" step. Outside the desktop app a live
+  // tab runs in a daemon-owned Chromium, downloaded once — never silently:
+  // this pane says what is downloaded, how big it is and where it runs, and
+  // nothing happens until someone clicks (api.md "Browser — remote live
+  // view": POST /browser/live/install is Browser Admin, sha256-pinned).
   //
-  //   missing     → EmptyState + the one CTA ("Download Chrome · 150 MB"),
+  //   missing     → EmptyState + the one CTA ("Download Chrome (180 MB)"),
   //                 with a "lighter engine" option underneath
-  //   installing  → progress (role=progressbar), received / total
+  //   installing  → progress (role=progressbar): downloading → verifying →
+  //                 extracting
   //   failed      → inline error + Retry
-  //   unsupported → honest note (this Mac/daemon can't run it)
+  //   unsupported → honest note (this Mac can't run it) + Reader
+  //   no admin    → says who can enable it
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { formatBytes } from '../../../lib/metric-format';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { browserLive } from '../../../lib/stores/browserLive.svelte';
-  import { DEFAULT_DOWNLOAD_BYTES, type LiveEngineKind } from '../../../lib/api/browserLive';
+  import type { BrowserChromeBuild } from '../../../lib/api/types';
 
   interface Props {
     /** "Switch to Reader" — the escape hatch for this tab. */
@@ -25,24 +29,35 @@
   let startError = $state('');
 
   const st = $derived(browserLive.status);
-  const kind: LiveEngineKind = $derived(lighter ? 'headless_shell' : 'chrome');
-  const sizeOf = (k: LiveEngineKind) => st?.download_bytes?.[k] ?? DEFAULT_DOWNLOAD_BYTES[k];
-  const approx = (n: number) => `about ${formatBytes(n)}`;
-  const engineName = (k: LiveEngineKind | null | undefined) =>
-    k === 'headless_shell' ? 'the lighter Chromium engine' : 'Chrome for Testing';
+  const engine = $derived(browserLive.engineState);
+  const build: BrowserChromeBuild = $derived(lighter ? 'chrome-headless-shell' : 'chrome');
+  const canInstall = $derived(auth.can('browser', 'admin'));
+  const pinned = (b: BrowserChromeBuild) => browserLive.build(b)?.sha256_pinned !== false;
+  const lighterAvailable = $derived(pinned('chrome-headless-shell'));
 
   async function enable(): Promise<void> {
     startError = '';
     try {
-      await browserLive.install(kind);
+      await browserLive.install(build);
     } catch (e) {
       startError = e instanceof Error ? e.message : String(e);
     }
   }
 
-  const received = $derived(st?.progress?.received_bytes ?? 0);
-  const total = $derived(st?.progress?.total_bytes ?? sizeOf(st?.engine ?? kind));
+  const job = $derived(st?.install ?? null);
+  const received = $derived(job?.received_bytes ?? 0);
+  const total = $derived(job?.total_bytes ?? (job ? browserLive.downloadBytes(job.build) : 0));
   const pct = $derived(total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0);
+  const phase = $derived(
+    job?.state === 'verifying' ? 'Checking the download…' : job?.state === 'extracting' ? 'Unpacking…' : null,
+  );
+  const jobName = $derived(job?.build === 'chrome-headless-shell' ? 'the lighter Chromium engine' : 'Chrome for Testing');
+
+  const body = $derived(
+    `Live tabs run in a Chromium browser on the Mac running Otto and stream here, so they work from any device, including your phone. ` +
+      `Otto downloads ${lighter ? 'the lighter Chromium engine' : 'Chrome for Testing'} once (about ${formatBytes(browserLive.downloadBytes(build))}) and checks it against a pinned checksum. ` +
+      `Every request the pages make goes through Otto's network guard.`,
+  );
 </script>
 
 <div class="setup" data-testid="live-engine-setup">
@@ -55,42 +70,53 @@
       </div>
       <button class="btn" onclick={() => void browserLive.load()}>Retry</button>
     </div>
-  {:else if !st}
+  {:else if engine === 'unknown'}
     <p class="loading" role="status">Checking the live browser engine…</p>
-  {:else if st.state === 'installing'}
+  {:else if engine === 'installing'}
     <div class="progress-card" role="status" aria-live="polite">
       <div class="icon-tile"><Icon name="download" size={24} /></div>
-      <h3>Downloading {engineName(st.engine)}…</h3>
+      <h3>{phase ?? `Downloading ${jobName}…`}</h3>
       <div
         class="bar"
         role="progressbar"
         aria-label="Download progress"
         aria-valuemin="0"
         aria-valuemax="100"
-        aria-valuenow={pct}
+        aria-valuenow={phase ? 100 : pct}
       >
-        <span style:width="{pct}%"></span>
+        <span style:width="{phase ? 100 : pct}%"></span>
       </div>
       <p class="meta">
-        {formatBytes(received)} of {formatBytes(total)} · {pct}%
+        {#if phase}{formatBytes(total)} downloaded{:else}{formatBytes(received)} of {formatBytes(total)} · {pct}%{/if}
       </p>
       <p class="hint">It downloads once and stays on this Mac. You can keep using Otto meanwhile.</p>
     </div>
-  {:else if st.state === 'failed'}
+  {:else if engine === 'failed'}
     <div class="inline-error" role="alert">
       <Icon name="warning" size={16} />
       <div>
-        <p class="title">The live browser engine didn't finish downloading</p>
-        <p class="detail">{st.error || 'The download stopped before it completed.'}</p>
+        <p class="title">The live browser engine didn't install</p>
+        <p class="detail">{job?.error || 'The download stopped before it finished.'}</p>
       </div>
-      <button class="btn" disabled={browserLive.installing} onclick={() => void enable()}>Retry</button>
+      {#if canInstall}
+        <button class="btn" disabled={browserLive.starting} onclick={() => void browserLive.install(job?.build ?? 'chrome')}>Retry</button>
+      {/if}
     </div>
-  {:else if st.state === 'unsupported'}
+  {:else if engine === 'unsupported'}
     <EmptyState
       variant="page"
       icon="globe"
-      title="Live browsing isn't available here"
-      body={st.error || "This Otto daemon can't run the live browser engine. Reader view still works."}
+      title="Live browsing isn't available on this Mac"
+      body="The live browser engine runs on Apple silicon Macs only for now. Reader view still works for every page."
+      actionLabel={onreader ? 'Switch to Reader' : undefined}
+      onaction={onreader}
+    />
+  {:else if !canInstall}
+    <EmptyState
+      variant="page"
+      icon="globe"
+      title="Live browsing isn't enabled yet"
+      body="Live tabs need a one-time Chromium download on the Mac running Otto. Ask an Otto admin to enable it in Settings → Browser. Reader view works meanwhile."
       actionLabel={onreader ? 'Switch to Reader' : undefined}
       onaction={onreader}
     />
@@ -99,20 +125,25 @@
       variant="page"
       icon="globe"
       title="Enable live browsing"
-      body={`Live tabs run in a Chromium browser on this Mac and stream here, so they work from any device — including your phone. Otto downloads ${engineName(kind)} once (${approx(sizeOf(kind))}). Pages load through Otto's network guard.`}
-      actionLabel={browserLive.installing
-        ? 'Starting download…'
-        : `${lighter ? 'Download lighter engine' : 'Download Chrome'} (${formatBytes(sizeOf(kind))})`}
+      {body}
+      actionLabel={browserLive.starting
+        ? 'Starting the download…'
+        : `${lighter ? 'Download lighter engine' : 'Download Chrome'} (${formatBytes(browserLive.downloadBytes(build))})`}
       actionIcon="download"
-      onaction={() => void enable()}
+      onaction={pinned(build) ? () => void enable() : undefined}
     >
-      <label class="checkbox-row lighter">
-        <input type="checkbox" bind:checked={lighter} />
-        <span>
-          Use the lighter engine ({approx(sizeOf('headless_shell'))})
-          <span class="hint">Faster to download; a few sites render differently than in Chrome.</span>
-        </span>
-      </label>
+      {#if lighterAvailable}
+        <label class="checkbox-row lighter">
+          <input type="checkbox" bind:checked={lighter} />
+          <span>
+            Use the lighter engine instead (about {formatBytes(browserLive.downloadBytes('chrome-headless-shell'))})
+            <span class="hint">Faster to download. A few sites render differently than in Chrome.</span>
+          </span>
+        </label>
+      {/if}
+      {#if !pinned(build)}
+        <p class="field-error" role="alert">This Otto build has no checksum for that engine, so it can't be downloaded safely.</p>
+      {/if}
       {#if startError}
         <p class="field-error" role="alert">Couldn't start the download: {startError}</p>
       {/if}
@@ -133,19 +164,17 @@
   }
   .lighter {
     max-width: 420px;
-    margin: 12px auto 0;
+    margin: 12px auto 8px;
     text-align: start;
     font-size: var(--fs-s);
   }
   .lighter .hint {
     display: block;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .field-error {
     color: var(--danger);
     font-size: var(--fs-s);
-    margin: 8px 0 0;
+    margin: 8px 0;
   }
   .loading {
     margin: 15vh auto 0;
