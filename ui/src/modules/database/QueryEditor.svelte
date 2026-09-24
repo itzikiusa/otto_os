@@ -48,7 +48,9 @@
     tabPick: tab.viewMode ?? null,
     connPick: database.connView,
     columnCount: tab.result?.columns.length ?? 0,
-    autoVerticalCols: ui.dbAutoVerticalCols,
+    // Per engine: MongoDB auto-verticals wide results by default, the SQL
+    // engines keep the grid unless the user opted in (Settings → Appearance).
+    autoVerticalCols: ui.dbAutoVerticalFor(database.capabilities?.engine),
     engine: database.capabilities?.engine ?? null,
   });
   const viewMode = $derived(effectiveViewMode(viewInputs));

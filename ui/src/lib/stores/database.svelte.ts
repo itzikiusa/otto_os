@@ -387,7 +387,8 @@ export const ENGINE_DEFAULT_VIEW: Record<DbEngine, ViewMode> = {
   redis: 'grid',
 };
 /** Everything `effectiveViewMode` / `viewModeReason` weigh. `autoVerticalCols`
- *  is the user's "switch to Vertical past N columns" setting (0 = never). */
+ *  is the user's "switch to Vertical past N columns" setting FOR THIS ENGINE
+ *  (`ui.dbAutoVerticalFor` — MongoDB 10, SQL engines 0 = never, by default). */
 export interface ViewModeInputs {
   tabPick: ViewMode | null;
   connPick: ViewMode | null;

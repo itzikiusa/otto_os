@@ -5,8 +5,9 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 // DB Explorer — result view modes (A1 / A1b) + pinned query tabs (A4).
 //
 // The view a result renders in is layered (`effectiveViewMode`): an explicit
-// pick on the tab → the auto-Vertical column threshold → the view remembered
-// for the connection → the engine default (Mongo = Vertical, SQL = Grid).
+// pick on the tab → the auto-Vertical column threshold (per engine: MongoDB on,
+// SQL off by default) → the view remembered for the connection → the engine
+// default (Mongo = Vertical, SQL = Grid).
 // Against the live Docker stack (MySQL + MongoDB) this proves:
 //   • a Mongo `find` opens in Vertical with nothing picked;
 //   • ⇧⌘V cycles Grid → Vertical → JSON → Grid, the pick is stored on the tab
@@ -117,8 +118,11 @@ test('threshold: wide result auto-verticals, explicit pick wins for that tab onl
   page,
 }) => {
   test.skip(!conn.mysql, 'mysql docker not reachable');
-  // The user-side setting: more than 2 columns → Vertical.
-  await page.addInitScript(() => localStorage.setItem('otto_db_auto_vertical_cols', '2'));
+  // The user-side setting (per engine; SQL is off by default): MySQL results
+  // with more than 2 columns → Vertical.
+  await page.addInitScript(() =>
+    localStorage.setItem('otto_db_auto_vertical_by_engine', JSON.stringify({ mysql: 2 })),
+  );
   await openConn(page, 'e2e-mysql');
   await runStatement(page, 'SELECT 1 AS a, 2 AS b, 3 AS c');
   await expect(activeView(page)).toHaveText('Vertical');
