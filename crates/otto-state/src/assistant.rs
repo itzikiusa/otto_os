@@ -1,4 +1,4 @@
-//! Persistence for the **Otto Assistant** (migration `XXXX_assistant.sql`).
+//! Persistence for the **Otto Assistant** (migration `0140_assistant.sql`).
 //!
 //! Every row is per user (`owner_user_id`): the by-id reads take the owner and
 //! answer `NotFound` for another user's row, so a route can never leak one
