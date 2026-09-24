@@ -570,6 +570,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  @media (max-width: 640px) {
+    .ct {
+      display: none;
+    }
+  }
   .ct {
     max-width: 240px;
     overflow: hidden;

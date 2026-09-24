@@ -1787,9 +1787,17 @@
     .docs-pane {
       grid-template-columns: minmax(0, 1fr);
     }
+    .name-row {
+      flex-wrap: wrap;
+      row-gap: 2px;
+    }
     .name-input {
-      width: auto;
-      flex: 1;
+      flex: 1 1 60%;
+      max-width: none;
+    }
+    .where {
+      order: 3;
+      flex: 1 1 100%;
     }
   }
 </style>

@@ -83,6 +83,7 @@
       class="pill-toggle small"
       class:on={apiClient.historyAgentOnly}
       aria-pressed={apiClient.historyAgentOnly}
+      aria-label="Show only agent runs"
       title="Show only requests that agents sent through Otto’s tools"
       onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
     >Agent runs only</button>
@@ -102,14 +103,14 @@
       {#snippet row(h: ApiHistorySummary)}
         {@const src = apiClient.historySource(h)}
         {@const u = splitUrl(h.url)}
-        <button class="hist-row" onclick={() => open(h)} title="{h.method} {h.url}&#10;{new Date(h.executed_at).toLocaleString()}">
+        <button class="hist-row" data-url={h.url} onclick={() => open(h)} title="{h.method} {h.url}&#10;{new Date(h.executed_at).toLocaleString()}">
           <span class="l1">
             <MethodTag method={h.method} fixed />
             <span class="path mono" dir="ltr">{u.path}</span>
           </span>
           <span class="l2">
             <span class="host" dir="ltr">{u.host || '—'}</span>
-            {#if src?.kind === 'agent'}<span class="chip agent" title="Sent by an agent session">Agent</span>{/if}
+            {#if src?.kind === 'agent'}<span class="chip agent src-chip" title="Sent by an agent session">Agent</span>{/if}
             <StatusChip status={h.status} small />
             <span class="when">{rel(h.executed_at)}</span>
           </span>

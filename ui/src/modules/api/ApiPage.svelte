@@ -239,14 +239,14 @@
       <button class="btn small env-btn" data-keep onclick={envMenu} aria-haspopup="menu"
         aria-label="Environment: {activeEnvName ?? 'none'}" title="Environment: where {'{{variables}}'} get their values">
         <Icon name="globe" size={12} />
-        <span class="env-k">Environment</span>
+        {#if !viewport.isPhone}<span class="env-k">Environment</span>{/if}
         <span class="env-v" class:none={!activeEnvName}>{activeEnvName ?? 'None'}</span>
         <Icon name="chevronDown" size={12} />
       </button>
       <button class="btn small" data-icon="download" data-overflow="0" onclick={() => (importOpen = true)}><Icon name="download" size={12} />Import…</button>
       <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'}><Icon name="branch" size={12} />Sync with Git…</button>
       {#if !onboarding}
-        <button class="btn small primary" onclick={newRequest} title="New request (⌘T)"><Icon name="plus" size={12} />New request</button>
+        <button class="btn small primary" onclick={newRequest} title="New request (⌘T)" aria-label="New request"><Icon name="plus" size={12} />{#if !viewport.isPhone}New request{/if}</button>
       {/if}
     {/snippet}
   </PageHeader>
