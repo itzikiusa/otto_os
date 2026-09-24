@@ -323,7 +323,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         &[&MenuItem::with_id(
             handle,
             "walkthroughs",
-            "Walkthroughs",
+            "Otto Help",
             true,
             None::<&str>,
         )?],

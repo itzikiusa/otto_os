@@ -1,774 +1,599 @@
 <script lang="ts">
-  // Walkthroughs page — plays the onboarding MP4s with a left-rail selector,
-  // a search box, and keyboard arrow-key navigation.
-  // Videos are also registered as palette commands so they're reachable from ⌘K.
-  import { registry } from '../../lib/commands.svelte';
+  // Help (route `#/walkthroughs`, kept for old links, the native Help menu and
+  // ⌘K). A list/detail page of section guides — one README per sidebar module
+  // plus the shell-wide Basics — with the single tour film on top of the
+  // default view.
+  //
+  //   #/walkthroughs            film + Getting started (never an empty pane)
+  //   #/walkthroughs/<id>       that guide (unknown id → inline "not found")
+  //
+  // Guides are ./sections/*.md, loaded at build time (./sections.ts) — the
+  // rail lists whatever files exist, grouped like the sidebar. The rail is
+  // searchable (title, summary, body and shortcut keys, ranked in ./guide.ts)
+  // and arrow-key navigable. A guide shows "Watch this part" when a film
+  // chapter maps to it; a chapter shows "Read the guide" when its guide exists.
+  // The ⌘K "Guide: …" commands are registered app-wide in App.svelte.
+  //
+  // Phone: push navigation — the film + list is the page; opening a guide
+  // replaces it and the header gets a back button.
+  import { tick } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
-  import { api } from '../../lib/api/client';
-  import type { ResolveWalkthroughResp } from '../../lib/api/types';
-  import cinematicCatalog from '../../lib/walkthroughs/catalog.json';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { SIDEBAR_MODULES } from '../../lib/sidebar';
+  import { GUIDE_GROUPS, searchSections, splitChord, timeLabel, type GuideSection } from './guide';
+  import { DEFAULT_GUIDE_ID, FILM, GUIDES, guideById } from './sections';
+  import { renderGuideHtml } from './render';
+  import TourFilm from './TourFilm.svelte';
 
-  interface VideoItem {
-    duration?: number;
-    chapters?: { id: string; title: string; start: number; duration: number; doc: string }[];
-    file: string;
-    title: string;
-    desc: string;
-    /** Extra keywords for the search/fuzzy index. */
-    tags: string;
-    /** Feature guide under docs/features/ — the code-grounded, current reference. */
-    doc: string;
-  }
+  const guideIds = new Set(GUIDES.map((g) => g.id));
 
-  /** A module that has a feature guide but no walkthrough video (yet). */
-  interface GuideItem {
-    title: string;
-    desc: string;
-    tags: string;
-    doc: string;
-  }
+  // ---- selection (from the route) ----
+  const param = $derived(router.module === 'walkthroughs' ? router.parts[1] : undefined);
+  const isDefault = $derived(!param);
+  const selectedId = $derived(param ?? DEFAULT_GUIDE_ID);
+  const selected = $derived(guideById(selectedId));
 
-  // The feature guides are the authoritative, code-grounded explainers; videos
-  // lag behind them (see marketing/videos/UPDATE_PLAN.md). Link every entry to
-  // its guide so a stale caption never becomes the last word.
-  const DOCS_BASE = 'https://github.com/itzikiusa/otto_os/blob/main/docs/features';
+  /** The film shows on the default view, and on a guide after "Watch this part"
+   *  / "Watch the tour" (reset whenever the guide changes). */
+  let filmRequested = $state(false);
+  const showFilm = $derived(isDefault || filmRequested);
+  let film: ReturnType<typeof TourFilm> | undefined = $state();
+  let mainEl: HTMLElement | undefined = $state();
 
-  function docUrl(doc: string): string {
-    return `${DOCS_BASE}/${doc}`;
-  }
-
-  // The MP4s are NOT bundled with the app (they were ~135 MB and were baked
-  // into both ottod's embed-ui and the Tauri bundle). They are hosted as assets
-  // of the rolling GitHub release tagged `walkthroughs`
-  // (packaging/publish-walkthroughs.sh re-encodes + uploads them). Override the
-  // base URL at build time with VITE_WALKTHROUGHS_BASE (e.g. a mirror / CDN).
-  // Opt in after the v2 assets are published, or point this at a local screening
-  // server. The installed app keeps its working catalog until that release is ready.
-  const cinematicBase: string | undefined = import.meta.env.VITE_WALKTHROUGHS_V2_BASE?.trim() || undefined;
-  const WALKTHROUGHS_BASE: string = cinematicBase ??
-    import.meta.env.VITE_WALKTHROUGHS_BASE ??
-    'https://github.com/itzikiusa/otto_os/releases/download/walkthroughs';
-
-  function videoUrl(file: string): string {
-    return `${WALKTHROUGHS_BASE.replace(/\/+$/, '')}/${file}`;
-  }
-
-  // One entry per rendered composition in marketing/videos/ (→ marketing/videos/out/,
-  // published to the `walkthroughs` release). Order = recommended viewing order:
-  // Intro → agents & delivery → automation → knowledge → infra & data → platform.
-  // Keep the `file` set in sync with marketing/videos/src/Root.tsx + render-all.mjs.
-  // `desc`/`tags` describe the feature as it ships TODAY (so search finds current
-  // terminology) — where a video's captions lag, the note says so and the guide
-  // link is the truth. Caption fixes live in marketing/videos/UPDATE_PLAN.md.
-  const legacyVideos: VideoItem[] = [
-    { file: 'Intro.mp4',          title: 'Welcome to Otto',           desc: 'Run many AI coding agents — and your whole workflow — in one native window.',                                                             tags: 'intro welcome overview onboarding first steps tour ade agentic development environment',                              doc: 'README.md' },
-    { file: 'Sessions.mp4',       title: 'Agent Sessions',            desc: 'claude, codex, agy (Antigravity), custom providers & shell as live PTY sessions — tiled, split, broadcast, resumable, auto-trusted.',       tags: 'agent session terminal pty tiled split broadcast resume trust claude codex agy antigravity shell custom provider model picker names', doc: 'agent-sessions.md' },
-    { file: 'MissionControl.mp4', title: 'Mission Control',           desc: 'One live work graph over sessions, swarms, goal loops, workflows, reviews, product stories, PRs & external triggers.',                       tags: 'mission control work graph nodes overview unified status workflow pr external trigger feed',                          doc: 'mission-control.md' },
-    { file: 'Git.mp4',            title: 'Git & Pull Requests',       desc: 'Repo tabs, commit graph, WIP staging, the conflict resolver, worktrees, a Focus tab, and agent-drafted PRs that auto-push.',              tags: 'git pr pull request branch commit graph diff merge conflict resolver wip stage discard worktree focus stash draft github bitbucket gitlab', doc: 'git.md' },
-    { file: 'Review.mp4',         title: 'AI Code Review',            desc: 'One reviewer per lens × provider over a PR or working tree; findings become tracked records — triage, fix with an agent, verify.',        tags: 'review code lens findings security correctness performance tests pr working tree triage verify waive regressed', doc: 'code-review.md' },
-    { file: 'ProofPacks.mp4',     title: 'Proof Packs',               desc: 'No “done” without evidence — artifacts, derived status & risk, and completion gates on PRs, goal loops and workflows.',                    tags: 'proof pack evidence artifact status risk gate test pr badge score report',                                             doc: 'proof-packs.md' },
-    { file: 'Product.mp4',        title: 'Product · Jira & Confluence', desc: 'Ticket or Confluence page → analyze, ask, rewrite, test cases, plan → hand to a swarm or a fresh agent session; publishes back to Jira & Confluence.', tags: 'product jira confluence ticket story spec plan analysis discovery rfc rewrite test cases learnings mockup publish inject', doc: 'product.md' },
-    { file: 'Canvas.mp4',         title: 'Canvas',                    desc: 'File-backed Excalidraw, Mermaid & D2 scenes an agent edits while you chat.',                                                             tags: 'canvas excalidraw mermaid d2 diagram draw scene visual',                                                              doc: 'canvas.md' },
-    { file: 'Swarm.mp4',          title: 'Agent Swarm',               desc: 'A company of role agents — recruiter, per-swarm coordinator, org tree, Kanban board, run graph, schedules & presets.',                    tags: 'swarm team agent coordinator recruiter org kanban board dag roles preset budget',                                      doc: 'agent-swarm.md' },
-    { file: 'GoalLoops.mp4',      title: 'Goal Loops',                desc: 'Give a goal + budget; agents iterate Plan→Execute→Evaluate→Digest on an isolated goal-loop/<id> branch until criteria pass.',           tags: 'goal loop iterate plan execute evaluate digest budget criteria branch worktree',                                       doc: 'goal-loops.md' },
-    { file: 'Workflows.mp4',      title: 'Workflows',                 desc: 'Chain agents, HTTP, DB, brokers, approvals & swarm tasks into a graph — manual, webhook, event, schedule & Slack-chat triggers; retry + run queue.', tags: 'workflow graph node trigger webhook approval automation pipeline schedule cron slack chat retry queue condition loop version', doc: 'workflows.md' },
-    { file: 'ScheduledTasks.mp4', title: 'Scheduled Tasks',           desc: 'Recurring agent jobs (interval, daily, weekly, cron) → a Markdown report → Slack, Telegram, email or webhook; presets & otto.* MCP tools.', tags: 'schedule task recurring cron report daily weekly interval timezone deliver markdown preset',                          doc: 'scheduled-tasks.md' },
-    { file: 'Channels.mp4',       title: 'Channels',                  desc: 'Bridge a Slack or Telegram thread to an agent — messages relayed both ways (files in on Slack, out on both) — plus Broadcast.',            tags: 'slack telegram channel bridge thread ticket relay broadcast socket mode botfather',                                    doc: 'channels-slack-telegram.md' },
-    { file: 'Skills.mp4',         title: 'Skills & Self-Improvement', desc: 'A versioned skill library (Settings → Skills) that drives review lenses, product analysis & insights — and improves itself from your sessions.', tags: 'skill library install version self improvement reflect lens insights okf',                                        doc: 'skills-library.md' },
-    { file: 'SkillsEval.mp4',     title: 'Skills Lab · Evaluator',    desc: 'Benchmark a skill: implement→validate→score→improve across providers, compare runs — now the Evaluator tab of the Skills Lab module.',   tags: 'skill eval evaluator benchmark score iterate provider compare report skills lab review editor',                       doc: 'skills-evaluator.md' },
-    { file: 'Vault.mp4',          title: 'Vault',                     desc: 'Docs home: register a local (Obsidian) markdown folder — wikilinks & backlinks, tags, full-text search, a scalable graph, OKF validation. Video predates Vault v3 (no vector recall).', tags: 'vault docs knowledge note obsidian markdown backlink wikilink graph search fts tags okf quick switcher', doc: 'vault.md' },
-    { file: 'Connections.mp4',    title: 'Connections · SSH & SFTP',  desc: 'SSH / MySQL / Postgres / Redis / Mongo / ClickHouse / Kafka connections, tunnels (-L / SOCKS5), and an SFTP browser — secrets in Keychain.', tags: 'ssh sftp connection tunnel socks bastion keychain mysql postgres redis mongo clickhouse kafka custom',          doc: 'connections-ssh-sftp.md' },
-    { file: 'Database.mp4',       title: 'Database Explorer',         desc: 'TablePlus-class browser: schema tree, DB Assistant (NL→SQL), reviewed inline edits, index editor, mongosh scripts, ERD, dashboards, export.', tags: 'database mysql postgres redis mongodb clickhouse sql query schema nl assistant join index mongosh explain erd dashboard export detached', doc: 'database-explorer.md' },
-    { file: 'Brokers.mp4',        title: 'Message Brokers',           desc: 'Kafka (incl. AWS MSK over SSH) — topics & configs, peek/produce, consumer-group lag, replay, lag alerts, schema registry.',                tags: 'kafka broker topic produce consumer group lag replay alert schema registry msk config',                             doc: 'message-brokers.md' },
-    { file: 'Api.mp4',            title: 'API Client',                desc: 'A Postman-class workbench: HTTP/SSE/WS/gRPC/GraphQL, environments, cookie jar, Postman/OpenAPI/HAR import, automations — SSRF-guarded.', tags: 'api http rest grpc graphql websocket sse postman openapi har environment import automation ssrf',                    doc: 'api-client.md' },
-    { file: 'Mcp.mp4',            title: 'MCP Control Plane',         desc: 'Govern MCP calls (allowlist → policy → approval → dry-run → fail-closed audit); expose Otto outward as 100+ otto.* tools behind a restricted token.', tags: 'mcp model context protocol tool governance approval audit server outbound gateway policy',                        doc: 'mcp-control-plane.md' },
-    { file: 'Plugins.mp4',        title: 'Custom Plugins',            desc: 'Runtime sidecar plugins in any language — supervised, reverse-proxied, scoped by RBAC.',                                                  tags: 'plugin sidecar extend runtime iframe host api rbac install',                                                          doc: 'plugins.md' },
-    { file: 'UsageInsights.mp4',  title: 'Usage, Cost & Insights',    desc: 'Real per-turn tokens & cost from transcripts, opt-in budgets, system metrics, and scheduled catch-up reports.',                           tags: 'usage cost token clickhouse budget insight report daily weekly cache metrics',                                        doc: 'usage-and-cost.md' },
-    { file: 'TeamMobile.mp4',     title: 'Multi-user & Mobile',       desc: 'Per-feature RBAC grants + workspace roles, scoped expiring share links with email-OTP, and an installable PWA over a tunnel.',              tags: 'rbac user role grant share link otp mobile pwa tunnel remote tablet responsive sharing impersonation',              doc: 'rbac-multiuser-sharing.md' },
-    { file: 'Platform.mp4',       title: 'Platform & Shortcuts',      desc: '⌘K palette, ⌘I Ask Otto, themes, RTL, a customizable sidebar, multi-window, and daily CLI auto-update.',                                  tags: 'platform shortcut command palette theme rtl sidebar settings auto-update multi window',                               doc: 'rtl-and-responsive.md' },
-  ];
-
-  const videos: VideoItem[] = cinematicBase ? cinematicCatalog : legacyVideos;
-
-  // Modules that ship today but have no walkthrough yet — listed so the page
-  // is an honest map of Otto, not just of what was filmed. Each links to its
-  // feature guide; a later render pass turns these into videos.
-  const guides: GuideItem[] = [
-    { title: 'Run with Otto',      desc: 'One button: a Jira/Confluence/GitHub/Slack item → worktree → agent → proof pack → review → approval → PR.', tags: 'run with otto one button pipeline jira slack pr approval',         doc: 'run-with-otto.md' },
-    { title: 'Browser',            desc: 'Reader & live tabs, DOM marks you send into a session or save to the Vault, site credentials for agents.',   tags: 'browser web reader live tab annotation mark lightpanda credentials', doc: 'browser.md' },
-    { title: 'AWS console',        desc: 'S3, SQS, EC2, Athena & EKS through the aws CLI per saved account — secrets in Keychain.',                     tags: 'aws cloud s3 sqs ec2 athena eks account sso profile',                doc: 'aws-console.md' },
-    { title: 'Kubernetes console', desc: 'k9s-class view over any kubeconfig context: workloads, logs, exec, Argo Rollouts & Argo CD actions.',        tags: 'kubernetes k8s kubectl pod logs exec argo rollouts argocd helm eks',  doc: 'kubernetes-console.md' },
-    { title: 'Personal Agents',    desc: 'Named personas with a pinned provider + model, schedules, memory, chat-anytime and user-visible rooms.',     tags: 'personal agent persona schedule room memory model catalog',          doc: 'personal-agents.md' },
-    { title: 'Snipping Tool',      desc: 'System-wide ⌘⌃⇧2 → region select → annotate; the image is on the clipboard at every step.',                  tags: 'snip screenshot capture annotate clipboard',                          doc: 'snipping-tool.md' },
-    { title: 'Multi-window',       desc: 'File → New Window (⌘⇧N): independent workspace surfaces, restored on relaunch.',                            tags: 'multi window new window restore',                                     doc: 'multi-window.md' },
-    { title: 'Daemon HTTP API',    desc: 'Drive Otto programmatically over ottod — tokens, REST map, WebSocket streams.',                              tags: 'api daemon rest http token websocket programmatic',                   doc: 'daemon-http-api.md' },
-  ];
-
-  let activeIndex = $state(0);
-  let currentTime = $state(0);
-  let pendingSeek = $state<number | null>(null);
-
-  function timeLabel(seconds: number): string {
-    return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
-  }
-
-  function seekChapter(seconds: number): void {
-    currentTime = seconds;
-    if (videoEl && videoEl.readyState >= 1) {
-      videoEl.currentTime = seconds;
-      void videoEl.play().catch(() => {});
-    } else {
-      pendingSeek = seconds;
-    }
-  }
-
-  function onMetadata(): void {
-    loading = false;
-    if (videoEl && pendingSeek !== null) {
-      videoEl.currentTime = pendingSeek;
-      pendingSeek = null;
-      void videoEl.play().catch(() => {});
-    }
-  }
-  let videoEl: HTMLVideoElement | null = $state(null);
-  let searchQuery = $state('');
-  let railEl: HTMLElement | null = $state(null);
-  // Per-file load state: files that failed to load (offline / blocked / 404)
-  // render the "unavailable" placeholder instead of a black box. Kept as a
-  // set so switching away and back doesn't re-hit a known-dead URL until the
-  // user explicitly retries.
-  let failed = $state(new Set<string>());
-  let loading = $state(false);
-
-  // GitHub serves release assets through a 302 to a short-lived signed URL,
-  // and WebKit (the desktop webview) refuses a <video src> that redirects
-  // (MEDIA_ERR_SRC_NOT_SUPPORTED — Chromium tolerates it, which is why this
-  // only bites in the app). The daemon resolves the hop; the element gets the
-  // final URL. Falls back to the raw URL when the daemon can't resolve it
-  // (offline, remote browser without the route…). Keyed by file so a stale
-  // resolution never lands on a different video.
-  let resolvedSrc = $state<{ file: string; url: string } | null>(null);
-  let resolveNonce = 0;
-  async function resolveSrc(file: string): Promise<void> {
-    const raw = videoUrl(file);
-    const nonce = ++resolveNonce;
-    let url = raw;
-    if (raw.startsWith('https://github.com/')) {
-      try {
-        url = (await api.get<ResolveWalkthroughResp>(`/walkthroughs/resolve?url=${encodeURIComponent(raw)}`)).url || raw;
-      } catch {
-        url = raw;
-      }
-    }
-    if (nonce === resolveNonce) resolvedSrc = { file, url };
-  }
+  let lastId = '';
   $effect(() => {
-    const file = current?.file;
-    if (!file) return;
-    if (resolvedSrc?.file === file) return;
-    resolvedSrc = null;
-    void resolveSrc(file);
+    const id = selectedId;
+    if (id === lastId) return;
+    lastId = id;
+    filmRequested = false;
+    mainEl?.scrollTo({ top: 0 });
   });
 
-  function onVideoError(file: string): void {
-    failed = new Set([...failed, file]);
-    loading = false;
+  function open(id: string, replace = false): void {
+    const path = id === DEFAULT_GUIDE_ID && !param ? 'walkthroughs' : `walkthroughs/${id}`;
+    if (replace) router.replace(path);
+    else router.go(path);
   }
 
-  function retry(file: string): void {
-    const next = new Set(failed);
-    next.delete(file);
-    failed = next;
-    // The signed URL expires (~1h) — re-resolve rather than re-hit a dead one.
-    resolvedSrc = null;
-    void resolveSrc(file);
-  }
-
-  // ---- filtered list ----
-  const filteredVideos = $derived.by(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return videos.map((v, i) => ({ v, i }));
-    return videos
-      .map((v, i) => ({ v, i }))
-      .filter(({ v }) =>
-        v.title.toLowerCase().includes(q) ||
-        v.desc.toLowerCase().includes(q) ||
-        v.tags.includes(q),
-      );
-  });
-
-  const filteredGuides = $derived.by(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (cinematicBase) return [];
-    if (!q) return guides;
-    return guides.filter((g) =>
-      g.title.toLowerCase().includes(q) ||
-      g.desc.toLowerCase().includes(q) ||
-      g.tags.includes(q),
-    );
-  });
-
-  function select(i: number): void {
-    activeIndex = i;
-    currentTime = 0;
-    pendingSeek = null;
-  }
-
-  // Auto-play whenever a new video element is bound (after key block re-mounts).
-  // play() rejects when the stream can't be fetched (offline) or autoplay is
-  // blocked — swallow it; the `error` event drives the placeholder state.
-  $effect(() => {
-    if (videoEl) {
-      loading = true;
-      // Narrated films start on user intent so switching pages never starts sound.
-      if (!cinematicBase) videoEl.play().catch(() => {});
+  // ---- rendered body (memoised per guide) ----
+  const htmlCache = new Map<string, string>();
+  const html = $derived.by(() => {
+    if (!selected) return '';
+    let h = htmlCache.get(selected.id);
+    if (h === undefined) {
+      h = renderGuideHtml(selected.body);
+      htmlCache.set(selected.id, h);
     }
+    return h;
   });
 
-  // Arrow-key navigation within the rail (when it is focused or contains focus).
-  // Arrow-key navigation: when the rail container or one of its children has
-  // focus, ArrowDown/Up moves between visible entries.
-  $effect(() => {
-    function onRailKey(e: KeyboardEvent): void {
-      // Only intercept when focus is inside the rail container.
-      if (!railEl?.contains(document.activeElement) || e.target instanceof HTMLInputElement) return;
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  // ---- film ↔ guide ----
+  const chapterFor = $derived(FILM?.chapters.find((c) => c.section === selectedId));
+
+  async function watchPart(start: number): Promise<void> {
+    filmRequested = true;
+    await tick();
+    mainEl?.scrollTo({ top: 0, behavior: 'smooth' });
+    film?.playAt(start);
+  }
+
+  async function watchTour(): Promise<void> {
+    filmRequested = true;
+    await tick();
+    mainEl?.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ---- "Open <module>" (respects the sidebar's RBAC gate) ----
+  function routeAllowed(route: string): boolean {
+    const mod = route.split('/')[0];
+    if (mod === 'plugin') return auth.canPlugin(route.split('/')[1] ?? '', 'view');
+    const def = SIDEBAR_MODULES.find((m) => m.id === mod);
+    if (!def) return true;
+    if (def.featureAny) return def.featureAny.some((f) => auth.can(f, 'view'));
+    return def.feature == null || auth.can(def.feature, 'view');
+  }
+  const openAllowed = $derived(selected?.route ? routeAllowed(selected.route) : false);
+
+  // ---- search ----
+  let query = $state('');
+  let searchEl: HTMLInputElement | undefined = $state();
+  const hits = $derived(searchSections(GUIDES, query));
+  const searching = $derived(query.trim().length > 0);
+  const grouped = $derived(
+    GUIDE_GROUPS.map((group) => ({ group, items: GUIDES.filter((g) => g.group === group) })).filter(
+      (s) => s.items.length > 0,
+    ),
+  );
+  /** The rail's rows in on-screen order (arrow-key navigation walks this). */
+  const railOrder = $derived(searching ? hits.map((h) => h.section.id) : GUIDES.map((g) => g.id));
+
+  // ---- keyboard: ↑/↓/Home/End move through the rail; Enter in search opens ----
+  let railEl: HTMLElement | undefined = $state();
+
+  function focusRow(id: string): void {
+    railEl?.querySelector<HTMLElement>(`[data-guide="${CSS.escape(id)}"]`)?.focus();
+  }
+
+  function step(from: string | undefined, delta: number | 'first' | 'last'): string | undefined {
+    const list = railOrder;
+    if (!list.length) return undefined;
+    if (delta === 'first') return list[0];
+    if (delta === 'last') return list[list.length - 1];
+    const i = from ? list.indexOf(from) : -1;
+    if (i < 0) return delta > 0 ? list[0] : list[list.length - 1];
+    return list[Math.min(Math.max(i + delta, 0), list.length - 1)];
+  }
+
+  function onRailKey(e: KeyboardEvent): void {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const inSearch = e.target === searchEl;
+    const moves: Record<string, number | 'first' | 'last'> = { ArrowDown: 1, ArrowUp: -1 };
+    if (!inSearch) Object.assign(moves, { Home: 'first', End: 'last' });
+    if (inSearch && e.key === 'Enter') {
+      const top = railOrder[0];
+      if (top) {
         e.preventDefault();
-        const visible = filteredVideos.map((x) => x.i);
-        const cur = visible.indexOf(activeIndex);
-        if (e.key === 'ArrowDown') {
-          const next = visible[Math.min(cur + 1, visible.length - 1)];
-          if (next !== undefined) select(next);
-        } else {
-          const prev = visible[Math.max(cur - 1, 0)];
-          if (prev !== undefined) select(prev);
-        }
+        open(top);
       }
+      return;
     }
-    window.addEventListener('keydown', onRailKey);
-    return () => window.removeEventListener('keydown', onRailKey);
-  });
+    if (inSearch && e.key === 'Escape' && query) {
+      e.preventDefault();
+      query = '';
+      return;
+    }
+    const mv = moves[e.key];
+    if (mv === undefined) return;
+    e.preventDefault();
+    const current = (document.activeElement as HTMLElement | null)?.dataset?.guide ?? (inSearch ? undefined : selectedId);
+    const next = inSearch && mv === 1 && !current ? step(undefined, 'first') : step(current, mv);
+    if (!next) return;
+    // Arrow browsing replaces the history entry (Back leaves the page, not
+    // every guide you arrowed past); on a phone it only moves focus.
+    if (!viewport.isPhone) open(next, true);
+    void tick().then(() => focusRow(next));
+  }
 
-  const current = $derived(videos[activeIndex]);
-
-  // ---- register every video as a palette command ----
-  $effect(() => {
-    const cmds = videos.map((v, i) => ({
-      id: `walkthrough.${v.file}`,
-      title: `Walkthrough: ${v.title}`,
-      group: 'Help',
-      keywords: `${v.tags} video tour`,
-      run: () => {
-        select(i);
-        router.go('walkthroughs');
-      },
-    }));
-    // Guides without a video are reachable from ⌘K too ("Guide: AWS console").
-    const guideCmds = guides.map((g) => ({
-      id: `walkthrough.guide.${g.doc}`,
-      title: `Guide: ${g.title}`,
-      group: 'Help',
-      keywords: `${g.tags} docs guide feature`,
-      run: () => {
-        window.open(docUrl(g.doc), '_blank', 'noopener,noreferrer');
-      },
-    }));
-    const chapterCmds = videos.flatMap((v, i) => (v.chapters ?? []).map(chapter => ({
-      id: `walkthrough.chapter.${chapter.id}`, title: `Walkthrough: ${chapter.title}`,
-      group: 'Help', keywords: `${v.tags} ${chapter.title} chapter video tour`,
-      run: () => {
-        const sameFilm = activeIndex === i;
-        select(i);
-        if (sameFilm) seekChapter(chapter.start);
-        else pendingSeek = chapter.start;
-        router.go('walkthroughs');
-      },
-    })));
-    const unreg = registry.register('walkthroughs', [...cmds, ...guideCmds, ...chapterCmds]);
-    return unreg;
-  });
+  const pageSubtitle = 'Guides to every part of Otto, with shortcuts and limits';
+  const showList = $derived(!viewport.isPhone || isDefault);
+  const showArticle = $derived(!viewport.isPhone || !isDefault);
 </script>
 
-<div class="wt-page">
-<PageHeader
-  title="Walkthroughs"
-  subtitle={cinematicBase ? 'Eight films. One complete workflow. Narration, sound, and chapters you can jump into.' : 'Short tours of Otto’s features. Search or use ⌘K → “Walkthrough:”.'}
-/>
-<div class="walkthroughs">
+{#snippet row(g: GuideSection, match?: { kind: string; text: string })}
+  <button
+    class="rail-row"
+    class:active={!searching && g.id === selectedId && !viewport.isPhone}
+    class:hit={searching && g.id === railOrder[0]}
+    aria-current={g.id === selectedId && !viewport.isPhone ? 'page' : undefined}
+    data-guide={g.id}
+    data-testid="guide-row"
+    onclick={() => open(g.id)}
+  >
+    <span class="row-title">{g.title}</span>
+    {#if searching}
+      <span class="row-meta">
+        <span class="row-group">{g.group}</span>
+        {#if match?.kind === 'shortcut'}
+          <span class="keys">{#each splitChord(match.text) as k, i (i)}<kbd>{k}</kbd>{/each}</span>
+        {:else if match?.text}
+          <span class="row-snippet">{match.text}</span>
+        {/if}
+      </span>
+    {:else if g.summary && viewport.isPhone}
+      <span class="row-snippet">{g.summary}</span>
+    {/if}
+  </button>
+{/snippet}
 
-  <div class="layout">
-    <!-- Left rail: search + video list.
-         Arrow-key navigation is handled globally (window keydown) while the
-         rail has focus, so no handler is needed directly on this element. -->
-    <div
-      class="video-rail"
-      aria-label="Walkthrough list"
-      bind:this={railEl}
-    >
-      <div class="rail-search">
-        <input
-          class="search-input"
-          type="search"
-          placeholder="Search…"
-          bind:value={searchQuery}
-          aria-label="Filter walkthroughs"
-        />
-      </div>
-
-      {#each filteredVideos as { v, i } (v.file)}
-        <button
-          class="rail-item"
-          class:active={activeIndex === i}
-          onclick={() => select(i)}
-          aria-current={activeIndex === i ? 'true' : undefined}
-        >
-          <span class="item-num">{i + 1}</span>
-          <span class="item-text">
-            <span class="item-title">{v.title}</span>
-            {#if v.duration}<span class="film-duration">{timeLabel(v.duration)} · {v.chapters?.length} chapters</span>{/if}
-            <span class="item-desc">{v.desc}</span>
-          </span>
+<div class="help-page">
+  <PageHeader title="Help" icon="book" subtitle={pageSubtitle}>
+    {#snippet leading()}
+      {#if viewport.isPhone && !isDefault}
+        <button class="icon-btn" onclick={() => router.go('walkthroughs')} aria-label="Back to all guides" title="Back to all guides">
+          <Icon name="chevronLeft" size={16} />
         </button>
-      {:else}
-        {#if filteredGuides.length === 0}
-          <div class="rail-empty dim">No matches for "{searchQuery}"</div>
-        {/if}
-      {/each}
-
-      {#if filteredGuides.length > 0}
-        <div class="rail-section" aria-label="Not yet covered by a video">
-          <div class="rail-section-title dim">Not yet covered — read the guide</div>
-          {#each filteredGuides as g (g.doc)}
-            <a
-              class="rail-guide"
-              href={docUrl(g.doc)}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={g.desc}
-            >
-              <span class="item-text">
-                <span class="item-title">{g.title} <span class="ext" aria-hidden="true">↗</span></span>
-                <span class="item-desc">{g.desc}</span>
-              </span>
-            </a>
-          {/each}
-        </div>
       {/if}
-    </div>
+    {/snippet}
+    {#snippet actions()}
+      {#if FILM && !showFilm && showArticle && !viewport.isPhone}
+        <button class="btn ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
+          <Icon name="play" size={12} /> Watch the tour
+        </button>
+      {/if}
+      {#if selected?.route && showArticle}
+        <button
+          class="btn primary"
+          disabled={!openAllowed}
+          title={openAllowed ? `Go to ${selected.title}` : `You don't have access to ${selected.title}. Ask an admin for access.`}
+          onclick={() => selected?.route && router.go(selected.route)}
+          data-testid="guide-open-module"
+        >
+          Open {selected.title}
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
 
-    <!-- Main: player -->
-    <div class="player-area">
-      <div class="player-meta">
-        <h2 class="player-title">{current.title}</h2>
-        <p class="player-desc">
-          {current.desc}
-          <a class="doc-link" href={docUrl(current.doc)} target="_blank" rel="noopener noreferrer">Read the guide ↗</a>
-        </p>
-      </div>
-      {#key current.file}
-        {#if failed.has(current.file)}
-          <div class="video-fallback" role="status">
-            <span class="fallback-icon" aria-hidden="true">▶</span>
-            <p class="fallback-title">Video unavailable</p>
-            <p class="fallback-sub">
-              This video could not be loaded. Check your connection or retry.
-            </p>
-            <div class="fallback-actions">
-              <a class="fallback-link" href={videoUrl(current.file)} target="_blank" rel="noopener noreferrer">
-                Open video ↗
-              </a>
-              <button class="fallback-retry" onclick={() => retry(current.file)}>Retry</button>
+  {#if GUIDES.length === 0}
+    <PageBody>
+      <EmptyState
+        variant="page"
+        icon="book"
+        title="No guides in this build"
+        body="The Help guides ship with the app. Reinstall or update Otto to get them back."
+      />
+    </PageBody>
+  {:else}
+    <PageBody fill padded={false}>
+      <div class="help-layout" class:phone={viewport.isPhone}>
+        {#if showList}
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey}>
+            <div class="rail-search">
+              <Icon name="search" size={13} />
+              <input
+                bind:this={searchEl}
+                bind:value={query}
+                type="search"
+                placeholder="Search guides and shortcuts"
+                aria-label="Search guides"
+                autocomplete="off"
+                spellcheck="false"
+                data-testid="guide-search"
+              />
             </div>
-          </div>
-        {:else}
-          <div class="video-frame" class:loading>
-            <!-- preload="metadata" (never "auto"): only the moov atom + first
-                 frame are fetched per selected video; nothing is fetched for
-                 the other 24 entries in the rail. -->
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video
-              bind:this={videoEl}
-              class="video-el"
-              controls
-              preload="metadata"
-              playsinline
-              crossorigin={cinematicBase ? 'anonymous' : undefined}
-              poster={cinematicBase ? videoUrl(current.file.replace(/\.mp4$/, '.jpg')) : undefined}
-              onloadedmetadata={onMetadata}
-              ontimeupdate={() => { currentTime = videoEl?.currentTime ?? 0; }}
-              src={resolvedSrc?.file === current.file ? resolvedSrc.url : undefined}
-              onerror={() => onVideoError(current.file)}
-              onloadeddata={() => (loading = false)}
-              oncanplay={() => (loading = false)}
-            >
-              {#if cinematicBase}
-                <track kind="captions" srclang="en" label="English" src={videoUrl(current.file.replace(/\.mp4$/, '.vtt'))} />
-              {/if}
-            </video>
-            {#if loading}
-              <div class="video-loading dim" aria-hidden="true">Loading…</div>
+
+            {#if viewport.isPhone && FILM && !searching}
+              <div class="rail-film"><TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} /></div>
             {/if}
-          </div>
-        {/if}
-      {/key}
-      {#if current.chapters}
-        <nav class="chapter-list" aria-label="Film chapters">
-          {#each current.chapters as chapter (chapter.id)}
-            <div class="chapter-entry">
-              <button class="chapter-button"
-                class:chapter-active={currentTime >= chapter.start && currentTime < chapter.start + chapter.duration}
-                aria-current={currentTime >= chapter.start && currentTime < chapter.start + chapter.duration ? 'step' : undefined}
-                onclick={() => seekChapter(chapter.start)}>
-                <span class="chapter-time">{timeLabel(chapter.start)}</span>
-                <span>{chapter.title}</span>
-              </button>
-              <a class="chapter-guide" href={docUrl(chapter.doc)} target="_blank" rel="noopener noreferrer" aria-label={`Read the guide for ${chapter.title}`}>Guide ↗</a>
+
+            <div class="rail-list">
+              {#if searching}
+                {#if hits.length === 0}
+                  <div class="rail-empty">
+                    <p>No guides match “{query.trim()}”.</p>
+                    <button class="btn small" onclick={() => { query = ''; searchEl?.focus(); }}>Clear search</button>
+                  </div>
+                {:else}
+                  <div class="rail-count" role="status">{hits.length} {hits.length === 1 ? 'guide' : 'guides'}</div>
+                  {#each hits as h (h.section.id)}
+                    {@render row(h.section, h.match)}
+                  {/each}
+                {/if}
+              {:else}
+                {#each grouped as s (s.group)}
+                  <div class="rail-group" role="group" aria-label={s.group}>
+                    <div class="rail-group-label" aria-hidden="true">{s.group}</div>
+                    {#each s.items as g (g.id)}
+                      {@render row(g)}
+                    {/each}
+                  </div>
+                {/each}
+              {/if}
             </div>
-          {/each}
-        </nav>
-      {/if}
-    </div>
-  </div>
-</div>
+          </nav>
+        {/if}
+
+        {#if showArticle}
+          <main class="main" bind:this={mainEl} data-testid="guide-main">
+            <div class="column">
+              {#if showFilm}
+                <TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} />
+              {/if}
+
+              {#if selected}
+                <article class="guide" data-testid="guide-article" data-guide-id={selected.id}>
+                  <header class="guide-head">
+                    <div class="eyebrow">{selected.group}</div>
+                    <h2>{selected.title}</h2>
+                    {#if selected.summary}<p class="summary">{selected.summary}</p>{/if}
+                    {#if chapterFor}
+                      <button class="btn small" onclick={() => chapterFor && watchPart(chapterFor.start)} data-testid="guide-watch-part">
+                        <Icon name="play" size={11} /> Watch this part · {timeLabel(chapterFor.start)}
+                      </button>
+                    {/if}
+                  </header>
+                  <div class="md-body guide-body">{@html html}</div>
+                </article>
+              {:else}
+                <EmptyState
+                  icon="book"
+                  title="There's no guide called “{param}”"
+                  body="It may have been renamed. Pick one from the list, or start at the beginning."
+                  actionLabel="Open Getting started"
+                  onaction={() => router.go('walkthroughs')}
+                />
+              {/if}
+            </div>
+          </main>
+        {/if}
+      </div>
+    </PageBody>
+  {/if}
 </div>
 
 <style>
-  .film-duration { color: var(--text-dim); font-size: var(--fs-xs); margin: 3px 0; }
-  .chapter-list { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; max-height: 160px; overflow-y: auto; padding: 2px; }
-  .chapter-entry { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; }
-  .chapter-button { display: flex; align-items: center; gap: 8px; padding: 9px 10px; background: transparent; border: 0; color: var(--text); cursor: pointer; text-align: start; font-size: 12px; border-radius: 5px; }
-  .chapter-active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); }
-  .chapter-time { color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 11px; }
-  .chapter-guide { color: var(--text-dim); font-size: var(--fs-xs); padding: 9px; white-space: nowrap; text-decoration: none; }
-  .chapter-button:focus-visible, .chapter-guide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-  .wt-page {
+  .help-page {
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--bg);
   }
-
-  .walkthroughs {
-    container-type: inline-size;
+  .help-layout {
     flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 272px minmax(0, 1fr);
+  }
+  .help-layout.phone {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* ---- rail ---- */
+  .rail {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    padding: 18px 20px 16px;
-    box-sizing: border-box;
-    color: var(--text);
+    border-inline-end: 1px solid var(--separator);
+    background: var(--bg);
   }
-
-  .layout {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    gap: 20px;
-  }
-
-  /* Left rail */
-  .video-rail {
-    flex-shrink: 0;
-    width: 230px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+  .phone .rail {
+    border-inline-end: 0;
     overflow-y: auto;
-    min-height: 0;
   }
-
   .rail-search {
-    padding: 0 0 6px;
-    flex-shrink: 0;
-  }
-
-  .search-input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 5px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 5px);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: 12.5px;
-    outline: none;
-  }
-
-  .search-input:focus {
-    border-color: var(--accent);
-  }
-
-  .rail-item {
     display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 9px 10px;
-    border: none;
-    background: transparent;
-    border-radius: var(--radius-s, 6px);
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-    transition: background 120ms ease-out;
-    width: 100%;
-  }
-
-  .rail-item:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-
-  .rail-item.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-  }
-
-  .rail-empty {
-    padding: 12px 10px;
-    font-size: 12px;
-    text-align: center;
-  }
-
-  .rail-section {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .rail-section-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    padding: 0 10px 4px;
-  }
-
-  .rail-guide {
-    display: flex;
-    padding: 7px 10px;
-    border-radius: var(--radius-s, 6px);
-    color: var(--text);
-    text-decoration: none;
-    transition: background 120ms ease-out;
-  }
-
-  .rail-guide:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-
-  .rail-guide .ext {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-
-  .doc-link {
-    margin-inline-start: 6px;
-    color: var(--accent-text);
-    text-decoration: none;
-    white-space: nowrap;
-  }
-
-  .doc-link:hover {
-    text-decoration: underline;
-  }
-
-  .item-num {
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    display: grid;
-    place-items: center;
-    color: var(--text-dim);
-    margin-top: 1px;
-    transition: background 120ms ease-out, color 120ms ease-out;
-  }
-
-  .rail-item.active .item-num {
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .item-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .item-title {
-    font-size: 12.5px;
-    font-weight: 500;
-    line-height: 1.3;
-    color: var(--text);
-  }
-
-  .rail-item.active .item-title {
-    color: var(--accent-text);
-  }
-
-  .item-desc {
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.4;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  /* Player area */
-  .player-area {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    overflow: hidden;
-  }
-
-  .player-meta {
-    flex-shrink: 0;
-  }
-
-  .player-title {
-    font-size: 15px;
-    font-weight: 600;
-    margin: 0 0 3px;
-    color: var(--text);
-    letter-spacing: -0.01em;
-  }
-
-  .player-desc {
-    font-size: 12.5px;
-    color: var(--text-dim);
-    margin: 0;
-  }
-
-  .video-frame {
-    position: relative;
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-
-  .video-el {
-    flex: 1;
-    min-height: 0;
-    width: 100%;
-    border-radius: var(--radius-s, 6px);
-    border: 1px solid var(--border);
-    background: #000;
-    display: block;
-    object-fit: contain;
-  }
-
-  /* Poster-less placeholder while metadata/first frame streams in. */
-  .video-loading {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    font-size: 12px;
-    color: color-mix(in srgb, #fff 55%, transparent);
-    pointer-events: none;
-    border-radius: var(--radius-s, 6px);
-  }
-
-  /* Offline / blocked / 404 state — same footprint as the player. */
-  .video-fallback {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
     gap: 6px;
-    text-align: center;
-    padding: 24px;
-    border-radius: var(--radius-s, 6px);
-    border: 1px dashed var(--border);
-    background: var(--surface-2);
+    margin: 12px 12px 8px;
+    padding: 0 8px;
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+  }
+  .rail-search:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+  .rail-search input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
     color: var(--text);
+    font-size: var(--fs-m);
   }
-
-  .fallback-icon {
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    font-size: 16px;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    margin-bottom: 6px;
+  .rail-film {
+    padding: 4px 12px 16px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--separator);
   }
-
-  .fallback-title {
-    font-size: 13.5px;
-    font-weight: 600;
-    margin: 0;
+  .rail-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 8px 16px;
   }
-
-  .fallback-sub {
-    font-size: 12px;
-    color: var(--text-dim);
-    margin: 0;
-    max-width: 380px;
+  .phone .rail-list {
+    overflow: visible;
   }
-
-  .fallback-actions {
-    display: flex;
-    gap: 10px;
-    align-items: center;
+  .rail-group + .rail-group {
     margin-top: 10px;
   }
-
-  .fallback-link {
-    font-size: 12.5px;
-    color: var(--accent-text);
-    text-decoration: none;
-    padding: 5px 10px;
-    border-radius: var(--radius-s, 5px);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  .rail-group-label {
+    padding: 6px 8px 3px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
-
-  .fallback-link:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  .rail-count {
+    padding: 2px 8px 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
-
-  .fallback-retry {
-    font-size: 12.5px;
-    padding: 5px 10px;
-    border-radius: var(--radius-s, 5px);
-    border: 1px solid var(--border);
+  .rail-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    width: 100%;
+    min-height: 28px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
+    text-align: start;
     cursor: pointer;
   }
+  .phone .rail-row {
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+  .rail-row:hover {
+    background: var(--hover);
+  }
+  .rail-row.active {
+    background: var(--accent-soft);
+  }
+  .rail-row.active .row-title {
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .rail-row.hit {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .row-title {
+    font-size: var(--fs-m);
+    line-height: 1.35;
+  }
+  .row-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .row-group {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .row-snippet {
+    min-width: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rail-empty {
+    padding: 16px 8px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .rail-empty p {
+    margin: 0 0 8px;
+  }
 
-  .fallback-retry:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  /* ---- main ---- */
+  .main {
+    min-height: 0;
+    min-width: 0;
+    overflow-y: auto;
+    padding: 20px 28px max(48px, var(--fb-clearance, 0px));
   }
-  @container (max-width: 800px) {
-    .layout { flex-direction: column; overflow-y: auto; }
-    .player-area { order: -1; flex: none; overflow: visible; }
-    .video-frame { flex: none; aspect-ratio: 16 / 9; min-height: 160px; }
-    .video-el { height: 100%; }
-    .video-rail { width: 100%; max-height: 260px; min-height: 160px; }
-    .chapter-list { max-height: 130px; }
-    .player-desc { line-height: 1.5; }
+  .phone .main {
+    padding: 14px 16px max(40px, var(--fb-clearance, 0px));
   }
-  @media (max-width: 600px) {
-    .walkthroughs { padding: 12px 14px 12px; }
+  .column {
+    max-width: 880px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .guide-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--separator);
+  }
+  .eyebrow {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+  }
+  .guide-head h2 {
+    margin: 0;
+    font-size: var(--fs-2xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .summary {
+    margin: 0 0 6px;
+    font-size: var(--fs-l);
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+
+  /* Guide prose on top of the shared .md-body. */
+  .guide-body {
+    line-height: 1.6;
+  }
+  .guide-body :global(h2) {
+    font-size: var(--fs-l);
+    margin: 26px 0 8px;
+  }
+  .guide-body :global(h3) {
+    font-size: var(--fs-m);
+    margin: 18px 0 6px;
+  }
+  .guide-body :global(li) {
+    margin: 3px 0;
+  }
+  .guide-body :global(ul),
+  .guide-body :global(ol) {
+    padding-inline-start: 22px;
+    padding-left: revert;
+  }
+  .guide-body :global(a) {
+    color: var(--accent-text);
+    text-decoration: none;
+  }
+  .guide-body :global(a:hover) {
+    text-decoration: underline;
+  }
+  .guide-body :global(.table-wrap) {
+    overflow-x: auto;
+    margin: 8px 0 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+  }
+  .guide-body :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-s);
+  }
+  .guide-body :global(th) {
+    text-align: start;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    padding: 6px 10px;
+  }
+  .guide-body :global(td) {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .guide-body :global(.keys-table td:first-child) {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  /* Key chips (guide tables, prose and the search results). */
+  .keys,
+  .guide-body :global(.keys) {
+    display: inline-flex;
+    gap: 2px;
+    vertical-align: baseline;
+  }
+  kbd,
+  .guide-body :global(kbd) {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 5px;
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs);
+    line-height: 17px;
+    text-align: center;
+  }
+
+  @media (max-width: 1024px) {
+    .help-layout:not(.phone) {
+      grid-template-columns: 232px minmax(0, 1fr);
+    }
+    .main {
+      padding-inline: 20px;
+    }
   }
 </style>

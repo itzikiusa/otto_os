@@ -269,7 +269,7 @@ export function moduleLabel(routerModule: string): string {
     database: 'Database',
     brokers: 'Message Brokers',
     settings: 'Settings',
-    walkthroughs: 'Walkthroughs',
+    walkthroughs: 'Help',
     plugin: 'Plugin',
   };
   return other[routerModule] ?? routerModule.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase());
