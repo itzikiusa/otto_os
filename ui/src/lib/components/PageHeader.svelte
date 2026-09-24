@@ -280,8 +280,7 @@
           aria-label="More actions"
           aria-haspopup="menu"
         >
-          <!-- Icon.svelte has no "more" glyph; the ellipsis reads as one. -->
-          <span class="ph-more-glyph" aria-hidden="true">⋯</span>
+          <Icon name="more" size={16} />
         </button>
       {/if}
     </div>
@@ -474,12 +473,6 @@
     flex-shrink: 0;
     width: 28px;
     height: 28px;
-  }
-  .ph-more-glyph {
-    font-size: var(--fs-l);
-    line-height: 1;
-    font-weight: 700;
-    letter-spacing: 0.02em;
   }
   .ph-tabs-below {
     display: flex;

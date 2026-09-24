@@ -1125,8 +1125,8 @@
     cursor: default;
   }
   .nav-title {
-    font-size: 13px;
-    font-weight: 700;
+    font-size: var(--fs-m);
+    font-weight: 600;
     letter-spacing: -0.01em;
   }
   .nav-scroll {
