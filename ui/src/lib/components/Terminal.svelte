@@ -1159,6 +1159,12 @@
     };
     textarea?.addEventListener('focus', onFocus);
     textarea?.addEventListener('blur', onBlur);
+    // Focused before these listeners existed (auto-focus on mount): record it
+    // now, or ⌃-keys, ⌘F find and terminal zoom miss the focused terminal.
+    if (textarea && document.activeElement === textarea) {
+      keyContext.terminalFocused = true;
+      keyContext.openFind = openFind;
+    }
 
     // ── Image paste ───────────────────────────────────────────────────────────
     // Agent CLIs take an image as a FILE PATH, and the path has to exist on the

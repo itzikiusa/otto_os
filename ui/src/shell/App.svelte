@@ -56,6 +56,7 @@
   import UsagePage from '../modules/usage/UsagePage.svelte';
   import Settings from '../modules/settings/Settings.svelte';
   import Walkthroughs from '../modules/help/Walkthroughs.svelte';
+  import { GUIDES } from '../modules/help/sections';
   import ProductPage from '../modules/product/ProductPage.svelte';
   import CanvasPage from '../modules/canvas/CanvasPage.svelte';
   import DesignHallPage from '../modules/design-hall/DesignHallPage.svelte';
@@ -485,7 +486,7 @@
       { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
       { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
       { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
-      { id: 'core.go-walkthroughs', title: 'Walkthroughs', group: 'Navigate', keywords: 'help intro tour videos onboarding', run: () => router.go('walkthroughs') },
+      { id: 'core.go-walkthroughs', title: 'Open Help', group: 'Navigate', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding', run: () => router.go('walkthroughs') },
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       // Canvas lost its sidebar row to Design Hall (it is the Whiteboard studio)
@@ -527,6 +528,23 @@
       })),
     );
   });
+
+  // ---- palette commands: Help guides ----
+  // One "Guide: <title>" per README in modules/help/sections (static, bundled
+  // at build time), so any guide is ⌘K away from anywhere in the app.
+  $effect(() =>
+    registry.register(
+      'guides',
+      GUIDES.map((g) => ({
+        id: `help.guide.${g.id}`,
+        title: `Guide: ${g.title}`,
+        group: 'Help',
+        detail: g.group,
+        keywords: `help guide readme docs ${g.id.replace(/-/g, ' ')} ${g.summary} ${g.shortcuts.join(' ')}`,
+        run: () => router.go(`walkthroughs/${g.id}`),
+      })),
+    ),
+  );
 
   // ---- palette commands: focused session ----
   // Lifecycle verbs for the currently-active session (mirrors the per-pane ⋯

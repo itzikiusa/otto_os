@@ -62,8 +62,15 @@ export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number
 /** Install the global key map. Returns an uninstall fn. */
 export function installKeyMap(dispatch: KeyDispatcher): () => void {
   const handler = (e: KeyboardEvent) => {
-    const mod = e.metaKey || e.ctrlKey;
-    const term = keyContext.terminalFocused;
+    // Ask the DOM too: a Terminal that focuses itself on mount does so before
+    // its focus listener exists, so the flag alone can miss a focused xterm.
+    const term =
+      keyContext.terminalFocused ||
+      !!(document.activeElement as HTMLElement | null)?.closest?.('.xterm');
+    // ⌃ stands in for ⌘ (non-Mac remote clients) EXCEPT in a focused terminal:
+    // there ⌃D/⌃K/⌃B/⌃F/… are the shell's (EOF, kill-line, readline motion),
+    // so only a real ⌘ chord may reach the app map.
+    const mod = e.metaKey || (e.ctrlKey && !term);
 
     // Bare Backspace outside an editable element: WKWebView's legacy default
     // is "navigate back", which silently loses page state when the user just
