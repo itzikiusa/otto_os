@@ -454,6 +454,16 @@
     flex-shrink: 0;
     white-space: nowrap;
   }
+  /* One control height in the toolbar row, whether a page passed .btn or
+     .btn.small — mixed 22/26px buttons made headers look assembled from
+     different kits. */
+  .ph-actions :global(.btn) {
+    height: 26px;
+    font-size: var(--fs-m);
+  }
+  .ph-actions :global(.btn.small) {
+    padding: 0 10px;
+  }
   .ph-actions > :global([data-ph-hidden]) {
     display: none !important;
   }

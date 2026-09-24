@@ -209,7 +209,7 @@
       <span class="t-lbl">Needs approval</span>
     </div>
     <div class="tile">
-      <span class="t-val mono">{fmtCost(summary?.total_cost ?? 0)}</span>
+      <span class="t-val">{fmtCost(summary?.total_cost ?? 0)}</span>
       <span class="t-lbl">Total cost</span>
     </div>
   </div>

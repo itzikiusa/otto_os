@@ -107,10 +107,11 @@ export function statusColor(s: WorkStatus): string {
 export function riskColor(r: RiskLevel): string {
   switch (r) {
     case 'critical':
-    case 'high':
       return 'var(--danger)';
-    case 'medium':
+    case 'high':
       return 'var(--warning)';
+    // medium is the everyday default — neutral, so the chip isn't an amber
+    // alarm on every row.
     default:
       return 'var(--text-dim)';
   }
