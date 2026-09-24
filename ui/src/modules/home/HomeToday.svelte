@@ -147,33 +147,6 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  /* Phone: one column, and a card with nothing in it is a single calm line
-     so the widgets stay within reach. */
-  @media (max-width: 640px) {
-    .glance {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 8px;
-    }
-    .gcard {
-      min-height: 0;
-    }
-    .gcard:has(.gc-empty) {
-      flex-direction: row;
-      align-items: center;
-    }
-    .gcard:has(.gc-empty) .gc-head {
-      flex: none;
-    }
-    .gc-empty {
-      flex-direction: row;
-      justify-content: flex-start;
-      padding: 0;
-      text-align: start;
-    }
-    .gc-empty-mark {
-      display: none;
-    }
-  }
   .gcard {
     display: flex;
     flex-direction: column;
@@ -341,5 +314,32 @@
   }
   .gc-more:hover {
     text-decoration: underline;
+  }
+  /* Phone: one column, and a card with nothing in it is a single calm line
+     so the widgets stay within reach. */
+  @media (max-width: 640px) {
+    .glance {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+    .gcard {
+      min-height: 0;
+    }
+    .gcard:has(.gc-empty) {
+      flex-direction: row;
+      align-items: center;
+    }
+    .gcard:has(.gc-empty) .gc-head {
+      flex: none;
+    }
+    .gc-empty {
+      flex-direction: row;
+      justify-content: flex-start;
+      padding: 0;
+      text-align: start;
+    }
+    .gc-empty-mark {
+      display: none;
+    }
   }
 </style>

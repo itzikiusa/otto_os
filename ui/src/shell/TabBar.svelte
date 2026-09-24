@@ -155,7 +155,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="tabbar"
+  class="tabbar chrome-material"
   class:tauri-pad={isTauri && !ui.railExpanded}
   data-tauri-drag-region
   onmousedown={startWindowDrag}
@@ -333,8 +333,9 @@
     gap: 4px;
     height: 38px;
     padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    /* Chrome: the toolbar glass over the ambient (.chrome-material), like
+       every other page's PageHeader row. */
+    border-bottom: 1px solid var(--separator);
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {
