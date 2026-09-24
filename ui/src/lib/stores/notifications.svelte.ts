@@ -232,9 +232,15 @@ class NotificationStore {
   }
 
   ingest(notice: Notice): void {
-    if (this.notices.some((n) => n.id === notice.id)) return;
+    // The daemon de-dupes on `source_key`: a re-fired notice (a session that is
+    // waiting AGAIN) comes back with the SAME id, refreshed in place — unread,
+    // new body/severity/created_at. Replace ours (and move it to the top) or
+    // the bell keeps showing it read while the server says unread. Only an
+    // identical re-delivery is ignored.
+    const known = this.notices.find((n) => n.id === notice.id);
+    if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
-    this.notices = [notice, ...this.notices];
+    this.notices = [notice, ...this.notices.filter((n) => n.id !== notice.id)];
     if (
       this.settings.native_enabled &&
       (notice.severity === 'warn' || notice.severity === 'error')
