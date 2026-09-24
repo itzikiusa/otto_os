@@ -1055,6 +1055,13 @@ async fn run(cfg: Config) -> Result<(), String> {
     let _personal_agents_handle = otto_server::personal_agents_scheduler::start(ctx.clone());
     tracing::info!("personal agents scheduler started");
 
+    // --- Otto Assistant ---
+    // 30 s tick: fires due reminders (`once`), reports finished delegations
+    // into their thread, syncs approvals decided in the MCP queue, and deletes
+    // incognito threads 24 h after their last turn.
+    let _assistant_handle = otto_server::assistant::start(ctx.clone());
+    tracing::info!("assistant supervisor started");
+
     // --- Run with Otto ---
     // Boot reaper (fail interrupted runs, re-drive resumable ones) + a 30 s tick
     // that re-drives still-active runs. The engine drives the stage machine.

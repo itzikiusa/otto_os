@@ -9,6 +9,7 @@ pub mod agent_tasks_nudge;
 pub mod api_helpers;
 pub mod api_scripts;
 pub mod api_secrets;
+pub mod assistant;
 pub mod auth;
 pub mod browser_login_throttle;
 pub mod cadence;
