@@ -3,8 +3,7 @@
   // (the Agents page keeps its session TabBar instead). Modelled on the macOS
   // unified toolbar — title + actions in a single fixed-height bar:
   //
-  //   [icon] Title  [badge]  [tabs (inline)]        [secondary…] [primary] [⋯]
-  //          subtitle
+  //   [icon] Title  [badge]  subtitle…  [tabs (inline)]  [secondary…] [primary] [⋯]
   //
   // • Fixed height (--ph-h, 46px) and one title size, so every page's chrome
   //   lines up when you move between modules.
@@ -47,7 +46,7 @@
     title: string;
     /** Optional Icon name drawn dim before the title. */
     icon?: IconName;
-    /** One short line under the title (truncated with an ellipsis). */
+    /** One short dim line after the title, on its baseline (ellipsized). */
     subtitle?: string;
     /** Status pill / count next to the title. */
     badge?: Snippet;
@@ -343,10 +342,14 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
+  /* Title and subtitle share ONE baseline (the Design Hall section-header
+     look), so the title sits at the same height on every page whether or not
+     it has a subtitle — a stacked subtitle pushed the title up against the
+     top edge and made headers jump between modules. */
   .ph-titles {
     display: flex;
-    flex-direction: column;
-    justify-content: center;
+    align-items: baseline;
+    gap: 10px;
     min-width: 0;
   }
   .ph-title-line {
@@ -354,6 +357,9 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+    /* The subtitle yields first; the title only ellipsizes past the block. */
+    flex: 0 0 auto;
+    max-width: 100%;
   }
   .ph-title {
     margin: 0;
@@ -395,8 +401,10 @@
     white-space: nowrap;
   }
   .ph-sub {
-    font-size: var(--fs-xs);
-    line-height: 15px;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--fs-s);
+    line-height: 20px;
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
