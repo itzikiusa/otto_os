@@ -787,7 +787,7 @@
                     {#if action.mode === 'idle'}
                       <div class="case-actions">
                         <button
-                          class="case-btn approve"
+                          class="btn small primary"
                           onclick={() => approveCase(tc)}
                           disabled={action.busy || tc.status === 'approved'}
                           title="Approve this test case"
@@ -795,7 +795,7 @@
                           {tc.status === 'approved' ? 'Approved' : 'Approve'}
                         </button>
                         <button
-                          class="case-btn changes"
+                          class="btn small"
                           onclick={() => openChanges(tc)}
                           disabled={action.busy}
                           title="Request changes"
@@ -803,7 +803,7 @@
                           Request changes
                         </button>
                         <button
-                          class="case-btn edit"
+                          class="btn small ghost"
                           onclick={() => openEdit(tc)}
                           disabled={action.busy}
                           title="Edit this test case"
@@ -1356,52 +1356,6 @@
     gap: 6px;
     flex-wrap: wrap;
   }
-  .case-btn {
-    height: 24px;
-    padding: 0 10px;
-    border-radius: var(--radius-s);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    transition: background 90ms, border-color 90ms, color 90ms, opacity 90ms;
-    white-space: nowrap;
-  }
-  .case-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    color: var(--text);
-  }
-  .case-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .case-btn.approve {
-    border-color: color-mix(in srgb, var(--status-working) 50%, var(--border));
-    color: var(--status-working);
-    background: color-mix(in srgb, var(--status-working) 8%, transparent);
-  }
-  .case-btn.approve:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .case-btn.changes {
-    border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
-    color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 8%, transparent);
-  }
-  .case-btn.changes:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--warning) 16%, transparent);
-  }
-  .case-btn.edit {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-  }
-  .case-btn.edit:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-  }
-
   /* ── Review note ─────────────────────────────────────────────── */
   .review-note {
     display: flex;
