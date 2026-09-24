@@ -574,10 +574,15 @@ async fn handoff_for(ctx: &ServerCtx, owner: &str, thread: &AssistantThread) -> 
     if turns.is_empty() {
         return None;
     }
-    let profile = super::memory::read_profile(ctx, owner)
-        .await
-        .map(|p| p.content)
-        .unwrap_or_default();
+    // Incognito threads read no memory — the profile included.
+    let profile = if thread.incognito {
+        String::new()
+    } else {
+        super::memory::read_profile(ctx, owner)
+            .await
+            .map(|p| p.content)
+            .unwrap_or_default()
+    };
     Some(handoff_packet(&thread.title, &turns, &profile))
 }
 
