@@ -27,7 +27,9 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
   // The film streams from the internet: make it unreachable, deterministically.
   await page.route('**/walkthroughs/resolve**', (r) => r.fulfill({ status: 502, body: '{}' }));
-  await page.route(/otto-tour[^/]*\.(mp4|jpg|vtt)(\?|$)/, (r) => r.abort('internetdisconnected'));
+  // Vite's dev-mode `?import&raw` fetch of the captions module is app code,
+  // not the film — blocking it blanks the whole page.
+  await page.route(/otto-tour[^/]*\.(mp4|jpg|vtt)(\?(?!import)|$)/, (r) => r.abort('internetdisconnected'));
 });
 
 function collectErrors(page: Page): string[] {
