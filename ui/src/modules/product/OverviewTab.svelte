@@ -2342,6 +2342,8 @@
   /* Toolbar */
   .toolbar {
     display: flex;
+    /* Wraps on a phone instead of scrolling the whole Overview sideways. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding-bottom: 12px;
