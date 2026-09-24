@@ -96,11 +96,11 @@ export function featureLabel(slug: string): string {
 export function settingsRoute(slug: string): string {
   const map: Record<string, string> = {
     sessions: 'settings/providers',
-    lsp: 'settings/lsp',
-    mcp: 'settings/mcp',
+    lsp: 'settings/language-servers',
+    mcp: 'settings/mcp-servers',
     channels: 'settings/channels',
-    git: 'settings/git',
-    issues: 'settings/integrations',
+    git: 'settings/git-accounts',
+    issues: 'settings/jira',
     db: 'connections',
     brokers: 'brokers',
   };
