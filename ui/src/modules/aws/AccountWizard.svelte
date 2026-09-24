@@ -407,7 +407,7 @@
     color: var(--text-dim);
   }
   .steps li.on {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .steps li.done {

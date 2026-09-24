@@ -165,7 +165,7 @@
   }
   .node-label {
     fill: var(--text);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     pointer-events: none;
   }
 </style>

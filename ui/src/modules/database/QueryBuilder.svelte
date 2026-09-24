@@ -1201,7 +1201,7 @@
     white-space: nowrap;
   }
   .pal-item :global(svg:last-child) {
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 0;
     flex-shrink: 0;
   }
@@ -1304,7 +1304,7 @@
     height: 20px;
     padding: 0 7px;
     border-radius: 4px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     cursor: pointer;
@@ -1333,7 +1333,7 @@
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     cursor: grab;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .node-head:active {
     cursor: grabbing;
@@ -1363,7 +1363,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: right;
   }
@@ -1427,7 +1427,7 @@
     font-size: 11px;
   }
   .col-name.pk {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .col-name.fk {
@@ -1459,7 +1459,7 @@
     border-color: var(--border);
   }
   .col-agg.set {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     font-weight: 700;
   }
@@ -1485,7 +1485,7 @@
   }
   .col-badge.pk {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .col-badge.fk {
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
@@ -1556,7 +1556,7 @@
     border: 1px solid var(--border);
   }
   .fk-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1571,7 +1571,7 @@
     border-radius: 999px;
     border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-family: var(--font-mono);
     cursor: pointer;
@@ -1617,7 +1617,7 @@
     border-radius: 999px;
     background: color-mix(in srgb, #d2691e 18%, transparent);
     color: #d2691e;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
   }
@@ -1734,8 +1734,8 @@
     padding: 0 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-    font-size: 10px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     text-transform: none;
   }
   .expr-list {
@@ -1758,7 +1758,7 @@
     min-width: 0;
   }
   .expr-as {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     color: var(--text-dim);
   }
@@ -1779,12 +1779,12 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .snip:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .gen-sql {

@@ -224,10 +224,10 @@
     font-weight: 600;
   }
   .rp-agent-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .rp-fallback-chip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     background: var(--status-warn-soft);
     color: var(--status-warn);
   }
@@ -239,7 +239,7 @@
   }
 
   .rp-status-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -255,7 +255,7 @@
   }
   .rp-status-running {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rp-status-done {
     background: color-mix(in srgb, var(--status-working) 15%, transparent);
@@ -321,14 +321,14 @@
     display: inline-block;
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .sev-info {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-warn {
     background: color-mix(in srgb, var(--status-warn) 15%, transparent);

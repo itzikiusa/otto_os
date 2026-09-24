@@ -157,7 +157,7 @@
   }
   .p {
     margin-inline-start: auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;

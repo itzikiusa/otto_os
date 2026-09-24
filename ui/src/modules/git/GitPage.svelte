@@ -609,7 +609,7 @@
     margin-top: 1px;
   }
   .remote-full {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     margin-top: 1px;
   }
   .pad {
@@ -700,7 +700,7 @@
     white-space: nowrap;
   }
   .repo-remote {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     margin-top: 2px;
     overflow: hidden;
     text-overflow: ellipsis;

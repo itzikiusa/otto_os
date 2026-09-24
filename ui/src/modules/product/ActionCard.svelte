@@ -393,7 +393,7 @@
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -419,7 +419,7 @@
     padding: 0;
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11.5px;
     font-weight: 600;
     cursor: pointer;
@@ -564,7 +564,7 @@
   .applied-text {
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .undo-btn {
     padding: 3px 10px;

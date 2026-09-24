@@ -278,7 +278,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -311,7 +311,7 @@
 
   /* Section color theme — dot + chip */
   .sec-source   { background: color-mix(in srgb, #60a5fa 18%, transparent); color: #3b82f6; }
-  .sec-analysis { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .sec-analysis { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
   .sec-questions { background: color-mix(in srgb, #a78bfa 18%, transparent); color: #7c3aed; }
   .sec-notes    { background: color-mix(in srgb, var(--success) 18%, transparent); color: #059669; }
   .sec-rewrite  { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }

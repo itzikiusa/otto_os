@@ -131,13 +131,13 @@
     border-bottom: 1px solid var(--border);
   }
   .title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
   }
   .err {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     margin-right: auto;
   }

@@ -564,7 +564,7 @@
     font-family: var(--font-mono);
   }
   .small {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 400;
   }
   .err {
@@ -644,7 +644,7 @@
     align-items: center;
     gap: 6px;
     padding: 4px 10px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     border-bottom: 1px solid var(--border);
   }
   .ptrack {
@@ -676,7 +676,7 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -694,7 +694,7 @@
     font-size: 11.5px;
   }
   .count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     background: var(--surface-2);
     border-radius: 999px;
@@ -725,7 +725,7 @@
     width: 18px;
     height: 18px;
     border-radius: 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     line-height: 1;
     margin-top: 1px;
@@ -756,7 +756,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .on-disk {
@@ -826,7 +826,7 @@
     cursor: pointer;
   }
   .more:hover:not(:disabled) {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
 

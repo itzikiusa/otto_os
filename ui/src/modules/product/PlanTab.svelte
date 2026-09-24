@@ -630,7 +630,7 @@
   }
   .sel-count {
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: none;
     letter-spacing: 0;
     color: var(--text-dim);
@@ -661,7 +661,7 @@
   .chip-on {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip:disabled { cursor: not-allowed; opacity: 0.5; }
 
@@ -705,7 +705,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -771,7 +771,7 @@
   .action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .action-btn.primary {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     font-weight: 600;
   }
@@ -820,7 +820,7 @@
   }
   .task-count { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .task-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;

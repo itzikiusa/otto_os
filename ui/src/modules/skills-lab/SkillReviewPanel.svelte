@@ -470,7 +470,7 @@
   .lr-item.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .lr-item-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-item-meta { display: flex; align-items: center; gap: 6px; }
-  .lr-src { font-size: 10px; }
+  .lr-src { font-size: var(--fs-xs); }
   .lr-del { flex-shrink: 0; }
   .lr-main { overflow-y: auto; min-height: 0; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
@@ -531,19 +531,19 @@
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
   .lr-plan { margin: 4px 0 8px 18px; font-size: 12.5px; line-height: 1.5; }
 
-  .rp-status-pill { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: var(--radius-s, 4px); display: inline-flex; align-items: center; gap: 3px; }
+  .rp-status-pill { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: var(--radius-s, 4px); display: inline-flex; align-items: center; gap: 3px; }
   .rp-status-pending { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
-  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .rp-status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
   .rp-status-done { background: color-mix(in srgb, var(--status-working) 15%, transparent); color: var(--status-working); }
   .rp-status-error, .rp-status-cancelled { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
   .rp-finding { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.4; }
   .rp-finding-body { flex: 1; min-width: 0; }
   .rp-loc { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-  .severity-chip { display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px); font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+  .severity-chip { display: inline-block; padding: 2px 7px; border-radius: var(--radius-s, 4px); font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
   .sev-critical { background: color-mix(in srgb, var(--status-exited) 22%, transparent); color: var(--status-exited); }
   .sev-high { background: color-mix(in srgb, var(--status-exited) 15%, transparent); color: var(--status-exited); }
   .sev-medium { background: color-mix(in srgb, var(--status-warn) 15%, transparent); color: var(--status-warn); }
-  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .sev-low { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-text); }
   .mono { font-family: var(--font-mono, monospace); }
 
   @media (max-width: 900px) {

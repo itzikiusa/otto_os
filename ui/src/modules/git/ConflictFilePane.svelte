@@ -341,7 +341,7 @@
     flex: 1;
   }
   .progress {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     padding: 2px 7px;
@@ -351,7 +351,7 @@
     white-space: nowrap;
   }
   .progress.done {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .pane-body {
@@ -438,7 +438,7 @@
     gap: 4px;
   }
   .output-count {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
     white-space: nowrap;
@@ -485,7 +485,7 @@
     word-break: break-all;
   }
   .out-deleted {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-style: italic;
     padding: 1px 8px;
     border-inline-start: 2px solid var(--border);

@@ -180,7 +180,7 @@
     gap: 7px;
   }
   .ab {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .ab.up {
@@ -229,7 +229,7 @@
     cursor: default;
   }
   .dd-item.create {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Long branch names ellipsize instead of widening the row / dropdown. */
   .dd-item .grow {
@@ -239,7 +239,7 @@
     white-space: nowrap;
   }
   .dd-up {
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .dd-away {
     position: fixed;

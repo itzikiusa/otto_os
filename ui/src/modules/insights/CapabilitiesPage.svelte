@@ -232,7 +232,7 @@
     padding: 3px 0; font-size: 12px;
   }
   .dep-ok  { display: flex; align-items: center; flex-shrink: 0; }
-  .dep-kind  { text-transform: uppercase; font-size: 10px; letter-spacing: .04em; width: 56px; flex-shrink: 0; }
+  .dep-kind  { text-transform: uppercase; font-size: var(--fs-xs); letter-spacing: .04em; width: 56px; flex-shrink: 0; }
   .dep-name  { font-weight: 500; }
   .dep-detail { font-size: 11px; }
 

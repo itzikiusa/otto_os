@@ -465,13 +465,13 @@
     letter-spacing: 0.08em;
   }
   .fx-count {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     min-width: 16px;
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     text-align: center;
   }
   .grow {
@@ -493,7 +493,7 @@
   }
   .fx-seg button.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .fx-empty {
@@ -515,7 +515,7 @@
   }
   .fx-group-head .mono {
     font-weight: 500;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
 
   /* ── PR rows ── */
@@ -531,7 +531,7 @@
     background: var(--surface-2);
   }
   .fx-ago {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     width: 26px;
     flex-shrink: 0;
     text-align: end;
@@ -551,11 +551,11 @@
     padding: 0;
   }
   .fx-pr-title:hover .fx-pr-text {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
   }
   .fx-pr-num {
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 600;
     flex-shrink: 0;
@@ -591,9 +591,9 @@
     gap: 4px;
     border: none;
     background: color-mix(in srgb, var(--accent) 10%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: 999px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     cursor: pointer;
@@ -606,7 +606,7 @@
     background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .fx-branch {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 3px;
@@ -707,12 +707,12 @@
   .fx-type.t-sub-task,
   .fx-type.t-subtask {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .fx-key {
     font-size: 11px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .fx-summary {
@@ -722,11 +722,11 @@
     min-width: 0;
   }
   .fx-prio {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
   }
   .fx-status {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
@@ -752,7 +752,7 @@
     opacity: 1;
   }
   .fx-ext:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .fx-account {

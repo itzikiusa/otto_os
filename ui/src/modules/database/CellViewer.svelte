@@ -104,12 +104,12 @@
   }
   .tb-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tb-btn.active {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .cell-viewer-backdrop {
     position: fixed;

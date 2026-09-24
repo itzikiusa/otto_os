@@ -1468,7 +1468,7 @@
     font-weight: 600;
   }
   .chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -1526,7 +1526,7 @@
   }
   .review-eyebrow {
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -1581,7 +1581,7 @@
   }
   .review-round-head div span {
     color: var(--text-dim);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .reviewer-list {
     display: flex;
@@ -1692,7 +1692,7 @@
 
   /* status pills */
   .pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -1870,13 +1870,13 @@
   }
   .run-row-when {
     flex: none;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .kind-chip {
     flex: none;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.03em;
     color: var(--text-dim);

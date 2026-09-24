@@ -193,12 +193,13 @@
 </div>
 
 <style>
+  /* Same card + heading treatment as the other Usage panels (it used to be
+     the one grey, title-cased card on the page). */
   .attribution-panel {
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    background: var(--surface-2);
-    margin-bottom: 16px;
+    border-radius: var(--radius-m);
+    padding: 14px;
+    background: var(--surface);
   }
 
   .attr-header {
@@ -210,12 +211,14 @@
   }
   .attr-title {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
   .attr-subtitle {
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     flex: 1;
   }
@@ -229,17 +232,17 @@
     color: var(--text-dim);
   }
   .dim-select {
-    font-size: 12px;
+    font-size: var(--fs-s);
     padding: 3px 6px;
-    background: var(--surface-3);
+    background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 4px;
   }
   .export-btn {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
-    background: var(--surface-3);
+    background: var(--surface-2);
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 4px;

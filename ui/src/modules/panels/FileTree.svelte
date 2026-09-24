@@ -410,7 +410,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -557,11 +557,11 @@
     color: var(--text);
   }
   .truncated-badge {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 1px 5px;
     border-radius: 3px;
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .close-btn {
@@ -590,7 +590,7 @@
   }
   .pv.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .preview-frame {
     flex: 1;

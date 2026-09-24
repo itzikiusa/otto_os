@@ -161,13 +161,13 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
     cursor: pointer;
   }
   .seg button.on {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .stats {
     display: grid;
@@ -183,13 +183,13 @@
     border-radius: var(--radius-s);
   }
   .n {
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
   .l {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .spark {

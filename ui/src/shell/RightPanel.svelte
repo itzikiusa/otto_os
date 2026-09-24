@@ -371,7 +371,7 @@
   }
   .ver.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .rstrip {
@@ -409,6 +409,6 @@
   }
   .notes-foot {
     padding: 4px 12px 8px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

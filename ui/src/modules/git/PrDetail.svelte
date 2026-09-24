@@ -610,7 +610,7 @@
     color: var(--text);
   }
   .tab-btn.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
     font-weight: 600;
   }
@@ -752,7 +752,7 @@
   }
   .commit-sha {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
   }
   .commit-subject {

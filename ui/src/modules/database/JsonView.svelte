@@ -252,8 +252,8 @@
     border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   }
   .jrec-tag {
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
   }
   .jrec-more {
     font-size: 13px;

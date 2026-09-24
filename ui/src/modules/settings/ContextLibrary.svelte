@@ -368,7 +368,7 @@
     color: var(--text);
   }
   .tab.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
     font-weight: 500;
   }

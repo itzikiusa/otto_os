@@ -833,7 +833,7 @@
   .kind-chip.selected {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 500;
   }
   .env-row {
@@ -855,7 +855,7 @@
   .env-chip.selected {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 500;
   }
   /* Production selected → red danger styling. */

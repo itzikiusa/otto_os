@@ -347,7 +347,7 @@
   {/snippet}
   {#snippet actions()}
     {#if !(creating || editId) && list.length > 0}
-      <button class="btn primary" onclick={startCreate}>New task</button>
+      <button class="btn primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
     {/if}
   {/snippet}
 </PageHeader>
@@ -576,13 +576,14 @@
               </div>
               <div class="task-actions">
                 <button class="btn small" onclick={() => runNow(t)} disabled={busy}>Run now</button>
-                <button class="btn small" onclick={() => toggleRuns(t)}>
+                <button class="btn small ghost" onclick={() => toggleRuns(t)}>
                   {expandedId === t.id ? 'Hide runs' : 'Runs'}
                 </button>
-                <button class="btn small" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
-                <button class="btn small" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
-                <button class="btn small" onclick={() => startEdit(t)}>Edit</button>
-                <button class="btn small danger" onclick={() => remove(t)}>Delete</button>
+                <button class="btn small ghost" onclick={() => toggle(t)}>{t.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn small ghost" title="Create a multi-step workflow (+ schedule trigger) from this task" onclick={() => convertToWorkflow(t)} disabled={busy}>To workflow</button>
+                <button class="btn small ghost" onclick={() => startEdit(t)}>Edit</button>
+                <!-- Destructive: quiet icon at the end of the row, confirmed by confirmer.ask(). -->
+                <button class="icon-btn del" onclick={() => remove(t)} aria-label="Delete task" title="Delete task"><Icon name="trash" size={14} /></button>
               </div>
             </div>
             {#if expandedId === t.id}
@@ -661,18 +662,19 @@
   .task { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius-m); padding: 0.6rem 0.75rem; color: var(--text); }
   .task-main { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .task-info { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .name { font-size: 0.95rem; color: var(--text); }
-  .meta { color: var(--text-dim); font-size: 0.8rem; }
-  .task-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); }
+  .meta { color: var(--text-dim); font-size: var(--fs-s); }
+  .task-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+  .task-actions .del:hover { color: var(--danger); background: var(--danger-soft); }
   .runs { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
   .run { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; flex-wrap: wrap; color: var(--text); }
   .run-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .run-sum { flex: 1; min-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pill { font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
-  .pill.ok { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-color: transparent; }
-  .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); border-color: transparent; }
-  .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); border-color: transparent; }
-  .pill.working { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); border-color: transparent; }
+  .pill { font-size: var(--fs-xs); padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
+  .pill.bad { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+  .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+  .pill.working { background: var(--info-soft); color: var(--info); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 720px; }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }

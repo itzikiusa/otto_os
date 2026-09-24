@@ -341,7 +341,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 1px 6px;

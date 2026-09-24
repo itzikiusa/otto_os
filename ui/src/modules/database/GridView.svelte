@@ -558,7 +558,7 @@
   }
   .th-sort-ind.on {
     opacity: 1;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .th-inner {
     display: inline-flex;
@@ -582,14 +582,14 @@
     letter-spacing: 0.04em;
     padding: 0 4px;
     border-radius: 3px;
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     transform: translateY(-1px);
   }
   .th-type {
     flex: 0 0 auto;
     font-weight: 400;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   /* Drag handle on the header's right edge. */
@@ -661,7 +661,7 @@
   .rownum {
     color: var(--text-dim);
     text-align: end;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     position: sticky;
     inset-inline-start: 0;
     background: var(--surface-2);
@@ -688,7 +688,7 @@
     justify-content: center;
     border: none;
     background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 0;
   }
@@ -727,7 +727,7 @@
     font-style: normal;
   }
   .cell.json {
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
   }
   .cell.json:hover {
@@ -758,7 +758,7 @@
     display: inline-flex;
   }
   .cell-expand:hover {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .cell.editable {

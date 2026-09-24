@@ -744,7 +744,7 @@
     padding: 1px 6px;
     border-radius: 99px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .provider-desc {
     font-size: 11px;
@@ -802,7 +802,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 4px;
     border-radius: 3px;
     line-height: 1;

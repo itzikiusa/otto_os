@@ -199,7 +199,7 @@
     box-shadow: inset 0 0 0 1px var(--status-exited);
   }
   .ve-err {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
   }
 </style>

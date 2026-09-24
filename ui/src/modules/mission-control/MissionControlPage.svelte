@@ -209,7 +209,7 @@
       <span class="t-lbl">Needs approval</span>
     </div>
     <div class="tile">
-      <span class="t-val mono">{fmtCost(summary?.total_cost ?? 0)}</span>
+      <span class="t-val">{fmtCost(summary?.total_cost ?? 0)}</span>
       <span class="t-lbl">Total cost</span>
     </div>
   </div>
@@ -324,12 +324,13 @@
     background: color-mix(in srgb, var(--warning) 8%, var(--surface));
   }
   .t-val {
-    font-size: 22px;
+    font-size: var(--fs-2xl);
     font-weight: 700;
     line-height: 1;
+    font-variant-numeric: tabular-nums;
   }
   .t-val.accent {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .t-lbl {
     font-size: 11px;
@@ -357,43 +358,50 @@
     border-radius: 6px;
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     padding: 5px 8px;
   }
   .filters .search {
     min-width: 160px;
   }
+  /* The shared segmented-control look (app.css .segmented): selection is a
+     raised surface, never a colour — the old lime fill read as "success". */
   .view-toggle {
     display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 7px;
-    overflow: hidden;
+    border-radius: var(--radius-s);
     flex: 0 0 auto;
   }
   .view-toggle button {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: var(--surface);
+    height: 24px;
+    padding: 0 10px;
+    background: transparent;
     border: none;
+    border-radius: 4px;
     color: var(--text-dim);
     font: inherit;
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 6px 12px;
+    font-size: var(--fs-s);
+    font-weight: 500;
     cursor: pointer;
   }
   .view-toggle button.on {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   .banner-err {
     background: color-mix(in srgb, var(--danger) 14%, transparent);
-    border: 1px solid #ff5f5766;
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     color: var(--danger);
     border-radius: 6px;
     padding: 7px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-s);
   }
   .mc-body {
     flex: 1 1 auto;

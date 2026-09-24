@@ -355,7 +355,7 @@
   }
   .send {
     flex-shrink: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 14px;
   }
   .send:disabled {
@@ -396,7 +396,7 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .cmd-name {
-    color: var(--accent);
+    color: var(--accent-text);
     white-space: nowrap;
   }
   .cmd-desc {
@@ -407,12 +407,12 @@
     font-size: 11.5px;
   }
   .cmd-src {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .cmd-hint {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px 2px;
     border-top: 1px solid var(--border);
     margin-top: 2px;
@@ -456,7 +456,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 5px 2px 0;
     min-width: 0;
@@ -474,7 +474,7 @@
     max-width: 260px;
   }
   .branch {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .term-status {
     overflow: hidden;

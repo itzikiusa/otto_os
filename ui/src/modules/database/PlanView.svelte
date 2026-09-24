@@ -98,7 +98,7 @@
     color: var(--text);
   }
   .plan-engine {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-dim);
@@ -124,7 +124,7 @@
   }
   .plan-btn:hover,
   .plan-btn.on {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .plan-close {
@@ -190,10 +190,10 @@
   }
   .plan-object {
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .plan-rows {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
@@ -209,7 +209,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     background: color-mix(in srgb, var(--status-exited) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);

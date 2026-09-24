@@ -53,7 +53,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .pulse {
