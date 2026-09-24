@@ -381,7 +381,7 @@
     align-items: center;
     gap: 4px;
     margin-left: auto;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   /* Batch pager for the non-virtualized alt views. */
   .alt-more {
@@ -440,7 +440,7 @@
     border-bottom: 1px solid var(--border);
   }
   .vrec-tag {
-    font-size: 10px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
   }
 </style>

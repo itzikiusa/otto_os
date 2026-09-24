@@ -183,7 +183,7 @@
     font-size: 11.5px;
   }
   .badge {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 4px;
   }

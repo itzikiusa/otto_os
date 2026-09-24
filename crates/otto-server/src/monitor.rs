@@ -552,6 +552,9 @@ const BACKGROUND_SOURCES: &[&str] = &[
     "mockup_assist",
     "db_assist",
     "browser_summarize",
+    // Assistant replies surface as `assistant_turn` events + the needs-you
+    // queue; a "waiting for your input" notice per reply would be noise.
+    "assistant",
 ];
 
 /// True when the session was spawned by a background runner (see

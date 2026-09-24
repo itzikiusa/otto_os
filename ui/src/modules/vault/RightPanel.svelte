@@ -191,7 +191,7 @@
   }
   .tri {
     transition: transform 0.12s;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .tri.open {
@@ -199,7 +199,7 @@
   }
   .badge {
     margin-inline-start: auto;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--hover);
     border-radius: 999px;
@@ -244,7 +244,7 @@
     opacity: 0.6;
   }
   .ghost {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     border: 1px dashed var(--text-dim);
     border-radius: 4px;
     padding: 0 4px;

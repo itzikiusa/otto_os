@@ -327,7 +327,7 @@
     padding: 8px 10px;
   }
   .tpl-notes a {
-    color: var(--accent);
+    color: var(--accent-text);
     margin-inline-start: 4px;
   }
   .warn {

@@ -100,7 +100,7 @@
     user-select: none;
   }
   .env-on {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .resp-wrap {

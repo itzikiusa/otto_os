@@ -462,9 +462,26 @@
     browser.deselect();
   }
 
+  // A tab can be in live mode only where the native webview exists (the
+  // desktop app). In a remote/web session it shows Reader instead, so say so
+  // rather than highlighting a mode that isn't running.
+  const liveUnavailable = $derived(!nativeBrowserAvailable && browser.activeTab?.mode === 'live');
+
+  /** Open the page in a real tab of the viewer's own browser — the useful
+   *  "live" view in a remote session (sites refuse to be framed). */
+  function openInOwnBrowser(): void {
+    const url = browser.activeTab?.url;
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
   function toggleMode(mode: 'reader' | 'live'): void {
     const tab = browser.activeTab;
-    if (tab) void browser.setMode(tab.id, mode);
+    if (!tab) return;
+    if (mode === 'live' && !nativeBrowserAvailable) {
+      openInOwnBrowser();
+      return;
+    }
+    void browser.setMode(tab.id, mode);
   }
 
   async function doSummarize(): Promise<void> {
@@ -556,11 +573,12 @@
         </button>
         <button
           class="seg"
-          class:active={browser.activeTab.mode === 'live'}
+          class:active={nativeBrowserAvailable && browser.activeTab.mode === 'live'}
           onclick={() => toggleMode('live')}
+          aria-label={nativeBrowserAvailable ? 'Live mode' : 'Open in a new browser tab'}
           title={nativeBrowserAvailable
             ? 'Live mode — a real embedded browser'
-            : 'Live mode needs the Otto desktop app — falls back to reader here'}
+            : 'Open this page in a new browser tab. The embedded live browser needs the Otto desktop app.'}
         >
           <Icon name="globe" size={13} />
         </button>
@@ -621,6 +639,15 @@
            itself just holds the geometry the ResizeObserver above tracks. -->
       <div class="live-host" bind:this={liveHostEl}></div>
     {:else}
+      {#if liveUnavailable}
+        <div class="live-note" role="status">
+          <Icon name="globe" size={13} />
+          <span>This tab is in live mode, which runs only in the Otto desktop app. You're seeing Reader view here.</span>
+          <span class="grow"></span>
+          <button class="btn" onclick={openInOwnBrowser}>Open in new tab</button>
+          <button class="btn ghost" onclick={() => browser.activeTab && void browser.setMode(browser.activeTab.id, 'reader')}>Switch to Reader</button>
+        </div>
+      {/if}
       <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
       {#if browser.page}
         <NotesRail annotations={browser.annotations} />
@@ -647,6 +674,24 @@
     display: flex;
     min-height: 0;
     position: relative;
+  }
+  .live-note {
+    position: absolute;
+    inset-inline: 12px;
+    inset-block-start: 8px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--info-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+  }
+  .live-note .grow {
+    flex: 1;
   }
   .live-host {
     flex: 1;
@@ -679,7 +724,7 @@
   }
   .seg.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .urlbar {
     display: flex;
@@ -720,7 +765,7 @@
   }
   .btn.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
   }
   .summary {

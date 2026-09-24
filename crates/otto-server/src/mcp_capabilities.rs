@@ -251,6 +251,13 @@ pub async fn proof_pack(
 
     if let Some(repo_id) = q.repo_id.as_deref().filter(|r| !r.is_empty()) {
         let repo = ctx.git_store.get_repo(&repo_id.to_string()).await?;
+        // The Viewer check above is for `{wid}` only — a repo registered in
+        // another workspace must not be readable through it.
+        if repo.workspace_id != wid {
+            return Err(ApiError(Error::NotFound(format!(
+                "repo {repo_id} is not in workspace {wid}"
+            ))));
+        }
         let path = PathBuf::from(&repo.path);
         let branch = q.branch.as_deref().unwrap_or("HEAD");
         if !valid_ref(branch) {
@@ -280,7 +287,14 @@ pub async fn proof_pack(
     }
 
     if let Some(loop_id) = q.goal_loop_id.as_deref().filter(|r| !r.is_empty()) {
-        if let Ok(gl) = ctx.goal_loops_repo.get(&loop_id.to_string()).await {
+        let gl = ctx
+            .goal_loops_repo
+            .get(&loop_id.to_string())
+            .await
+            .ok()
+            // Same workspace confinement as the repo above.
+            .filter(|gl| gl.workspace_id == wid);
+        if let Some(gl) = gl {
             // Machine-checked acceptance criteria + status = the strongest evidence.
             pack["goal_loop"] = json!({
                 "id": gl.id,

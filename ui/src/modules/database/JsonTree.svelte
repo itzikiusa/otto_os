@@ -200,7 +200,7 @@
     flex: none;
   }
   .k {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .sep {
@@ -251,7 +251,7 @@
     color: var(--warning);
   }
   .json-bson {
-    color: var(--accent);
+    color: var(--accent-text);
     font-style: italic;
   }
 </style>

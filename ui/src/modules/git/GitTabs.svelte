@@ -241,14 +241,14 @@
     align-items: center;
     gap: 3px;
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 110px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .git-tab.active .git-tab-branch {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .git-tab-close {
     border: none;
@@ -276,7 +276,7 @@
   }
   .git-tab-new:hover {
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Auto-fetch toggle: dim when paused, accent when on. */
   .git-autofetch {
@@ -298,7 +298,7 @@
     opacity: 1;
   }
   .git-autofetch.on {
-    color: var(--accent);
+    color: var(--accent-text);
     opacity: 1;
   }
   .mono {

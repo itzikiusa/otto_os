@@ -201,7 +201,7 @@
     flex-wrap: wrap;
   }
   .kind {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--text-dim);

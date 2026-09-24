@@ -251,7 +251,7 @@
   }
   .skill-chip.must {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .link {
     border: none;

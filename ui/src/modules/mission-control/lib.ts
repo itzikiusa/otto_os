@@ -84,24 +84,22 @@ export const WORK_STATUSES: WorkStatus[] = [
 ];
 export const RISK_LEVELS: RiskLevel[] = ['low', 'medium', 'high', 'critical'];
 
-/** A colour (CSS value) for a normalized status — drives chips and graph nodes. */
+/** A colour (CSS value) for a normalized status — drives chips, labels and
+ *  graph nodes. Tone tokens (text-safe in every theme), never raw hex. */
 export function statusColor(s: WorkStatus): string {
   switch (s) {
     case 'running':
-      return 'var(--status-working, #28c840)';
     case 'succeeded':
     case 'done':
-      return '#2ea043';
+      return 'var(--success)';
     case 'waiting':
     case 'pending':
-      return 'var(--status-warn, #e0a000)';
+      return 'var(--warning)';
     case 'blocked':
     case 'failed':
-      return 'var(--status-exited, #ff5f57)';
-    case 'cancelled':
-      return 'var(--text-dim, #98989f)';
+      return 'var(--danger)';
     default:
-      return 'var(--text-dim, #98989f)';
+      return 'var(--text-dim)';
   }
 }
 
@@ -109,13 +107,13 @@ export function statusColor(s: WorkStatus): string {
 export function riskColor(r: RiskLevel): string {
   switch (r) {
     case 'critical':
-      return '#ff5f57';
+      return 'var(--danger)';
     case 'high':
-      return '#ff8c00';
-    case 'medium':
-      return 'var(--status-warn, #e0a000)';
+      return 'var(--warning)';
+    // medium is the everyday default — neutral, so the chip isn't an amber
+    // alarm on every row.
     default:
-      return 'var(--text-dim, #98989f)';
+      return 'var(--text-dim)';
   }
 }
 

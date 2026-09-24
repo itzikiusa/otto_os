@@ -41,42 +41,73 @@
 
   const page = $derived(router.parts[1] ?? 'appearance');
 
-  const items = $derived([
-    { id: 'appearance', label: 'Appearance' },
-    { id: 'session-names', label: 'Session Names' },
-    { id: 'git-accounts', label: 'Git Accounts' },
-    { id: 'jira', label: 'Jira' },
-    { id: 'channels', label: 'Channels' },
-    { id: 'assistant', label: 'Assistant' },
-    { id: 'notifications', label: 'Notifications' },
-    { id: 'self-improvement', label: 'Self-Improvement' },
-    { id: 'mcp-servers', label: 'MCP Servers' },
-    { id: 'insights', label: 'Insights' },
-    { id: 'snipping', label: 'Snipping' },
-    { id: 'context-soul', label: 'Workspace context' },
-    { id: 'language-servers', label: 'Language Servers' },
-    { id: 'sharing', label: 'Sharing' },
-    { id: 'tokens', label: 'API Tokens' },
-    // skills + skill-eval + context-library + backup: settings:admin covers root-managed items.
-    ...(auth.can('settings', 'admin')
-      ? [
-          { id: 'skills', label: 'Skills' },
-          { id: 'skill-eval', label: 'Skills Evaluator' },
-          { id: 'context-library', label: 'Context Library' },
-          { id: 'providers', label: 'Providers' },
-          { id: 'daemon', label: 'Daemon' },
-          { id: 'plugins', label: 'Plugins' },
-          { id: 'trust-safety', label: 'Trust & Safety' },
-          { id: 'logs', label: 'Logs' },
-          { id: 'backup', label: 'Backup & Restore' },
-        ]
-      : []),
-    // users management: users:admin gate.
-    ...(auth.can('users', 'admin') ? [{ id: 'users', label: 'Users' }] : []),
-    ...(auth.isRoot ? [{ id: 'access-groups', label: 'Groups & Access' }] : []),
-    // admin session overview: users:admin gate.
-    ...(auth.can('users', 'admin') ? [{ id: 'sessions', label: 'Sessions' }] : []),
-  ]);
+  type NavItem = { id: string; label: string };
+  // Grouped like the main sidebar (a macOS source list): ~25 flat rows were a
+  // wall to scan. Admin-only sections appear only for roles that can open them.
+  const groups = $derived<{ label: string; items: NavItem[] }[]>(
+    [
+      {
+        label: 'General',
+        items: [
+          { id: 'appearance', label: 'Appearance' },
+          { id: 'session-names', label: 'Session Names' },
+          { id: 'notifications', label: 'Notifications' },
+          { id: 'snipping', label: 'Snipping' },
+          { id: 'tokens', label: 'API Tokens' },
+        ],
+      },
+      {
+        label: 'Integrations',
+        items: [
+          { id: 'git-accounts', label: 'Git Accounts' },
+          { id: 'jira', label: 'Jira' },
+          { id: 'channels', label: 'Channels' },
+          { id: 'mcp-servers', label: 'MCP Servers' },
+          { id: 'language-servers', label: 'Language Servers' },
+          { id: 'sharing', label: 'Sharing' },
+        ],
+      },
+      {
+        label: 'Agents',
+        items: [
+          { id: 'assistant', label: 'Assistant' },
+          ...(auth.can('settings', 'admin') ? [{ id: 'providers', label: 'Providers' }] : []),
+          { id: 'context-soul', label: 'Workspace context' },
+          { id: 'self-improvement', label: 'Self-Improvement' },
+          { id: 'insights', label: 'Insights' },
+          // skills + skill-eval + context-library: settings:admin covers root-managed items.
+          ...(auth.can('settings', 'admin')
+            ? [
+                { id: 'skills', label: 'Skills' },
+                { id: 'skill-eval', label: 'Skills Evaluator' },
+                { id: 'context-library', label: 'Context Library' },
+              ]
+            : []),
+        ],
+      },
+      {
+        label: 'System',
+        items: auth.can('settings', 'admin')
+          ? [
+              { id: 'daemon', label: 'Daemon' },
+              { id: 'plugins', label: 'Plugins' },
+              { id: 'trust-safety', label: 'Trust & Safety' },
+              { id: 'logs', label: 'Logs' },
+              { id: 'backup', label: 'Backup & Restore' },
+            ]
+          : [],
+      },
+      {
+        label: 'People',
+        items: [
+          // users management + admin session overview: users:admin gate.
+          ...(auth.can('users', 'admin') ? [{ id: 'users', label: 'Users' }] : []),
+          ...(auth.isRoot ? [{ id: 'access-groups', label: 'Groups & Access' }] : []),
+          ...(auth.can('users', 'admin') ? [{ id: 'sessions', label: 'Sessions' }] : []),
+        ],
+      },
+    ].filter((g) => g.items.length > 0),
+  );
 </script>
 
 <div class="settings">
@@ -88,17 +119,23 @@
       </button>
     </div>
     <div class="settings-nav-list">
-    {#each items as it (it.id)}
-      <button
-        class="settings-nav-item"
-        class:active={page === it.id}
-        onclick={() => router.go(`settings/${it.id}`)}
-        oncontextmenu={(e) => ctxMenu.show(e, [
-          { label: `Open ${it.label}`, icon: 'gear', action: () => router.go(`settings/${it.id}`) },
-        ])}
-      >
-        {it.label}
-      </button>
+    {#each groups as g (g.label)}
+      <div class="settings-nav-group" role="group" aria-label={g.label}>
+        <div class="settings-nav-heading" aria-hidden="true">{g.label}</div>
+        {#each g.items as it (it.id)}
+          <button
+            class="settings-nav-item"
+            class:active={page === it.id}
+            aria-current={page === it.id ? 'page' : undefined}
+            onclick={() => router.go(`settings/${it.id}`)}
+            oncontextmenu={(e) => ctxMenu.show(e, [
+              { label: `Open ${it.label}`, icon: 'gear', action: () => router.go(`settings/${it.id}`) },
+            ])}
+          >
+            {it.label}
+          </button>
+        {/each}
+      </div>
     {/each}
     </div>
   </nav>
@@ -189,7 +226,7 @@
     justify-content: space-between;
     padding: 0 10px 0 18px;
     border-bottom: 1px solid var(--border);
-    font-size: 15px;
+    font-size: var(--fs-l);
     font-weight: 600;
     letter-spacing: -0.01em;
     color: var(--text);
@@ -198,10 +235,24 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 10px 10px 16px;
+    padding: 6px 10px 16px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 10px;
+  }
+  .settings-nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  /* Same section-label treatment as the main sidebar's groups. */
+  .settings-nav-heading {
+    padding: 8px 10px 3px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
   }
   .settings-close {
     display: inline-flex;
@@ -216,8 +267,8 @@
     cursor: pointer;
   }
   .settings-close:hover {
-    background: var(--surface-2, rgba(255, 255, 255, 0.06));
-    color: var(--text, inherit);
+    background: var(--hover);
+    color: var(--text);
   }
   .settings-nav-item {
     height: 28px;
@@ -226,18 +277,20 @@
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
-    font-size: 12.5px;
+    font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
     transition: background 120ms ease-out;
   }
   .settings-nav-item:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
+  /* The sidebar's active row: accent tint + --text at 600 (accent is never
+     text — it fails contrast in several themes). */
   .settings-nav-item.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
-    font-weight: 500;
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
   }
   /* Each section owns its chrome (PageHeader) and scroll (PageBody). */
   .settings-body {
@@ -258,12 +311,28 @@
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
     }
+    /* One horizontally scrolling row of sections (the wrapped grid of ~25
+       buttons took a third of the phone screen). */
     .settings-nav-list {
       flex-direction: row;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 4px;
-      padding: 10px 8px;
+      padding: 8px;
       overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .settings-nav-list::-webkit-scrollbar {
+      display: none;
+    }
+    .settings-nav-group {
+      display: contents;
+    }
+    .settings-nav-heading {
+      display: none;
+    }
+    .settings-nav-item {
+      flex: none;
+      white-space: nowrap;
     }
     .settings-nav-title {
       display: none;

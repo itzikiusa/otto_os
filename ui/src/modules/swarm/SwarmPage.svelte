@@ -725,7 +725,7 @@
   }
   .swarm-item.active {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .empty {
     padding: 12px;
@@ -796,7 +796,7 @@
     flex-wrap: wrap;
   }
   .budget-label {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     white-space: nowrap;
   }
   .cap-edit {
@@ -827,7 +827,7 @@
     background: var(--status-exited);
   }
   .status-pill {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 8px;
     border-radius: 999px;
     text-transform: uppercase;
@@ -878,7 +878,7 @@
   }
   .seg.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .body {
     flex: 1;

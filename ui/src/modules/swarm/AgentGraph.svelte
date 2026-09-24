@@ -517,7 +517,7 @@
     background: var(--accent);
   }
   .node-status {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .node-foot {
     display: flex;
@@ -557,7 +557,7 @@
     padding: 5px;
   }
   .tip-head {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 2px 6px 4px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -640,7 +640,7 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     flex: none;
   }
@@ -717,7 +717,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
   .pchip {
     text-transform: uppercase;

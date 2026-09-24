@@ -265,7 +265,7 @@
   .drop-zone.drop-active {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .add-top-btn {
     display: flex;
@@ -317,7 +317,7 @@
     font-weight: 600;
   }
   .title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .state {
     width: 7px;
@@ -363,6 +363,6 @@
   }
   .session-row.selected {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 </style>

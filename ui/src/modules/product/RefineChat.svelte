@@ -273,14 +273,14 @@
     gap: 6px;
   }
   .bubble-role {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
   .bubble-time {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 
@@ -329,7 +329,7 @@
     border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;

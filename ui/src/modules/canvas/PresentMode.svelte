@@ -475,7 +475,7 @@
   .ctl:hover,
   .ctl.on {
     background: var(--surface-2);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .counter {
     font-size: 12px;

@@ -978,8 +978,7 @@ pub async fn get_discovery_run(
             .list_runs(&RunFilter {
                 swarm_id: Some(run.swarm_id.clone()),
                 project_id: Some(run.project_id.clone()),
-                agent_id: None,
-                status: None,
+                ..Default::default()
             })
             .await
             .unwrap_or_default();

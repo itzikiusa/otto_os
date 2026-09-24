@@ -3,8 +3,7 @@
   // (the Agents page keeps its session TabBar instead). Modelled on the macOS
   // unified toolbar — title + actions in a single fixed-height bar:
   //
-  //   [icon] Title  [badge]  [tabs (inline)]        [secondary…] [primary] [⋯]
-  //          subtitle
+  //   [icon] Title  [badge]  subtitle…  [tabs (inline)]  [secondary…] [primary] [⋯]
   //
   // • Fixed height (--ph-h, 46px) and one title size, so every page's chrome
   //   lines up when you move between modules.
@@ -41,13 +40,14 @@
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
   import { startWindowDrag } from '../windowDrag';
+  import { isPopout } from '../desktop';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
 
   interface Props {
     title: string;
     /** Optional Icon name drawn dim before the title. */
     icon?: IconName;
-    /** One short line under the title (truncated with an ellipsis). */
+    /** One short dim line after the title, on its baseline (ellipsized). */
     subtitle?: string;
     /** Status pill / count next to the title. */
     badge?: Snippet;
@@ -90,7 +90,8 @@
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
-  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded);
+  // A pop-out window's traffic lights live in its own title strip (shell).
+  const padTraffic = $derived(isTauri && viewport.isDesktop && !ui.railExpanded && !isPopout);
   // A phone row has no room for title + tabs + actions: tabs drop to the
   // second row there regardless of the requested placement.
   const tabsBelow = $derived(!!tabs && (tabsPlacement === 'below' || viewport.isPhone));
@@ -343,10 +344,14 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
+  /* Title and subtitle share ONE baseline (the Design Hall section-header
+     look), so the title sits at the same height on every page whether or not
+     it has a subtitle — a stacked subtitle pushed the title up against the
+     top edge and made headers jump between modules. */
   .ph-titles {
     display: flex;
-    flex-direction: column;
-    justify-content: center;
+    align-items: baseline;
+    gap: 10px;
     min-width: 0;
   }
   .ph-title-line {
@@ -354,6 +359,9 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+    /* The subtitle yields first; the title only ellipsizes past the block. */
+    flex: 0 0 auto;
+    max-width: 100%;
   }
   .ph-title {
     margin: 0;
@@ -395,8 +403,10 @@
     white-space: nowrap;
   }
   .ph-sub {
-    font-size: var(--fs-xs);
-    line-height: 15px;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--fs-s);
+    line-height: 20px;
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -445,6 +455,16 @@
     flex-wrap: nowrap;
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  /* One control height in the toolbar row, whether a page passed .btn or
+     .btn.small — mixed 22/26px buttons made headers look assembled from
+     different kits. */
+  .ph-actions :global(.btn) {
+    height: 26px;
+    font-size: var(--fs-m);
+  }
+  .ph-actions :global(.btn.small) {
+    padding: 0 10px;
   }
   .ph-actions > :global([data-ph-hidden]) {
     display: none !important;

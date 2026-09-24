@@ -180,7 +180,7 @@
     gap: 3px;
     max-width: 40%;
     padding: 1px 7px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -207,7 +207,7 @@
     align-self: flex-start;
     margin-bottom: 4px;
     padding: 1px 7px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--status-warn);
     background: var(--status-warn-soft);
     border-radius: 999px;

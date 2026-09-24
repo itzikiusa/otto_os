@@ -519,7 +519,7 @@
   .link {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     padding: 0;
     font: inherit;
@@ -631,7 +631,7 @@
   }
   .bulk-count {
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .column.drop-target {
     background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
@@ -657,14 +657,14 @@
   .tag {
     display: inline-block;
     margin-top: 6px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 6px;
   }
   .vchip {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--accent-text);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
@@ -680,7 +680,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     background: transparent;
     border: 1px solid var(--border);
@@ -693,8 +693,8 @@
     color: var(--text);
   }
   .gchip.all-passed {
-    background: #7ee787;
-    color: #0a0a0a;
+    background: var(--success-soft);
+    color: var(--success);
     border-color: var(--success);
     font-weight: 600;
   }

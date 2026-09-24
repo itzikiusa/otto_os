@@ -131,7 +131,7 @@
         the workspace, its git dir, the CLIs' own caches and temp — never the rest of
         your disk. Reads are unaffected. macOS only; ignored on other systems.
       </p>
-      <div class="field" style="max-width: 220px">
+      <div class="field" style="max-width: 320px">
         <label for="dm-sandbox-net">Network</label>
         <select
           id="dm-sandbox-net"

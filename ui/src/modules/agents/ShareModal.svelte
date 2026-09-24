@@ -418,7 +418,7 @@
     padding: 4px 0;
   }
   .sm-sender-warn a {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;
   }
@@ -481,7 +481,7 @@
     flex: 1;
     min-width: 0;
     font-size: 11.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -545,7 +545,7 @@
     cursor: pointer;
     padding: 2px 4px;
     border-radius: var(--radius-s);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sm-link-btn:disabled {
     opacity: 0.5;
@@ -609,7 +609,7 @@
   }
   .sm-share-role {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;

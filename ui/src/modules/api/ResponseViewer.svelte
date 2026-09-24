@@ -434,7 +434,7 @@
   }
   .status-pill.redirect {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .status-pill.client {
     background: color-mix(in srgb, #d2691e 20%, transparent);
@@ -472,11 +472,11 @@
     margin-bottom: -1px;
   }
   .rtab.active {
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom-color: var(--accent);
   }
   .hcount {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .rbody {
@@ -535,7 +535,7 @@
     word-break: break-word;
   }
   .hkey {
-    color: var(--accent);
+    color: var(--accent-text);
     width: 34%;
     font-weight: 600;
   }
@@ -566,7 +566,7 @@
   }
   .save-btn:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .view-toggle {
     display: inline-flex;
@@ -586,7 +586,7 @@
   }
   .vt.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .img-wrap {
     display: flex;
@@ -687,7 +687,7 @@
   }
   .trace-ms {
     font-variant-numeric: tabular-nums;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
     font-size: 11px;
   }
@@ -749,7 +749,7 @@
     height: 100%;
   }
   .ring-note {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding: 2px 8px 4px;
@@ -772,9 +772,9 @@
     flex: 0 0 auto;
     min-width: 56px;
     font-weight: 700;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .stream-item.error .si-tag { color: var(--status-exited); }
   .si-data {

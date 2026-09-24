@@ -665,7 +665,7 @@
     color: var(--text);
   }
   .node.active-db .node-icon {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .caret {
     display: grid;
@@ -701,7 +701,7 @@
   .node-icon.table,
   .node-icon.view,
   .node-icon.collection {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   /* Routines get a muted-accent tone so they read as distinct from data objects. */
   .node-icon.procedure,
@@ -733,7 +733,7 @@
     flex: 0 1 auto;
   }
   .nl-detail {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     min-width: 0;
     /* Engine/detail is secondary: shrinks (and ellipsises away) ~100× faster
@@ -741,7 +741,7 @@
     flex: 0 100 auto;
   }
   .node-empty {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding-top: 2px;
@@ -749,7 +749,7 @@
   }
   /* Truncation tail when a node's children exceed the render cap. */
   .node-more {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     font-style: italic;
     padding-top: 2px;
@@ -760,7 +760,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--status-exited);
     padding-top: 2px;
     padding-bottom: 2px;
@@ -770,13 +770,13 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 10px;
+    font-size: var(--fs-xs);
     padding: 0 6px;
     cursor: pointer;
   }
   .node-failed-retry:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .ellipsis {
     overflow: hidden;
@@ -788,13 +788,13 @@
     align-items: center;
     gap: 8px;
     padding: 0 8px 5px;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim, #98989f);
   }
   .scope-pick {
     flex: 1;
     min-width: 0;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 1px 4px;
     background: var(--surface-2, #323238);
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
@@ -834,7 +834,7 @@
     align-items: center;
     gap: 6px;
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim, #98989f);
@@ -873,7 +873,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-dim, #98989f);
-    font-size: 10px;
+    font-size: var(--fs-xs);
   }
 
   /* Schema-tree filter bar */

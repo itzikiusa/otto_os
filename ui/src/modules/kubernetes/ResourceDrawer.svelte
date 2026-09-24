@@ -352,7 +352,7 @@
     font-size: 12.5px;
   }
   .dr-kind {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -393,7 +393,7 @@
     background: var(--status-exited);
   }
   .health-progressing {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .health-progressing .hdot {
     background: var(--accent);
@@ -456,7 +456,7 @@
     min-width: 0;
   }
   .sec-title {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
@@ -504,7 +504,7 @@
     top: 0;
     background: var(--surface);
     text-align: left;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);

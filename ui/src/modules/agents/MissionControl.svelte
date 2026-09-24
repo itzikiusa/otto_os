@@ -829,12 +829,12 @@
     background: transparent;
     color: var(--text-dim);
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .subtask-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .subtask-form {
     display: flex;

@@ -142,6 +142,6 @@
   .pill.ok { background: color-mix(in srgb, var(--status-working) 16%, transparent); color: var(--status-working); }
   .pill.bad { background: color-mix(in srgb, var(--status-exited) 16%, transparent); color: var(--status-exited); }
   .pill.warn { background: color-mix(in srgb, var(--status-warn) 18%, transparent); color: var(--status-warn); }
-  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .pill.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
   .pill.dim { background: color-mix(in srgb, var(--text-dim) 14%, transparent); color: var(--text-dim); }
 </style>

@@ -627,7 +627,7 @@
     margin-top: 2px;
   }
   .cnt {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .kinds-mobile {

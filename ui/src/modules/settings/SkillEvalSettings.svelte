@@ -221,7 +221,7 @@
   .chip-toggle.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .chip-toggle input {
     display: none;

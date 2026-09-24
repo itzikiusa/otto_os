@@ -1405,7 +1405,7 @@
     width: 7px;
     height: 7px;
     flex-shrink: 0;
-    color: #febc2e;
+    color: var(--warning);
   }
   .susp-pill {
     flex-shrink: 0;
@@ -1416,8 +1416,8 @@
     font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.01em;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 16%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
@@ -1525,7 +1525,7 @@
     color: var(--text);
   }
   .provider {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
   .provider-ico {
@@ -1564,11 +1564,11 @@
     width: 14px;
     height: 14px;
     border-radius: 99px;
-    color: #febc2e;
-    background: color-mix(in srgb, #febc2e 18%, transparent);
+    color: var(--warning);
+    background: color-mix(in srgb, var(--status-warn) 18%, transparent);
   }
   .nested-row.needs-you .nested-item:not(.active) {
-    box-shadow: inset 2px 0 0 #febc2e;
+    box-shadow: inset 2px 0 0 var(--status-warn);
   }
   .needs-you-filter {
     display: flex;
@@ -1578,32 +1578,32 @@
     margin: 0 4px 6px;
     height: 26px;
     padding: 0 8px;
-    border: 1px solid color-mix(in srgb, #febc2e 40%, transparent);
-    background: color-mix(in srgb, #febc2e 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-warn) 40%, transparent);
+    background: color-mix(in srgb, var(--status-warn) 8%, transparent);
     border-radius: var(--radius-s);
-    color: #febc2e;
+    color: var(--warning);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     transition: background 120ms ease-out;
   }
   .needs-you-filter:hover {
-    background: color-mix(in srgb, #febc2e 14%, transparent);
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
   }
   .needs-you-filter.active {
-    background: color-mix(in srgb, #febc2e 22%, transparent);
+    background: color-mix(in srgb, var(--status-warn) 22%, transparent);
   }
   .needs-you-count {
     min-width: 16px;
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;
     color: #1a1407;
-    background: #febc2e;
+    background: var(--status-warn);
   }
   .ellipsis {
     overflow: hidden;
@@ -1615,7 +1615,7 @@
     height: 15px;
     padding: 0 4px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     display: grid;
     place-items: center;

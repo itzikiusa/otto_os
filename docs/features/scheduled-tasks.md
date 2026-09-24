@@ -315,15 +315,18 @@ suggested_destination, skill }`); there is no preset-specific code path.
 
 ---
 
-## 9. MCP surface (the 7 `otto.*` tools)
+## 9. MCP surface (the 8 `otto.*` tools)
 
 The outward `otto.*` MCP surface (managed in **MCP Control Plane → Otto Server**,
-served by `ottod mcp-server`) exposes seven scheduled-task tools so an external
-agent can inspect and — once enabled — manage jobs:
+served by `ottod mcp-server`) exposes eight scheduled-task tools so an external
+agent can inspect and — once enabled — manage jobs. Every `task_id` (and a
+create/update's `workflow_id`) accepts the task's (workflow's) **name** as well as
+its id — see [MCP Control Plane](./mcp-control-plane.md#33-the-outward-tool-catalog--every-otto-feature):
 
 | Tool | Mutating | DANGEROUS | Default-enabled | Backing endpoint |
 |---|---|---|---|---|
-| `otto.list_scheduled_tasks` | no | — | **yes** | `GET /workspaces/{ws}/scheduled-tasks` |
+| `otto.list_scheduled_tasks` | no | — | **yes** | `GET /workspaces/{ws}/scheduled-tasks` for every workspace you can read (the `agent_refs` directory: `{kind, items, current_workspace_id, workspace_count}`; `workspace_id` narrows) |
+| `otto.get_scheduled_task` | no | — | **yes** | `GET /scheduled-tasks/{id}` |
 | `otto.list_scheduled_task_runs` | no | — | **yes** | `GET /scheduled-tasks/{id}/runs` |
 | `otto.create_scheduled_task` | yes | **yes** | no | `POST /workspaces/{ws}/scheduled-tasks` |
 | `otto.update_scheduled_task` | yes | **yes** | no | `PATCH /scheduled-tasks/{id}` |

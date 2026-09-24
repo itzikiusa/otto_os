@@ -241,7 +241,7 @@
   }
   .da-working {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
   .da-act {

@@ -147,7 +147,7 @@
     white-space: nowrap;
   }
   .saved.active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .right {
     display: flex;

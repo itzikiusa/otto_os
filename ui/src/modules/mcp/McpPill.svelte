@@ -54,7 +54,7 @@
 <style>
   .pill {
     display: inline-block;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     text-transform: uppercase;
     letter-spacing: 0.03em;

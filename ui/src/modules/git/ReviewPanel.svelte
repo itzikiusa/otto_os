@@ -1483,7 +1483,7 @@
     white-space: nowrap;
   }
   .rp-readiness-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 7px;
   }
   /* CI status pill colours */
@@ -1606,7 +1606,7 @@
     font-weight: 600;
   }
   .rp-agent-chip {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
   .rp-agent-note {
     margin: 4px 0 0;
@@ -1622,7 +1622,7 @@
 
   /* Status pills */
   .rp-status-pill {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -1638,7 +1638,7 @@
   }
   .rp-status-running {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rp-status-done {
     background: color-mix(in srgb, var(--status-working) 15%, transparent);
@@ -1772,14 +1772,14 @@
     display: inline-block;
     padding: 2px 7px;
     border-radius: var(--radius-s, 4px);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .sev-info {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .sev-warn {
     background: color-mix(in srgb, var(--status-warn) 15%, transparent);
@@ -1798,7 +1798,7 @@
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 0;
     line-height: 1.4;
@@ -1922,7 +1922,7 @@
     align-items: flex-end;
   }
   .cfg-save-preset {
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
     padding: 2px 6px;
     white-space: nowrap;
   }
@@ -2061,7 +2061,7 @@
     border: none;
     cursor: pointer;
     padding: 0 2px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1;
   }
