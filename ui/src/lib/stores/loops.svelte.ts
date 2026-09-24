@@ -4,6 +4,7 @@
 // the swarm store), so there is no import cycle.
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   CreateGoalLoopReq,
   DefineGoalReq,
@@ -17,18 +18,26 @@ class LoopsStore {
   list: GoalLoop[] = $state([]);
   detail: GoalLoopDetail | null = $state(null);
   loadingList = $state(false);
+  /** Last list-load failure (human text) — shown inline with Retry, never as "no loops". */
+  listError = $state<string | null>(null);
   loadingDetail = $state(false);
   /** Bumped whenever the open detail should be considered stale (event tick). */
   tick = $state(0);
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  private listWs = '';
+
   async loadList(workspaceId: string): Promise<void> {
+    // Another workspace's loops are not "stale data" for this one.
+    if (this.listWs !== workspaceId) this.list = [];
+    this.listWs = workspaceId;
     this.loadingList = true;
     try {
       this.list = await api.get<GoalLoop[]>(`/workspaces/${workspaceId}/goal-loops`);
-    } catch {
-      this.list = [];
+      this.listError = null;
+    } catch (e) {
+      this.listError = loadErrorText(e);
     } finally {
       this.loadingList = false;
     }

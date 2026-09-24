@@ -9,6 +9,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import RunLauncher from './RunLauncher.svelte';
   import RunDetail from './RunDetail.svelte';
   import RunStageRail from './RunStageRail.svelte';
@@ -48,11 +50,16 @@
 
   <div class="body" class:has-detail={openRun}>
     <section class="list-col">
-      {#if runWithOtto.loadingList && list.length === 0}
-        <div class="muted">Loading runs…</div>
-      {:else if list.length === 0}
-        <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto." />
-      {:else}
+      <LoadState
+        what="runs"
+        loading={runWithOtto.loadingList}
+        error={runWithOtto.listError}
+        empty={list.length === 0}
+        onretry={() => ws.currentId && void runWithOtto.loadList(ws.currentId)}
+      >
+        {#snippet emptyView()}
+          <EmptyState icon="play" title="No runs yet" body="Paste a source above and press Run with Otto." />
+        {/snippet}
         <ul class="runs">
           {#each list as r (r.id)}
             <li>
@@ -80,13 +87,13 @@
                   <span class="agent mono" title="Executing agent (provider · model)">
                     {r.provider}{r.model ? ` · ${r.model}` : ''}
                   </span>
-                  <span class="when">{r.updated_at}</span>
+                  <span class="when"><RelTime iso={r.updated_at} /></span>
                 </div>
               </button>
             </li>
           {/each}
         </ul>
-      {/if}
+      </LoadState>
     </section>
 
     {#if openRun}
@@ -106,7 +113,6 @@
   @media (max-width: 860px) {
     .body.has-detail { grid-template-columns: 1fr; }
   }
-  .muted { color: var(--text-dim); padding: 0.75rem 0; font-size: 0.9rem; }
   .runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .run {
     width: 100%; text-align: left; cursor: pointer;

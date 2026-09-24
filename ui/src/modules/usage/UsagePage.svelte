@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { usage } from '../../lib/api/usage.svelte';
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
@@ -384,9 +385,19 @@
       title="Usage is root-only"
       body="Usage analytics are available to the root account."
     />
-  {:else if usage.loading && !usage.status}
-    <div class="empty"><p>Loading…</p></div>
-  {:else if !usage.status?.available}
+  {:else if !usage.status}
+    <!-- Status unknown (loading, or /usage/status failed): never fall through to
+         the "Install ClickHouse" prompt — a failed load is not "not installed". -->
+    <LoadState
+      what="usage"
+      variant="page"
+      rows={6}
+      loading={usage.loading || !usage.statusError}
+      error={usage.statusError}
+      empty
+      onretry={() => void usage.loadAll()}
+    />
+  {:else if !usage.status.available}
     <!-- ClickHouse not installed: install / configure prompt -->
     <div class="install card">
       <Icon name="db" size={26} />
@@ -435,6 +446,16 @@
     </div>
   {:else}
     <div class="body">
+      {#if usage.summaryError}
+        <!-- Summary failed: inline error (no data yet) or a stale-data bar. -->
+        <LoadState
+          what="usage summary"
+          loading={usage.loading}
+          error={usage.summaryError}
+          empty={!usage.summary}
+          onretry={() => void usage.loadAll()}
+        />
+      {/if}
       <!-- Stat cards -->
       {#if usage.summary}
         <div class="cards">
@@ -719,6 +740,14 @@
               </p>
             {/each}
           {/if}
+        {:else if usage.budgetsError}
+          <LoadState
+            what="budgets"
+            variant="compact"
+            error={usage.budgetsError}
+            empty
+            onretry={() => void usage.loadBudgets()}
+          />
         {:else}
           <p class="dim small">No budgets set. Configure caps to track spend against a target.</p>
         {/if}
@@ -1473,16 +1502,6 @@
   .input.mono,
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-
-  .empty {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
   }
 
   .install {

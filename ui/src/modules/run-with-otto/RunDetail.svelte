@@ -6,6 +6,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import RunStageRail from './RunStageRail.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import { humanize, isTerminal, sourceColor, sourceLabel, statusTone } from './runStatus';
 
@@ -129,9 +131,15 @@
   <!-- stage timeline -->
   <section class="block">
     <h3 class="h">Stage timeline</h3>
-    {#if events.length === 0}
-      <div class="muted">No stage events yet.</div>
-    {:else}
+    <LoadState
+      what="the stage timeline"
+      variant="compact"
+      loading={!runWithOtto.eventsByRun[run.id] && !runWithOtto.eventsError[run.id]}
+      error={runWithOtto.eventsError[run.id]}
+      empty={events.length === 0}
+      onretry={() => void runWithOtto.loadEvents(run.id)}
+    >
+      {#snippet emptyView()}<div class="muted">No stage events yet.</div>{/snippet}
       <ol class="timeline">
         {#each events as ev (ev.id)}
           <li class="tl-item">
@@ -140,14 +148,14 @@
               <div class="tl-top">
                 <span class="tl-kind">{humanize(ev.kind)}</span>
                 {#if ev.status}<span class="pill {statusTone(ev.status)} tiny">{humanize(ev.status)}</span>{/if}
-                <span class="tl-when">{ev.created_at}</span>
+                <span class="tl-when"><RelTime iso={ev.created_at} /></span>
               </div>
               {#if ev.message}<div class="tl-msg">{ev.message}</div>{/if}
             </div>
           </li>
         {/each}
       </ol>
-    {/if}
+    </LoadState>
   </section>
 
   <!-- approval gate -->
