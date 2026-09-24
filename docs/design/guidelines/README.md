@@ -84,10 +84,12 @@ The user also pointed to two outside references:
 | **cnvs.dev** | A full-bleed ambient (blurred) backdrop seen through translucent chrome. Almost no chrome. One floating glass pill at the bottom ("Type or speak… ⌘K · model picker · spaces 01–04"). | Chrome-less layouts on data-dense tool pages. Glass behind text-heavy content. |
 | **bridgemind.ai** | Confident, calm dark UI; generous spacing around a few strong elements; agent activity presented as a first-class feed. | Marketing-page scale type and hero sections inside the app. |
 
-The floating command bar and ambient backdrop are written up as a **proposed**
-pattern for future canvas/studio and Home surfaces in
-[layout.md → Floating command bar](./layout.md#7-floating-command-bar-proposed).
-They are not a licence to restyle list, detail or settings pages.
+The ambient backdrop and the glass chrome are shipped
+([foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)),
+and Home is the desktop they frame ([layout.md → Home](./layout.md#home-the-desktop)).
+The floating command bar is written up in
+[layout.md → Floating command bar](./layout.md#7-floating-command-bar). None of
+it is a licence to put glass behind list, detail or settings content.
 
 ## How to use these docs
 

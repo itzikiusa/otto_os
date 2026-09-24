@@ -5,10 +5,10 @@ This doc covers:
 - the shell anatomy
 - the sidebar
 - the page chrome (`PageHeader` and `PageBody`)
-- the five page archetypes
+- the five page archetypes, and Home as the desktop
 - responsive rules
 - windows
-- the proposed floating command bar
+- the floating command bar
 
 ---
 
@@ -38,6 +38,10 @@ The parts of the shell:
 
 - **Sidebar.** `shell/Navigator.svelte` when expanded, `shell/Rail.svelte` when
   collapsed (icons only; ⌘1 toggles between them). Both use `.sidebar-material`.
+- **Backdrop and glass.** The window paints the ambient backdrop; the sidebar,
+  the `PageHeader` row and the status bar are glass over it; the content column
+  is opaque `--bg`. See
+  [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
   exception is **Agents**, whose session `TabBar` is its top row; it has a
   right panel (⌘J) for Browser, Outputs and similar.
@@ -308,21 +312,67 @@ PageHeader: title = selected item (or module), item actions, primary
 
 ### 4.3 Dashboard
 
-- A grid of cards (`.card`, `--surface`, `--border`, no shadow). Home uses a
-  12-column grid (`COLS = 12`, row 72 px, gap 12 px) of live boxes from
-  `modules/home/kinds.ts`.
+- A grid of cards (`.card`: `--surface`, `--border`, `--shadow-card`).
 - Every card has:
   - a title row (label, plus an optional "open" affordance to its module)
   - one primary figure or list
   - its **own** loading, empty and error states, so one failing box never
     blanks the page
 - KPI figures: `--fs-xl`/`--fs-2xl`, `tabular-nums`, **one** font family per
-  row (don't mix mono `$0.00` with sans counts).
+  row (don't mix mono `$0.00` with sans counts). In widgets, figures sit number
+  over label, split by `--separator` hairlines, not in filled tiles.
 - **Don't seed empty cards.** A default layout contains only kinds that have
-  data. Offer "Add box" for the rest.
-- Home is the one "desktop" in Otto: widgets, up to four views, and rotation.
-  Other modules don't grow widget systems of their own. Contribute a Home box
-  kind instead.
+  data. Offer "Add widget" for the rest.
+
+#### Home: the desktop
+
+Home is the one "desktop" in Otto (`modules/home/`). Other modules don't grow
+widget systems of their own; contribute a Home widget kind (`kinds.ts`)
+instead.
+
+```
+PageHeader: Home  [01 Overview][02][03] + ⋯           [30s]  [+ Add widget]
+┌ ambient backdrop, full-bleed ─────────────────────────────────────────────┐
+│ Good afternoon, Dana                                                      │
+│ Thursday 24 September · 1 needs you · 2 running                           │
+│ ┌ Needs you ─┐ ┌ Running ───┐ ┌ Up next ───┐ ┌ Recent ────┐               │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘               │
+│ ┌ widget ──────────────┐ ┌ widget ───────────────────────────┐            │
+│ └──────────────────────┘ └───────────────────────────────────┘            │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+- **The backdrop** is the ambient image, painted full-bleed and fixed to the
+  viewport, so it runs on into the toolbar and sidebar glass. Everything on it
+  is an opaque card at elevation 1. Text straight on the backdrop is `--text`
+  only (the greeting and today's line).
+- **Today** (`HomeToday.svelte`, data in `today.svelte.ts`): four glance cards,
+  built from data Otto already has.
+  - *Needs you*: pending MCP approvals, sessions waiting on input, work items
+    awaiting approval, unread warnings.
+  - *Running*: working sessions and in-flight workflow runs.
+  - *Up next*: the assistant's reminders (a typed `Reminder` slot, empty until
+    the assistant API lands), then today's notices.
+  - *Recent*: Design Hall artifacts and pull requests from the work graph.
+
+  Each card shows at most three rows plus "N more", and has its own loading and
+  empty state. An empty card is a centred, one-line "nothing here" with a quiet
+  mark, never a blank box. On a phone an empty card collapses to one line.
+- **Widgets** are the existing live boxes on a 12-column grid (`COLS = 12`, row
+  72 px, gap 12 px), up to 8 per space. They keep drag-to-reorder (the grip),
+  resize in grid units (the corner, or arrow keys on it) and zoom to fill. Their
+  header is quiet: icon tile and title; refresh, zoom and the menu surface on
+  hover or focus (always visible without hover).
+- **Spaces 01–04** are Home's views (`MAX_VIEWS = 4`). The toolbar shows them as
+  numbered segmented tabs (the active one also shows its name), then `+` (add)
+  and `⋯` (rename, add, delete). ←/→, swipe and ⌘K "Home: space 01 · …" switch
+  them; they can cycle every 30 s. The active space and the names live in
+  `lib/stores/spaces.svelte.ts`, shared with the floating bar's 01–04 and synced
+  across windows; Home owns what a space contains.
+- **An empty space** invites setup without clutter: one page `EmptyState` with
+  the single "Add widget" action and a row of quick-add chips for the first few
+  widget kinds. Examples are generic (agents, usage, clusters), never tied to a
+  particular product or customer.
 
 ### 4.4 Settings form
 
@@ -367,8 +417,9 @@ PageHeader: crumbs / title · status pill · version   [device ▢▢▢] [Fit] 
 - **Versions are the undo model.** Every applied change (the user's or an
   agent's) creates a version chip, and restoring creates a *new* version.
   Nothing is lost silently.
-- This is the archetype where the ambient backdrop and the floating command
-  bar (below) may appear.
+- This is the other archetype where the ambient backdrop may show (around the
+  pasteboard, never under the artboard) and where the floating command bar
+  (below) may appear.
 
 ## 5. Responsive rules
 
@@ -415,11 +466,12 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
 - Sheets (`Modal`) are for short, blocking tasks. Anything the user works in
   for minutes is a page, a pane or a window, not a modal.
 
-## 7. Floating command bar (Proposed)
+## 7. Floating command bar
 
-This is a pattern for **future** canvas/studio surfaces and Home, inspired by
-cnvs.dev. It doesn't exist in code yet. Build it as a shared component the
-first time a surface needs it, not as a one-off.
+A single glass pill for Home and canvas/studio surfaces, inspired by cnvs.dev.
+**TBD:** the shared `FloatingBar.svelte` is being built; the desktop app already
+hosts it in its own ⌥Space panel window (`#/bar`). Until it lands in-page,
+don't build a one-off.
 
 ```
                  ╭──────────────────────────────────────────────────────────╮
@@ -428,17 +480,19 @@ first time a surface needs it, not as a one-off.
                                   (bottom-centre, above the status bar)
 ```
 
-**Anatomy.** A single glass pill (`--radius-l` or pill, `.sidebar-material`-style
-tint, `--shadow`) containing:
+**Anatomy.** A single glass pill (`--radius-l` or pill; `--glass-tint-bar` +
+`--glass-blur`, `--glass-border`, `--glass-shadow`) containing:
 
 1. An input: "Type or speak…". It routes to **Ask Otto** (the existing ⌘I flow)
    or to the surface's agent. There is no second command system.
 2. A `⌘K` hint that opens the **existing** palette (`registry.all`). The bar is
    a doorway to the palette, not a replacement.
 3. A model/agent picker (reuse `ModelPicker` / `ProviderIcon`).
-4. **Numbered spaces 01–04.** On Home these map to the existing up-to-four
-   views (`MAX_VIEWS = 4`); on a studio, to pages or boards. `⌃1…⌃4`-style
-   switching must not clash with the session chords in `lib/keys.ts`.
+4. **Numbered spaces 01–04.** On Home these are Home's spaces: read and switch
+   them through `spaces` (`lib/stores/spaces.svelte.ts`: `active`, `names`,
+   `select(i)`, `spaceNumber(i)`), never through Home's own store. On a studio
+   they map to pages or boards. `⌃1…⌃4` already jumps between session tabs
+   (`lib/keys.ts`), so in-page switching needs another chord.
 
 **Rules:**
 
@@ -447,13 +501,14 @@ tint, `--shadow`) containing:
 - At most 720 px wide, centred, with 16 px clearance above the status bar or
   bottom nav. It is clamped into the viewport like any floating UI.
 - It is chrome, so vibrancy is allowed (see
-  [foundations.md §7](./foundations.md#7-translucency-and-vibrancy)). Keep the
-  78% tint and the opaque fallback.
+  [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop)).
+  Use the glass tokens, and keep the opaque fallback.
 - Keyboard: `Esc` blurs it, `Enter` sends, and `⌘K` still opens the palette.
   The pill is never the only way to reach an action.
 
-**Ambient backdrop (Proposed).** A full-bleed, heavily blurred backdrop (a
-wallpaper or a render of the user's own work) is allowed only behind
-**Home and canvas/studio** surfaces, and only seen through chrome. Content
-cards on top of it stay opaque `--surface`. It is off under reduced
-transparency and in e2e/screenshot runs, and the user can turn it off.
+**Ambient backdrop.** Shipped: see
+[foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
+It shows through chrome on every page and fills only Home's desktop (and, when
+a studio adopts it, the pasteboard). Content cards on top of it stay opaque
+`--surface`. It is off under reduced transparency and when the user picks
+**None**.

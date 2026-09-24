@@ -44,8 +44,8 @@ Rules:
 
 | Token | Use for |
 |---|---|
-| `--bg` | Window and page background, `PageHeader`, content behind cards |
-| `--bg-sidebar` | Sidebar tint (see [§7 Translucency](#7-translucency-and-vibrancy)) |
+| `--bg` | Window and page background, content behind cards (and the base under the toolbar glass) |
+| `--bg-sidebar` | Sidebar tint (see [§7 Translucency](#7-translucency-vibrancy-and-the-ambient-backdrop)) |
 | `--surface` | Cards, sheets (Modal), popovers, menus, toasts, list panes |
 | `--surface-2` | Inputs, wells, code blocks, hovered buttons, segmented-control track, empty-state icon tile |
 | `--surface-3` | Pressed or nested wells, a selected cell inside a `--surface-2` well. Use sparingly. |
@@ -55,7 +55,8 @@ Rules:
 
 | Token | Use for |
 |---|---|
-| `--border` | Hairline borders: cards, inputs, dividers, header bottom edge |
+| `--border` | Hairline borders: cards, inputs, dividers inside content |
+| `--separator` | The quieter hairline between chrome and content: the `PageHeader` bottom edge, the sidebar's inline-end edge, the status bar's top edge, a Modal footer, stat dividers in Home widgets |
 | `--border-strong` | Emphasised borders: focused/selected cards, drag targets, the agent-content rule (see patterns.md) |
 | `--hover` | Hover wash on rows and ghost controls (7% of `--text`, works on any surface) |
 
@@ -148,8 +149,8 @@ UI graphics.
 | Pair | Native light | Native dark | Pro Dark | Warm light | Warm dark |
 |---|---|---|---|---|---|
 | `--text` on `--bg` | 15.5 | 14.9 | 14.8 | 10.8 | 13.0 |
-| `--text-dim` on `--surface-2` | 4.80 | 4.84 | 5.40 | 4.82 | 4.65 |
-| `--text-dim` on `--surface-3` | **4.39** | **4.29** | 4.83 | **4.40** | **4.18** |
+| `--text-dim` on `--surface-2` | 5.26 | 4.84 | 5.40 | 4.82 | 4.65 |
+| `--text-dim` on `--surface-3` | 4.81 | **4.29** | 4.83 | **4.40** | **4.18** |
 | `--accent-text` on `--bg` | 6.09 | 7.08 | 6.56 | 5.22 | 8.15 |
 | `--accent-contrast` on `--accent-solid` | 4.94 | 4.94 | 6.38 | 4.76 | 6.83 |
 | `--danger` on `--surface-2` | 5.75 | 5.58 | 6.57 | 5.60 | 5.70 |
@@ -160,15 +161,18 @@ UI graphics.
 
 Rules that follow from the table:
 
-- **`--text-dim` is not readable on `--surface-3`.** It falls below 4.5 in four
-  of five combinations. On `--surface-3`, use `--text`.
+- **`--text-dim` is not readable on `--surface-3`.** It falls below 4.5 in three
+  of five combinations. On `--surface-3`, use `--text`. (Native light's
+  `--text-dim` moved from `#69696e` to `#636368` in the ambient pass so dim text
+  clears AA on the sidebar glass; that also lifted it on `--surface-3`.)
 - Tones are safe on `--bg`, `--surface`, `--surface-2`, `--surface-3` and their
   own soft tint. Don't put a tone on another tone's tint (for example
   `--warning` text on `--danger-soft`).
 - Nothing on a `--accent-solid` fill except `--accent-contrast`. Don't assume
   white: Warm dark uses near-black.
 - Text over an image or a translucent material must be checked against the
-  **worst** backdrop it can sit on. See [§7](#7-translucency-and-vibrancy).
+  **worst** backdrop it can sit on. See [§7](#7-translucency-vibrancy-and-the-ambient-backdrop)
+  for the measured glass table.
 
 ### 1.5 Where literal colours are still allowed
 
@@ -283,7 +287,7 @@ edge instead of adding more space.
 |---|---|---|
 | `--radius-s` | 5 | Controls: buttons, inputs, icon buttons, nav rows, the focus ring |
 | `--radius-m` | 8 | Cards, list items, code blocks, skeleton rows |
-| `--radius-l` | 12 | Sheets (Modal), popovers, the empty-state icon tile, the floating bar |
+| `--radius-l` | 12 | Sheets (Modal), popovers, the notification panel, Home widgets and glance cards, the empty-state icon tile, the floating bar |
 | `999px` | pill | `.chip`, `.pill-toggle`, status pills |
 
 Don't use 3 px, 4 px, 6 px or `99px`. (4 px inside the `.segmented` track is
@@ -293,18 +297,25 @@ the one existing exception.)
 
 ## 5. Elevation and shadow
 
-Elevation comes mostly from **surface steps and hairlines, not shadows**:
+Elevation comes from **surface steps and hairlines first, shadow second**.
+There are three levels, each with one token:
 
-- Cards sit on `--bg` as `--surface` with a 1 px `--border`. No shadow.
-- **Floating layers only** get `--shadow`: Modal, popovers, menus, toasts, and
-  the proposed floating bar. There is one shadow token, and it is tuned per
-  theme.
+| Level | What | Token |
+|---|---|---|
+| 0: the page | `--bg` (and, on Home, the ambient backdrop) | none |
+| 1: content cards | `.card`, Home widgets and glance cards, the empty-space panel on Home: `--surface` + 1 px `--border` | `--shadow-card` (a whisper: 1–2 px, low alpha, tuned per scheme) |
+| 2: floating layers | Modal sheets, menus, popovers, the palette, the floating bar | `--glass-shadow`, with a `--glass-border` hairline |
+
+- `.card` carries `--shadow-card` globally, so a card rests just above the page
+  and above the ambient backdrop on Home. Don't add a stronger shadow to "lift"
+  a card; change its surface step or its border (`--border-strong`) instead.
+- Floating layers share one family: `--glass-border` + `--glass-shadow`, whether
+  the surface is glass (menus, palette) or opaque (Modal). `--shadow` remains
+  for older floating UI (toasts, legacy popovers) until they move over.
 - A selected segment in `.segmented` has a 1 px micro-shadow. That is the only
-  in-flow shadow.
+  other in-flow shadow.
 
-Don't stack shadows, add coloured glows, or give a static card a shadow to
-"lift" it. If something must stand out, change its surface step or its border
-(`--border-strong`).
+Don't stack shadows, add coloured glows, or invent a fourth level.
 
 ---
 
@@ -335,46 +346,107 @@ Rules:
 
 ---
 
-## 7. Translucency and vibrancy
+## 7. Translucency, vibrancy and the ambient backdrop
 
-The Tauri window is created with `"transparent": true`, and
-`window_vibrancy::apply_vibrancy(…, NSVisualEffectMaterial::Sidebar)` is applied
-to it (`apps/desktop/src-tauri/src/main.rs`, `windows.rs`). The web layer shows
-it through `.sidebar-material` (`tokens.css`):
+Otto's chrome is glass over a calm backdrop; its content is opaque. Three
+pieces make that work, all wired through `ui/src/lib/tokens.css`:
 
-```css
-.sidebar-material {
-  background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
-  backdrop-filter: blur(20px) saturate(1.4);
-}
-```
+1. **The ambient backdrop** (`--ambient-image`): a soft, full-bleed image
+   behind the window. Settings → Appearance → Backdrop: **None**, **Subtle** (an
+   accent wash, the default) or **Wallpaper** (a generated wallpaper, or the
+   user's own photo). `lib/ambient.ts` generates it from the accent in effect
+   and the resolved scheme; there are no network images. A photo is processed
+   on the device by `lib/wallpaper.ts` (downscaled, blurred, clamped into a
+   light and a dark variant) and stored in `localStorage` only.
+2. **Glass materials**: the `--glass-*` tokens and three classes, for chrome.
+3. **Native vibrancy** in the desktop app. The Tauri window is created with
+   `"transparent": true` and `window_vibrancy::apply_vibrancy(…,
+   NSVisualEffectMaterial::Sidebar)` (`apps/desktop/src-tauri/src/main.rs`,
+   `windows.rs`). The shell clears the document background there
+   (`html.otto-vibrant`), so the sidebar glass shows the real desktop. A Subtle
+   backdrop is translucent and tints the native material; a Wallpaper paints
+   its own opaque base.
 
-Today it is used by the Navigator and the Rail.
+### 7.1 Tokens and classes
 
-**The rule: vibrancy is for chrome, never for content.**
+| Token | Value | Used by |
+|---|---|---|
+| `--ambient-image` | the generated art (`var(--ambient-art)`, set on `<html>` by `ui.applyTheme()`), `none` when off | the shell, `.chrome-material`, Home's desktop |
+| `--glass-tint` | `--bg-sidebar` at 72% | `.sidebar-material` over the ambient (browser, remote, tablet) |
+| `--glass-tint-native` | `--bg-sidebar` at 84% | the sidebar and the menu-bar popover over **native** vibrancy (the real desktop is not luminance-banded) |
+| `--glass-tint-bar` | `--bg` at 72% | `.chrome-material`: the `PageHeader` row and the status bar |
+| `--glass-tint-raised` | `--surface` at 90% | `.glass-raised`: context menus, the ⌘K palette, the notification panel |
+| `--glass-blur`, `--glass-blur-raised` | `blur(24px) saturate(1.5)`, `blur(20px) saturate(1.4)` | the backdrop-filter that goes with them |
+| `--glass-border` | `--text` at 10% | the hairline edge of any floating layer, glass or not |
+| `--glass-shadow` | two layers, per scheme | elevation 2 (see [§5](#5-elevation-and-shadow)) |
 
-| Allowed (chrome) | Never (content) |
+| Class | What it paints | Where |
+|---|---|---|
+| `.sidebar-material` | `--glass-tint` + `--glass-blur` over whatever is behind it (the ambient, or native vibrancy) | Navigator, Rail, the pop-out title strip |
+| `.chrome-material` | `--bg`, then the ambient **fixed to the viewport** (`background-attachment: fixed`), then `--glass-tint-bar`. There is no backdrop-filter, so it never becomes the containing block of a fixed-position popup inside it. | `PageHeader`, `StatusBar` |
+| `.glass-raised` | `--glass-tint-raised` + `--glass-blur-raised` + `--glass-border` + `--glass-shadow` | `ContextMenu`, `Palette`, the `NotificationBell` panel |
+
+Because `.chrome-material` fixes the ambient to the viewport, the toolbar strip,
+the status bar, the sidebar and Home all show one continuous backdrop.
+
+### 7.2 The rule: glass is for chrome, never for content
+
+| Glass allowed (chrome) | Always opaque (content) |
 |---|---|
 | Sidebar / Rail | Tables, grids, result sets |
-| The window's toolbar strip, if it is made translucent | Editors, terminals, diffs, logs |
-| Popovers and menus (optional) | Forms and settings bodies |
-| The proposed floating command bar | Modal bodies and long-form text |
-| The ambient backdrop behind Home / studio canvases (Proposed) | Anything the user reads for more than a glance |
+| The toolbar strip (`PageHeader`) and the status bar | Editors, terminals, diffs, logs |
+| Menus, popovers, the palette, the menu-bar popover (`#/tray`) | Forms and settings bodies |
+| The floating command bar | Modal sheets: they hold forms, so they are opaque `--surface` with the glass edge and shadow |
+| The ambient backdrop on Home, around the widgets | Anything the user reads for more than a glance |
 
-Constraints for any translucent surface:
+The content column (`.center` in the shell) is always `--bg`. Only **Home**
+paints the ambient behind its content, and only around opaque cards.
 
-1. **Keep a token tint of at least 78% opacity** under the blur, like
-   `.sidebar-material`. Text on it must pass 4.5:1 against both the lightest and
-   the darkest wallpaper the user could have. Pure glass (a 20–40% tint) is
-   only for surfaces that hold no text (a backdrop, a divider).
-2. **Opaque fallback.** In the browser, the phone/remote UI and e2e runs there
-   is no native material, only the page behind. The surface must look right
-   and pass contrast with the blur off.
-3. **Reduced transparency.** Honour `prefers-reduced-transparency: reduce` by
-   switching to the opaque token (`--bg-sidebar` / `--surface`), where the
-   engine supports the media query.
-4. **One level of glass.** Never put a translucent surface on top of another
-   translucent surface.
+### 7.3 The contrast contract
+
+Every ambient pixel stays inside a **scheme luminance band** (`AMBIENT_LUM` in
+`lib/ambient.ts`): relative luminance ≥ 0.68 in light schemes and ≤ 0.07 in dark
+ones. The generator aims inside it, and a photo is clamped into it per pixel
+(mixed toward white or black in linear light). That bound is what lets the
+chrome tint drop to 72% and still keep every text token AA over *any* backdrop
+the user can pick. `unit/ambient.test.ts` enforces it against the real token
+values: it composites each glass tint over every generated sample (every theme
+accent plus extreme custom accents, their blends, and clamped extreme photo
+pixels) and fails below 4.5:1.
+
+Worst case measured (WCAG ratio; 4.5 is AA):
+
+| Pair (worst backdrop) | Native light | Native dark | Pro Dark | Warm light | Warm dark |
+|---|---|---|---|---|---|
+| `--text` on sidebar glass | 13.34 | 12.70 | 12.42 | 9.25 | 11.08 |
+| `--text-dim` on sidebar glass | 4.74 | 5.40 | 5.46 | 4.59 | 5.03 |
+| `--text` on toolbar glass | 14.13 | 13.33 | 13.11 | 9.74 | 11.63 |
+| `--text-dim` on toolbar glass | 5.02 | 5.66 | 5.76 | 4.84 | 5.28 |
+| `--text` straight on the backdrop (Home greeting) | 12.63 | 9.44 | 8.64 | 8.49 | 8.31 |
+| `--text-dim` on raised glass (over app surfaces) | 5.85 | 5.30 | 5.79 | 5.49 | 5.03 |
+| `--text` on raised glass (over pure black or white) | 13.42 | 9.32 | 9.91 | 9.03 | 8.25 |
+
+Rules that follow:
+
+1. **Only `--text` sits straight on the backdrop.** `--text-dim` is not AA on
+   the raw ambient; put secondary text on a card or on glass.
+2. **Never change a glass tint without running `npm run test:unit`.** A tint
+   below 70% over the banded backdrop, or below 78% over native vibrancy, fails
+   the test by design.
+3. **Raised glass assumes app content behind it.** It is measured over the
+   scheme's own surfaces for `--text-dim` and over black and white for
+   `--text`. Keep dim text in menus short (shortcut hints, meta).
+4. **Opaque fallback.** In e2e runs, the phone/remote UI and any browser without
+   `backdrop-filter`, the same tints composite over the ambient without blur and
+   still pass: the numbers above are blur-free.
+5. **Reduced transparency.** `prefers-reduced-transparency: reduce`, or
+   Settings → Appearance → *Reduce transparency* (`data-transparency="reduced"`
+   on `<html>`), turns every `--glass-*` tint into its opaque token, sets the
+   blurs to `none` and sets `--ambient-image: none`. Components need no code of
+   their own for it; use the tokens.
+6. **One level of glass.** Never put a translucent surface on top of another
+   translucent surface. (A menu opened from a menu is fine: each one sits over
+   content.)
 
 ---
 
@@ -454,9 +526,9 @@ Rules:
 - **One icon per concept.** Don't give two adjacent buttons the same icon (as
   "Ask AI" and "Ask in English" once did).
 - **No glyph characters as icons** in new code: `✕ × ⋯ → ▸`. Use `x`,
-  `chevronRight` and so on. Existing exceptions: the Modal and toast close `✕`,
-  and `PageHeader`'s `⋯` (there is no `more` icon yet; **TBD:** add `more` and
-  migrate them).
+  `chevronRight` and so on; for "more" use `more` (`PageHeader`'s overflow
+  button and Home's widget menu do). Existing exceptions: the Modal and toast
+  close `✕`.
 - **Provider marks** (Claude, Codex, Antigravity, custom providers) come from
   `ProviderIcon`, never from `Icon`. Every provider gets a mark; custom ones
   get a deterministic monogram tile.
