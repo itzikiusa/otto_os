@@ -244,18 +244,17 @@
     position: fixed;
     top: 40px; /* below the tab bar / titlebar area */
     inset-inline-end: 12px;
-    z-index: 9000;
+    z-index: var(--z-find);
     display: flex;
     align-items: center;
     gap: 4px;
     height: 34px;
     padding: 0 6px;
+    /* Opaque (it hosts a field) but one family with every floating layer. */
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius-m);
-    box-shadow:
-      0 4px 16px rgba(0, 0, 0, 0.22),
-      0 1px 4px rgba(0, 0, 0, 0.12);
+    box-shadow: var(--glass-shadow);
   }
 
   .find-input {
