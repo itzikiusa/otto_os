@@ -8,6 +8,8 @@
   import Modal from '../../lib/components/Modal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { effectiveRetry, updateRetry, clearRetry } from './retryPolicy';
   import WorkflowCanvas from './WorkflowCanvas.svelte';
@@ -41,6 +43,10 @@
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
+  /** List load state — a failed load renders inline with Retry, never as the
+   *  "Build a workflow" empty state. */
+  let wfLoading = $state(true);
+  let wfError = $state<string | null>(null);
   let templates = $state<WorkflowTemplate[]>([]);
   let types = $state<NodeTypeSpec[]>([]);
   let current = $state<Workflow | null>(null);
@@ -321,12 +327,16 @@
   }
 
   async function load(): Promise<void> {
+    wfLoading = true;
     try {
       if (types.length === 0) types = await api.get<NodeTypeSpec[]>('/workflows/node-types');
       if (templates.length === 0) templates = await api.get<WorkflowTemplate[]>('/workflows/templates');
       workflows = await api.get<Workflow[]>(`/workspaces/${ws.currentId}/workflows`);
+      wfError = null;
     } catch (e) {
-      toasts.error('Failed to load workflows', e instanceof Error ? e.message : String(e));
+      wfError = loadErrorText(e);
+    } finally {
+      wfLoading = false;
     }
   }
 
@@ -1524,7 +1534,10 @@
         </div>
       {/each}
       {#if workflows.length === 0}
-        <p class="empty">No workflows yet — describe one above.</p>
+        <!-- The main pane owns Retry; the rail just mustn't claim "none". -->
+        <LoadState what="workflows" variant="compact" loading={wfLoading} error={wfError} empty>
+          {#snippet emptyView()}<p class="empty">No workflows yet — describe one above.</p>{/snippet}
+        </LoadState>
       {/if}
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2789,6 +2802,8 @@
           {/if}
         </div>
       {/if}
+    {:else if workflows.length === 0 && (wfError || wfLoading)}
+      <LoadState what="workflows" variant="page" loading={wfLoading} error={wfError} empty onretry={() => void load()} />
     {:else}
       <!-- The sidebar's Generate / Start blank form is this page's CTA. -->
       <EmptyState
