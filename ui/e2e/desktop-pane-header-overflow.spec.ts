@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectFullyInViewport } from './helpers';
+import { expectFullyInViewport, runBarCommand } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The pane header never clips a control (desktop-browser only).
@@ -41,14 +41,8 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
-/** Run a ⌘K command by its exact palette title. */
-async function runCommand(page: Page, title: string): Promise<void> {
-  await page.keyboard.press('Meta+k');
-  await expect(page.locator('.palette')).toBeVisible({ timeout: 10_000 });
-  await page.keyboard.type(title);
-  await page.locator('.pal-item', { hasText: title }).first().click();
-  await expect(page.locator('.palette')).toBeHidden({ timeout: 10_000 });
-}
+/** Run a ⌘K command by its exact title (⌘K focuses the floating bar). */
+const runCommand = runBarCommand;
 
 /**
  * Split into equal COLUMNS until a pane header is at most `maxW` wide, and

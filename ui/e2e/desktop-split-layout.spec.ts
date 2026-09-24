@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
+import { runBarCommand } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Nested split layouts (desktop-browser only).
@@ -66,14 +67,8 @@ async function leafBoxes(page: Page): Promise<{ x: number; y: number; w: number;
   );
 }
 
-/** Run a ⌘K command by its exact palette title. */
-async function runCommand(page: Page, title: string): Promise<void> {
-  await page.keyboard.press('Meta+k');
-  await expect(page.locator('.palette')).toBeVisible({ timeout: 10_000 });
-  await page.keyboard.type(title);
-  await page.locator('.pal-item', { hasText: title }).first().click();
-  await expect(page.locator('.palette')).toBeHidden({ timeout: 10_000 });
-}
+/** Run a ⌘K command by its exact title (⌘K focuses the floating bar). */
+const runCommand = runBarCommand;
 
 test('⌘D then ⌘⇧D gives one full-height pane beside two stacked', async ({ page }) => {
   await openSession(page, 'Pirlo');
