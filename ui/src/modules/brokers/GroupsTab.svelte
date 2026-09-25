@@ -63,9 +63,9 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = listW;
+    const direction = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? -1 : 1;
     const onMove = (ev: PointerEvent): void => {
-      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
-      listW = Math.max(220, Math.min(520, startW + (ev.clientX - startX)));
+      listW = Math.max(220, Math.min(520, startW + direction * (ev.clientX - startX)));
     };
     const onUp = (): void => {
       persistListW();
@@ -74,6 +74,16 @@
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+  }
+  function resizeListKey(e: KeyboardEvent): void {
+    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+    if (e.key === 'Home') listW = 220;
+    else if (e.key === 'End') listW = 520;
+    else if (e.key === 'Enter') listW = LIST_W_DEFAULT;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') listW = Math.max(220, Math.min(520, listW + (e.key === forward ? 1 : -1) * (e.shiftKey ? 40 : 10)));
+    else return;
+    e.preventDefault();
+    persistListW();
   }
   function resetListW(): void {
     listW = LIST_W_DEFAULT;
@@ -233,12 +243,17 @@
 
   async function resetOffsets() {
     if (!selected || resetError) return;
+    const groupId = selected;
+    const clusterId = cluster.id;
+    const request = detailRequest;
+    const body = buildResetBody(guarded);
+    const current = () => cluster.id === clusterId && selected === groupId && detailRequest === request;
     const typed = await confirmer.promptText(
       `Type the group name to confirm offset reset.`,
-      { title: `Reset offsets for "${selected}"`, confirmLabel: 'Reset', placeholder: selected, danger: true },
+      { title: `Reset offsets for "${groupId}"`, confirmLabel: 'Reset', placeholder: groupId, danger: true },
     );
-    if (typed === null) return;
-    if (typed !== selected) {
+    if (typed === null || !current()) return;
+    if (typed !== groupId) {
       // A mistyped name must not look like a silent no-op.
       toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
       return;
@@ -247,11 +262,11 @@
     resetting = true;
     try {
       const updated = await api.post<GroupDetail>(
-        `/brokers/clusters/${cluster.id}/groups/${encodeURIComponent(selected)}/reset`,
-        buildResetBody(guarded),
+        `/brokers/clusters/${clusterId}/groups/${encodeURIComponent(groupId)}/reset`,
+        body,
       );
-      detail = updated;
-      toasts.success(`Offsets reset for "${selected}"`);
+      if (current()) detail = updated;
+      toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
       toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
     } finally {
@@ -260,6 +275,7 @@
   }
 </script>
 
+<div class="groups-container">
 <div class="groups">
   <div class="list" style="--groups-list-w:{listW}px">
     {#if loadError}
@@ -294,11 +310,18 @@
     {/if}
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A focusable ARIA separator is the APG window-splitter control. Svelte
+       classifies separator as static even with its required value/keyboard API. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="side-resizer"
     role="separator"
     aria-orientation="vertical"
+    tabindex="0"
+    aria-valuemin="220"
+    aria-valuemax="520"
+    aria-valuenow={Math.round(listW)}
+    onkeydown={resizeListKey}
     aria-label="Drag to resize the group list (double-click to reset)"
     title="Drag to resize · double-click to reset"
     ondblclick={resetListW}
@@ -486,8 +509,14 @@
     {/if}
   </div>
 </div>
+</div>
 
 <style>
+  .groups-container {
+    container-type: inline-size;
+    height: 100%;
+    min-width: 0;
+  }
   .groups {
     display: flex;
     height: 100%;
@@ -495,8 +524,9 @@
   }
   .list {
     /* Default width; drag-resizable via the .side-resizer (persisted). The
-       phone media query below overrides back to a full-width band. */
+       narrow-container query below overrides back to a full-width band. */
     width: var(--groups-list-w, 300px);
+    max-width: 45%;
     border-inline-end: 1px solid var(--border);
     overflow: auto;
     flex: none;
@@ -755,14 +785,14 @@
     margin: 0;
   }
 
-  /* Stack on tablets too: the app rail and cluster sidebar leave too little
-     room for both the group list and a readable offsets table. */
-  @media (max-width: 1100px) {
+  /* Follow the actual content width, including resizable app/cluster panes. */
+  @container (max-width: 760px) {
     .groups {
       flex-direction: column;
     }
     .list {
       width: 100%;
+      max-width: none;
       max-height: 35vh;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
