@@ -971,9 +971,8 @@
     <div class="provider-banner" role="alert">
       <Icon name="warning" size={14} />
       <span>
-        A remote git provider (GitHub / Bitbucket / GitLab) is failing with a
-        <strong>gateway error</strong> — it may be down or under maintenance. Your local work is
-        unaffected; retries will resume automatically.
+        A request to your Git provider failed with a <strong>gateway error</strong>.
+        Local work remains available.
       </span>
       <span class="grow"></span>
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss">

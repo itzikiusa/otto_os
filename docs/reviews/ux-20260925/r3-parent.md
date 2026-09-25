@@ -25,3 +25,7 @@ The first full run found a stale macOS-only browser-install test that expected i
 `CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace` passed: **3,562 passed, zero failed, 66 ignored**, across 125 test binaries/doc-test suites (`/tmp/otto-ux-rust-tests-verified.log`, exit 0). Full clippy with the same profile and `--workspace --all-targets -- -D warnings` passed (`/tmp/otto-ux-clippy-verified.log`, exit 0).
 
 These Rust results precede the later R3 Git reference-normalization repair. That repair requires its own focused checks and renewed final gates; these results must not be represented as verifying a later Rust revision.
+
+## Provider failure copy
+
+The Git reviewer’s failed-reply screenshot exposed a misleading shared banner promising that retries would resume automatically. `serviceHealth.svelte.ts` tracks response status and a dismissal timer; it does not retry requests. The banner now states the observed failed provider request and that local work remains available. The reviewer re-executed the failed-reply flow in the final 13-test Git subset and visually verified the corrected text (`/tmp/otto-ux-r3-git-final.log`). No request/retry behavior changed.
