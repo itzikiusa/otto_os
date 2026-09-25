@@ -131,7 +131,7 @@ test('unrecognized forge: PR tab renders an honest empty state naming the host',
   await page.goto(`/#/git/${serverRepoId}/prs`);
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
   await expect(
-    page.getByText("Pull requests aren't available for bitbucket-server.corp.example.com"),
+    page.getByText("Pull requests aren’t available for bitbucket-server.corp.example.com"),
   ).toBeVisible();
   await expect(page.getByText('Otto supports GitHub, Bitbucket Cloud, and GitLab', { exact: false })).toBeVisible();
   // No "New pull request" button on an unsupported forge — the surface is the message.

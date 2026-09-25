@@ -14,6 +14,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
 
   // ── state ─────────────────────────────────────────────────────────────────────
   let status = $state<EmailSenderResp | null>(null);
@@ -78,6 +79,13 @@
   }
 
   const baseUrlDirty = $derived(fBaseUrl.trim() !== savedBaseUrl.trim());
+  // Typed-but-unsaved edits (an app password, or a changed domain) ask
+  // before a navigation drops them.
+  $effect(() =>
+    guardUnsaved(() => !saving && !savingBaseUrl && (fPassword.trim() !== '' || baseUrlDirty), {
+      what: 'the sharing settings',
+    }),
+  );
   const baseUrlInvalid = $derived(fBaseUrl.trim() !== '' && !/^https?:\/\/[^\s/]+/i.test(fBaseUrl.trim()));
 
   async function saveBaseUrl(): Promise<void> {
@@ -169,10 +177,11 @@
   <LoadState what="the email sender" {loading} error={loadError} empty={!status} onretry={() => void load()} rows={2}>
   <div class="card s-card">
     <div class="status-row">
-      <span class="status-address" title={status?.gmail_address ?? undefined}>
+      <span class="status-address" class:unset={!status?.gmail_address} title={status?.gmail_address ?? undefined}>
         {status?.gmail_address ?? 'No sender configured'}
       </span>
-      <span class={verifiedBadge}>{verifiedLabel}</span>
+      <!-- "Not configured" beside "No sender configured" said it twice. -->
+      {#if status?.gmail_address}<span class={verifiedBadge}>{verifiedLabel}</span>{/if}
       {#if status?.gmail_address && !status.verified}
         <button class="btn small" disabled={verifying} onclick={reverify}>
           {verifying ? 'Verifying…' : 'Re-verify'}
@@ -203,6 +212,8 @@
         placeholder="you@gmail.com"
         autocomplete="email"
         aria-invalid={!!gmailError}
+        disabled={hasStoredPassword && !editingPassword}
+        title={hasStoredPassword && !editingPassword ? 'Replace the app password to change the sender' : undefined}
         bind:value={fGmail}
         oninput={() => (gmailError = '')}
       />
@@ -239,7 +250,7 @@
 
     <div class="form-actions">
       {#if editingPassword}
-        <button class="btn ghost" onclick={() => { editingPassword = false; fPassword = ''; pwError = ''; }}>Cancel</button>
+        <button class="btn ghost" onclick={() => { editingPassword = false; fPassword = ''; pwError = ''; gmailError = ''; fGmail = status?.gmail_address ?? fGmail; }}>Cancel</button>
       {/if}
       <button
         class="btn primary"
@@ -309,7 +320,7 @@
   }
   .s-card {
     padding: 14px 16px;
-    max-width: 560px;
+    max-width: var(--settings-col);
     margin-bottom: 8px;
   }
   .status-row {
@@ -327,6 +338,10 @@
     font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
+  }
+  .status-address.unset {
+    font-weight: 500;
+    color: var(--text-dim);
   }
   .chip-warn {
     color: var(--warning);
@@ -350,7 +365,7 @@
     line-height: 1.6;
     color: var(--text-dim);
     margin: 0;
-    max-width: 560px;
+    max-width: var(--settings-col);
     padding-inline-start: 18px;
     display: flex;
     flex-direction: column;

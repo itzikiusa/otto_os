@@ -52,7 +52,7 @@
   {:else}
     <PageHeader
       title="Goal Loops"
-      subtitle="Give a goal + a budget; a team of agents iterates toward it on an isolated branch until the acceptance criteria are met or a limit is hit."
+      subtitle="Agents iterate toward a goal within a budget"
     >
       {#snippet actions()}
         <!-- One primary per page: while the list is empty the empty state owns
@@ -137,13 +137,11 @@
   }
   .loop-card:hover {
     border-color: var(--border-strong);
+    background: var(--hover);
   }
   .loop-card:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-  }
-  .loop-card:hover {
-    background: var(--hover);
   }
   .card-top {
     display: flex;

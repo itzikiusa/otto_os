@@ -201,7 +201,7 @@
             <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
           {/if}
         {:else if !aws.accountsLoaded}
-          <div class="pad"><Skeleton rows={5} /></div>
+          <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={5} /></div>
         {:else if !account}
           <EmptyState
             variant="page"
@@ -263,6 +263,11 @@
 {/if}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .aws-page {
     display: flex;
     flex-direction: column;

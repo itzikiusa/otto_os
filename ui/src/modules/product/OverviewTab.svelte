@@ -19,6 +19,7 @@
   import type { ProductAttachment } from './types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { ctxMenu, type MenuItem, type MenuOptions } from '../../lib/contextmenu.svelte';
   import PublishDialog from './PublishDialog.svelte';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
@@ -114,6 +115,11 @@
   // ── Draft edit state ─────────────────────────────────────────────────────
   let draftTitle = $state('');
   let draftBody = $state('');
+  /** The draft form differs from the saved draft (Save enabled; leaving asks). */
+  const draftDirty = $derived(
+    isDraft && !!story && !!source && (draftTitle !== story.title || draftBody !== (source.body_md ?? '')),
+  );
+  $effect(() => guardUnsaved(() => draftDirty, { what: 'this draft' }));
   let draftSaving = $state(false);
 
   // ── AttachmentsPanel ref + screenshot paste counter ───────────────────────
@@ -1185,9 +1191,11 @@
           </button>
           <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
         </div>
-      {:else}
+      {:else if !isDraft}
+        <!-- The page header already names the story; this row is the Jira
+             title's edit affordance (a draft edits its title in the form). -->
         <div class="title-row">
-          <h1 class="story-title">{story.title}</h1>
+          <h2 class="story-title">{story.title}</h2>
           {#if isJira}
             <button
               class="title-edit-btn"
@@ -1263,14 +1271,15 @@
 
       <span class="grow"></span>
 
+      {#if !isDraft}
+      <!-- Watch / Refresh follow the SOURCE issue/page — a draft has none. -->
       <!-- Watch toggle -->
       <button
         class="btn small"
         aria-pressed={story.watch_enabled}
         onclick={toggleWatch}
         disabled={watchWorking}
-        title={story.watch_enabled ? 'Watching — click to disable' : 'Click to watch this story'}
-        aria-label="Toggle watch"
+        title={story.watch_enabled ? 'Watching the source for changes — click to stop' : 'Watch the source for changes'}
       >
         <Icon name="eye" size={13} />
         {story.watch_enabled ? 'Watching' : 'Watch'}
@@ -1287,6 +1296,7 @@
         <Icon name="refresh" size={13} />
         {refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
+      {/if}
 
       <!-- Discovery: team picker + launch button -->
       {#if swarm.swarms.length > 1}
@@ -1349,9 +1359,10 @@
               <button
                 class="btn"
                 onclick={saveDraft}
-                disabled={draftSaving}
+                disabled={draftSaving || !draftDirty}
+                title={draftDirty ? undefined : 'No unsaved changes'}
               >
-                {draftSaving ? 'Saving…' : 'Save draft'}
+                {draftSaving ? 'Saving…' : draftDirty ? 'Save draft' : 'Saved'}
               </button>
             </div>
 
@@ -2255,9 +2266,9 @@
   }
   .story-title {
     margin: 0 0 10px;
-    font-size: var(--fs-xl);
+    font-size: var(--fs-l);
     font-weight: 600;
-    line-height: 1.25;
+    line-height: 1.3;
     color: var(--text);
   }
   /* Title row: heading + an on-hover pencil (mirrors the field-edit pattern). */

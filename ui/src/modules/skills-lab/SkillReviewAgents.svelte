@@ -143,7 +143,7 @@
   .sev-low { background: var(--info-soft); color: var(--info); }
 
   .grow { flex: 1; }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
   @media (max-width: 1024px) {
     .rp-agent { padding: 10px 12px; }

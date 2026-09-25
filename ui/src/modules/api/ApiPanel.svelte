@@ -64,7 +64,7 @@
   </div>
 
   <details class="env-fold">
-    <summary>Environment{#if apiClient.activeEnv} · <span class="env-on">{apiClient.activeEnv.name}</span>{/if}</summary>
+    <summary>Environment{#if apiClient.activeEnv}{' '}· <span class="env-on">{apiClient.activeEnv.name}</span>{/if}</summary>
     <EnvSelector compact />
   </details>
 

@@ -19,6 +19,8 @@
   let generation = 0;
   let fileEl: HTMLInputElement | null = $state(null);
   onDestroy(() => { generation++; });
+  // Inline errors say which step failed, then the daemon's reason.
+  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
   async function exportArchive() {
     const seq = generation;
@@ -32,7 +34,7 @@
         records: Object.values(data.records).reduce((sum, rows) => sum + rows.length, 0),
         files: data.files.length, excluded: data.excluded, reconnect: data.reconnect,
       };
-    } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (seq === generation) error = `Couldn’t prepare the data archive. ${msg(e)}`; }
     finally { if (seq === generation) exporting = false; }
   }
 
@@ -51,7 +53,7 @@
         throw new Error('Choose an Otto data archive (format 2). Older settings backups use the settings restore section below.');
       }
       if (seq === generation) archive = data as StateArchive;
-    } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (seq === generation) error = `Couldn’t read “${file.name}”. ${msg(e)}`; }
     finally { if (seq === generation) busy = false; }
   }
 
@@ -64,7 +66,7 @@
     try {
       const data = await api.post<RestorePreview>('/state/archive/preview', { archive, conflicts });
       if (seq === generation) preview = data;
-    } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    } catch (e) { if (seq === generation) error = `Couldn’t preview the restore. ${msg(e)}`; }
     finally { if (seq === generation) busy = false; }
   }
 
@@ -80,7 +82,7 @@
       result = data; preview = null; reviewed = false;
     } catch (e) {
       if (seq === generation) {
-        error = e instanceof Error ? e.message : String(e);
+        error = `Couldn’t restore the archive. ${msg(e)} Preview it again to retry.`;
         preview = null; reviewed = false; // A failed/stale preview must be checked again.
       }
     } finally { if (seq === generation) busy = false; }
@@ -134,7 +136,7 @@
 <style>
   /* One settings card per backup tool — same shape in FullBackup, GitBackup
      and ConnectionsExport so the Backup page reads as one form. */
-  .full-backup { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: 880px; }
+  .full-backup { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: var(--settings-col); }
   .card-title { margin: 0 0 6px; font-size: var(--fs-m); font-weight: 600; }
   .sub-title { margin: 20px 0 6px; padding-top: 16px; border-top: 1px solid var(--border); font-size: var(--fs-m); font-weight: 600; }
   p { margin: 0 0 8px; font-size: var(--fs-s); line-height: 1.5; }

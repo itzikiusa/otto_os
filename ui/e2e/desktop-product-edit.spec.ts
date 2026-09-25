@@ -202,7 +202,7 @@ test('product: manually edit Jira story title and description', async ({
   await openStoryOverview(page);
 
   // ── Baseline: the Jira layout renders with the stubbed title + description ──
-  await expect(page.locator('h1.story-title')).toHaveText(INITIAL_TITLE, { timeout: 20_000 });
+  await expect(page.locator('h2.story-title')).toHaveText(INITIAL_TITLE, { timeout: 20_000 });
   await expect(page.locator('.body-wrap .md-body')).toContainText('Original description line one', {
     timeout: 20_000,
   });
@@ -228,7 +228,7 @@ test('product: manually edit Jira story title and description', async ({
   await page.locator('.title-edit').getByRole('button', { name: /^Save to / }).click();
 
   // Optimistic update: the header reflects the new title without a reload.
-  await expect(page.locator('h1.story-title')).toHaveText(NEW_TITLE, { timeout: 10_000 });
+  await expect(page.locator('h2.story-title')).toHaveText(NEW_TITLE, { timeout: 10_000 });
   // The write endpoint received `fields.summary = NEW_TITLE`.
   await expect.poll(() => fx.fieldsPuts.length, { timeout: 10_000 }).toBeGreaterThan(0);
   expect(fx.fieldsPuts.at(-1)).toMatchObject({ summary: NEW_TITLE });
@@ -257,7 +257,7 @@ test('product: manually edit Jira story title and description', async ({
   // ── 3. Reload → persisted values re-render (detail GET reads the mutated fx) ─
   await page.reload();
   await openStoryOverview(page);
-  await expect(page.locator('h1.story-title')).toHaveText(NEW_TITLE, { timeout: 20_000 });
+  await expect(page.locator('h2.story-title')).toHaveText(NEW_TITLE, { timeout: 20_000 });
   await expect(page.locator('.body-wrap .md-body')).toContainText('Rewritten description', {
     timeout: 20_000,
   });

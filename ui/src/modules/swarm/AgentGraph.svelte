@@ -189,8 +189,10 @@
   // manual pan/zoom sets it true so we stop fighting the user's gesture.
   let userTouched = $state(false);
 
-  // Fit ALL nodes into view (with padding); never zoom IN past 1:1.
-  function fit(): void {
+  const AUTO_FIT_MIN = 1;
+  // Fit ALL nodes into view (with padding); never zoom IN past 1:1, nor out
+  // past legibility (AUTO_FIT_MIN) unless `all` (the Fit to view button).
+  function fit(all = false): void {
     if (!wrapEl || positions.size === 0) return;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const p of positions.values()) {
@@ -205,10 +207,19 @@
     const h = wrapEl.clientHeight;
     if (w === 0 || h === 0) return;
     const pad = 44;
-    const s = Math.min(1, Math.max(0.2, Math.min((w - pad * 2) / bw, (h - pad * 2) / bh)));
+    const fitS = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
+    // Scaled below 1:1 the node text drops under 11px (the legibility floor),
+    // so the auto-fit stops at 1:1: a wide org then opens top-anchored and
+    // centred on its root, readable, and pans for the rest (Fit to view still
+    // shows the whole org, small).
+    const s = Math.min(1, Math.max(all ? 0.2 : AUTO_FIT_MIN, fitS));
     scale = s;
-    tx = w / 2 - ((minX + maxX) / 2) * s;
-    ty = h / 2 - ((minY + maxY) / 2) * s;
+    const clamped = !all && fitS < AUTO_FIT_MIN;
+    // The root(s): the top row of the layout.
+    const top = [...positions.values()].filter((p) => p.y - NODE_H / 2 <= minY + 1);
+    const rootX = top.reduce((a, p) => a + p.x, 0) / Math.max(1, top.length);
+    tx = w / 2 - (clamped ? rootX : (minX + maxX) / 2) * s;
+    ty = clamped ? pad - minY * s : h / 2 - ((minY + maxY) / 2) * s;
   }
 
   // Auto-fit on first layout, when the node set changes, and on container resize
@@ -254,9 +265,11 @@
     userTouched = true;
     scale = Math.min(2, Math.max(0.2, scale * f));
   }
+  /** Fit to view: the whole org, however small (then holds — a resize won't
+   *  snap it back to the legible auto-fit). */
   function recenter() {
-    userTouched = false;
-    fit();
+    userTouched = true;
+    fit(true);
   }
 </script>
 

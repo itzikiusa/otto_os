@@ -141,6 +141,16 @@
     hand: 'M5.5 8V3.8a1 1 0 0 1 2 0V7.5m0-4.7a1 1 0 0 1 2 0v4.7m0-3.7a1 1 0 0 1 2 0V9a4.5 4.5 0 0 1-4.5 4.5H7a3.5 3.5 0 0 1-2.9-1.6L2.6 9.6a1 1 0 0 1 1.6-1.2L5.5 10',
     // Door + outward arrow — Sign out.
     logout: 'M6.5 13.5h-3a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3M10.5 5l3 3-3 3M13.5 8H6',
+    // Stop — end a running thing (a solid-cornered square, smaller than `square`).
+    stop: 'M5.2 4.5h5.6a.7.7 0 0 1 .7.7v5.6a.7.7 0 0 1-.7.7H5.2a.7.7 0 0 1-.7-.7V5.2a.7.7 0 0 1 .7-.7Z',
+    // Annotation tools (Snip editor, Canvas): shape / stroke / label / step.
+    rectangle: 'M3 4h10a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5v-7A.5.5 0 0 1 3 4Z',
+    ellipse: 'M8 3.5c3 0 5.5 2 5.5 4.5S11 12.5 8 12.5 2.5 10.5 2.5 8 5 3.5 8 3.5Z',
+    arrow: 'M3 13 12.5 3.5M7 3.5h5.5V9',
+    line: 'M3 13 13 3',
+    marker: 'M2.5 13.5h11M5 11l5.5-7.5 2.3 1.7L7.3 12.7H5Z',
+    text: 'M3.5 3.5h9M8 3.5v9M6 12.5h4',
+    step: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4',
   } satisfies Record<string, string>;
 
   export type IconName = keyof typeof paths;

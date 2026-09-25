@@ -5,10 +5,11 @@
   // unless you turn on automatic switching. One form, one Save.
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
@@ -59,9 +60,10 @@
     base = JSON.stringify(d);
   });
   const dirty = $derived(!!draft && JSON.stringify(draft) !== base);
+  // Leaving Settings (or this page) with unsaved edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: 'the routing rules' }));
   let saving = $state(false);
   let saveError = $state('');
-  let savedNote = $state(false);
 
   async function save(): Promise<void> {
     if (!draft || !dirty) return;
@@ -74,9 +76,8 @@
         auto_failover: draft.auto_failover,
         memory_approval: draft.memory_approval,
       });
-      savedNote = true;
-      // The Save button sits in the header; the inline note is at the top of a
-      // long form, so also confirm with a toast when it may be off-screen.
+      // The Save button sits in the header and the form is long — confirm
+      // with a toast (like every other Save-model Settings page).
       toasts.success('Routing saved', 'New turns use these rules.');
     } catch (e) {
       saveError = `Couldn’t save routing. ${describeError(e)}`;
@@ -88,7 +89,6 @@
   function setProvider(kind: AssistantRouteKind, p: Provider): void {
     if (!draft) return;
     draft.targets[kind] = { provider: p, model: null, account_id: null };
-    savedNote = false;
   }
 
   // ── subscriptions ──────────────────────────────────────────────────────────
@@ -102,7 +102,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('assistant')} subtitle="How each turn routes between Claude and Codex plans">
+  <PageHeader title={sectionLabel('assistant')} subtitle="Route each turn to Claude or Codex">
     {#snippet actions()}
       <button class="btn small ghost" data-icon="assistant" onclick={() => router.go('assistant')}><Icon name="assistant" size={12} /> Open Assistant</button>
       {#if routing.data}
@@ -111,20 +111,20 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-    {#if routing.state === 'loading' && !routing.data}
-      <div aria-busy="true" aria-label="Loading routing settings"><Skeleton rows={6} height={40} /></div>
-    {:else if routing.state === 'unsupported'}
+    {#if routing.state === 'unsupported'}
       <EmptyState variant="page" icon="assistant" title="The assistant isn’t available yet" body="This Otto daemon doesn’t include the assistant. Update Otto to configure routing." />
-    {:else if routing.state === 'error' && !routing.data}
-      <div class="error" role="alert">
-        <Icon name="warning" size={14} />
-        <div class="error-t"><strong>Couldn’t load routing settings.</strong><span class="dim">{routing.error}</span></div>
-        <button class="btn small" onclick={() => void assistant.loadRouting()}>Retry</button>
-      </div>
+    {:else if !routing.data}
+      <LoadState
+        what="routing settings"
+        loading={routing.state !== 'error'}
+        error={routing.state === 'error' ? routing.error || 'The daemon didn’t answer.' : null}
+        empty
+        rows={6}
+        onretry={() => void assistant.loadRouting()}
+      />
     {:else if draft}
       <div class="form" data-testid="assistant-routing">
-        {#if saveError}<p class="err" role="alert">{saveError}</p>{/if}
-        {#if savedNote && !dirty}<p class="ok" role="status">Saved. New turns use these rules.</p>{/if}
+        {#if saveError}<p class="form-note err" role="alert">{saveError}</p>{:else if dirty}<p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
 
         <section>
           <h2 class="section-title">Subscriptions</h2>
@@ -201,7 +201,6 @@
                           compact
                           onchange={(m) => {
                             if (draft) draft.targets[row.kind] = { ...draft.targets[row.kind], model: m.trim() || null };
-                            savedNote = false;
                           }}
                         />
                       {/key}
@@ -214,11 +213,11 @@
           <div class="kw">
             <div class="field">
               <label for="kw-code">Extra words that mean “code”</label>
-              <input id="kw-code" class="input" bind:value={draft.code} placeholder="terraform, jq, regex" oninput={() => (savedNote = false)} />
+              <input id="kw-code" class="input" bind:value={draft.code} placeholder="terraform, jq, regex" />
             </div>
             <div class="field">
               <label for="kw-hard">Extra words that mean “think hard”</label>
-              <input id="kw-hard" class="input" bind:value={draft.hard} placeholder="deep dive, audit, proof" oninput={() => (savedNote = false)} />
+              <input id="kw-hard" class="input" bind:value={draft.hard} placeholder="deep dive, audit, proof" />
             </div>
           </div>
           <p class="help">Comma-separated. They add to the built-in rules.</p>
@@ -226,33 +225,35 @@
 
         <section>
           <h2 class="section-title">When a limit is reached</h2>
-          <div class="radios" role="radiogroup" aria-label="When a usage limit is reached">
+          <div class="card set-card radios" role="radiogroup" aria-label="When a usage limit is reached">
             <label class="radio">
-              <input type="radio" name="failover" checked={!draft.auto_failover} onchange={() => { if (draft) draft.auto_failover = false; savedNote = false; }} />
+              <input type="radio" name="failover" checked={!draft.auto_failover} onchange={() => { if (draft) draft.auto_failover = false; }} />
               <span>
                 <span class="opt">Ask before switching provider</span>
                 <span class="dim sm">The thread asks “Claude limit reached until 14:00 — continue on Codex?” and remembers your answer for that thread.</span>
               </span>
             </label>
             <label class="radio">
-              <input type="radio" name="failover" checked={draft.auto_failover} onchange={() => { if (draft) draft.auto_failover = true; savedNote = false; }} />
+              <input type="radio" name="failover" checked={draft.auto_failover} onchange={() => { if (draft) draft.auto_failover = true; }} />
               <span>
                 <span class="opt">Switch automatically</span>
                 <span class="dim sm">Moves the thread to the other subscription and posts a visible note in it.</span>
               </span>
             </label>
+            <p class="note"><Icon name="info" size={12} /> A switch starts a new session seeded with a thread summary, the last turns and your profile, so the conversation carries on in one thread.</p>
           </div>
-          <p class="note"><Icon name="info" size={12} /> A switch starts a new session seeded with a thread summary, the last turns and your profile, so the conversation carries on in one thread.</p>
         </section>
 
         <section>
           <h2 class="section-title">Memory</h2>
+          <div class="card set-card">
           <SettingToggle
             label="Review memories before Otto keeps them"
             hint="Off: Otto saves what matters and shows a chip with Undo. On: suggestions wait on the Memory tab until you accept them."
             checked={draft.memory_approval}
-            onchange={(v) => { if (draft) draft.memory_approval = v; savedNote = false; }}
+            onchange={(v) => { if (draft) draft.memory_approval = v; }}
           />
+          </div>
         </section>
       </div>
     {/if}
@@ -271,11 +272,15 @@
   .form {
     display: flex;
     flex-direction: column;
-    gap: 28px;
-    max-width: 880px;
+    gap: 18px;
+    max-width: var(--settings-col);
   }
   .section-title {
-    margin: 0 0 4px;
+    margin: 0 0 8px;
+  }
+  /* Same card padding as the other Settings pages (Daemon, Insights…). */
+  .set-card {
+    padding: 8px 16px 14px;
   }
   .help {
     margin: 0 0 10px;
@@ -292,15 +297,15 @@
     font-family: var(--font-mono);
     color: var(--text);
   }
-  .err {
-    margin: 0;
+  .form-note {
+    margin: 0 0 -6px;
     font-size: var(--fs-s);
-    color: var(--danger);
   }
-  .ok {
-    margin: 0;
-    font-size: var(--fs-s);
-    color: var(--success);
+  .form-note.unsaved {
+    color: var(--warning);
+  }
+  .form-note.err {
+    color: var(--danger);
   }
   .subs {
     display: grid;
@@ -327,10 +332,12 @@
     background: var(--surface-3);
     overflow: hidden;
   }
+  /* A share of the week's load, not a quota: a neutral fill (accent is for
+     selection), amber only when that provider actually hit its limit. */
   .meter span {
     display: block;
     height: 100%;
-    background: var(--accent);
+    background: var(--status-idle);
   }
   .meter span.warn {
     background: var(--status-warn);
@@ -414,11 +421,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    padding-top: 12px;
   }
   .radio {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: 10px;
     cursor: pointer;
   }
   .radio input {
@@ -429,8 +437,10 @@
     flex-direction: column;
     gap: 2px;
   }
+  /* Same weight/size as a SettingToggle label, so every Settings choice
+     reads alike. */
   .opt {
-    font-weight: 500;
+    font-size: var(--fs-m);
   }
   .note {
     margin: 10px 0 0;
@@ -442,26 +452,5 @@
   }
   .note :global(svg) {
     margin-top: 2px;
-  }
-  .error {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    max-width: 640px;
-  }
-  .error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .error-t {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--fs-s);
   }
 </style>

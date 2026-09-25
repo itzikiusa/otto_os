@@ -42,6 +42,7 @@ import type {
 } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
+import { router } from '../router.svelte';
 import { downloadText } from '../components/exporters';
 import { format as formatSql } from 'sql-formatter';
 import { formatMongo } from '../../modules/database/mongo-format';
@@ -2392,6 +2393,18 @@ class DatabaseStore {
 
   // ── Query ─────────────────────────────────────────────────────────────────
 
+  /** True when `t` (a tab of connection `connId`) is the query tab on screen:
+   *  the Database page is open, on that connection's DB workbench, with `t`
+   *  as its active tab. */
+  private isVisibleTab(connId: Id, t: QueryTab): boolean {
+    return (
+      (router.module === 'database' || router.module === 'connections') &&
+      this.selectedConnId === connId &&
+      this.activePane === null &&
+      this.tab?.id === t.id
+    );
+  }
+
   /** Run the active tab's statement (or a given one) and store the result.
    *  `node` scopes it: omitted (`undefined`) → the active database; `null` →
    *  explicitly NO scope (how a result that ran unscoped is paged/refreshed —
@@ -2506,7 +2519,9 @@ class DatabaseStore {
       if (e instanceof ApiError) {
         this.clearPending(t);
         t.error = errMsg(e);
-        toasts.error('Query failed', errMsg(e));
+        // The tab's inline ErrorPanel already says this when it's on screen —
+        // only toast when the failing tab is NOT the one the person is looking at.
+        if (!this.isVisibleTab(id, t)) toasts.error('Query failed', errMsg(e));
         return null;
       }
       // The HTTP wait was lost (page teardown / network blip) but the server

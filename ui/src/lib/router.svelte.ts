@@ -91,6 +91,14 @@ export interface RouteDelegate {
   deliver(route: string): void;
 }
 
+/**
+ * A leave-guard (see {@link Router.guard}): asked before this pane navigates
+ * away. `to` is the target route without the leading `#/`. Return false (or
+ * resolve false) to keep the current route — e.g. after the person declines a
+ * "Discard unsaved changes?" confirm.
+ */
+export type LeaveGuard = (to: string) => boolean | Promise<boolean>;
+
 class Router {
   /** path segments after '#/', e.g. ['git', '01H...', 'pr', '7'] */
   parts: string[] = $state([]);
@@ -101,6 +109,13 @@ class Router {
   /** set while doing an internal back/forward so onHashChange doesn't push. */
   private navigating = false;
   private delegate: RouteDelegate | null = null;
+  /** Registered leave-guards ({@link guard}). Plain field — not reactive. */
+  private guards = new Set<LeaveGuard>();
+  /** A hash whose guards already passed, so the hashchange it fires must not
+   *  ask again. */
+  private approved: string | null = null;
+  /** Bumped per guarded navigation: an older one resolving late is dropped. */
+  private guardSeq = 0;
 
   canBack = $derived(this.index > 0);
   canForward = $derived(this.index < this.stack.length - 1);
@@ -159,6 +174,44 @@ class Router {
     return true;
   }
 
+  /**
+   * Register a leave-guard; returns its unregister function (hand it straight
+   * back as an `$effect` cleanup). `go()`, `back()`/`forward()`, links and
+   * sidebar navigation all await every guard first; one false keeps the route
+   * (a link/hash change is reverted to the previous hash). `replace()` — a
+   * programmatic canonicalisation, not a person leaving — is never guarded.
+   * For the usual unsaved-editor case use `guardUnsaved` (lib/leaveGuard.ts).
+   */
+  guard(fn: LeaveGuard): () => void {
+    this.guards.add(fn);
+    return () => {
+      this.guards.delete(fn);
+    };
+  }
+
+  /** Ask every guard about leaving for `hash`; true = go ahead. A newer guarded
+   *  navigation started meanwhile makes this one resolve false. */
+  private async mayLeave(hash: string): Promise<boolean> {
+    const seq = ++this.guardSeq;
+    const to = hash.replace(/^#\/?/, '');
+    for (const g of [...this.guards]) {
+      let ok = false;
+      try {
+        ok = await g(to);
+      } catch {
+        ok = false;
+      }
+      if (!ok || seq !== this.guardSeq) return false;
+    }
+    return seq === this.guardSeq;
+  }
+
+  /** Set the hash after its guards passed (so onHashChange doesn't re-ask). */
+  private setHash(hash: string): void {
+    this.approved = hash;
+    window.location.hash = hash;
+  }
+
   private onHashChange(): void {
     // A link (`<a href="#/…">`) or a direct hash write bypasses go(): divert a
     // claimed route after the fact and put this pane's hash back, leaving the
@@ -170,7 +223,18 @@ class Router {
         history.replaceState(null, '', prev);
         return;
       }
+      // Unapproved navigation (a link, a direct hash write) while a guard is
+      // registered: put the old hash back at once so the page doesn't change,
+      // then re-issue the navigation only if every guard agrees.
+      if (prev !== undefined && h !== prev && this.guards.size > 0 && this.approved !== h) {
+        history.replaceState(null, '', prev);
+        void this.mayLeave(h).then((ok) => {
+          if (ok) this.setHash(h);
+        });
+        return;
+      }
     }
+    this.approved = null;
     this.parse();
     persistLastRoute(this.currentHash());
     if (this.navigating) {
@@ -197,7 +261,13 @@ class Router {
     const hash = this.toHash(path);
     if (hash === this.currentHash()) return;
     if (this.divert(hash)) return;
-    window.location.hash = hash;
+    if (this.guards.size === 0) {
+      window.location.hash = hash;
+      return;
+    }
+    void this.mayLeave(hash).then((ok) => {
+      if (ok) this.setHash(hash);
+    });
   }
 
   replace(path: string): void {
@@ -215,16 +285,31 @@ class Router {
     let i = this.index - 1;
     while (i >= 0 && this.claimed(this.stack[i])) i -= 1;
     if (i < 0) return;
-    this.index = i;
-    this.moveTo(this.stack[i]);
+    this.step(i);
   }
 
   forward(): void {
     let i = this.index + 1;
     while (i < this.stack.length && this.claimed(this.stack[i])) i += 1;
     if (i >= this.stack.length) return;
-    this.index = i;
-    this.moveTo(this.stack[i]);
+    this.step(i);
+  }
+
+  /** Move the stack pointer to `i` once the leave-guards agree. */
+  private step(i: number): void {
+    const target = this.stack[i];
+    if (this.guards.size === 0 || target === this.currentHash()) {
+      this.index = i;
+      this.moveTo(target);
+      return;
+    }
+    const from = this.index;
+    void this.mayLeave(target).then((ok) => {
+      // The stack moved while the guard was asking (another navigation won).
+      if (!ok || this.index !== from || this.stack[i] !== target) return;
+      this.index = i;
+      this.moveTo(target);
+    });
   }
 
   /** Internal back/forward. Setting the hash to its CURRENT value fires no

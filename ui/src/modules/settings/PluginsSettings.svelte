@@ -97,7 +97,7 @@
     busy = p.slug;
     try {
       await api.del(`/plugin-admin/${p.slug}`);
-      toasts.info(`Removed ${p.name}`);
+      toasts.success(`Removed ${p.name}`, `Its files are kept — install it again any time.`);
       await load();
       await plugins.load();
     } catch (e) {
@@ -169,7 +169,7 @@
               <StatusBadge variant="text" tone={p.enabled ? 'success' : 'neutral'} label={p.enabled ? 'Enabled' : 'Disabled'} />
             </div>
             {#if p.description}<div class="pdesc" title={p.description}>{p.description}</div>{/if}
-            <div class="psrc mono" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)} · {installedLabel(p.installed_at)}{/if}</div>
+            <div class="psrc mono" title={p.source}>{p.slug} · {p.source}{#if installedLabel(p.installed_at)}{' · '}{installedLabel(p.installed_at)}{/if}</div>
           </div>
           <div class="pactions">
             <button class="btn small" onclick={() => void toggle(p)} disabled={busy !== null}>
@@ -225,7 +225,7 @@
   .install {
     display: flex;
     gap: 8px;
-    max-width: 880px;
+    max-width: var(--settings-col);
     margin-bottom: 6px;
   }
   .grow {
@@ -238,13 +238,13 @@
   }
   .field-err {
     margin: 0 0 8px;
-    max-width: 880px;
+    max-width: var(--settings-col);
     font-size: var(--fs-s);
     color: var(--danger);
   }
   .plist {
     margin-top: 14px;
-    max-width: 880px;
+    max-width: var(--settings-col);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);

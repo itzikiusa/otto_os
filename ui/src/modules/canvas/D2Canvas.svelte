@@ -398,6 +398,7 @@
           <button
             class="code-toggle"
             class:on={codeOpen}
+            aria-pressed={codeOpen}
             onclick={() => (codeOpen = !codeOpen)}
             title="Edit the D2 source"
           >

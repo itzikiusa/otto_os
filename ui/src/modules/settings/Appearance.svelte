@@ -2,6 +2,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import SettingToggle from './SettingToggle.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import {
     ui,
@@ -227,18 +228,14 @@
     Pages, tables, editors and terminals stay solid. A photo never leaves this device: Otto
     blurs it and tones it for light and dark so the text over it stays readable.
   </p>
-  <label class="switch-row reduce-row">
-    <input
-      type="checkbox"
+  <div class="toggle-block">
+    <SettingToggle
+      label="Reduce transparency"
+      hint="Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce transparency” accessibility setting."
       checked={ui.reduceTransparency}
-      onchange={(e) => ui.setReduceTransparency(e.currentTarget.checked)}
+      onchange={(v) => ui.setReduceTransparency(v)}
     />
-    <span>Reduce transparency</span>
-  </label>
-  <p class="hint-line">
-    Solid sidebar, toolbar and menus with no backdrop. Otto also follows the macOS “Reduce
-    transparency” accessibility setting.
-  </p>
+  </div>
 
   <div class="section-title">Terminal font</div>
   <div class="segmented" role="group" aria-label="Terminal font">
@@ -259,45 +256,41 @@
        two can't drift; also the only way back when those controls are hidden. -->
   <div class="row term-size-row" role="group" aria-label="Terminal font size">
     <span class="term-size-label">Font size</span>
-    <button class="sb-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Smaller (⌘− in a terminal)" aria-label="Terminal font smaller">−</button>
+    <button class="sb-btn" onclick={() => ui.termZoomOut()} disabled={ui.termFontSize <= 8} title="Smaller (⌘− in a terminal)" aria-label="Terminal font smaller"><Icon name="minus" size={12} /></button>
     <span class="mono term-size-val" aria-live="polite">{ui.termFontSize}px</span>
-    <button class="sb-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Larger (⌘+ in a terminal)" aria-label="Terminal font larger">+</button>
+    <button class="sb-btn" onclick={() => ui.termZoomIn()} disabled={ui.termFontSize >= 28} title="Larger (⌘+ in a terminal)" aria-label="Terminal font larger"><Icon name="plus" size={12} /></button>
     {#if ui.termFontSize !== 13}
       <button class="btn small ghost" onclick={() => ui.termZoomReset()}>Reset</button>
     {/if}
   </div>
-  <label class="switch-row term-opt-row">
-    <input
-      type="checkbox"
+  <div class="toggle-block">
+    <SettingToggle
+      label="Copy on select"
+      hint="Selecting text in a terminal copies it to the clipboard."
       checked={ui.termCopyOnSelect}
-      onchange={(e) => ui.setTermCopyOnSelect(e.currentTarget.checked)}
+      onchange={(v) => ui.setTermCopyOnSelect(v)}
     />
-    <span>Copy to the clipboard when you select text in a terminal</span>
-  </label>
-  <label class="switch-row term-opt-row">
-    <input
-      type="checkbox"
+    <SettingToggle
+      label="Terminal toolbar"
+      hint="Show the font-size and copy-on-select controls on each terminal."
       checked={ui.termToolbar}
-      onchange={(e) => ui.setTermToolbar(e.currentTarget.checked)}
+      onchange={(v) => ui.setTermToolbar(v)}
     />
-    <span>Show font-size and copy-on-select controls on terminals</span>
-  </label>
+  </div>
 
-  <div class="section-title">Right-to-left text <span class="chip accent exp-tag">Experimental</span></div>
-  <label class="switch-row">
-    <input
-      type="checkbox"
+  <div class="section-title">Right-to-left text <span class="chip exp-tag">Experimental</span></div>
+  <div class="toggle-block">
+    <SettingToggle
+      label="Right-to-left text in the terminal"
       checked={ui.rtlBidi}
-      onchange={(e) => ui.setRtlBidi(e.currentTarget.checked)}
-    />
-    <span>Right-to-left text in the terminal</span>
-  </label>
-  <p class="hint-line warn">
-    <Icon name="warning" size={12} /> Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
-    engine (switches the terminal off the GPU renderer). Because text is reflowed for reading, the
-    monospace grid no longer lines up exactly — great for chat-style output, imperfect for TUI
-    tables or box art. Toggling reloads open terminals.
-  </p>
+      onchange={(v) => ui.setRtlBidi(v)}
+    >
+      Lays out Hebrew right-to-left with English embedded left-to-right, using the browser's bidi
+      engine (it switches the terminal off the GPU renderer). Text is reflowed for reading, so the
+      monospace grid no longer lines up exactly: good for chat-style output, imperfect for TUI
+      tables or box art. Toggling reloads open terminals.
+    </SettingToggle>
+  </div>
 
   <div class="section-title">Floating bar</div>
   <div class="segmented" role="radiogroup" aria-label="Floating bar">
@@ -316,18 +309,15 @@
   </p>
 
   <div class="section-title">Sessions on this device</div>
-  <label class="switch-row">
-    <input
-      type="checkbox"
+  <div class="toggle-block">
+    <SettingToggle
+      label="Isolate sessions to this device"
+      hint="Only show sessions started on this device. Other devices' sessions stay hidden here (they still run on the daemon)."
       checked={ui.sessionIsolation}
-      onchange={(e) => ui.setSessionIsolation(e.currentTarget.checked)}
+      onchange={(v) => ui.setSessionIsolation(v)}
+      testid="session-isolation-toggle"
     />
-    <span>Isolate sessions to this device</span>
-  </label>
-  <p class="hint-line">
-    Only show sessions started on this device. Other devices' sessions stay hidden here (they
-    still run on the daemon).
-  </p>
+  </div>
   <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
     Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
@@ -501,9 +491,9 @@
   }
   .theme-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     gap: 12px;
-    max-width: min(620px, 92vw);
+    max-width: var(--settings-col);
   }
   .theme-card {
     text-align: start;
@@ -575,8 +565,11 @@
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .reduce-row {
-    margin-top: 12px;
+  /* SettingToggle rows under a picker or hint (their own 8px padding sets
+     the rhythm; the block only separates them from what's above). */
+  .toggle-block {
+    max-width: var(--settings-col);
+    margin-top: 6px;
   }
   /* A control that doesn't apply under the current theme (Scheme on Pro Dark). */
   .segmented.off {
@@ -604,9 +597,6 @@
     font-size: var(--fs-m);
     color: var(--text);
   }
-  .term-opt-row {
-    margin-top: 8px;
-  }
   .tp-bar {
     width: 34px;
     height: 8px;
@@ -633,13 +623,7 @@
     line-height: 1.5;
     color: var(--text-dim);
     margin: 8px 0 0;
-    max-width: min(620px, 92vw);
-  }
-  .hint-line.warn {
-    color: var(--warning);
-  }
-  .hint-line.warn :global(svg) {
-    vertical-align: -2px;
+    max-width: var(--settings-col);
   }
   .accent-val {
     font-family: var(--font-mono);
@@ -659,7 +643,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-bottom: 10px;
+    margin: 10px 0;
   }
   .switch-row input {
     width: 15px;

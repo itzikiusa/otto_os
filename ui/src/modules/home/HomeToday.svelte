@@ -38,7 +38,7 @@
   const summary = $derived.by(() => {
     const parts: string[] = [];
     if (today.needs.length) parts.push(`${today.needs.length} need${today.needs.length === 1 ? 's' : ''} you`);
-    if (today.running.length) parts.push(`${today.running.length} running`);
+    if (today.running.length) parts.push(`${today.running.length} working`);
     return parts.length ? parts.join(' · ') : 'All quiet';
   });
 
@@ -65,7 +65,7 @@
   }
   const cards: Card[] = $derived([
     { id: 'needs', title: 'Needs you', icon: 'bell', rows: today.needs, empty: 'Nothing needs you right now.', more: () => router.go('agents') },
-    { id: 'running', title: 'Running', icon: 'play', rows: today.running, empty: 'No agents or workflows are working.', more: () => router.go('mission-control') },
+    { id: 'running', title: 'Working', icon: 'play', rows: today.running, empty: 'No agent, task or workflow is working right now.', more: () => router.go('mission-control') },
     {
       id: 'next',
       title: 'Up next',
@@ -122,7 +122,7 @@
                   </span>
                   <span class="gc-text">
                     <span class="gc-title">{r.title}</span>
-                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && now() && when(r.at)} · {when(r.at)}{/if}</span>
+                    <span class="gc-sub" title={r.detail}>{r.detail}{#if r.at && now() && when(r.at)}{` · ${when(r.at)}`}{/if}</span>
                   </span>
                 </button>
               </li>

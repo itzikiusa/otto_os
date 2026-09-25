@@ -59,6 +59,18 @@
   let testDefault = $state('');
   let lintDefault = $state('');
   let validations: SkillEvalValidationCfg[] = $state([]);
+  // Advanced options (commands, passes, improver, base ref) sit behind a
+  // disclosure: most runs only need the skill, the task and validations.
+  let advancedOpen = $state(false);
+  const advancedSummary = $derived.by(() => {
+    const parts: string[] = [];
+    const t = testCmd.trim() || testDefault;
+    parts.push(t ? `Tests: ${t}` : 'No test command');
+    parts.push(`${Math.max(1, Math.floor(validatorPasses))} validation pass${Math.floor(validatorPasses) === 1 ? '' : 'es'}`);
+    parts.push(`improver ${improverProvider}`);
+    if (baseRef.trim()) parts.push(`from ${baseRef.trim()}`);
+    return parts.join(' · ');
+  });
 
   let loaded = $state(false);
   // A failed defaults/sources load is shown inline with Retry: the form would
@@ -210,79 +222,57 @@
     </div>
   {/if}
 
-  <!-- Skill source -->
+  <!-- What to test: the skill and the task (the fields every run needs). -->
   <section class="card block">
-    <label class="field-label" for="se-source">Skill under test</label>
-    <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
-      {#if !loaded}<option value="custom">Loading skills…</option>{/if}
-      {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
-        <option value={i}>{sourceLabel(s)}</option>
-      {/each}
-      <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
-    </select>
+    <div class="fld">
+      <label class="field-label" for="se-source">Skill under test</label>
+      <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
+        {#if !loaded}<option value="custom">Loading skills…</option>{/if}
+        {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
+          <option value={i}>{sourceLabel(s)}</option>
+        {/each}
+        <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
+      </select>
 
-    {#if sourceSel === 'custom'}
-      <div class="row">
-        <input
-          class="input grow"
-          aria-label="Skill path or archive"
-          placeholder="/path/to/skill-folder · SKILL.md · skill.zip"
-          bind:value={customPath}
-        />
-        <button class="btn small" onclick={() => (showPicker = true)} type="button">
-          <Icon name="folder" size={13} /> Browse
-        </button>
+      {#if sourceSel === 'custom'}
+        <div class="row">
+          <input
+            class="input grow"
+            aria-label="Skill path or archive"
+            placeholder="/path/to/skill-folder · SKILL.md · skill.zip"
+            bind:value={customPath}
+          />
+          <button class="btn small" onclick={() => (showPicker = true)} type="button">
+            <Icon name="folder" size={12} /> Browse…
+          </button>
+        </div>
+      {:else if sources[sourceSel as number]?.description}
+        <p class="hint clamp" title={sources[sourceSel as number].description}>{sources[sourceSel as number].description}</p>
+      {/if}
+    </div>
+
+    <div class="fld">
+      <label class="field-label" for="se-task">Task to implement</label>
+      <textarea
+        id="se-task"
+        class="input"
+        rows="3"
+        placeholder="e.g. Add a new endpoint that returns a player's bonus balance history"
+        bind:value={task}
+      ></textarea>
+    </div>
+
+    <div class="grid2">
+      <div class="fld">
+        <label class="field-label" for="se-cli">Implementation agent</label>
+        <select id="se-cli" class="input" bind:value={implCli}>
+          {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
+        </select>
       </div>
-    {:else if sources[sourceSel as number]?.description}
-      <p class="hint">{sources[sourceSel as number].description}</p>
-    {/if}
-  </section>
-
-  <!-- Task -->
-  <section class="card block">
-    <label class="field-label" for="se-task">Task to implement</label>
-    <textarea
-      id="se-task"
-      class="input"
-      rows="3"
-      placeholder="e.g. Add a new endpoint that returns a player's bonus balance history"
-      bind:value={task}
-    ></textarea>
-  </section>
-
-  <!-- Run knobs -->
-  <section class="card block grid4">
-    <div>
-      <label class="field-label" for="se-cli">Implementation CLI</label>
-      <select id="se-cli" class="input" bind:value={implCli}>
-        {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
-      </select>
-    </div>
-    <div>
-      <label class="field-label" for="se-iter">Iterations</label>
-      <input id="se-iter" class="input" type="number" min="1" max="10" bind:value={iterations} />
-    </div>
-    <div>
-      <label class="field-label" for="se-passes">Validation passes</label>
-      <input id="se-passes" class="input" type="number" min="1" max="3" bind:value={validatorPasses} />
-    </div>
-    <div>
-      <label class="field-label" for="se-imp">Improver agent</label>
-      <select id="se-imp" class="input" bind:value={improverProvider}>
-        {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
-      </select>
-    </div>
-  </section>
-
-  <!-- Repo-specific scoring commands -->
-  <section class="card block grid4">
-    <div style="grid-column: span 2;">
-      <label class="field-label" for="se-test">Test command <span class="hint-inline">(scored + proof)</span></label>
-      <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
-    </div>
-    <div style="grid-column: span 2;">
-      <label class="field-label" for="se-lint">Lint command <span class="hint-inline">(optional)</span></label>
-      <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
+      <div class="fld">
+        <label class="field-label" for="se-iter">Iterations</label>
+        <input id="se-iter" class="input" type="number" min="1" max="10" bind:value={iterations} />
+      </div>
     </div>
   </section>
 
@@ -292,14 +282,14 @@
       <span class="field-label">Validations</span>
       <span class="grow"></span>
       <button class="btn small" onclick={addValidation} type="button">
-        <Icon name="plus" size={13} /> Add validation
+        <Icon name="plus" size={12} /> Add validation
       </button>
     </div>
     {#if validations.length === 0}
       <p class="hint">Add at least one validation (e.g. logging, docs, naming). Each runs as its own agent.</p>
     {/if}
     {#each validations as v, i (i)}
-      <div class="val card">
+      <div class="val">
         <div class="row">
           <input class="input grow" placeholder="logging" aria-label="Validation {i + 1} name" bind:value={v.name} />
           <button class="icon-btn" onclick={() => removeValidation(i)} type="button" title="Remove validation" aria-label="Remove validation {v.name.trim() || i + 1}">
@@ -329,15 +319,46 @@
     {/each}
   </section>
 
-  <!-- Advanced -->
-  <section class="card block">
-    <label class="field-label" for="se-base">Base git ref (optional)</label>
-    <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
-    <p class="hint">
-      Each iteration's worktree is created from this ref of the workspace's git repo. If the
-      workspace root isn't a git repo, Otto uses a scratch repo at <span class="mono">~/Otto/SkillsEvaluator</span>
-      (created automatically).
-    </p>
+  <!-- Advanced: scoring commands, validation passes, improver, base ref. -->
+  <section class="card adv">
+    <button class="adv-toggle" type="button" aria-expanded={advancedOpen} aria-controls="se-advanced" onclick={() => (advancedOpen = !advancedOpen)}>
+      <Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+      <span>Advanced</span>
+      <span class="adv-sum dim">{advancedSummary}</span>
+    </button>
+    {#if advancedOpen}
+      <div class="block adv-body" id="se-advanced">
+        <div class="grid2">
+          <div class="fld">
+            <label class="field-label" for="se-test">Test command <span class="hint-inline">scored and added to the proof pack</span></label>
+            <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
+          </div>
+          <div class="fld">
+            <label class="field-label" for="se-lint">Lint command <span class="hint-inline">optional</span></label>
+            <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
+          </div>
+          <div class="fld">
+            <label class="field-label" for="se-passes">Validation passes</label>
+            <input id="se-passes" class="input" type="number" min="1" max="3" bind:value={validatorPasses} />
+          </div>
+          <div class="fld">
+            <label class="field-label" for="se-imp">Improver agent</label>
+            <select id="se-imp" class="input" bind:value={improverProvider}>
+              {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
+            </select>
+          </div>
+        </div>
+        <div class="fld">
+          <label class="field-label" for="se-base">Base git ref</label>
+          <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
+          <p class="hint">
+            Each iteration's worktree is created from this ref of the workspace's git repo. If the
+            workspace root isn't a git repo, Otto uses a scratch repo at <span class="mono">~/Otto/SkillsEvaluator</span>
+            (created automatically).
+          </p>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <div class="actions">
@@ -398,32 +419,83 @@
     padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-  }
-  .grid4 {
-    display: grid;
-    grid-template-columns: 1fr 110px 110px 1fr;
     gap: 12px;
-    /* Bottom-align so the inputs line up even when a label wraps to two lines
-       (e.g. "Validation passes"). */
-    align-items: end;
   }
-  .grid4 > div {
+  .fld {
     display: flex;
     flex-direction: column;
     gap: 4px;
     min-width: 0;
+  }
+  .grid2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    /* Bottom-align so the inputs line up even when a label wraps. */
+    align-items: end;
+  }
+  .clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .adv {
+    display: flex;
+    flex-direction: column;
+  }
+  .adv-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    padding: 0 14px;
+    border: none;
+    border-radius: var(--radius-m);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-weight: 500;
+    text-align: start;
+    cursor: pointer;
+  }
+  .adv-toggle:hover {
+    background: var(--hover);
+  }
+  .adv-toggle > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
+  }
+  .adv-sum {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .adv-body {
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+  .hint-inline {
+    font-weight: 400;
+    font-size: var(--fs-xs);
+  }
+  .hint-inline::before {
+    content: '· ';
   }
   .cost {
     font-size: var(--fs-xs);
     color: var(--text-dim);
     align-self: center;
   }
+  /* Same field-label style as every other Otto form (app.css .field > label). */
   .field-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
   }
   .block-head {
@@ -441,6 +513,8 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
     background: var(--surface-2);
   }
   .provider-chips {
@@ -478,7 +552,7 @@
     border: 0;
   }
   .chip-toggle:has(input:focus-visible) {
-    outline: 2px solid var(--accent);
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
     outline-offset: 1px;
   }
   .hint {
@@ -519,14 +593,11 @@
     color: var(--text-dim);
   }
   @media (max-width: 640px) {
-    .grid4 {
-      grid-template-columns: 1fr 1fr;
-    }
-    .grid4 > div[style] {
-      grid-column: span 2;
+    .grid2 {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 </style>

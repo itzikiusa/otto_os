@@ -492,7 +492,7 @@
         title="Mask PII/prod — server redacts sensitive values (emails, tokens, keys) before returning messages"
       >
         <input type="checkbox" bind:checked={maskPayloads} />
-        <Icon name="lock" size={11} /> Mask
+        <Icon name="lock" size={12} /> Mask
       </label>
       <button class="btn primary small" onclick={consume} disabled={consuming}>
         {consuming ? 'Reading…' : 'Peek'}
@@ -582,11 +582,11 @@
               </button>
             {/if}
             <button class="btn small" onclick={copySelectedAsJson} title="Copy message as JSON">
-              <Icon name="copy" size={11} /> Copy
+              <Icon name="copy" size={12} /> Copy
             </button>
             {#if ws.current}
               <button class="btn small" onclick={() => (sendToAgentOpen = true)} title="Send message to a running agent (redacted preview)">
-                <Icon name="send" size={11} /> To agent
+                <Icon name="send" size={12} /> To agent
               </button>
             {/if}
           </div>
@@ -697,7 +697,7 @@
       <div class="headers-section">
         <div class="headers-title">
           <span class="dim-label">Headers</span>
-          <button class="btn small" onclick={addHeader}><Icon name="plus" size={11} /> Add</button>
+          <button class="btn small" onclick={addHeader}><Icon name="plus" size={12} /> Add</button>
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">

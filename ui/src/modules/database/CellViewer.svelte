@@ -33,15 +33,15 @@
             onclick={() => (flow.viewer && (flow.viewer.formatted = !flow.viewer.formatted))}
             title="Toggle SQL formatting"
           >
-            <Icon name="grid" size={11} />{flow.viewer.formatted ? 'Formatted' : 'Raw'}
+            <Icon name="grid" size={12} />{flow.viewer.formatted ? 'Formatted' : 'Raw'}
           </button>
         {/if}
         {#if flow.viewer.edit && !flow.viewerEditing}
           <button class="tb-btn" onclick={() => flow.startViewerEdit()} title="Edit this cell value">
-            <Icon name="edit" size={11} />Edit
+            <Icon name="edit" size={12} />Edit
           </button>
         {/if}
-        <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={11} />Copy</button>
+        <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={12} />Copy</button>
       </div>
       {#if nestedPending}
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>

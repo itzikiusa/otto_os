@@ -12,7 +12,8 @@
   import type { InsightsConfig } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { contextApi } from '../../lib/api/context';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -24,13 +25,34 @@
   let saving = $state(false);
   // Quiet inline confirmation for the report-agent fields (the checkboxes
   // show their own state; toasting every change was noise).
-  let agentNote = $state('');
-  let agentNoteTimer: ReturnType<typeof setTimeout> | null = null;
-  function flashAgentNote(text: string): void {
-    agentNote = text;
-    if (agentNoteTimer) clearTimeout(agentNoteTimer);
-    agentNoteTimer = setTimeout(() => (agentNote = ''), 2500);
+  // One quiet "Saved" per section (a toggle or select applies immediately —
+  // layout.md §4.4), next to the heading of the section that changed.
+  let savedIn = $state<'schedule' | 'agent' | null>(null);
+  let savedTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashSaved(where: 'schedule' | 'agent'): void {
+    savedIn = where;
+    if (savedTimer) clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => (savedIn = null), 2500);
   }
+
+  // Reports are written by the bundled `insights` skill: say whether it's
+  // installed instead of only telling people it's required (a schedule with
+  // the skill missing produced nothing, silently). Unknown (no access to the
+  // bundled list) = say nothing extra.
+  let skillState = $state<'installed' | 'missing' | null>(null);
+  $effect(() => {
+    void contextApi
+      .listBundled()
+      .then((list) => {
+        const sk = list.find((x) => x.name === 'insights');
+        skillState = sk ? (sk.state === 'not_installed' ? 'missing' : 'installed') : null;
+      })
+      .catch(() => (skillState = null));
+  });
+  const anyOn = $derived.by(() => {
+    const c = cfg as InsightsConfig | null;
+    return !!c && (c.daily || c.weekly || c.monthly);
+  });
   // A provider/model change made while another save is in flight is queued
   // (merged) and sent right after — it used to be dropped while the picker
   // kept showing it, so the reports ran on the old model.
@@ -87,7 +109,7 @@
     saving = true;
     try {
       cfg = await insightsApi.putConfig(next);
-      flashAgentNote('Saved');
+      flashSaved('agent');
     } catch (e) {
       cfg = prev;
       modelDraft = prev.model || '';
@@ -110,6 +132,7 @@
     saving = true;
     try {
       cfg = await insightsApi.putConfig(next);
+      flashSaved('schedule');
     } catch (e) {
       cfg = prev; // revert
       toasts.error(`Couldn’t turn ${String(key)} reports ${next[key] ? 'on' : 'off'}`, e instanceof Error ? e.message : String(e));
@@ -124,19 +147,24 @@
   <PageBody width="readable">
   <SectionIntro>These are <strong>opt-in</strong> and <strong>off by default</strong> — turn on only the cadences you want. Runs are <strong>catch-up</strong>: if the app was closed at the scheduled time, the report is generated the next time the app is open, so a scheduled report is never missed.</SectionIntro>
 
-  {#if loading && !cfg}
-    <Skeleton rows={3} height={64} />
-  {:else if !cfg}
-    <LoadState what="insights settings" error={loadError} empty onretry={() => void load()} />
+  {#if !cfg}
+    <LoadState what="insights settings" loading={loading || !loadError} error={loadError || null} empty rows={3} onretry={() => void load()} />
   {:else}
-    <h2 class="section-title">Schedule</h2>
+    {#if skillState === 'missing'}
+      <p class="skill-warn" role={anyOn ? 'alert' : undefined}>
+        <Icon name="warning" size={12} />
+        <span>The <span class="mono">insights</span> skill isn't installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
+        <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
+      </p>
+    {/if}
+    <h2 class="section-title">Schedule {#if savedIn === 'schedule'}<span class="saved" role="status">Saved</span>{/if}</h2>
     <div class="card toggles">
       <SettingToggle label="Daily" hint="Covers the previous day (UTC), generated once it has ended." checked={cfg.daily} disabled={saving} onchange={() => toggle('daily')} />
       <SettingToggle label="Weekly" hint="Runs on Monday (UTC), covering the previous Monday–Sunday." checked={cfg.weekly} disabled={saving} onchange={() => toggle('weekly')} />
       <SettingToggle label="Monthly" hint="Runs on the 1st (UTC), covering the previous month." checked={cfg.monthly} disabled={saving} onchange={() => toggle('monthly')} />
     </div>
 
-    <h2 class="section-title">Report agent {#if agentNote}<span class="saved" role="status">{agentNote}</span>{/if}</h2>
+    <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved" role="status">Saved</span>{/if}</h2>
     <div class="card agent-row">
       <div class="field agent-fld">
         <label for="ins-provider">Provider</label>
@@ -169,8 +197,12 @@
     </div>
 
     <p class="note">
-      Requires the <span class="mono">insights</span> skill to be installed
-      (<button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>).
+      {#if skillState === 'installed'}
+        Written by the installed <span class="mono">insights</span> skill.
+      {:else if skillState === null}
+        Requires the <span class="mono">insights</span> skill to be installed
+        (<button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>).
+      {/if}
       Generated reports appear in
       <button class="link" onclick={() => router.go('insights')}>Insights</button>, where you
       can also run a report on demand.
@@ -191,10 +223,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 20px 0 8px;
-  }
-  .section-title:first-of-type {
-    margin-top: 0;
   }
   .saved {
     font-weight: 500;
@@ -206,7 +234,7 @@
     display: flex;
     flex-direction: column;
     padding: 4px 16px;
-    max-width: 760px;
+    max-width: var(--settings-col);
   }
   /* Rows stacked in one card read as a list. */
   .toggles > :global(.st + .st) {
@@ -217,7 +245,7 @@
     align-items: flex-start;
     gap: 16px;
     padding: 12px 16px;
-    max-width: 760px;
+    max-width: var(--settings-col);
     flex-wrap: wrap;
   }
   .agent-fld {
@@ -230,7 +258,7 @@
   }
   .note {
     margin: 14px 0 0;
-    max-width: 760px;
+    max-width: var(--settings-col);
     font-size: var(--fs-s);
     color: var(--text-dim);
     line-height: 1.6;
@@ -242,6 +270,27 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
+  }
+  .skill-warn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    max-width: var(--settings-col);
+    box-sizing: border-box;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    border-radius: var(--radius-m);
+    background: var(--warning-soft);
+    font-size: var(--fs-s);
+  }
+  .skill-warn > :global(svg) {
+    flex-shrink: 0;
+    color: var(--warning);
+  }
+  .skill-warn > span {
+    flex: 1;
+    min-width: 0;
   }
   .link {
     border: none;

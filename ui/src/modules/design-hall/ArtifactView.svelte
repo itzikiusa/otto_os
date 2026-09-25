@@ -58,6 +58,7 @@
   import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
   import { library } from './library.svelte';
   import { originOf } from './nav';
+  import { guardUnsaved } from '../../lib/leaveGuard';
 
   interface Props {
     id: string;
@@ -99,6 +100,8 @@
   const canEdit = $derived(!!artifact && auth.can('design', 'edit') && artifact.status !== 'archived');
   const readonly = $derived(!canEdit || imported || !textual);
   const dirty = $derived(textual && source !== null && source !== baseSource);
+  // Leaving the page (sidebar, link, back) with unsaved source edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: 'this design' }));
   const head = $derived<DesignVersion | null>(detail?.head ?? null);
   const project = $derived(library.projectOf(artifact?.project_id));
   /** Seqs of OTHER artifacts' versions that links pin (resolved lazily below). */

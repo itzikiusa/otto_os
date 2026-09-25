@@ -186,7 +186,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('jira')} subtitle="Attach issues to sessions and track work in progress">
+  <PageHeader title={sectionLabel('jira')} subtitle="Search and attach Jira issues">
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
@@ -229,7 +229,7 @@
               {#if warn === 'expired'}
                 <span class="chip bad" title="The token has expired — edit the account and paste a new one">Token expired</span>
               {:else if warn === 'soon'}
-                <span class="chip chip-warn" title="Update the token before it lapses">{expiryLabel(a.token_expires_at!)}</span>
+                <span class="chip chip-warn" title="Update the token before it lapses">{expiryLabel(a.token_expires_at!).replace(/^./, (c) => c.toUpperCase())}</span>
               {/if}
             </div>
             <div class="acct-sub">
@@ -355,7 +355,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .acct {
     display: flex;

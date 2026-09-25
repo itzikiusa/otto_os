@@ -11,6 +11,7 @@
   import { authedBlobUrl } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { ProductAttachment } from './types';
 
@@ -39,6 +40,7 @@
 
   // Upload-in-progress count (for optimistic thumbnails).
   let uploading = $state(false);
+  let filePicker = $state<HTMLInputElement | null>(null);
 
   // Drag-over styling toggle.
   let dragOver = $state(false);
@@ -246,7 +248,7 @@
       localAttUrls = rest;
       toasts.info('Attachment deleted');
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Delete failed', loadErrorText(e));
     }
   }
 </script>
@@ -265,16 +267,20 @@
   <!-- Header row -->
   <div class="att-header-row">
     <span class="att-panel-title">Attachments</span>
-    <label class="att-pick-btn" title="Attach files">
-      {uploading ? 'Uploading…' : '+ File'}
-      <input
-        type="file"
-        multiple
-        style="display:none"
-        onchange={handleFileInput}
-        disabled={uploading}
-      />
-    </label>
+    <!-- A real button (keyboard-reachable) drives the hidden file input. -->
+    <button class="btn small" title="Attach files" disabled={uploading} onclick={() => filePicker?.click()}>
+      <Icon name="plus" size={12} /> {uploading ? 'Uploading…' : 'File'}
+    </button>
+    <input
+      bind:this={filePicker}
+      class="att-file-input"
+      type="file"
+      multiple
+      tabindex="-1"
+      aria-hidden="true"
+      onchange={handleFileInput}
+      disabled={uploading}
+    />
   </div>
 
   <!-- Drop-zone hint when empty -->
@@ -282,7 +288,7 @@
     <LoadState what="attachments" variant="compact" loading={localAttLoading} error={loadError} empty onretry={() => void loadAttachments()} />
   {:else if localAtts.length === 0 && !uploading}
     <div class="att-drop-hint">
-      Drop files here, use + File, or paste a screenshot (⌘⌃⇧4)
+      Drop files here, choose File, or paste a screenshot (⌘⌃⇧4)
     </div>
   {/if}
 
@@ -418,19 +424,8 @@
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
-  .att-pick-btn {
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s, 4px);
-    cursor: pointer;
-    color: var(--text-dim);
-    background: transparent;
-    transition: border-color 100ms, color 100ms;
-  }
-  .att-pick-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
+  .att-file-input {
+    display: none;
   }
 
   .att-uploading {

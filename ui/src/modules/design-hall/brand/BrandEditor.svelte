@@ -50,6 +50,7 @@
   import { brandExport, brandImpact, getLearned } from './api';
   import { copyWithToast } from './edit';
   import { diffTokens, normalizeBrandDoc, parseBrandDoc, rulesForKit, serializeBrandDoc, validateBrandDoc } from './tokens';
+  import { guardUnsaved } from '../../../lib/leaveGuard';
 
   interface Props {
     id: string;
@@ -126,6 +127,8 @@
   // ── Derived editing state ─────────────────────────────────────────────────
   const draftText = $derived(serializeBrandDoc(doc));
   const dirty = $derived(phase === 'ready' && draftText !== baseText);
+  // Leaving the editor (sidebar, link, back) with unsaved token edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: 'the brand kit' }));
   const baseDoc = $derived(parseBrandDoc(baseText) ?? normalizeBrandDoc({}));
   const localChanges = $derived(dirty ? diffTokens(baseDoc, doc) : []);
   const issues = $derived(validateBrandDoc(doc));

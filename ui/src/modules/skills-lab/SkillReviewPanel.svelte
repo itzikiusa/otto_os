@@ -16,6 +16,7 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import { rel } from '../../lib/stores/now.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { sourceLabel } from './skillGroups';
 
@@ -24,8 +25,11 @@
     /** Optional skill to pre-select in the New Review form (from the Skills tab). */
     initialTarget?: { name: string; source: string } | null;
     onconsumed?: () => void;
+    /** Open this existing review (a skill's Usage → Reviews card). */
+    initialReview?: string | null;
+    onreviewconsumed?: () => void;
   }
-  let { wsId, initialTarget = null, onconsumed }: Props = $props();
+  let { wsId, initialTarget = null, onconsumed, initialReview = null, onreviewconsumed }: Props = $props();
 
   // `source` is "library" | "bundled" | a provider name (claude/codex/agy) — all
   // valid `skill_source` values the review engine resolves.
@@ -202,6 +206,7 @@
 
   function newReview(): void {
     selected = null;
+    fSkill = '';
   }
 
   // --- live refresh -----------------------------------------------------------
@@ -262,6 +267,19 @@
     }
   });
 
+  $effect(() => {
+    if (!initialReview) return;
+    const id = initialReview;
+    onreviewconsumed?.();
+    void openReview(id);
+  });
+
+  /** "spec_compliance" → "Spec compliance" (scorecard areas are snake_case ids). */
+  function areaLabel(a: string): string {
+    const t = a.replace(/_/g, ' ').trim();
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  }
+
   function verdictClass(v: string): string {
     if (v === 'Ready') return 'verdict-ready';
     if (v === 'Ready with fixes') return 'verdict-fixes';
@@ -274,8 +292,12 @@
 
 <div class="lab-review" data-testid="skill-review">
   <aside class="lr-side">
-    <!-- Not .primary: the form's "Start review" is the view's primary. -->
-    <button class="btn small block" onclick={newReview} aria-pressed={!selected} data-testid="new-skill-review"><Icon name="plus" size={12} /> New review</button>
+    <!-- Same list head as the Evaluator's runs. Not .primary: the form's
+         "Start review" is the view's primary. -->
+    <div class="lr-side-head">
+      <span class="lr-side-title">Reviews</span>
+      <button class="btn small" onclick={newReview} aria-pressed={!selected} title="New review" data-testid="new-skill-review"><Icon name="plus" size={12} /> New</button>
+    </div>
     {#if listError && reviews.length === 0}
       <div class="lr-empty lr-list-err" role="alert">
         <span><Icon name="warning" size={12} /> <strong>Couldn't load reviews.</strong> <span class="lr-err-detail">{listError}</span></span>
@@ -290,13 +312,16 @@
         {#each reviews as r (r.id)}
           <li>
             <button class="lr-item" class:active={selected?.id === r.id} aria-current={selected?.id === r.id ? 'true' : undefined} onclick={() => openReview(r.id)}>
-              <span class="lr-item-name" title={r.skill_name}>{r.skill_name}</span>
+              <span class="lr-item-top">
+                <span class="lr-item-name" title={r.skill_name}>{r.skill_name}</span>
+                <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} variant="text" /></span>
+              </span>
               <span class="lr-item-meta">
-                <span class="chip lr-src">{sourceLabel(r.skill_source)}</span>
-                <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} /></span>
+                <span>{sourceLabel(r.skill_source)}{r.static_report ? ` · ${r.static_report.verdict}` : ''}</span>
+                <span class="grow"></span>
+                <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
               </span>
             </button>
-             <button class="icon-btn lr-del" title="Delete review" aria-label="Delete the review of {r.skill_name}" onclick={() => deleteReview(r)}><Icon name="trash" size={12} /></button>
           </li>
         {/each}
       </ul>
@@ -338,7 +363,7 @@
           </fieldset>
         {/if}
         <label class="lr-field">
-          <span>Additional instructions (optional)</span>
+          <span>Additional instructions <span class="hint-inline">optional</span></span>
           <textarea
             class="input lr-textarea"
             rows="3"
@@ -347,9 +372,13 @@
             data-testid="skill-review-instructions"
           ></textarea>
         </label>
-        <button class="btn primary" disabled={!fSkill || starting} title={!fSkill ? 'Pick a skill to review' : undefined} onclick={start} data-testid="start-skill-review">
-          {starting ? 'Starting…' : 'Start review'}
-        </button>
+        <div class="lr-actions">
+          <span class="dim lr-cost">{fMode === 'static' ? 'No agents — runs instantly' : `${Math.max(1, fProviders.size)} review agent${fProviders.size === 1 ? '' : 's'} + a summarizer`}</span>
+          <span class="grow"></span>
+          <button class="btn primary" disabled={!fSkill || starting} title={!fSkill ? 'Pick a skill to review' : undefined} onclick={start} data-testid="start-skill-review">
+            {starting ? 'Starting…' : 'Start review'}
+          </button>
+        </div>
       </div>
     {:else}
       <!-- Review detail -->
@@ -364,6 +393,7 @@
           {#if selected.status === 'running'}
             <button class="btn small" onclick={cancelReview}><Icon name="square" size={12} /> Stop review</button>
           {/if}
+          <button class="icon-btn" onclick={() => selected && deleteReview(selected)} aria-label="Delete this review" title="Delete this review"><Icon name="trash" size={14} /></button>
         </div>
 
         {#if selected.error}
@@ -388,7 +418,7 @@
             <table class="lr-score">
               <tbody>
                 {#each sr.scorecard as row (row.area)}
-                  <tr><td class="lr-area">{row.area.replace(/_/g, ' ')}</td><td class="lr-num">{row.score}/5</td><td class="lr-notes">{row.notes}</td></tr>
+                  <tr><td class="lr-area">{areaLabel(row.area)}</td><td class="lr-num">{row.score}/5</td><td class="lr-notes">{row.notes}</td></tr>
                 {/each}
               </tbody>
             </table>
@@ -507,27 +537,33 @@
 <style>
   /* Same shell as Skills: a surface list pane with a hairline, content beside it. */
   .lab-review { display: grid; grid-template-columns: 280px 1fr; height: 100%; min-height: 0; }
-  .lr-side { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 10px 8px; background: var(--surface); border-inline-end: 1px solid var(--border); }
-  .block { width: 100%; }
+  .lr-side { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; padding: 0 8px 12px; background: var(--surface); border-inline-end: 1px solid var(--border); }
+  .lr-side-head { display: flex; align-items: center; gap: 8px; padding: 12px 4px 8px; }
+  .lr-side-title { flex: 1; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
   .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
   .lr-list-err { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--text); overflow-wrap: anywhere; }
   .lr-list-err :global(svg), .lr-error :global(svg) { color: var(--danger); vertical-align: -1px; }
   .lr-err-detail { color: var(--text-dim); }
   .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  .lr-list li { display: flex; align-items: center; gap: 4px; }
+  .lr-list li { display: flex; }
   .lr-item {
     flex: 1; min-width: 0; text-align: start; background: transparent; border: 1px solid transparent;
     border-radius: var(--radius-m); padding: 7px 9px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
   }
   .lr-item:hover { background: var(--hover); }
   .lr-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
-  .lr-item-name { font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lr-item-meta { display: flex; align-items: center; gap: 6px; }
+  .lr-item-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .lr-item-name { flex: 1; min-width: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lr-item-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
+  .lr-item-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-src { font-size: var(--fs-xs); }
-  .lr-del { flex-shrink: 0; }
   .lr-main { overflow-y: auto; min-height: 0; padding: 16px 20px; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
-  .lr-form h3 { margin: 0; }
+  .lr-form h3 { margin: 0; font-size: var(--fs-l); font-weight: 600; }
+  .lr-actions { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+  .lr-cost { font-size: var(--fs-xs); }
+  .hint-inline { font-weight: 400; font-size: var(--fs-xs); }
+  .hint-inline::before { content: '· '; }
   .lr-hint { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5; margin: 0; }
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
   .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
@@ -554,7 +590,8 @@
 
   .lr-detail { display: flex; flex-direction: column; gap: 12px; }
   .lr-detail-head { display: flex; align-items: center; gap: 8px; }
-  .lr-detail-head h3 { margin: 0 8px 0 0; display: inline; }
+  .lr-detail-head > div:first-child { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .lr-detail-head h3 { margin: 0; font-size: var(--fs-l); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-error { color: var(--danger); font-size: var(--fs-s); }
   .grow { flex: 1; }
 
@@ -568,7 +605,7 @@
   .lr-score { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
   .lr-score td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
   .lr-area { font-weight: 600; white-space: nowrap; }
-  .lr-num { text-align: right; white-space: nowrap; color: var(--text-dim); }
+  .lr-num { text-align: end; white-space: nowrap; color: var(--text-dim); }
   .lr-notes { color: var(--text-dim); }
   .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
@@ -583,10 +620,13 @@
   .sev-high { background: var(--danger-soft); color: var(--danger); }
   .sev-medium { background: var(--warning-soft); color: var(--warning); }
   .sev-low { background: var(--info-soft); color: var(--info); }
-  .mono { font-family: var(--font-mono, monospace); }
+  .mono { font-family: var(--font-mono); }
 
-  @media (max-width: 1024px) {
-    .lab-review { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    .lr-side { max-height: 40vh; border-inline-end: none; border-bottom: 1px solid var(--border); }
+  /* Phone: the list stacks above the report, like the Evaluator's runs. */
+  @media (max-width: 640px) {
+    .lab-review { display: flex; flex-direction: column; }
+    .lr-side { flex: none; max-height: 40%; border-inline-end: none; border-bottom: 1px solid var(--border); }
+    .lr-main { flex: 1; }
+    .lr-main { padding: 12px 14px; }
   }
 </style>

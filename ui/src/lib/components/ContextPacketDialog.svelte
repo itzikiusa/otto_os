@@ -177,7 +177,7 @@
     margin-bottom: 12px;
   }
   label {
-    font-size: 12px;
+    font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text-dim);
   }
@@ -187,23 +187,23 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .no-sessions {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin-bottom: 12px;
   }
   .preview-loading,
   .preview-err {
-    font-size: 13px;
+    font-size: var(--fs-m);
     color: var(--text-dim);
     margin-bottom: 8px;
   }
   .preview-err { color: var(--danger); }
   .badge {
     display: inline-block;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 3px 8px;
     border-radius: 999px;
@@ -221,13 +221,13 @@
   .preview-code {
     margin: 0;
     padding: 10px 12px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     font-family: var(--font-mono);
     white-space: pre-wrap;
     word-break: break-all;
   }
   .size-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-top: 6px;
     text-align: end;
@@ -239,7 +239,7 @@
     background: transparent;
     color: var(--text);
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
   }
   .btn-primary {
     padding: 6px 14px;
@@ -248,7 +248,7 @@
     background: var(--accent);
     color: var(--accent-contrast);
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-m);
     font-weight: 500;
   }
   .btn-primary:disabled,

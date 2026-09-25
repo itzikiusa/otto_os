@@ -226,6 +226,12 @@
       void loadGatewayTools(id);
     }
   });
+
+  /** Tool descriptions are markdown-ish: render `inline code` spans as code
+   *  instead of showing raw backticks. */
+  function descParts(text: string | null | undefined): { text: string; code: boolean }[] {
+    return (text ?? '').split('`').map((t, i) => ({ text: t, code: i % 2 === 1 })).filter((p) => p.text !== '');
+  }
 </script>
 
 <div class="otto">
@@ -272,7 +278,7 @@
       </span>
     </label>
     <p class="counts muted small">
-      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount} · <span class="noask">{skippedCount} run without asking</span>{/if}
+      {tools.length} tools · {enabledNames.size} exposed · {mutatingCount} mutating{#if skippedCount}{' '}· <span class="noask">{skippedCount} run without asking</span>{/if}
     </p>
   </section>
 
@@ -358,7 +364,7 @@
                 <span class="t-name mono">
                   {tool.name}{#if tool.mutating}<span class="mut">Mutating</span>{/if}
                 </span>
-                <span class="t-desc">{tool.description}</span>
+                <span class="t-desc">{#each descParts(tool.description) as part, i (i)}{#if part.code}<code>{part.text}</code>{:else}{part.text}{/if}{/each}</span>
               </span>
             </label>
             {#if tool.mutating && tool.enabled}
@@ -601,6 +607,14 @@
   .t-desc {
     font-size: var(--fs-s);
     color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .t-desc code {
+    font-size: var(--fs-xs);
+    padding: 0 4px;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
   }
   .mono {
     font-family: var(--font-mono);

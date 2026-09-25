@@ -218,7 +218,7 @@
           <div class="crit-row">
             <select class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
               <option value="agent">Agent assessment</option>
-              <option value="manual">Agent assessment (legacy)</option>
+              {#if c.verify_kind === 'manual'}<option value="manual">Agent assessment (legacy)</option>{/if}
               <option value="human">Human verification</option>
               <option value="command">Shell command</option>
             </select>

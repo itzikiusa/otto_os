@@ -266,7 +266,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-s);
     font-family: var(--font-ui);
     outline: none;
     transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
@@ -280,7 +280,7 @@
   }
 
   .find-count {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
     min-width: 44px;
@@ -297,7 +297,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     cursor: pointer;
     transition: background 130ms ease-out, color 130ms ease-out;
     padding: 0;
@@ -322,7 +322,7 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 130ms ease-out, color 130ms ease-out;
     padding: 0;

@@ -84,7 +84,7 @@
 </section>
 
 <style>
-  .connections-export { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: 880px; }
+  .connections-export { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: var(--settings-col); }
   .card-title { margin: 0 0 6px; font-size: var(--fs-m); font-weight: 600; }
   p { margin: 0 0 8px; font-size: var(--fs-s); line-height: 1.5; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0; }

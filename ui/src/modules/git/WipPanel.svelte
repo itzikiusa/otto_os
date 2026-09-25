@@ -553,7 +553,7 @@
     <div class="wp-section">
       <button class="wp-sec-head" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
         <Icon name={unstagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        <span>Unstaged Files</span>
+        <span>Unstaged files</span>
         <span class="wp-sec-count">{unstaged.length}</span>
         <span class="grow"></span>
         {#if unstaged.length > 0}
@@ -605,7 +605,7 @@
     <div class="wp-section">
       <button class="wp-sec-head" onclick={() => (stagedOpen = !stagedOpen)} aria-expanded={stagedOpen}>
         <Icon name={stagedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        <span>Staged Files</span>
+        <span>Staged files</span>
         <span class="wp-sec-count">{staged.length}</span>
         <span class="grow"></span>
         {#if staged.length > 0}

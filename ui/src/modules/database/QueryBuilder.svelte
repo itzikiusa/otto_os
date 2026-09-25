@@ -787,7 +787,7 @@
             <button class="pal-item" class:on={onCanvas.has(t.path)} onclick={() => addTable(t)} title="Add {t.label} to the canvas">
               <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
               <span class="pal-item-label">{t.label}</span>
-              <Icon name="plus" size={11} />
+              <Icon name="plus" size={12} />
             </button>
           {/each}
         {/if}
@@ -870,7 +870,7 @@
                   <span class="node-src mono" title="{t.db ? `${t.db}.` : ''}{t.table}">{t.alias !== t.table ? t.table : ''}</span>
                   {#if ti === 0}<span class="node-base" title="The first table is the FROM table">FROM</span>{/if}
                   <button class="icon-btn node-x" aria-label="Remove {t.alias} from the canvas" title="Remove table" onpointerdown={(e) => e.stopPropagation()} onclick={() => removeTable(t.uid)}>
-                    <Icon name="x" size={11} />
+                    <Icon name="x" size={12} />
                   </button>
                 </div>
                 <div class="node-body" use:cardBody={t.uid}>
@@ -914,11 +914,11 @@
         {#if suggestions.length || unreached.length}
           <div class="canvas-bar">
             {#if unreached.length}
-              <span class="cb-warn"><Icon name="warning" size={11} />Not joined — left out of the SQL: {unreached.map((t) => t.alias).join(', ')}</span>
+              <span class="cb-warn"><Icon name="warning" size={12} />Not joined — left out of the SQL: {unreached.map((t) => t.alias).join(', ')}</span>
             {/if}
             {#each suggestions as s (s.label)}
               <button class="fk-chip" onclick={() => applySuggestion(s)} title="Join on this foreign key">
-                <Icon name="merge" size={11} />{s.label}
+                <Icon name="merge" size={12} />{s.label}
               </button>
             {/each}
           </div>
@@ -937,7 +937,7 @@
             <div class="notice err" role="alert">
               <Icon name="warning" size={12} />
               <span>{importError}</span>
-              <button class="icon-btn" onclick={() => (importError = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={11} /></button>
+              <button class="icon-btn" onclick={() => (importError = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={12} /></button>
             </div>
           {/if}
           {#if importing}<div class="notice">Opening the statement…</div>{/if}
@@ -949,9 +949,9 @@
               <span class="sec-count">{clauses.select.length || 'all (*)'}</span>
               <label class="distinct"><input type="checkbox" bind:checked={clauses.distinct} /> Distinct</label>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={addColumnItem} disabled={!colOptions.length}><Icon name="plus" size={11} />Column</button>
-              <button class="btn small ghost" onclick={addAggregate} disabled={!colOptions.length}><Icon name="sigma" size={11} />Aggregate</button>
-              <button class="btn small ghost" onclick={addExpression} disabled={!colOptions.length}><Icon name="function" size={11} />Expression</button>
+              <button class="btn small ghost" onclick={addColumnItem} disabled={!colOptions.length}><Icon name="plus" size={12} />Column</button>
+              <button class="btn small ghost" onclick={addAggregate} disabled={!colOptions.length}><Icon name="sigma" size={12} />Aggregate</button>
+              <button class="btn small ghost" onclick={addExpression} disabled={!colOptions.length}><Icon name="function" size={12} />Expression</button>
             </header>
             {#if clauses.select.length === 0}
               <p class="sec-hint">Every column (<code>*</code>). Tick columns on the cards, or add columns and aggregates here.</p>
@@ -989,8 +989,8 @@
               <h3 id="qb-where" class="section-title">Filters</h3>
               <span class="sec-count">{countConds(clauses.where) || ''}</span>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={() => addCond(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={11} />Condition</button>
-              <button class="btn small ghost" onclick={() => addGroup(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={11} />Group</button>
+              <button class="btn small ghost" onclick={() => addCond(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
+              <button class="btn small ghost" onclick={() => addGroup(clauses.where, false)} disabled={!colOptions.length}><Icon name="plus" size={12} />Group</button>
             </header>
             {#if clauses.where.items.length === 0}
               <p class="sec-hint">No filters — every row.</p>
@@ -1035,7 +1035,7 @@
               <h3 id="qb-having" class="section-title">Having</h3>
               <span class="sec-count">{countConds(clauses.having) || ''}</span>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={() => addCond(clauses.having, true)} disabled={!colOptions.length}><Icon name="plus" size={11} />Condition</button>
+              <button class="btn small ghost" onclick={() => addCond(clauses.having, true)} disabled={!colOptions.length}><Icon name="plus" size={12} />Condition</button>
             </header>
             {#if clauses.having.items.length === 0}
               <p class="sec-hint">Filter the groups, e.g. COUNT(*) &gt; 10.</p>
@@ -1049,7 +1049,7 @@
             <header class="sec-head">
               <h3 id="qb-order" class="section-title">Sort</h3>
               <span class="grow"></span>
-              <button class="btn small ghost" onclick={addOrder} disabled={!colOptions.length}><Icon name="plus" size={11} />Sort</button>
+              <button class="btn small ghost" onclick={addOrder} disabled={!colOptions.length}><Icon name="plus" size={12} />Sort</button>
             </header>
             {#if clauses.orderBy.length === 0}
               <p class="sec-hint">Unsorted — the engine picks the order.</p>
@@ -1120,7 +1120,7 @@
             <ul class="issues">
               {#each issues as is (is.message)}
                 <li class:err={is.level === 'error'}>
-                  <Icon name="warning" size={11} />
+                  <Icon name="warning" size={12} />
                   <span>{is.message}</span>
                   {#if is.fix?.kind === 'group-by'}
                     {@const refs = is.fix.refs}
@@ -1133,7 +1133,7 @@
           <pre class="sql mono" data-testid="qb-sql">{#if sql}{#each sqlTokens as tok, ti (ti)}<span class={tok.c}>{tok.t}</span>{/each}{:else}<span class="sql-empty">Add a table to start.</span>{/if}</pre>
           <footer class="sql-actions">
             <button class="btn small" onclick={() => openInQuery(false)} disabled={!sql} title="Open the SQL in a new query tab to keep editing by hand (not run)">
-              <Icon name="external" size={11} />Open in editor
+              <Icon name="external" size={12} />Open in editor
             </button>
             <button
               class="btn small primary"
@@ -1141,7 +1141,7 @@
               disabled={!sql || !canRun || hasErrors}
               title={hasErrors ? 'Fix the errors above first' : !canRun ? 'You do not have query access on this connection' : 'Run in a new query tab'}
             >
-              <Icon name="play" size={11} />Run
+              <Icon name="play" size={12} />Run
             </button>
           </footer>
         </div>

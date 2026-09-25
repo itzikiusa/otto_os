@@ -10,8 +10,8 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { router } from '../../lib/router.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -24,7 +24,7 @@
   import Switcher from './Switcher.svelte';
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import PathField from '../../lib/components/PathField.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
   // -- pane widths (drag-resizable, persisted) ---------------------------------
@@ -83,8 +83,6 @@
   let cOkf = $state(true);
   let creating = $state(false);
   let createError = $state('');
-  // Folder selection uses the shared daemon-side FolderPicker (/fs/browse).
-  let browsing = $state(false);
 
   async function submitCreate(): Promise<void> {
     if (!cName.trim() || creating) return;
@@ -131,13 +129,13 @@
             },
             { label: 'Rescan', icon: 'refresh', action: () => void vault.rescan() },
             {
-              label: 'Unregister vault…',
-              icon: 'trash',
-              danger: true,
-              action: async () => {
-                if (await confirmer.ask(`Otto stops indexing “${vault.current?.name}” and removes it from this list. The files on disk are not touched, and you can add the folder again later.`, { title: 'Unregister vault', confirmLabel: 'Unregister vault', danger: false }) && vault.current) {
-                  void vault.unregister(vault.current!.id);
-                }
+              // Reversible (the files, their edit history and trash all live
+              // in the folder; re-adding it rebuilds the index), so no confirm
+              // — the toast says what happened and how to undo it.
+              label: 'Unregister vault',
+              icon: 'x',
+              action: () => {
+                if (vault.current) void vault.unregister(vault.current.id);
               },
             },
           ]
@@ -224,6 +222,11 @@
     vault.startPolling();
     return () => vault.stopPolling();
   });
+
+  // Leaving the Vault lands a pending autosave first (never asks: the vault
+  // auto-saves and keeps a local draft). Moves inside the Vault are the
+  // store's own business (it saves before switching notes).
+  $effect(() => router.guard((to) => (to === 'vault' || to.startsWith('vault/') ? true : vault.flushBeforeLeave())));
 
   // Reload when the workspace changes.
   let lastWs = $state('');
@@ -314,12 +317,17 @@
         <button class="btn primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
           <Icon name="plus" size={13} /> New note
         </button>
+        <!-- Collapses FIRST (not data-keep): once anything overflows, this
+             menu folds into the header's own ⋯, so a narrow header never
+             shows two ⋯ buttons side by side. -->
         <button
           class="icon-btn vh-tool"
           title="More vault actions"
           aria-label="More vault actions"
           aria-haspopup="menu"
-          data-keep
+          data-overflow="-10"
+          data-icon="more"
+          data-label="More vault actions…"
           onclick={moreMenu}
         >
           <Icon name="more" size={14} />
@@ -504,26 +512,27 @@
 
 {#if createOpen}
   <Modal title="Add a vault" onclose={() => (createOpen = false)}>
-    <div class="av-body">
-      <label class="av-fld">
-        <span>Name</span>
-        <input bind:value={cName} placeholder="Team Docs" />
-      </label>
-      <label class="av-fld">
-        <span>Folder (blank → create under ~/.otto/vault; a new path is created)</span>
-        <div class="pathrow">
-          <input bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" />
-          <button class="btn" type="button" onclick={() => (browsing = true)}>Browse…</button>
-        </div>
-      </label>
-      <label class="av-chk">
+    <form class="av-body" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
+      <div class="field">
+        <label for="av-name">Name</label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" autofocus />
+      </div>
+      <div class="field">
+        <label for="av-path">Folder</label>
+        <PathField bind:value={cPath} start={cPath || '~'}>
+          <input id="av-path" class="input" bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" spellcheck="false" />
+        </PathField>
+        <span class="hint">An existing folder (an Obsidian vault works as is) or a new path to create. Leave it blank to create one under ~/.otto/vault.</span>
+      </div>
+      <label class="checkbox-row">
         <input type="checkbox" bind:checked={cOkf} />
-        OKF vault (Open Knowledge Format validation + templates)
+        OKF vault (Open Knowledge Format validation and templates)
       </label>
       {#if createError}
-        <div class="av-err" role="alert">{createError}</div>
+        <div class="av-err" role="alert">Couldn’t add the vault. {createError}</div>
       {/if}
-    </div>
+    </form>
     {#snippet footer()}
       <button class="btn" onclick={() => (createOpen = false)}>Cancel</button>
       <button class="btn primary" disabled={!cName.trim() || creating} onclick={() => void submitCreate()}>
@@ -531,18 +540,6 @@
       </button>
     {/snippet}
   </Modal>
-{/if}
-
-{#if browsing}
-  <FolderPicker
-    title="Choose vault folder"
-    start={cPath || '~'}
-    onpick={(p: string) => {
-      cPath = p;
-      browsing = false;
-    }}
-    onclose={() => (browsing = false)}
-  />
 {/if}
 
 <NewNoteDialog bind:open={newNoteOpen} bind:dir={newNoteDir} />
@@ -812,32 +809,12 @@
   .av-body {
     display: flex;
     flex-direction: column;
-    gap: 12px;
   }
-  .av-fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .av-fld input {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-m);
-    padding: 8px 10px;
-  }
-  .pathrow {
-    display: flex;
-    gap: 6px;
-  }
-  .pathrow input {
-    flex: 1;
-    min-width: 0;
+  .av-body .checkbox-row {
+    margin-bottom: 4px;
   }
   .av-err {
+    margin-top: 8px;
     color: var(--danger);
     font-size: var(--fs-s);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
@@ -845,13 +822,6 @@
     border-radius: var(--radius-s);
     padding: 6px 10px;
     word-break: break-word;
-  }
-  .av-chk {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    font-size: var(--fs-s);
-    color: var(--text);
   }
 
   /* Mid widths (narrow desktop / tablet portrait / phone landscape): the

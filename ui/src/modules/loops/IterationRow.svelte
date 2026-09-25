@@ -85,12 +85,12 @@
         <h4>Agents and roles</h4>
         {#each iter.agents as a, i (i)}
           <div class="agent">
-            <span class={dotClass(a.status)} role="img" aria-label={a.status}></span>
+            <span class={dotClass(a.status)} role="img" aria-label={runStatus(a.status).label}></span>
             <span class="aname">{a.name}</span>
             <span class="aprov">{a.provider}</span>
             <span class="anote" title={a.note || a.output_summary || a.status}>{a.note || a.output_summary || a.status}</span>
             {#if a.session_id}
-              <button class="btn ghost small" title="Open {a.name}'s session below" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
+              <button class="btn ghost small" title="Open {a.name}'s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
             {/if}
             {#if i < executorCount && canRetry(a)}
               <button class="btn small" onclick={() => retry(i)}>Retry</button>

@@ -4,7 +4,7 @@
   // then selects the new story and closes.
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import PathField from '../../lib/components/PathField.svelte';
   import { api } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -40,7 +40,6 @@
   let submitting = $state(false);
   let formError = $state('');
 
-  let folderPickerOpen = $state(false);
 
   // ── load accounts on mount ────────────────────────────────────────────────
   $effect(() => {
@@ -141,7 +140,7 @@
       <!-- Account -->
       <div class="field">
         <label class="label" for="import-account">Account</label>
-        <select id="import-account" class="select" bind:value={accountId} onchange={resetSelection}>
+        <select id="import-account" class="input" bind:value={accountId} onchange={resetSelection}>
           {#each accounts as a (a.id)}
             <option value={a.id}>{a.label} ({a.base_url})</option>
           {/each}
@@ -222,7 +221,7 @@
       <!-- Repo path (cwd) -->
       <div class="field">
         <label class="label" for="import-cwd">Repo path <span class="dim">(optional)</span></label>
-        <div class="cwd-row">
+        <PathField bind:value={cwd}>
           <input
             id="import-cwd"
             class="input"
@@ -231,15 +230,7 @@
             spellcheck="false"
             autocomplete="off"
           />
-          <button
-            class="icon-btn"
-            title="Browse folder"
-            aria-label="Browse folder"
-            onclick={() => (folderPickerOpen = true)}
-          >
-            <Icon name="folder" size={13} />
-          </button>
-        </div>
+        </PathField>
       </div>
 
       <!-- Watch toggle -->
@@ -266,13 +257,6 @@
   {/snippet}
 </Modal>
 
-{#if folderPickerOpen}
-  <FolderPicker
-    title="Select repo folder"
-    onpick={(p) => { cwd = p; folderPickerOpen = false; }}
-    onclose={() => (folderPickerOpen = false)}
-  />
-{/if}
 
 <style>
   .loading {
@@ -291,43 +275,21 @@
     color: var(--text-dim);
     line-height: 1.5;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 14px;
+  /* A `<span>` label (no single control to point at) matches the global
+     `.field > label` style. */
+  .field > span.label {
+    font-size: var(--fs-s);
+    font-weight: 500;
+    color: var(--text-dim);
   }
   .search-field {
     margin-bottom: 4px;
-  }
-  .label {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .dim {
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
     font-size: var(--fs-xs);
-  }
-  .select,
-  .input {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 5px 9px;
-    box-sizing: border-box;
-    outline: none;
-  }
-  .select:focus,
-  .input:focus {
-    border-color: var(--accent);
   }
   .kind-row {
     display: flex;
@@ -410,14 +372,6 @@
   .manual-toggle:hover {
     color: var(--text);
   }
-  .cwd-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-  .cwd-row .input {
-    flex: 1;
-  }
   .watch-row {
     display: flex;
     align-items: center;
@@ -435,51 +389,5 @@
     padding: 6px 10px;
     background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 16px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    transition: background 110ms, border-color 110ms, color 110ms;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn.ghost:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .btn.primary {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
-  }
-  .btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
-  }
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .icon-btn:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text);
   }
 </style>

@@ -86,10 +86,10 @@ test('WIP row → stage → commit, all on the graph', async ({ page }) => {
   await expect(panel).toBeVisible();
   await expectFullyInViewport(page, panel, 'WIP staging panel');
 
-  // Both files sit under Unstaged; nothing staged yet. (exact: 'Staged Files'
-  // is a substring of 'Unstaged Files' for Playwright's default matcher.)
-  await expect(panel.getByText('Unstaged Files', { exact: true })).toBeVisible();
-  await expect(panel.getByText('Staged Files', { exact: true })).toBeVisible();
+  // Both files sit under Unstaged; nothing staged yet. (exact: 'Staged files'
+  // is a substring of 'Unstaged files' for Playwright's default matcher.)
+  await expect(panel.getByText('Unstaged files', { exact: true })).toBeVisible();
+  await expect(panel.getByText('Staged files', { exact: true })).toBeVisible();
   await expect(panel.locator('.wp-file')).toHaveCount(2);
   await expect(panel.getByText('Nothing staged yet.')).toBeVisible();
 

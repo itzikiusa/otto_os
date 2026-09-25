@@ -19,7 +19,7 @@
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
-  import { prettyJson } from './util';
+  import { prettyJson, awsErrorText } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -244,9 +244,9 @@
   {#if showList}
     <div class="list">
       {#if loading && !queues}
-        <div class="pad"><Skeleton rows={8} /></div>
+        <div class="pad" role="status"><p class="load-note">Loading queues…</p><Skeleton rows={8} /></div>
       {:else if error}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list queues" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list queues" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
       {:else if shown.length === 0}
         <EmptyState icon="send" title={filter ? 'No matching queues' : 'No queues'} />
       {:else}
@@ -371,7 +371,7 @@
             </div>
           {:else if tab === 'attributes'}
             {#if !attrs}
-              <div class="pad"><Skeleton rows={6} /></div>
+              <div class="pad" role="status"><p class="load-note">Loading queue attributes…</p><Skeleton rows={6} /></div>
             {:else}
               <table class="tbl kvt">
                 <tbody>
@@ -406,6 +406,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .split {
     flex: 1;
     min-height: 0;
@@ -538,14 +543,7 @@
     padding: 2px;
   }
   .more {
-    display: inline-flex;
-    align-items: center;
-    margin-left: auto;
-    border: 0;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
+    margin-inline-start: auto;
   }
   .tabs {
     display: flex;

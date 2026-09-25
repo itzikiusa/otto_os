@@ -83,15 +83,19 @@
 </script>
 
 <div class="k8s">
-  <div class="bar">
-    <span class="dim">{k8s.clusters.length} cluster{k8s.clusters.length === 1 ? '' : 's'}</span>
-    <span class="spacer"></span>
-    <div class="seg" role="radiogroup" aria-label="Window">
-      {#each WINDOWS as w (w)}
-        <button class:on={w === win} role="radio" aria-checked={w === win} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
-      {/each}
+  <!-- The count + time window only mean something once there are clusters;
+       the empty / off states below stand alone. -->
+  {#if k8s.clusters.length > 0 && !k8s.unavailable}
+    <div class="bar">
+      <span class="dim">{k8s.clusters.length} cluster{k8s.clusters.length === 1 ? '' : 's'}</span>
+      <span class="spacer"></span>
+      <div class="seg" role="radiogroup" aria-label="Window">
+        {#each WINDOWS as w (w)}
+          <button class:on={w === win} role="radio" aria-checked={w === win} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
+        {/each}
+      </div>
     </div>
-  </div>
+  {/if}
   {#if loading && k8s.clusters.length === 0}
     <Skeleton rows={3} />
   {:else if k8s.unavailable}

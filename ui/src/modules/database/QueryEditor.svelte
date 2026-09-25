@@ -839,7 +839,7 @@
         disabled={!tab.statement.trim()}
         title={savedLinked ? 'Update the saved query (or Save as new)' : 'Save this query'}
       >
-        <Icon name="check" size={11} />{savedLinked ? 'Update' : 'Save'}
+        <Icon name="check" size={12} />{savedLinked ? 'Update' : 'Save'}
       </button>
     {/if}
     {#if database.capabilities?.explain !== false}
@@ -851,7 +851,7 @@
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
         aria-label="Explain"
       >
-        <Icon name="zap" size={11} /><span class="btn-label">Explain</span>
+        <Icon name="zap" size={12} /><span class="btn-label">Explain</span>
       </button>
     {/if}
     <button
@@ -862,7 +862,7 @@
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
       aria-label="Ask AI"
     >
-      <Icon name="sparkle" size={11} /><span class="btn-label">Ask AI</span>
+      <Icon name="sparkle" size={12} /><span class="btn-label">Ask AI</span>
     </button>
     <button
       class="btn small ghost"
@@ -872,7 +872,7 @@
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
       aria-label="Ask in English"
     >
-      <Icon name="comment" size={11} /><span class="btn-label">Ask in English</span>
+      <Icon name="comment" size={12} /><span class="btn-label">Ask in English</span>
     </button>
     {#if database.queryLanguage !== 'redis'}
       <button
@@ -887,7 +887,7 @@
           : 'Format / beautify the SQL'}
         aria-label="Format"
       >
-        <Icon name="format" size={11} /><span class="btn-label">Format</span>
+        <Icon name="format" size={12} /><span class="btn-label">Format</span>
       </button>
     {/if}
     <div class="qe-kbd" bind:this={kbdWrapEl}>
@@ -915,7 +915,7 @@
     <div class="qe-settings">
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
       <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
-        <Icon name="db" size={11} />
+        <Icon name="db" size={12} />
         <select
           class="input"
           value={database.activeDb ?? ''}
@@ -929,7 +929,7 @@
       </label>
     {:else if database.isRedis && database.keyspaces.length > 0}
       <label class="qe-db" title="Active Redis database — commands (GET, HGETALL, …) run against this DB">
-        <Icon name="db" size={11} />
+        <Icon name="db" size={12} />
         <select
           class="input"
           value={database.activeDb ?? database.keyspaces[0]?.id ?? ''}
@@ -979,7 +979,7 @@
         checked={tab.mask}
         onchange={(e) => { database.tab.mask = (e.currentTarget as HTMLInputElement).checked; }}
       />
-      <Icon name="lock" size={11} />
+      <Icon name="lock" size={12} />
       {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
     </label>
     <span class="qe-lang mono" title="Query language">{database.queryLanguage}</span>
@@ -988,7 +988,7 @@
 
   {#if queryVars.length > 0}
     <div class="qe-vars" bind:this={varsBarEl}>
-      <Icon name="tag" size={11} />
+      <Icon name="tag" size={12} />
       <span class="qe-vars-label">Variables</span>
       {#each queryVars as name (name)}
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
@@ -1036,7 +1036,7 @@
 
   {#if isMongoshScript}
     <div class="qe-script" class:missing={mongoshInfo?.available === false} data-testid="mongosh-script-bar">
-      <Icon name="zap" size={11} />
+      <Icon name="zap" size={12} />
       <span>
         mongosh script detected — Run executes the WHOLE file through the real
         <code class="mono">mongosh</code> CLI against this connection (counts as a write).
@@ -1103,6 +1103,7 @@
       readOnly={false}
       minimal={true}
       findOwner={true}
+      placeholder={lang === 'redis' ? 'Write a command — ⌘↵ to run' : 'Write a query — ⌘↵ to run'}
       completionSource={database.selectedConnId ? completionSource : null}
       onchange={(v) => database.setStatement(v)}
       onsubmit={run}

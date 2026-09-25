@@ -14,7 +14,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
-  import { fmtAgo, roleFromArn } from './util';
+  import { fmtAgo, roleFromArn, awsErrorText } from './util';
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -82,9 +82,9 @@
 
 <div class="ov">
   {#if aws.accountsLoading && !aws.accountsLoaded}
-    <div class="pad"><Skeleton rows={3} height={90} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={3} height={90} /></div>
   {:else if aws.accountsError && aws.accounts.length === 0}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={aws.accountsError} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
+    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
   {:else if aws.accounts.length === 0}
     <EmptyState
       variant="page"
@@ -192,6 +192,11 @@
 {/if}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .ov {
     display: flex;
     flex-direction: column;
@@ -234,7 +239,7 @@
   }
   .name {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     flex: 1;
     min-width: 0;
@@ -243,15 +248,7 @@
     white-space: nowrap;
   }
   .more {
-    display: inline-flex;
-    align-items: center;
-    border: 0;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
-    line-height: 1;
-    padding: 0 4px;
+    flex-shrink: 0;
   }
   .meta {
     display: grid;

@@ -211,7 +211,7 @@ test('Settings → Assistant saves routing rules and limit behaviour', async ({ 
   await form.getByLabel('Extra words that mean “code”').fill('terraform, jq');
   await form.getByRole('radio', { name: /Switch automatically/ }).check();
   await save.click();
-  await expect(form.getByText('Saved. New turns use these rules.')).toBeVisible();
+  await expect(page.getByText('Routing saved')).toBeVisible();
   const body = lastCall(s, 'PUT', '/assistant/routing')?.body as Record<string, unknown>;
   expect(body.auto_failover).toBe(true);
   expect(body.extra_keywords).toEqual({ code: ['terraform', 'jq'], hard: [] });

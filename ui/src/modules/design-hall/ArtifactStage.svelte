@@ -372,9 +372,24 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
+  /* A neutral pasteboard (layout.md §4.5) with the image as the artboard on
+     it — a full-bleed white stage glared in dark mode. The artboard keeps a
+     white backing so transparent SVG/PNG art reads as authored. */
   .paper {
     flex: 1;
+    background-color: var(--bg);
+    background-image: radial-gradient(circle, color-mix(in srgb, var(--text) 12%, transparent) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .paper .svg,
+  .paper .img {
     background: white;
+    border-radius: var(--radius-s);
+    box-shadow: var(--shadow-card);
+  }
+  .compact .paper .svg,
+  .compact .paper .img {
+    box-shadow: none;
   }
   .center {
     display: flex;

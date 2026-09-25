@@ -19,7 +19,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
-  import { fmtAgo, fmtDate } from './util';
+  import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, EksClusterDetail, EksClusterSummary } from '../../lib/api/types';
 
   interface Props {
@@ -140,9 +140,9 @@
 
 <div class="tbl-wrap">
   {#if loading && !clusters}
-    <div class="pad"><Skeleton rows={5} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading EKS clusters…</p><Skeleton rows={5} /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="helm" title={filter ? 'No matching clusters' : `No EKS clusters in ${region}`} />
   {:else}
@@ -217,6 +217,11 @@
 {/if}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }

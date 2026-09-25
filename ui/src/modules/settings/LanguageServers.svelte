@@ -125,10 +125,10 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('language-servers')} subtitle="Code intelligence for the editors — servers found on your PATH">
+  <PageHeader title={sectionLabel('language-servers')} subtitle="Code intelligence for Otto's editors">
     {#snippet actions()}
-      <button class="btn small" data-icon="refresh" disabled={loading} onclick={() => void load()}>
-        <Icon name="refresh" size={12} /> {loading ? 'Checking…' : 'Refresh'}
+      <button class="btn" data-icon="refresh" disabled={loading} onclick={() => void load()}>
+        <Icon name="refresh" size={13} /> {loading ? 'Checking…' : 'Refresh'}
       </button>
       {#if missingWithInstall.length > 0}
         <button class="btn primary" disabled={installingAll} onclick={installAll}>
@@ -217,6 +217,7 @@
   /* Wide paths scroll inside the card, never the page. */
   .table-wrap {
     overflow-x: auto;
+    max-width: var(--settings-col);
   }
   .ls-table {
     width: 100%;

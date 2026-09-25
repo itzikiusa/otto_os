@@ -27,6 +27,8 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { CreateAgentReq, RecruitedAgent, Swarm, SwarmAgent, SwarmProject } from './types';
 
   type View = 'tree' | 'graph' | 'kanban' | 'runs' | 'board';
@@ -175,17 +177,11 @@
   let projSkills = $state<string[]>([]);
   let projSaving = $state(false);
 
-  // Load swarms for the current workspace. The store has no loading flag for
-  // the list, so track it here: a first load must show a skeleton, never flash
-  // the "No swarms in …" empty state while the request is in flight.
-  let listLoading = $state(false);
-  async function loadList(id: string): Promise<void> {
-    listLoading = true;
-    try {
-      await swarm.loadSwarms(id);
-    } finally {
-      listLoading = false;
-    }
+  // Load swarms for the current workspace. A first load shows a skeleton
+  // (store `loadingSwarms`), never a flash of the "No swarms in …" empty state.
+  const listLoading = $derived(swarm.loadingSwarms);
+  function loadList(id: string): Promise<void> {
+    return swarm.loadSwarms(id);
   }
   $effect(() => {
     const id = ws.currentId;
@@ -203,7 +199,7 @@
     try {
       await swarm.openSwarm(id);
     } catch (e) {
-      openError = e instanceof Error ? e.message : String(e);
+      openError = swarm.detailError ?? loadErrorText(e);
       openErrorId = id;
     }
   }
@@ -510,6 +506,17 @@
     showBudgetModal = false;
   }
 
+  /** Header ⋯: the swarm's destructive verbs, kept off the toolbar row. */
+  function swarmMenu(e: MouseEvent): void {
+    if (!detail) return;
+    ctxMenu.show(e, [
+      ...(detail.status !== 'aborted'
+        ? [{ label: 'Abort all…', icon: 'square', danger: true, title: 'Stop every agent and cancel queued runs', action: () => void lifecycle('abort') }]
+        : []),
+      { label: 'Delete swarm…', icon: 'trash', danger: true, action: () => void deleteSwarm() },
+    ]);
+  }
+
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 </script>
 
@@ -531,18 +538,15 @@
     {/snippet}
     {#snippet actions()}
       {#if detail}
-        <!-- Order = collapse order into ⋯ (lowest data-overflow first). The
-             destructive pair sits at the far start, away from the primary
-             lifecycle action; "New project" lives on the Board, where projects
-             are shown, so the header stays at five controls. -->
-        <button class="icon-btn" data-overflow="-3" data-icon="trash" data-label="Delete swarm…" onclick={deleteSwarm} aria-label="Delete swarm" title="Delete swarm"><Icon name="trash" size={14} /></button>
-        {#if detail.status !== 'aborted'}
-          <button class="btn small danger" data-overflow="-2" data-icon="x" title="Stop every agent and cancel queued runs" onclick={() => lifecycle('abort')}><Icon name="x" size={12} /> Abort all…</button>
-        {/if}
+        <!-- Settings · Recruit · ⋯ · lifecycle. The destructive verbs (Abort all,
+             Delete swarm) live in ⋯, one step away from the lifecycle action —
+             the same shape as a goal loop's and a workflow's header. "New
+             project" lives on the Board, where projects are shown. -->
         <button class="btn small" data-overflow="-1" data-icon="gear" onclick={() => (showSettings = true)} title="Standing goals, team skills & channel triggers" data-label="Settings"><Icon name="gear" size={12} /> Settings</button>
         <button class="btn small" data-icon="plus" title="Let the Recruiter propose an agent for you to review and hire" onclick={() => (showRecruit = true)}><Icon name="plus" size={12} /> Recruit</button>
+        <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={swarmMenu}><Icon name="more" size={14} /></button>
         {#if detail.status === 'active'}
-          <button class="btn small" data-keep title="Stop picking up new runs; running agents finish their current step" onclick={() => lifecycle('pause')}><Icon name="square" size={12} /> Pause</button>
+          <button class="btn small" data-keep title="Stop picking up new runs; running agents finish their current step" onclick={() => lifecycle('pause')}><Icon name="pause" size={12} /> Pause</button>
         {:else if detail.status === 'paused'}
           {#if detail.pause_reason}
             <!-- A budget stop: resuming without headroom would pause again at

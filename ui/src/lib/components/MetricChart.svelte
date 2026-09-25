@@ -334,7 +334,7 @@
     display: grid;
     place-items: center;
     color: var(--text-dim);
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     border: 1px dashed var(--border);
     border-radius: var(--radius-m, 6px);
   }
@@ -348,7 +348,7 @@
     border-radius: var(--radius-m, 6px);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
     padding: 6px 8px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     min-width: 120px;
     max-width: 240px;
     z-index: 2;
@@ -383,7 +383,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 2px 12px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text);
   }
   .mc-legend li {

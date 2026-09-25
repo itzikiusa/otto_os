@@ -113,7 +113,7 @@
         >
           Proof: {sentenceCase(score.proof_status || 'missing')}
         </span>
-        <span class="done" title="How much of the done contract this iteration met">Done {score.done_score}</span>
+        <span class="done" title="How much of the done contract (tests, lint, proof) this iteration met">Done contract {score.done_score}/100</span>
       </div>
     </div>
 
@@ -127,7 +127,7 @@
             </span>
             <span class="rscore">{r.score.toFixed(0)}</span>
           {:else}
-            <span class="notrun">Not run</span>
+            <span class="notrun">{r.label === 'Human' ? 'Not rated' : 'Not run'}</span>
             <span class="rscore">—</span>
           {/if}
           {#if r.detail}<span class="rdetail" title={r.detail}>{r.detail}</span>{/if}
@@ -136,7 +136,7 @@
     </div>
 
     {#if !compact}
-      <button class="proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={toggleProof}>
+      <button class="btn small ghost proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={toggleProof}>
         <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
         {expanded ? 'Hide proof pack' : 'View proof pack'}
       </button>
@@ -185,20 +185,19 @@
   .signals { display: flex; flex-direction: column; gap: 5px; }
   .row { display: grid; grid-template-columns: 54px 1fr 28px; align-items: center; gap: 8px; }
   .row.dim { opacity: 0.55; }
-  .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2, color-mix(in srgb, var(--text-dim) 18%, transparent)); }
+  .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
   .fill { display: block; height: 100%; border-radius: 999px; }
   /* Replaces the bar (a 7px track can't hold readable text). */
   .notrun { font-size: var(--fs-xs); line-height: 1; color: var(--text-dim); }
-  .rscore { font-size: var(--fs-xs); font-weight: 600; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .rscore { font-size: var(--fs-xs); font-weight: 600; text-align: end; color: var(--text); font-variant-numeric: tabular-nums; }
   .row.dim .rscore { color: var(--text-dim); }
   .rdetail { grid-column: 2 / -1; font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .proofpack-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; font-size: var(--fs-xs); color: var(--text-dim); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-m); cursor: pointer; }
-  .proofpack-btn:hover { color: var(--text); border-color: var(--accent); }
+  .proofpack-btn { align-self: flex-start; }
   .pack { display: flex; flex-direction: column; gap: 8px; }
   .artifact { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 6px 8px; }
   .ahead { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--text); }
   .adot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
   .akind { font-weight: 600; }
   .sep, .atitle, .astatus { color: var(--text-dim); }
-  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2, color-mix(in srgb, var(--text-dim) 10%, transparent)); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
+  .apreview { margin: 6px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-dim); background: var(--surface-2); border-radius: var(--radius-m); white-space: pre-wrap; word-break: break-word; }
 </style>

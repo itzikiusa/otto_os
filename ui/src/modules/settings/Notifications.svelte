@@ -126,7 +126,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('notifications')} subtitle="Credential-expiry warnings and how Otto alerts you" />
+  <PageHeader title={sectionLabel('notifications')} subtitle="Alerts and credential-expiry warnings" />
   <PageBody width="readable">
 
   <div class="section-title">Alerts</div>
@@ -200,7 +200,7 @@
   }
   .s-card {
     padding: 6px 16px;
-    max-width: 560px;
+    max-width: var(--settings-col);
     margin-bottom: 8px;
   }
   .threshold {
@@ -211,7 +211,7 @@
   }
   .section-note {
     margin: 0 0 8px;
-    max-width: 560px;
+    max-width: var(--settings-col);
     font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
@@ -229,7 +229,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: 560px;
+    max-width: var(--settings-col);
     margin-bottom: 8px;
     font-size: var(--fs-s);
     color: var(--danger);

@@ -3,6 +3,7 @@
   // per-case approve/request-changes/edit, bulk-select + bulk-approve, drag-to-
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
+  import { rel } from '../../lib/stores/now.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type {
@@ -562,7 +563,7 @@
   }
 
   function fmtDate(s: string): string {
-    try { return new Date(s).toLocaleString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 </script>
 
@@ -588,8 +589,11 @@
           </select>
         </div>
 
+        <!-- Primary only before the first run: once cases exist, reviewing them
+             (Approve run) is the view's one primary. -->
         <button
-          class="btn primary"
+          class="btn"
+          class:primary={product.testcaseRuns.length === 0}
           onclick={generate}
           disabled={generating || pollTimer !== null}
         >

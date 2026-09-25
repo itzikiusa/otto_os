@@ -496,7 +496,8 @@ test.describe('workflows page (desktop)', () => {
     await page.goto('/#/workflows');
     const row = page.getByTestId(`wf-row-${wfId}`);
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.getByTestId('wf-rename-btn').click();
+    await row.getByTestId('wf-row-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename' }).click();
     const input = row.getByTestId('wf-rename-input');
     await input.fill('E2E Renamed Flow');
     await input.press('Enter');
@@ -517,7 +518,8 @@ test.describe('workflows page (desktop)', () => {
     await page.goto('/#/workflows');
     const row = page.getByTestId(`wf-row-${wfId}`);
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.getByTestId('wf-duplicate-btn').click();
+    await row.getByTestId('wf-row-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Duplicate' }).click();
     // Server-side: a NEW workflow (different id) named "<src> (copy)" appears.
     let copy: { id: string; name: string } | undefined;
     await expect
@@ -544,12 +546,14 @@ test.describe('workflows page (desktop)', () => {
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.locator('.row-main').click();
     await expect(row).toHaveClass(/active/);
-    await row.getByTestId('wf-delete-btn').click();
+    await row.getByTestId('wf-row-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
     await expect(page.locator('.cf-msg')).toContainText('Delete “E2E Delete Me”');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
     expect((await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(true);
 
-    await row.getByTestId('wf-delete-btn').click();
+    await row.getByTestId('wf-row-more').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Delete workflow' }).click();
     await expect(row).toHaveCount(0, { timeout: 10_000 });
     await expect.poll(async () => (await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(false);

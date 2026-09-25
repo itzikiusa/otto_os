@@ -2,6 +2,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import SectionIntro from './SectionIntro.svelte';
   // Admin active-sessions overview: list every session daemon-wide; terminate
   // (kill the PTY, keep the row) or remove (delete the row + history), one at a
   // time or in bulk. "Remove all exited" prunes the background/ephemeral
@@ -26,7 +27,23 @@
   let bulkBusy = $state(false);
 
   const exitedCount = $derived(sessions.filter((s) => !s.live).length);
-  const allSelected = $derived(sessions.length > 0 && selected.size === sessions.length);
+  const liveCount = $derived(sessions.length - exitedCount);
+  // Background runs (insights, analysis…) pile up as ended rows; a Live /
+  // Ended filter finds the running ones without scrolling past them.
+  let show = $state<'all' | 'live' | 'ended'>('all');
+  // Only filter while both kinds exist (the control hides otherwise), so a
+  // refresh that empties one side can't strand the table on nothing.
+  const effShow = $derived(exitedCount > 0 && liveCount > 0 ? show : 'all');
+  const visible = $derived(
+    effShow === 'all' ? sessions : sessions.filter((s) => (effShow === 'live' ? s.live : !s.live)),
+  );
+  const allSelected = $derived(visible.length > 0 && visible.every((s) => selected.has(s.id)));
+  function setShow(next: 'all' | 'live' | 'ended'): void {
+    show = next;
+    // Never act on rows the filter hides.
+    const ids = new Set(visible.map((s) => s.id));
+    selected = new Set([...selected].filter((id) => ids.has(id)));
+  }
 
   $effect(() => {
     void load();
@@ -55,7 +72,7 @@
     selected = next;
   }
   function toggleAll(): void {
-    selected = allSelected ? new Set() : new Set(sessions.map((s) => s.id));
+    selected = allSelected ? new Set() : new Set(visible.map((s) => s.id));
   }
 
   async function act(id: string, kind: 'terminate' | 'remove'): Promise<void> {
@@ -168,7 +185,18 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <p class="section-intro"><strong>Terminate</strong> kills a live session's process and keeps its row and history; <strong>Delete</strong> removes the session and its history for good.</p>
+  <SectionIntro>
+    <strong>Terminate</strong> kills a live session's process and keeps its row and history; <strong>Delete</strong>
+    removes the session and its history for good.
+  </SectionIntro>
+
+  {#if sessions.length > 0 && exitedCount > 0 && liveCount > 0}
+    <div class="segmented show" role="group" aria-label="Show sessions">
+      <button class:active={show === 'all'} aria-pressed={show === 'all'} onclick={() => setShow('all')}>All <span class="n">{sessions.length}</span></button>
+      <button class:active={show === 'live'} aria-pressed={show === 'live'} onclick={() => setShow('live')}>Live <span class="n">{liveCount}</span></button>
+      <button class:active={show === 'ended'} aria-pressed={show === 'ended'} onclick={() => setShow('ended')}>Ended <span class="n">{exitedCount}</span></button>
+    </div>
+  {/if}
 
   {#if selected.size > 0}
     <div class="bulk-bar" role="toolbar" aria-label="Selected sessions">
@@ -196,7 +224,7 @@
           <span class="col-viewers">Viewers</span>
           <span class="col-action"><span class="sr-only">Actions</span></span>
         </div>
-        {#each sessions as s (s.id)}
+        {#each visible as s (s.id)}
           {@const info = statusInfo(s)}
           <div class="session-row" class:row-sel={selected.has(s.id)}>
             <span class="col-sel">
@@ -211,7 +239,7 @@
               <span class="owner-name">{s.owner_username}</span>
             </span>
             <span class="col-kind ellip" title={`${s.kind} · ${s.provider}`}>
-              <span class="chip">{sentenceCase(s.kind)}</span>
+              <span class="chip kind-chip">{sentenceCase(s.kind)}</span>
               <span class="dim provider-name">{s.provider}</span>
             </span>
             <span class="col-title ellip" title={s.title}>{s.title || '—'}</span>
@@ -263,14 +291,16 @@
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .section-intro {
-    margin: 0 0 14px;
-    max-width: 78ch;
-    font-size: var(--fs-s);
-    line-height: 1.5;
+  .show {
+    margin: 0 0 10px;
+  }
+  .show .n {
     color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .bulk-bar {
+    max-width: var(--settings-col);
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -287,6 +317,7 @@
   }
   /* Wide table scrolls inside its card, never the page. */
   .session-table {
+    max-width: var(--settings-col);
     overflow-x: auto;
   }
   .table-inner {
@@ -338,7 +369,14 @@
     gap: 6px;
   }
   .provider-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--fs-xs);
+  }
+  .kind-chip {
+    flex-shrink: 0;
   }
   .dim {
     color: var(--text-dim);

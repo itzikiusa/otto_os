@@ -1,5 +1,6 @@
 <script lang="ts">
   // Notes tab — list, add, edit, delete internal notes for the selected story.
+  import { rel } from '../../lib/stores/now.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
@@ -110,7 +111,7 @@
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   function fmtDate(s: string): string {
-    try { return new Date(s).toLocaleString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 </script>
 

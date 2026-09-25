@@ -39,15 +39,18 @@
     if (!next.remotes.includes(remote)) remote = next.remotes[0] ?? '';
     try { localStorage.setItem(preferenceKey, next.repo_path); } catch { /* Browsing still works without storage. */ }
   }
-  async function perform(action: () => Promise<void>) {
+  // `what` names the step for the inline error ("Couldn't check the
+  // repository. <daemon reason>") — a bare daemon message didn't say which
+  // of the six buttons failed.
+  async function perform(what: string, action: () => Promise<void>) {
     const seq = generation;
     busy = true; error = ''; notice = '';
-    try { await action(); } catch (e) { if (seq === generation) error = e instanceof Error ? e.message : String(e); }
+    try { await action(); } catch (e) { if (seq === generation) error = `Couldn’t ${what}. ${e instanceof Error ? e.message : String(e)}`; }
     finally { if (seq === generation) busy = false; }
   }
   async function loadStatus() {
     const seq = generation;
-    await perform(async () => {
+    await perform('check the repository', async () => {
       const next = await api.post<GitBackupStatus>('/state/git/status', { repo_path: repoPath });
       if (seq !== generation) return;
       useStatus(next); preview = null; exported = false; restorePreview = null;
@@ -55,7 +58,7 @@
   }
   async function previewExport() {
     const seq = generation;
-    await perform(async () => {
+    await perform('preview the snapshot', async () => {
       const next = await api.post<GitBackupPreview>('/state/git/preview', { repo_path: repoPath });
       if (seq !== generation) return;
       preview = next; exported = false; restorePreview = null; useStatus(next.status);
@@ -64,7 +67,7 @@
   async function writeSnapshot() {
     if (!preview) return;
     const seq = generation;
-    await perform(async () => {
+    await perform('write the snapshot', async () => {
       const next = await api.post<GitBackupPreview>('/state/git/export', { repo_path: repoPath, preview_token: preview!.token });
       if (seq !== generation) return;
       preview = next; exported = true; restorePreview = null; reviewed = false; useStatus(next.status); notice = 'Snapshot written to .otto-sync in this repository.';
@@ -73,7 +76,7 @@
   async function commitSnapshot() {
     if (!status || !preview || !message.trim()) return;
     const seq = generation;
-    await perform(async () => {
+    await perform('commit the snapshot', async () => {
       const next = await api.post<{ status: GitBackupStatus }>('/state/git/commit', {
         repo_path: repoPath, expected_head: status!.head, snapshot_digest: preview!.snapshot_digest, message: message.trim(),
       });
@@ -93,7 +96,7 @@
     )
       return;
     const seq = generation;
-    await perform(async () => {
+    await perform(action === 'fetch' ? 'fetch from the remote' : action === 'pull' ? 'pull from the remote' : 'push to the remote', async () => {
       const next = await api.post<{ status: GitBackupStatus }>('/state/git/sync', { repo_path: repoPath, expected_head: status!.head, action, remote });
       if (seq !== generation) return;
       useStatus(next.status); preview = null; exported = false; restorePreview = null;
@@ -102,7 +105,7 @@
   }
   async function previewRestore() {
     const seq = generation;
-    await perform(async () => {
+    await perform('preview the Git restore', async () => {
       const next = await api.post<RestorePreview>('/state/git/restore/preview', { repo_path: repoPath, conflicts });
       if (seq !== generation) return;
       restorePreview = next; reviewed = false;
@@ -111,7 +114,7 @@
   async function restoreSnapshot() {
     if (!restorePreview?.can_restore || !reviewed) return;
     const seq = generation;
-    await perform(async () => {
+    await perform('restore from Git', async () => {
       try {
         const next = await api.post<RestoreResult>('/state/git/restore', { repo_path: repoPath, conflicts, preview_token: restorePreview!.preview_token, confirm: true });
         if (seq === generation) notice = `Restored ${next.records_inserted} records and ${next.files_restored} files; kept ${next.records_skipped} existing records and ${next.files_skipped} existing files.`;
@@ -172,7 +175,7 @@
 {#if browsing}<FolderPicker title="Choose backup repository" start={repoPath || '~'} gitOnly onpick={chooseRepo} onclose={() => browsing = false} />{/if}
 
 <style>
-  .git-backup { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: 880px; }
+  .git-backup { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); box-shadow: var(--shadow-card); padding: 16px 18px; margin: 0 0 16px; max-width: var(--settings-col); }
   .card-title { margin: 0 0 6px; font-size: var(--fs-m); font-weight: 600; }
   .sub-title { margin: 20px 0 6px; padding-top: 16px; border-top: 1px solid var(--border); font-size: var(--fs-m); font-weight: 600; }
   p { margin: 0 0 8px; font-size: var(--fs-s); line-height: 1.5; }

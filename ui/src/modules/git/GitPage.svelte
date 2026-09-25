@@ -20,7 +20,6 @@
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -99,21 +98,18 @@
   // changes. `restoreOpenTabs` prunes ids that no longer exist. Guarded so it
   // runs a single time even if the effect re-fires.
   let restored = false;
-  // The store swallows a failed repo-list load (allRepos stays []), which used
-  // to render "No repositories yet" — an empty state one click from registering
-  // a duplicate. Track the failure here so the landing shows Retry instead.
-  let reposFailed = $state(false);
+  // A failed list load is `git.allReposError` (the store keeps the last known
+  // list), so the landing shows Retry instead of "No repositories yet" — an
+  // empty state one click from registering a duplicate.
   async function retryRepos(): Promise<void> {
-    reposFailed = false;
-    await git.initializeOpenTabs();
-    reposFailed = !git.allReposLoaded;
+    await git.loadAllRepos(true);
+    if (git.allReposLoaded) await git.initializeOpenTabs();
   }
   $effect(() => {
     if (restored) return;
     restored = true;
     void (async () => {
       await git.initializeOpenTabs();
-      reposFailed = !git.allReposLoaded;
       // A deep-link into a repo (#/git/:id or #/git/:id/:tab, non-PR) opens that
       // repo as a tab so the route still lands somewhere useful.
       if (routeRepoId && !isPr && git.allRepos.some((r) => r.id === routeRepoId)) {
@@ -251,7 +247,7 @@
   }
 
   async function removeRepo(r: Repo): Promise<void> {
-    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its open tab closes; the folder and its history on disk are not touched, and you can add it again any time.`, { title: 'Remove repository', confirmLabel: 'Remove' }))) return;
+    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its tab closes and its saved review findings are deleted. The folder and its git history on disk are not touched, so you can add it again later.`, { title: 'Remove repository', confirmLabel: 'Remove' }))) return;
     try {
       await api.del(`/repos/${r.id}`);
       git.closeRepoTab(r.id);
@@ -312,28 +308,26 @@
       <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
            the + tab, so this is just a tidy launcher, not a separate screen. ── -->
       <div class="landing">
-        {#if git.loading && !git.allReposLoaded}
-          <Skeleton rows={3} height={56} />
-        {:else if reposFailed && !git.allReposLoaded}
-          <LoadState
-            what="repositories"
-            variant="page"
-            error="Otto couldn’t reach the daemon for the repository list. Check that ottod is running, then retry."
-            empty
-            loading={git.loading}
-            onretry={() => void retryRepos()}
-          />
-        {:else if git.allRepos.length === 0}
-          <EmptyState
-            variant="page"
-            icon="branch"
-            title="No repositories yet"
-            body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
-            actionLabel="Add repository"
-            actionIcon="plus"
-            onaction={() => (addOpen = true)}
-          />
-        {:else}
+        <LoadState
+          what="repositories"
+          variant="page"
+          loading={!git.allReposLoaded && (git.loading || !git.allReposError)}
+          error={git.allReposError}
+          empty={git.allRepos.length === 0}
+          rows={3}
+          onretry={() => void retryRepos()}
+        >
+          {#snippet emptyView()}
+            <EmptyState
+              variant="page"
+              icon="branch"
+              title="No repositories yet"
+              body="Register an existing local repo or clone one from GitHub, Bitbucket or GitLab."
+              actionLabel="Add repository"
+              actionIcon="plus"
+              onaction={() => (addOpen = true)}
+            />
+          {/snippet}
           <div class="landing-inner">
             <div class="landing-hint">
               <span class="section-title landing-count">Repositories · {git.allRepos.length}</span>
@@ -371,11 +365,11 @@
                 <button class="repo-main" onclick={() => openRepo(r.id)}>
                   <div class="repo-name">
                     <Icon name="branch" size={14} />
-                    {r.name}
-                    {#if r.provider}<span class="chip">{PROVIDER_LABEL[r.provider] ?? r.provider}</span>{/if}
+                    <span class="repo-name-text" title={r.name}>{r.name}</span>
+                    {#if r.provider}<span class="chip repo-provider">{PROVIDER_LABEL[r.provider] ?? r.provider}</span>{/if}
                   </div>
-                  <div class="repo-path mono">{r.path}</div>
-                  {#if r.remote_url}<div class="repo-remote mono dim">{r.remote_url}</div>{/if}
+                  <div class="repo-path mono" title={r.path}>{r.path}</div>
+                  {#if r.remote_url}<div class="repo-remote mono dim" title={r.remote_url}>{r.remote_url}</div>{/if}
                 </button>
                 <div class="repo-actions">
                   <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')} title="Open {r.name} on its pull requests">
@@ -410,7 +404,7 @@
             {/each}
             </div>
           </div>
-        {/if}
+        </LoadState>
       </div>
     {/if}
   </div>
@@ -729,7 +723,10 @@
   .repo-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   }
+  /* Grows so every card's action row sits on the same baseline, whether or
+     not the repo has a remote line. */
   .repo-main {
+    flex: 1;
     text-align: start;
     border: none;
     background: transparent;
@@ -743,7 +740,15 @@
     gap: 7px;
     font-size: var(--fs-m);
     font-weight: 600;
-    /* Long repo names clip with an ellipsis instead of widening the card. */
+    min-width: 0;
+  }
+  .repo-name > :global(svg),
+  .repo-provider {
+    flex-shrink: 0;
+  }
+  /* Long repo names clip with an ellipsis instead of widening the card (on the
+     text span: a bare text node in a flex row is cut mid-character). */
+  .repo-name-text {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;

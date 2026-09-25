@@ -264,7 +264,7 @@
     <div class="imp">
       <div class="prev-head">
         <button class="btn small" onclick={backToPick} disabled={creating}>
-          <Icon name="chevronLeft" size={11} /> Back
+          <Icon name="chevronLeft" size={12} /> Back
         </button>
         <span class="prev-title">{activeLabel}</span>
         {#if scanPath}
@@ -281,7 +281,7 @@
         {#if warnings.length > 0}
           <div class="prev-warn">
             {#each warnings as w (w)}
-              <div class="prev-warn-line"><Icon name="info" size={11} /> {w}</div>
+              <div class="prev-warn-line"><Icon name="info" size={12} /> {w}</div>
             {/each}
           </div>
         {/if}
@@ -359,7 +359,7 @@
           </div>
 
           <p class="imp-note">
-            <Icon name="key" size={11} /> Passwords are never imported — set them on each
+            <Icon name="key" size={12} /> Passwords are never imported — set them on each
             connection before connecting.
           </p>
         {/if}

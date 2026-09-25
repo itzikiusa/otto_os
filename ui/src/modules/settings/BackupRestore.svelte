@@ -163,7 +163,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('backup')} subtitle="Back up Otto data, restore an archive or transfer settings" />
+  <PageHeader title={sectionLabel('backup')} subtitle="Archives, Git sync and exports" />
   <PageBody width="readable">
   <SectionIntro>
     Everything here stays on this Mac unless you push a Git backup to a remote. Credentials are never included
@@ -246,7 +246,7 @@
   }
   .card.pad {
     padding: 16px 18px;
-    max-width: 880px;
+    max-width: var(--settings-col);
     margin-bottom: 16px;
   }
   .card-title {

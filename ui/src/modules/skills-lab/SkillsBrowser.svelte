@@ -46,8 +46,10 @@
     onphonedetail?: (open: boolean) => void;
     /** Open one evaluation run in the Evaluator. */
     onopenrun?: (id: string) => void;
+    /** Open one existing review in the Review tab. */
+    onopenreview?: (id: string) => void;
   }
-  let { onreview, onevaluate, onempty, onphonedetail, onopenrun }: Props = $props();
+  let { onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
 
   // ---- Data -----------------------------------------------------------------
   let library = $state<LibrarySkill[]>([]);
@@ -186,7 +188,7 @@
    *  (another skill, the page's Review / Evaluator tabs). */
   export async function confirmLeave(): Promise<boolean> {
     if (!editorDirty) return true;
-    const ok = await confirmer.ask(`Discard your unsaved changes to ${selName ?? 'this skill'}?`, { title: 'Discard changes', confirmLabel: 'Discard' });
+    const ok = await confirmer.ask(`You have unsaved changes to ${selName ?? 'this skill'}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
     if (ok) editorDirty = false;
     return ok;
   }
@@ -386,7 +388,9 @@
                   <span class="row-name" title={g.name}>{g.name}</span>
                   {#if g.description}<span class="row-desc" title={g.description}>{g.description}</span>{/if}
                 </span>
-                <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')}">
+                <!-- The sync state rides on the copies' label (after the name, so the
+                     option still reads as the skill first). -->
+                <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')} · {syncTitle(g).split('\n')[0]}">
                   {#each g.variants as v (v.source)}
                     <span class="badge" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
                       {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
@@ -427,6 +431,7 @@
             onevaluate={() => onevaluate?.(selected.name, selSource)}
             ondirty={(d) => (editorDirty = d)}
             {onopenrun}
+            {onopenreview}
           />
         {:else}
           <EmptyState title="No skill selected" body="Pick a skill on the left to see its method, files and history." icon="zap" />

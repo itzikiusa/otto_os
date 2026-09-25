@@ -19,6 +19,7 @@
   import { renderMermaid } from './mermaid';
   import { svgToPngDownload } from './export';
   import { copyText } from '../../lib/clipboard';
+  import { ui } from '../../lib/stores/ui.svelte';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -49,6 +50,7 @@
   let natH = 600;
   let renderToken = 0;
   let lastRendered = '';
+  let lastRenderedDark = false;
 
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
@@ -116,8 +118,11 @@
       return;
     }
     notMermaid = false;
-    if (text === lastRendered) return; // nothing changed
-    const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text);
+    // The pasteboard follows the app scheme, so the diagram does too (the
+    // light theme's dark labels vanished on the dark board).
+    const dark = ui.resolvedScheme === 'dark';
+    if (text === lastRendered && dark === lastRenderedDark) return; // nothing changed
+    const out = await renderMermaid(`cv-${sceneId ?? 'x'}-${token}`, text, { dark });
     if (token !== renderToken) return; // superseded
     if (out.error || !out.svg) {
       renderError = out.error || 'Could not render the diagram';
@@ -125,6 +130,7 @@
     }
     renderError = '';
     lastRendered = text;
+    lastRenderedDark = dark;
     svgHtml = out.svg;
     await tick();
     sizeSvg();
@@ -213,8 +219,22 @@
   function fileBase(): string {
     return (canvas.scene?.title ?? 'canvas').replace(/[^\w.-]+/g, '-');
   }
-  function downloadSvg(): void {
-    const svg = content?.querySelector('svg');
+  /** Exports always use the LIGHT theme: a downloaded diagram lands in docs
+   *  and slides (the PNG gets a white backing), whatever the app scheme. */
+  async function exportSvg(): Promise<SVGSVGElement | null> {
+    const src = (canvas.source ?? '').trim();
+    if (!src) return null;
+    const out = await renderMermaid(`cv-export-${sceneId ?? 'x'}-${++renderToken}`, src, { dark: false });
+    if (!out.svg) {
+      toasts.error('Couldn’t export the diagram', out.error);
+      return null;
+    }
+    const host = document.createElement('div');
+    host.innerHTML = out.svg;
+    return host.querySelector('svg');
+  }
+  async function downloadSvg(): Promise<void> {
+    const svg = await exportSvg();
     if (!svg) return;
     const blob = new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
@@ -224,8 +244,8 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  function downloadPng(): void {
-    const svg = content?.querySelector('svg');
+  async function downloadPng(): Promise<void> {
+    const svg = await exportSvg();
     if (!svg) return;
     svgToPngDownload(svg, `${fileBase()}.png`);
   }
@@ -283,6 +303,7 @@
   // Render whenever the source changes (open / generate / live / code edit).
   $effect(() => {
     const src = canvas.source; // dependency
+    const _scheme = ui.resolvedScheme; // dependency: re-theme on a scheme switch
     void renderNow(src ?? '');
   });
 
@@ -367,6 +388,7 @@
           <button
             class="code-toggle"
             class:on={codeOpen}
+            aria-pressed={codeOpen}
             onclick={() => (codeOpen = !codeOpen)}
             title="Edit the Mermaid source"
           >
@@ -383,10 +405,10 @@
           <button class="pct" onclick={fitView} title="Fit to screen" aria-label="Zoom {Math.round(scale * 100)}% — fit to screen">{Math.round(scale * 100)}%</button>
           <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
-          <button onclick={downloadSvg} title="Download SVG" aria-label="Download SVG">
+          <button onclick={() => void downloadSvg()} title="Download SVG" aria-label="Download SVG">
             <Icon name="file" size={15} />
           </button>
-          <button onclick={downloadPng} title="Download PNG" aria-label="Download PNG">
+          <button onclick={() => void downloadPng()} title="Download PNG" aria-label="Download PNG">
             <Icon name="image" size={15} />
           </button>
           <button onclick={() => void copySource()} title="Copy source" aria-label="Copy source">

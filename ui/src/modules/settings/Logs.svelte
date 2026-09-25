@@ -222,7 +222,7 @@
         </select>
       </label>
 
-      <label class="field compact">
+      <label class="field mode">
         <span>Read</span>
         <!-- The daemon reads every file in full for "All log files" whatever
              the mode, so Tail is only offered for a single file. -->
@@ -285,6 +285,13 @@
           No lines match “{filter.trim()}”.
           <button class="btn small ghost" onclick={() => (filter = '')}>Clear filter</button>
         </div>
+      {:else if !content.trim()}
+        <!-- A fresh daemon (or a just-rotated file) has nothing yet — say so
+             rather than show a blank terminal-coloured pane. -->
+        <div class="no-match">
+          {selected === ALL_FILES ? 'The log folder is empty.' : 'This log file is empty so far.'}
+          {autoRefresh ? 'New lines appear here as the daemon writes them.' : 'Turn on Live to watch for new lines.'}
+        </div>
       {/if}
       <!-- eslint-disable-next-line svelte/no-at-html-tags -- escaped in `highlighted` -->
       <div class="log-view" class:nowrap={!wrap} bind:this={logEl} onscroll={onLogScroll} role="textbox" aria-readonly="true" aria-multiline="true" tabindex="0" aria-label="Daemon log">{@html highlighted}</div>
@@ -328,6 +335,11 @@
   }
   .field.compact {
     width: 210px;
+  }
+  /* "Full file" / "Tail" — narrow, so Live · Follow · Wrap stay on the
+     toolbar's one row at a 1280px window instead of wrapping to a second. */
+  .field.mode {
+    width: 120px;
   }
   .field.lines {
     width: 96px;

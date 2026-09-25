@@ -1,6 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Root-only defaults for the Skills Evaluator: the validations, improver
@@ -26,6 +27,8 @@
     return JSON.stringify([c.iterations, c.validator_passes, c.improver.provider, c.validations]);
   }
   const dirty = $derived(!!cfg && formKey(cfg) !== savedKey);
+  // Leaving Settings (or this page) with unsaved edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: 'the evaluator defaults' }));
   // Inline validation (not a toast): every validation needs a name, criteria
   // and at least one CLI, and the numbers must be in range.
   const formError = $derived.by(() => {
@@ -161,22 +164,26 @@
 
     <section class="block">
       <div class="block-head">
-        <h2 class="section-title">Default validations</h2>
-        <span class="count">{cfg.validations.length}</span>
+        <h2 class="section-title">Default validations <span class="count">{cfg.validations.length}</span></h2>
         <span class="grow"></span>
         <button class="btn small" data-icon="plus" onclick={addValidation}><Icon name="plus" size={12} /> Add validation</button>
       </div>
       {#each cfg.validations as v, i (i)}
         <div class="val card">
-          <div class="row">
-            <input
-              class="input grow"
-              placeholder="logging"
-              aria-label={`Validation ${i + 1} name`}
-              bind:value={v.name}
-            />
+          <div class="val-row">
+            <div class="field grow">
+              <label for={`sv-name-${i}`}>Name</label>
+              <input
+                id={`sv-name-${i}`}
+                class="input"
+                placeholder="logging"
+                spellcheck="false"
+                autocomplete="off"
+                bind:value={v.name}
+              />
+            </div>
             <button
-              class="icon-btn danger-icon"
+              class="icon-btn danger-icon val-remove"
               onclick={() => removeValidation(i)}
               aria-label={`Remove validation ${v.name || i + 1}`}
               title={`Remove validation ${v.name || i + 1}`}
@@ -184,14 +191,19 @@
               <Icon name="trash" size={14} />
             </button>
           </div>
-          <textarea
-            class="input"
-            rows="2"
-            placeholder="Logs use the skill's conventions and never leak secrets."
-            aria-label={`Validation ${v.name || i + 1} criteria`}
-            bind:value={v.criteria}
-          ></textarea>
-          <div class="chips" role="group" aria-label={`Agent CLIs for ${v.name || `validation ${i + 1}`}`}>
+          <div class="field">
+            <label for={`sv-crit-${i}`}>Passes when</label>
+            <textarea
+              id={`sv-crit-${i}`}
+              class="input val-textarea"
+              rows="2"
+              placeholder="Logs use the skill's conventions and never leak secrets."
+              bind:value={v.criteria}
+            ></textarea>
+          </div>
+          <div class="field">
+          <span class="lbl" id={`sv-clis-${i}`}>Run on</span>
+          <div class="chips" role="group" aria-labelledby={`sv-clis-${i}`}>
             {#each providerOpts as p (p)}
               <button
                 type="button"
@@ -203,6 +215,7 @@
                 {#if v.providers.includes(p)}<Icon name="check" size={12} />{/if}<span class="mono">{p}</span>
               </button>
             {/each}
+          </div>
           </div>
         </div>
       {:else}
@@ -225,16 +238,10 @@
     min-height: 0;
   }
   .eval-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-width: 880px;
-  }
-  .section-title {
-    margin: 8px 0 0;
+    max-width: var(--settings-col);
   }
   .form-note {
-    margin: 0;
+    margin: 0 0 12px;
     font-size: var(--fs-s);
   }
   .form-note.unsaved {
@@ -260,27 +267,38 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin-top: 8px;
   }
   .block-head {
     display: flex;
     align-items: center;
     gap: 8px;
+    margin-top: 18px;
   }
   .block-head .section-title {
     margin: 0;
   }
   .count {
-    font-size: var(--fs-xs);
+    font-weight: 500;
+    letter-spacing: 0;
+  }
+  .lbl {
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
   }
-  .row {
+  .val .field {
+    margin: 0;
+  }
+  .val-row {
     display: flex;
     gap: 8px;
-    align-items: center;
+    align-items: flex-end;
+  }
+  .val-remove {
+    margin-bottom: 1px;
   }
   .val {
-    padding: 12px;
+    padding: 12px 16px 14px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -296,7 +314,7 @@
   .danger-icon:hover {
     color: var(--danger);
   }
-  textarea.input {
+  .val-textarea {
     resize: vertical;
     font-size: var(--fs-s);
   }

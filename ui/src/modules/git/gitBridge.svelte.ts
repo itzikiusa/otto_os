@@ -32,6 +32,11 @@ class GitBridge {
     this.openRecovery(repoId, 'bisect');
   }
 
+  /** Stash count per repo, published by the graph (which owns the stash list)
+   *  so the toolbar's Pop can say "nothing to pop" instead of failing. Absent
+   *  = unknown (Pop stays enabled). */
+  stashCount = $state<Record<string, number>>({});
+
   fileTool = $state<FileToolRequest | null>(null);
   focus = $state<FocusRequest | null>(null);
   private nonce = 0;

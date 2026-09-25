@@ -29,6 +29,9 @@
   let newDisplay = $state('');
   let newPassword = $state('');
   let busy = $state(false);
+  // The daemon's floor (the same one Onboarding shows): the sheet used to
+  // say 6 and enable Create at 6, so every 6–9 character password failed.
+  const MIN_PASSWORD = 10;
 
   /** Filter text for the user list. */
   let userFilter = $state('');
@@ -129,6 +132,7 @@
       allMembers = { ...allMembers, [wsId]: saved };
       // Keep the by-workspace view honest when it's showing the same workspace.
       if (matrixWs === wsId) members = saved;
+      flashSaved('roles');
     } catch (e) {
       toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,15 +184,24 @@
   /** Working copy of grants for the selected user: feature → capability. */
   let grantMap: Record<string, Capability> = $state({});
   let grantLoading = $state(false);
+  // Grants apply on click, like the workspace roles above (one saving model
+  // per page — this used to be the one matrix with its own Save button, and
+  // an unsaved grant was silently lost on navigation). One PUT at a time: the
+  // endpoint replaces the whole grant list, so overlapping writes could
+  // interleave.
   let grantSaving = $state(false);
-  // A failed grants load must never show every feature as "None" — one Save
-  // would then wipe the user's real grants.
+  // A failed grants load must never show every feature as "None" — the next
+  // click would then write that over the user's real grants.
   let grantError = $state('');
-  let grantSavedKey = $state('');
-  function grantKey(m: Record<string, Capability>): string {
-    return JSON.stringify(ALL_FEATURES.map((f) => m[f] ?? 'none'));
+
+  // Quiet inline "Saved" beside the section that just applied a change.
+  let savedIn = $state<'roles' | 'grants' | null>(null);
+  let savedTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashSaved(which: 'roles' | 'grants'): void {
+    savedIn = which;
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => (savedIn = null), 1800);
   }
-  const grantsDirty = $derived(!grantLoading && !grantError && grantKey(grantMap) !== grantSavedKey);
 
   /** The non-root users available to manage grants for. */
   const nonRootUsers = $derived(users.filter((u) => !u.is_root));
@@ -261,7 +274,6 @@
       const m: Record<string, Capability> = {};
       for (const g of resp.grants) m[g.feature] = g.capability as Capability;
       grantMap = m;
-      grantSavedKey = grantKey(m);
     } catch (e) {
       if (grantUserId === id) grantError = loadErrorText(e);
     } finally {
@@ -288,7 +300,7 @@
   }
 
   async function createUser(): Promise<void> {
-    if (busy || newUsername.trim() === '' || newPassword.length < 6) return;
+    if (busy || newUsername.trim() === '' || newPassword.length < MIN_PASSWORD) return;
     busy = true;
     createError = '';
     try {
@@ -359,6 +371,7 @@
       });
       // Keep the by-user view's cache honest too.
       if (allMembers[matrixWs]) allMembers = { ...allMembers, [matrixWs]: members };
+      flashSaved('roles');
     } catch (e) {
       toasts.error('Couldn’t change the workspace role', e instanceof Error ? e.message : String(e));
     }
@@ -368,23 +381,23 @@
     return grantMap[feature] ?? 'none';
   }
 
-  function setGrantCap(feature: Feature, cap: Capability): void {
-    grantMap = { ...grantMap, [feature]: cap };
-  }
-
-  async function saveGrants(): Promise<void> {
-    if (!grantUserId || grantError || !grantsDirty) return;
+  /** Apply one feature's capability now; revert the cell if the write fails. */
+  async function setGrantCap(feature: Feature, cap: Capability): Promise<void> {
+    const userId = grantUserId;
+    if (!userId || grantError || grantSaving || grantCapOf(feature) === cap) return;
+    const before = grantMap;
+    const next = { ...grantMap, [feature]: cap };
+    grantMap = next;
     grantSaving = true;
     try {
       const grants: GrantEntry[] = ALL_FEATURES
-        .filter((f) => grantMap[f] && grantMap[f] !== 'none')
-        .map((f) => ({ feature: f, capability: grantMap[f] }));
-      await api.put(`/users/${grantUserId}/grants`, { grants });
-      grantSavedKey = grantKey(grantMap);
-      const who = users.find((u) => u.id === grantUserId);
-      toasts.success('Feature grants saved', who ? `@${who.username}` : undefined);
+        .filter((f) => next[f] && next[f] !== 'none')
+        .map((f) => ({ feature: f, capability: next[f] }));
+      await api.put(`/users/${userId}/grants`, { grants });
+      flashSaved('grants');
     } catch (e) {
-      toasts.error('Couldn’t save feature grants', e instanceof Error ? e.message : String(e));
+      if (grantUserId === userId) grantMap = before;
+      toasts.error(`Couldn’t change access to ${FEATURE_LABELS[feature]}`, e instanceof Error ? e.message : String(e));
     } finally {
       grantSaving = false;
     }
@@ -471,7 +484,10 @@
         />
       </div>
     {:else}
-    <h2 class="section-title">Workspace roles</h2>
+    <div class="title-row">
+      <h2 class="section-title">Workspace roles</h2>
+      {#if savedIn === 'roles'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
+    </div>
     <p class="sub">
       A user only reaches the workspaces they're a member of. Switch to <b>By user</b> to grant one
       account several workspaces at once.
@@ -593,15 +609,14 @@
     {/if}
 
     <!-- Feature grant matrix -->
-    <div class="grant-title-row">
+    <div class="title-row">
       <h2 class="section-title">Feature grants</h2>
-      <span class="grow"></span>
-      {#if grantsDirty}<span class="unsaved">Unsaved changes</span>{/if}
-      <button class="btn small" disabled={grantSaving || !grantsDirty} title={grantsDirty ? 'Save these grants' : 'No unsaved changes'} onclick={saveGrants}>
-        {grantSaving ? 'Saving…' : 'Save grants'}
-      </button>
+      {#if savedIn === 'grants'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
     </div>
-    <p class="sub">Per-feature capability for non-root users. None = no access; root always has admin everywhere.</p>
+    <p class="sub">
+      What each non-root user can do per feature; a change applies as soon as you click it. None = no access; root
+      always has admin everywhere.
+    </p>
 
     <div class="urow controls">
       <select class="input picker" bind:value={grantUserId} aria-label="User to grant features to">
@@ -629,7 +644,8 @@
                 <button
                   class:active={grantCapOf(feat) === c}
                   aria-pressed={grantCapOf(feat) === c}
-                  onclick={() => setGrantCap(feat, c)}
+                  disabled={grantSaving}
+                  onclick={() => void setGrantCap(feat, c)}
                 >{CAP_LABEL[c]}</button>
               {/each}
             </div>
@@ -663,7 +679,7 @@
       <div class="field">
         <label for="nu-pass">Password</label>
         <input id="nu-pass" class="input" type="password" bind:value={newPassword} autocomplete="new-password" aria-describedby="nu-pass-hint" />
-        <span class="hint" id="nu-pass-hint" class:bad={newPassword.length > 0 && newPassword.length < 6}>At least 6 characters. Share it with them privately.</span>
+        <span class="hint" id="nu-pass-hint" class:bad={newPassword.length > 0 && newPassword.length < MIN_PASSWORD}>At least {MIN_PASSWORD} characters{#if newPassword.length > 0 && newPassword.length < MIN_PASSWORD}{' '}({newPassword.length}/{MIN_PASSWORD}){/if}. Share it with them privately.</span>
       </div>
       {#if createError}<p class="form-err" role="alert"><strong>Couldn’t create the user.</strong> {createError}</p>{/if}
     </form>
@@ -673,8 +689,8 @@
         class="btn primary"
         type="submit"
         form="new-user-form"
-        disabled={busy || newUsername.trim() === '' || newPassword.length < 6}
-        title={newUsername.trim() === '' ? 'Enter a username' : newPassword.length < 6 ? 'Enter a password of at least 6 characters' : undefined}
+        disabled={busy || newUsername.trim() === '' || newPassword.length < MIN_PASSWORD}
+        title={newUsername.trim() === '' ? 'Enter a username' : newPassword.length < MIN_PASSWORD ? `Enter a password of at least ${MIN_PASSWORD} characters` : undefined}
       >
         {busy ? 'Creating…' : 'Create user'}
       </button>
@@ -700,7 +716,7 @@
     margin: 0 0 10px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-    max-width: 78ch;
+    max-width: var(--settings-col);
   }
   .dim {
     color: var(--text-dim);
@@ -711,6 +727,7 @@
     gap: 8px;
   }
   .controls {
+    max-width: var(--settings-col);
     flex-wrap: wrap;
     margin-bottom: 10px;
     font-size: var(--fs-s);
@@ -737,7 +754,7 @@
   .user-table,
   .matrix,
   .grant-matrix {
-    max-width: 760px;
+    max-width: var(--settings-col);
     overflow: hidden;
   }
   .user-row {
@@ -790,7 +807,7 @@
     color: var(--text-dim);
   }
   .no-members {
-    max-width: 760px;
+    max-width: var(--settings-col);
     margin-top: 16px;
   }
   .matrix-head,
@@ -840,22 +857,26 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .grant-title-row {
+  /* Section title + its transient "Saved" note on one line. */
+  .title-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    max-width: 760px;
+    gap: 10px;
+    max-width: var(--settings-col);
     margin-top: 24px;
   }
-  .grant-title-row .section-title {
+  .title-row .section-title {
     margin: 0;
   }
-  .grant-title-row + .sub {
+  .title-row + .sub {
     margin-top: 6px;
   }
-  .unsaved {
+  .saved {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-s);
-    color: var(--warning);
+    color: var(--success);
   }
   .grant-label {
     min-width: 0;

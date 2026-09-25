@@ -66,6 +66,16 @@
   };
   const channelLabel = (c: Channel): string => CHANNEL_LABELS[c];
 
+  // Agent CLI ids → the names people know them by.
+  const CLI_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', agy: 'Gemini (agy)' };
+  const cliName = (p: string): string => CLI_NAMES[p] ?? p.charAt(0).toUpperCase() + p.slice(1);
+
+  // A first-time setup needs the secret: without one the row stays "Not set
+  // up" after Save, which read as a silent failure.
+  const needsSecret = $derived(
+    editOpen && !integrations.find((i) => i.channel === editChannel)?.has_bot_token && fBotToken.trim() === '',
+  );
+
   // The inbound URL an external system POSTs to (host = this Otto daemon).
   const webhookUrl = $derived(wsId ? `${baseUrl()}/api/v1/webhooks/${wsId}` : '');
 
@@ -264,12 +274,13 @@
       : channel === 'webhook'
         ? 'no reply URL'
         : 'no default chat';
-    return `${target} · ${intg.agent_reply ? 'agent posts replies' : 'Otto posts replies'}`;
+    const line = `${target} · ${intg.agent_reply ? 'the agent posts replies' : 'Otto posts replies'}`;
+    return line.charAt(0).toUpperCase() + line.slice(1);
   }
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('channels')} subtitle="Slack, Telegram and webhook bridges for this workspace" />
+  <PageHeader title={sectionLabel('channels')} subtitle="Slack, Telegram and webhook bridges" />
   <PageBody width="readable">
   <SectionIntro>Configure Slack, Telegram and inbound webhook integrations per workspace. Tokens and webhook keys are stored in the <strong>macOS Keychain</strong>, never in Otto’s database.</SectionIntro>
 
@@ -330,11 +341,15 @@
                 {testBusy === channel ? 'Sending…' : 'Test…'}
               </button>
             {/if}
-            <button class="btn small ch-tool" onclick={() => openEdit(channel)}>{configured ? 'Edit' : 'Set up…'}</button>
             {#if configured}
+              <button class="icon-btn ch-tool" title="Edit {label} integration" aria-label="Edit {label} integration" onclick={() => openEdit(channel)}>
+                <Icon name="edit" size={14} />
+              </button>
               <button class="icon-btn ch-tool" title="Remove {label} integration" aria-label="Remove {label} integration" onclick={() => remove(channel)}>
                 <Icon name="trash" size={14} />
               </button>
+            {:else}
+              <button class="btn small ch-tool" onclick={() => openEdit(channel)}>Set up…</button>
             {/if}
           </div>
         </div>
@@ -490,7 +505,7 @@
       <select id="ch-cli" class="input" bind:value={fPreferredCli}>
         <option value="">Use default agent</option>
         {#each providers as p (p)}
-          <option value={p}>{p}</option>
+          <option value={p}>{cliName(p)}</option>
         {/each}
       </select>
       <span class="hint">
@@ -523,7 +538,12 @@
 
     {#snippet footer()}
       <button class="btn" onclick={() => (editOpen = false)}>Cancel</button>
-      <button class="btn primary" disabled={editBusy} onclick={save}>
+      <button
+        class="btn primary"
+        disabled={editBusy || needsSecret}
+        title={needsSecret ? `Enter the ${editChannel === 'webhook' ? 'webhook key' : 'bot token'} first` : undefined}
+        onclick={save}
+      >
         {editBusy ? 'Saving…' : 'Save'}
       </button>
     {/snippet}
@@ -542,7 +562,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .channel-card {
     display: flex;

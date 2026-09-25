@@ -15,6 +15,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   let groups = $state<AccessGroup[]>([]),
     roles = $state<AccessRole[]>([]),
     users = $state<User[]>([]);
@@ -35,6 +36,24 @@
     grantable = $state<string[]>([]);
   let membershipGeneration = 0;
   let loadGeneration = 0;
+  // Groups and role presets are two list/detail editors; showing one at a
+  // time (like Context library's Skills | Souls | Context) keeps ONE primary
+  // action on screen instead of two stacked forms each with its own.
+  let tab = $state<'groups' | 'presets'>('groups');
+  // Save stays disabled until something changed (layout.md → Settings form).
+  const groupDirty = $derived(
+    !selected || name.trim() !== selected.name || description.trim() !== (selected.description ?? ''),
+  );
+  const savedRole = $derived(roles.find((r) => r.id === roleId));
+  const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+  const roleDirty = $derived(
+    !savedRole ||
+      roleName.trim() !== savedRole.name ||
+      roleDescription.trim() !== (savedRole.description ?? '') ||
+      roleKind !== savedRole.kind ||
+      !sameSet(operations, savedRole.operations ?? []) ||
+      !sameSet(grantable, savedRole.grantable_operations ?? []),
+  );
   async function load() {
     const generation = ++loadGeneration;
     loading = true;
@@ -61,6 +80,12 @@
   onMount(() => {
     if (auth.isRoot) void load();
   });
+  // Typed-but-unsaved group or preset edits (a blank new form isn't "dirty").
+  const leaveDirty = $derived(
+    (selected ? groupDirty : !!(name.trim() || description.trim())) ||
+      (savedRole ? roleDirty : !!(roleName.trim() || roleDescription.trim() || operations.length)),
+  );
+  $effect(() => guardUnsaved(() => leaveDirty, { what: 'this group or preset' }));
   $effect(() =>
     resourceAccess.subscribe((change) => {
       if (change.type === 'reset' && change.identity) {
@@ -207,15 +232,28 @@
     subtitle="Reusable access rules across resources"
   />
   <PageBody width="readable">
-  <SectionIntro>Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong></SectionIntro>
+  <SectionIntro>
+    Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong>
+    Role presets are reusable sets of operations you copy into a resource rule.
+  </SectionIntro>
 <section class="access-groups">
   {#if !auth.isRoot}<p class="hint">Only the root account can manage groups and role presets.</p>
   {:else}
   <LoadState what="groups and role presets" {loading} error={loadError} empty={loading || !!loadError} rows={4} onretry={() => void load()}>
+    <div class="segmented tabs" role="group" aria-label="Show">
+      <button class:active={tab === 'groups'} aria-pressed={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
+        Groups <span class="count">{groups.length}</span>
+      </button>
+      <button class:active={tab === 'presets'} aria-pressed={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
+        Role presets <span class="count">{roles.length}</span>
+      </button>
+    </div>
     {#if error}<p role="alert" class="error"><Icon name="warning" size={12} /> {error}</p>{/if}
-    <section>
-      <h2 class="section-title">Groups <span class="count">{groups.length}</span></h2>
-      <div class="layout">
+    {#if tab === 'groups'}
+    <section aria-label="Groups">
+      <!-- An empty list hides its pane: the page opens on the create form. -->
+      <div class="layout" class:single={groups.length === 0}>
+        {#if groups.length}
         <div class="list-pane">
           <div class="list-head">
             <span class="list-label">{groups.length ? 'All groups' : 'No groups yet'}</span>
@@ -241,6 +279,7 @@
             {/each}
           </nav>
         </div>
+        {/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{selected ? selected.name : 'New group'}</legend>
           <div class="field"><label for="ag-name">Group name</label><input id="ag-name" class="input" bind:value={name} maxlength="120" placeholder="Database readers" /></div>
@@ -248,7 +287,11 @@
           <div class="actions">
             {#if selected}<button class="btn small danger" onclick={removeGroup}><Icon name="trash" size={12} /> Delete group…</button>{/if}
             <span class="grow"></span>
-            <button class="btn primary" disabled={!name.trim()} title={name.trim() ? undefined : 'Enter a group name'} onclick={saveGroup}
+            <button
+              class="btn primary"
+              disabled={!name.trim() || !groupDirty}
+              title={!name.trim() ? 'Enter a group name' : !groupDirty ? 'No changes to save' : undefined}
+              onclick={saveGroup}
               >{selected ? 'Save group' : 'Create group'}</button
             >
           </div>
@@ -293,12 +336,13 @@
         </fieldset>
       </div>
     </section>
-    <section>
-      <h2 class="section-title">Role presets <span class="count">{roles.length}</span></h2>
+    {:else}
+    <section aria-label="Role presets">
       <p class="hint">
         Copy a preset into a resource rule. Editing a preset does not change existing rules.
       </p>
-      <div class="layout">
+      <div class="layout" class:single={roles.length === 0}>
+        {#if roles.length}
         <div class="list-pane">
           <div class="list-head">
             <span class="list-label">{roles.length ? 'All presets' : 'No presets yet'}</span>
@@ -323,6 +367,7 @@
             {/each}
           </nav>
         </div>
+        {/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{roleId ? roleName || 'Preset' : 'New preset'}</legend>
           <div class="field"><label for="rp-name">Preset name</label><input id="rp-name" class="input" bind:value={roleName} maxlength="120" placeholder="Read-only analyst" /></div>
@@ -363,14 +408,15 @@
             <span class="grow"></span>
             <button
               class="btn primary"
-              disabled={!roleName.trim() || !operations.length}
-              title={!roleName.trim() ? 'Enter a preset name' : !operations.length ? 'Pick at least one operation' : undefined}
+              disabled={!roleName.trim() || !operations.length || !roleDirty}
+              title={!roleName.trim() ? 'Enter a preset name' : !operations.length ? 'Pick at least one operation' : !roleDirty ? 'No changes to save' : undefined}
               onclick={saveRole}>{roleId ? 'Save preset' : 'Create preset'}</button
             >
           </div>
         </fieldset>
       </div>
     </section>
+    {/if}
   </LoadState>
   {/if}
 </section>
@@ -390,7 +436,14 @@
     flex-direction: column;
     gap: 24px;
     color: var(--text);
-    max-width: 960px;
+    max-width: var(--settings-col);
+  }
+  .tabs {
+    align-self: flex-start;
+  }
+  .tabs .count {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .access-groups :global(section) {
     display: flex;
@@ -398,9 +451,6 @@
     gap: 8px;
   }
   p {
-    margin: 0;
-  }
-  .section-title {
     margin: 0;
   }
   .count {
@@ -427,6 +477,9 @@
     grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
     gap: 16px;
     align-items: start;
+  }
+  .layout.single {
+    grid-template-columns: minmax(0, 1fr);
   }
   .list-pane {
     display: flex;

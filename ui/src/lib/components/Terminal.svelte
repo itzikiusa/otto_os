@@ -1515,6 +1515,7 @@
          ARIA structure is inside the xterm canvas layer, not this host div. -->
     <div
       class="term-host"
+      class:ro={readOnly}
       class:force-dark={forceDark}
       class:rtl-bidi={ui.rtlBidi}
       bind:this={container}
@@ -1557,7 +1558,13 @@
     {/if}
 
     {#if readOnly}
-      <div class="ro-chip" title="Viewer role — input disabled">Read-only</div>
+      <!-- An in-flow strip ABOVE the output (the host is inset below it), so the
+           notice never sits on top of terminal text. -->
+      <div class="ro-strip" role="note">
+        <Icon name="lock" size={12} />
+        <span class="ro-label">Read-only</span>
+        <span class="ro-why" title="Your viewer role can watch this session but not type in it.">Your viewer role can watch this session but not type in it.</span>
+      </div>
     {/if}
 
     <!-- Task 5.1 + 5.3: phone-only floating control strip (keyboard + zoom).
@@ -1682,7 +1689,7 @@
     width: 180px;
     border: none;
     background: transparent;
-    font-size: 12px;
+    font-size: var(--fs-s);
     color: var(--text);
     outline: none;
   }
@@ -1707,7 +1714,7 @@
     width: 340px;
     max-height: 200px;
     overflow-y: auto;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-family: var(--font-mono);
   }
   .find-result-row {
@@ -1776,7 +1783,7 @@
     font-size: var(--fs-xs);
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 8px;
     border-radius: 999px;
     background: var(--surface-2);
@@ -1787,20 +1794,36 @@
     color: var(--danger);
     background: var(--danger-soft);
   }
-  .ro-chip {
+  /* Read-only notice: a slim strip across the top; the host starts below it. */
+  .term-host.ro {
+    top: 30px;
+  }
+  .ro-strip {
     position: absolute;
-    top: 8px;
-    inset-inline-end: 8px;
+    top: 0;
+    inset-inline: 0;
+    height: 24px;
     z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
     font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
     color: var(--text-dim);
     background: var(--surface-2);
-    border: 1px solid var(--border);
-    padding: 2px 7px;
-    border-radius: 999px;
-    opacity: 0.85;
+    border-bottom: 1px solid var(--border);
+    min-width: 0;
+  }
+  .ro-label {
+    font-weight: 600;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .ro-why {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* ── Task 5.1 + 5.3: phone-only floating controls (keyboard toggle + zoom) ──
@@ -1832,7 +1855,7 @@
     border: 1px solid var(--border, #444);
     background: color-mix(in srgb, var(--surface, #28282e) 85%, transparent);
     color: var(--text, #e8e8e0);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     cursor: pointer;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
@@ -1841,13 +1864,13 @@
     -webkit-backdrop-filter: blur(4px);
   }
   .phone-btn:active {
-    background: var(--accent, #0066cc);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .phone-btn.active {
-    background: var(--accent, #0066cc);
-    color: #fff;
-    border-color: var(--accent, #0066cc);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
 
   /* ── Desktop terminal toolbar (font zoom + copy-on-select) ─────────────
@@ -1884,7 +1907,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 100ms ease-out, color 100ms ease-out;
   }

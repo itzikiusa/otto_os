@@ -113,8 +113,8 @@
     flex-direction: column;
     gap: 4px;
     padding: 4px 6px;
-    background: var(--surface-2, #1e1e24);
-    border-top: 1px solid var(--border, #333);
+    background: var(--surface-2);
+    border-top: 1px solid var(--border);
     /* Prevent the bar itself from receiving touch-scroll events (it shouldn't scroll). */
     touch-action: none;
     user-select: none;
@@ -138,9 +138,9 @@
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-s, 6px);
-    border: 1px solid var(--border, #444);
-    background: var(--surface, #28282e);
-    color: var(--text, #e8e8e0);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
     font-size: 14px;
     font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
     cursor: pointer;
@@ -152,19 +152,19 @@
   }
 
   .key-btn:active:not(:disabled) {
-    background: var(--accent, #0066cc);
-    color: #fff;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
   }
 
   .key-btn.ctrl {
-    background: var(--surface-2, #1e1e24);
+    background: var(--surface-2);
     font-weight: 600;
   }
 
   .key-btn.ctrl.active {
-    background: var(--accent, #0066cc);
-    color: #fff;
-    border-color: var(--accent, #0066cc);
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+    border-color: var(--accent-solid);
   }
 
   .key-btn.arrow {

@@ -146,7 +146,8 @@
                     {b.name}
                     {#if info?.installed}<span class="chip ok">Installed{info.version ? ` · ${info.version}` : ''}</span>{/if}
                   </span>
-                  <span class="row-desc">{b.blurb} About {formatBytes(browserLive.downloadBytes(b.build))}.</span>
+                  <!-- The size is on the Download button when there is one; saying it twice read as clutter. -->
+                  <span class="row-desc">{b.blurb}{#if !(isAdmin && info && !info.installed && info.sha256_pinned)}{' '}About {formatBytes(browserLive.downloadBytes(b.build))}.{/if}</span>
                   {#if info && !info.sha256_pinned}
                     <span class="row-desc">This Otto build has no checksum for it, so it can't be downloaded.</span>
                   {/if}
@@ -239,12 +240,12 @@
     min-height: 0;
   }
   .bs-card {
-    max-width: 720px;
+    max-width: var(--settings-col);
     padding: 14px 16px;
     margin-bottom: 12px;
   }
   .note {
-    max-width: 720px;
+    max-width: var(--settings-col);
   }
   .toggle-card {
     padding-block: 6px;

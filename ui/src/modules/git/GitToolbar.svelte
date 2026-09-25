@@ -8,6 +8,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { runPull } from './pullFlow';
+  import { gitBridge } from './gitBridge.svelte';
 
   interface Props {
     repoId: string;
@@ -21,6 +22,14 @@
   let { repoId, status, onstatus, onrefresh }: Props = $props();
 
   let busy = $state('');
+
+  // Nothing to push: the branch tracks an upstream and has no local commits on
+  // top of it. (No upstream → the button is Publish, always available.)
+  const nothingToPush = $derived(status.upstream != null && status.ahead === 0);
+  // Known-empty stash list → Pop can only fail, so say so up front. Unknown
+  // (the graph hasn't reported yet) keeps it enabled.
+  const stashCount = $derived(gitBridge.stashCount[repoId]);
+  const nothingToPop = $derived(stashCount === 0);
 
   async function doFetch(): Promise<void> {
     busy = 'fetch';
@@ -209,12 +218,12 @@
   <!-- Push -->
   <button
     class="btn ghost tbtn"
-    disabled={busy !== ''}
+    disabled={busy !== '' || nothingToPush}
     onclick={() => void doPush()}
     title={status.upstream
       ? status.ahead > 0
         ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
-        : `Nothing to push — ${status.branch} matches ${status.upstream}`
+        : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
       : `Publish ${status.branch} to origin`}
   >
     <Icon name="arrowUp" size={14} />
@@ -243,7 +252,12 @@
   </button>
 
   <!-- Pop -->
-  <button class="btn ghost tbtn" disabled={busy !== ''} onclick={doPop} title="Apply the latest stash and drop it">
+  <button
+    class="btn ghost tbtn"
+    disabled={busy !== '' || nothingToPop}
+    onclick={doPop}
+    title={nothingToPop ? 'Nothing to pop — there are no stashes' : 'Apply the latest stash and drop it'}
+  >
     <Icon name="archive" size={14} />
     {busy === 'pop' ? 'Popping…' : 'Pop'}
   </button>
@@ -263,8 +277,8 @@
     align-items: center;
     gap: 5px;
     min-width: 0;
-    max-width: 260px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    max-width: 200px;
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 2px 8px;
@@ -283,6 +297,8 @@
     white-space: nowrap;
   }
   .ab {
+    display: inline-flex;
+    align-items: center;
     font-size: var(--fs-xs);
     font-weight: 600;
   }
@@ -331,6 +347,12 @@
      inside RepoView's header, so just give the buttons comfortable touch
      heights. ── */
   @media (max-width: 1024px) {
+    /* The toolbar scrolls here, so the chip needn't shrink — shrinking only
+       collapsed it to a bare icon on a phone. */
+    .branch-chip {
+      flex-shrink: 0;
+      max-width: 160px;
+    }
     .tbtn {
       height: 36px;
       padding: 0 11px;

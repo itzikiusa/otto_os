@@ -358,17 +358,37 @@ class VaultStore {
 
   async unregister(id: number): Promise<void> {
     if (this.current?.id === id && !(await this.canLeaveNote())) return;
-    await deleteVault(this.wsId, id);
+    const name = this.vaults.find((v) => v.id === id)?.name ?? 'the vault';
+    try {
+      await deleteVault(this.wsId, id);
+    } catch (e) {
+      toasts.error(`Couldn’t unregister “${name}”`, msg(e));
+      return;
+    }
     this.vaults = this.vaults.filter((v) => v.id !== id);
     if (this.current?.id === id) await this.load();
-    toasts.success('Vault unregistered (files untouched)');
+    toasts.success(`Unregistered “${name}”`, 'Its files are untouched. Add the folder again (Add vault…) to bring it back.');
   }
 
   async toggleOkf(): Promise<void> {
     if (!this.current) return;
-    const v = await patchVault(this.wsId, this.current.id, { okf: !this.current.okf });
-    this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
-    this.current = v;
+    const on = !this.current.okf;
+    try {
+      const v = await patchVault(this.wsId, this.current.id, { okf: on });
+      this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
+      this.current = v;
+    } catch (e) {
+      toasts.error(on ? 'Couldn’t turn OKF mode on' : 'Couldn’t turn OKF mode off', msg(e));
+    }
+  }
+
+  /** Router leave-guard (VaultPage): land a pending autosave before the page
+   *  goes away, so a failed save still toasts while the user can act on it.
+   *  Never blocks and never asks — the draft is also kept on this Mac and
+   *  restored on return, and a disk conflict is resolved from its banner. */
+  async flushBeforeLeave(): Promise<boolean> {
+    if ((this.dirty || this.saving) && !this.conflict) await this.saveNow().catch(() => false);
+    return true;
   }
 
   async rescan(): Promise<void> {

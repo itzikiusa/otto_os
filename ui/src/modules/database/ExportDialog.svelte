@@ -192,7 +192,7 @@
       <div class="exp-dir">
         <input class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
         <button class="tb-btn" onclick={() => (pickingDir = true)} title="Browse the daemon host">
-          <Icon name="folder" size={11} />Browse…
+          <Icon name="folder" size={12} />Browse…
         </button>
       </div>
     </div>

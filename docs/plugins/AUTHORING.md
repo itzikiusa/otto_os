@@ -93,6 +93,11 @@ window.addEventListener('message', (ev) => {
   // m.apiBase  -> call your backend: fetch(`${m.apiBase}/metrics`, {headers:{Authorization:`Bearer ${m.token}`}})
   // m.token    -> the user's bearer (for the gated /api/v1/plugins/<slug>/* calls)
   // m.theme    -> { '--bg', '--text', '--accent', ... } CSS vars to match Otto
+  // m.scheme   -> 'light' | 'dark'
+});
+// Otto re-sends the vars when the person changes light/dark, theme or accent:
+window.addEventListener('message', (ev) => {
+  if (ev.data?.type === 'otto:theme') applyTheme(ev.data.theme, ev.data.scheme);
 });
 ```
 

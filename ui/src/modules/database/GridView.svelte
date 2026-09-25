@@ -477,7 +477,7 @@
         <!-- Per-column filter (client-side, over the loaded rows). `td`, not
              `th`, so header counts stay one per column. -->
         <tr class="filter-row">
-          <td class="rownum"><Icon name="filter" size={11} /></td>
+          <td class="rownum"><Icon name="filter" size={12} /></td>
           {#each cols as ci (ci)}
             {@const c = result.columns[ci]}
             <td style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;">
@@ -526,7 +526,7 @@
                 aria-label="Duplicate row"
                 onclick={() => flow.duplicateRow(idx)}
               >
-                <Icon name="plus" size={11} />
+                <Icon name="plus" size={12} />
               </button>
             {/if}
           </td>

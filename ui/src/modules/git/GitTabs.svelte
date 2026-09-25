@@ -72,6 +72,37 @@
     );
   }
 
+  /** Tablist keys: Enter/Space open, ←/→ (Home/End) move + open, Delete or
+   *  Backspace closes (focus moves to the neighbour). RTL flips the arrows. */
+  function onTabKey(e: KeyboardEvent, id: string): void {
+    const ids = openRepos.map((r) => r.id);
+    const i = ids.indexOf(id);
+    const focusTab = (tid: string | undefined) => {
+      if (!tid) return;
+      onopen(tid);
+      queueMicrotask(() =>
+        listEl?.querySelector<HTMLElement>(`[data-repo-id="${CSS.escape(tid)}"]`)?.focus(),
+      );
+    };
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onopen(id);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const rtl = listEl ? getComputedStyle(listEl).direction === 'rtl' : false;
+      const fwd = e.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+      focusTab(ids[(i + (fwd ? 1 : -1) + ids.length) % ids.length]);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      focusTab(e.key === 'Home' ? ids[0] : ids[ids.length - 1]);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      const next = ids[i + 1] ?? ids[i - 1];
+      git.closeRepoTab(id);
+      if (next) focusTab(next);
+    }
+  }
+
   // ── Drag-to-reorder (mirrors shell/TabBar) ───────────────────────────────
   let dragId = $state<string | null>(null);
   let dragOverId = $state<string | null>(null);
@@ -126,13 +157,13 @@
       class:active={git.activeRepoId === r.id}
       class:drag-over={dragOverId === r.id}
       role="tab"
-      tabindex="0"
+      tabindex={git.activeRepoId === r.id || (!git.activeRepoId && r.id === openRepos[0]?.id) ? 0 : -1}
       aria-selected={git.activeRepoId === r.id}
       data-repo-id={r.id}
       draggable="true"
       title={branchOf(r.id) ? `${r.path}\n${branchOf(r.id)}` : r.path}
       onclick={() => onopen(r.id)}
-      onkeydown={(e) => e.key === 'Enter' && onopen(r.id)}
+      onkeydown={(e) => onTabKey(e, r.id)}
       ondragstart={(e) => onDragStart(e, r.id)}
       ondragover={(e) => onDragOver(e, r.id)}
       ondragleave={() => onDragLeave(r.id)}
@@ -154,8 +185,9 @@
       {/if}
       <button
         class="git-tab-close"
-        title="Close tab"
-        aria-label="Close tab"
+        tabindex="-1"
+        title="Close {r.name}"
+        aria-label="Close {r.name}"
         onclick={(e) => {
           e.stopPropagation();
           git.closeRepoTab(r.id);
@@ -255,11 +287,14 @@
     text-overflow: ellipsis;
     font-weight: 500;
   }
+  /* A short branch ("main") keeps its full width; the repo name gives way
+     first. Long branches still ellipsize at the cap. */
   .git-tab-branch {
     display: inline-flex;
     align-items: center;
     gap: 3px;
     min-width: 0;
+    flex-shrink: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     max-width: 120px;

@@ -169,13 +169,14 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
   await row.click();
   await expect(page.locator('[data-testid="skill-name"]')).toHaveText(SKILL);
   await expect(page.locator('[data-testid="skill-preview"] h2', { hasText: 'Workflow' })).toBeVisible();
-  await expect(page.getByRole('complementary', { name: 'Skill metadata' })).toContainText('review');
+  // Metadata card (frontmatter); the category shows once, as the header chip.
+  await expect(page.getByRole('complementary', { name: 'Skill metadata' })).toContainText('v1');
+  await expect(page.locator('[data-testid="skill-detail"] .d-meta')).toContainText('review');
 
-  // Edit: the multi-file editor (library copies are editable).
-  await page.getByRole('tab', { name: 'Edit', exact: true }).click();
-  await expect(page.locator('[data-testid="skill-view"]')).toContainText('## Workflow');
-  await page.locator('[data-testid="edit-skill"]').click();
-  await expect(page.locator('[data-testid="skill-editor"]')).toBeVisible();
+  // Files: the multi-file editor (library copies are editable in place).
+  await page.getByRole('tab', { name: 'Files', exact: true }).click();
+  await expect(page.locator('[data-testid="skill-editor"]')).toContainText('## Workflow');
+  await expect(page.locator('[data-testid="save-skill"]')).toBeDisabled();
 
   // Evals / Usage: honest states from existing data (no eval runs here).
   await page.getByRole('tab', { name: 'Evals', exact: true }).click();
@@ -194,8 +195,8 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
   await page.locator('[data-testid="new-skill-name"]').fill(`${SKILL}-two`);
   await page.locator('[data-testid="create-skill"]').click();
   await expect(page.locator('[data-testid="skill-name"]')).toHaveText(`${SKILL}-two`, { timeout: 15_000 });
-  await expect(page.getByRole('tab', { name: 'Edit', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('[data-testid="skill-view"]')).toContainText('## When to use');
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('[data-testid="skill-editor"]')).toContainText('## When to use');
   // Clean up the extra library skill so reruns start clean.
   const { ctx: c2, base: b2 } = await apiCtx();
   await c2.delete(`${b2}/api/v1/library/skills/${SKILL}-two`);

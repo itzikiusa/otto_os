@@ -764,7 +764,12 @@
     {/if}
   </div>
 
-  {#if summary}
+  {#if summarizing && !summary}
+    <div class="summary" role="status">
+      <div class="summary-head"><span>Summary · drafted by Otto</span></div>
+      <p class="dim-line">Summarizing this page…</p>
+    </div>
+  {:else if summary}
     <div class="summary">
       <div class="summary-head">
         <span>Summary · drafted by Otto</span>
@@ -972,6 +977,9 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     margin-bottom: 6px;
+  }
+  .summary .dim-line {
+    color: var(--text-dim);
   }
   .summary p {
     /* A long summary scrolls in place instead of shoving the page off-screen. */

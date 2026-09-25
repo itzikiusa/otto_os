@@ -1,13 +1,18 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { SessionNetwork } from '../../lib/api/types';
   import NetworkProfilePicker from './NetworkProfilePicker.svelte';
-  let { sessionId, workspaceId, selectedProfileId = '', editable = false, manageEditable = false, onchange }: {
-    sessionId: string; workspaceId: string; selectedProfileId?: string; editable?: boolean; manageEditable?: boolean; onchange?: (id: string) => Promise<void>;
+  import Icon from '../../lib/components/Icon.svelte';
+  let { sessionId, workspaceId, selectedProfileId = '', editable = false, manageEditable = false, defaultOpen = false, onchange }: {
+    sessionId: string; workspaceId: string; selectedProfileId?: string; editable?: boolean; manageEditable?: boolean;
+    /** Start expanded (opened on purpose from the session's ⋯ menu). */
+    defaultOpen?: boolean;
+    onchange?: (id: string) => Promise<void>;
   } = $props();
   let network = $state<SessionNetwork | null>(null);
   let error = $state('');
-  let open = $state(false);
+  let open = $state(untrack(() => defaultOpen));
   let busy = $state(false);
   let refresh = $state(0);
   // Status enum → words ("disabled" means no profile: a direct connection).
@@ -40,7 +45,10 @@
   }
 </script>
 <details class="network" bind:open data-testid="network-status">
-  <summary>Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Loading…'}{#if network?.restart_required} · Restart required{/if}</summary>
+  <summary aria-expanded={open}>
+    <span class="chev" class:open aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
+    <span class="sum-text">Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Loading…'}{#if network?.restart_required}{' · '}<span class="warn">Restart required</span>{/if}</span>
+  </summary>
   <div class="contents">
     {#if network?.status === 'connected'}<p>SSH forwards ready. Service health is not checked.</p>{/if}
     {#if network?.error}<p class="error" role="alert">{network.error} Restart the session to rebuild its forwards.</p>{/if}
@@ -53,7 +61,7 @@
       </div>
     {/each}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
-    <button type="button" onclick={() => refresh++}>Refresh network status</button>
+    <button type="button" class="btn small" onclick={() => refresh++}>Refresh network status</button>
     {#if editable && onchange}
       <NetworkProfilePicker {workspaceId} value={selectedProfileId} onchange={(id) => void choose(id)} editable={manageEditable} disabled={busy} />
       <p>Profile changes apply on the next restart.</p>
@@ -62,8 +70,15 @@
 </details>
 <style>
   .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: var(--fs-xs); }
-  summary { cursor: pointer; padding: 5px 9px; overflow-wrap: anywhere; color: var(--text-dim); }
+  summary { cursor: pointer; padding: 5px 9px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary:hover { color: var(--text); }
+  .chev { display: inline-flex; flex-shrink: 0; transition: transform 120ms ease-out; }
+  .chev.open { transform: rotate(90deg); }
+  :global([dir='rtl']) .chev:not(.open) { transform: scaleX(-1); }
+  .sum-text { min-width: 0; overflow-wrap: anywhere; }
+  .warn { color: var(--warning); }
+  @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
   .contents { max-height: 40vh; overflow: auto; padding: 5px 9px; } .endpoint { display: grid; gap: 3px; margin-block: 8px; }
   code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--danger); }
-  button { color: var(--text); background: var(--surface-2); border: 1px solid var(--border); padding: 5px; border-radius: 4px; }
 </style>

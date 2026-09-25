@@ -485,7 +485,7 @@
         {#each podOpts as p (p)}<option value={p}>{p}</option>{/each}
       </select>
       {#if hasFilter}
-        <button class="btn small ghost" onclick={clearFilters} data-testid="k8s-fleet-clear"><Icon name="x" size={11} /> Clear</button>
+        <button class="btn small ghost" onclick={clearFilters} data-testid="k8s-fleet-clear"><Icon name="x" size={12} /> Clear</button>
       {/if}
     </div>
   </div>
@@ -841,7 +841,7 @@
     color: var(--text-dim);
   }
   .kpi .v {
-    font-size: 20px;
+    font-size: var(--fs-xl);
     font-weight: 700;
     line-height: 1.1;
   }

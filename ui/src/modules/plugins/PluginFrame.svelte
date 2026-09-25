@@ -1,7 +1,8 @@
 <script lang="ts">
   // Hosts a runtime plugin's UI in an iframe served by the daemon at
   // /plugins/<slug>/ui/. After load, we hand the iframe its API base + bearer
-  // token + theme via postMessage (the plugin SDK listens for `otto:init`).
+  // token + theme via postMessage (the plugin SDK listens for `otto:init`),
+  // then re-sends the theme as `otto:theme` whenever the appearance changes.
   //
   // Keyboard chords: an focused iframe swallows keydown, so global shell
   // shortcuts (⌘⇧←, ⌘K …) die inside plugin pages. Plugins forward
@@ -20,8 +21,10 @@
   import { plugins } from '../../lib/stores/plugins.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   let { slug }: { slug: string } = $props();
 
@@ -73,7 +76,14 @@
 
   function themeVars(): Record<string, string> {
     const cs = getComputedStyle(document.documentElement);
-    const pick = ['--bg', '--text', '--text-dim', '--accent', '--border'];
+    // The semantic set a plugin needs to look native: surfaces, text, the
+    // accent trio, status tones, border/radius and the two font stacks.
+    const pick = [
+      '--bg', '--surface', '--surface-2', '--text', '--text-dim', '--border',
+      '--accent', '--accent-solid', '--accent-contrast', '--accent-text', '--accent-soft',
+      '--danger', '--warning', '--success', '--info',
+      '--radius-s', '--radius-m', '--font-ui', '--font-mono',
+    ];
     const out: Record<string, string> = {};
     for (const v of pick) out[v] = cs.getPropertyValue(v).trim();
     return out;
@@ -88,6 +98,7 @@
         apiBase: `${baseUrl()}/api/v1/plugins/${slug}`,
         token: getToken(),
         theme: themeVars(),
+        scheme: ui.resolvedScheme,
         // The live agent-provider registry (built-ins + custom, e.g. grok) so a
         // plugin's provider pickers stay in sync with Otto — never hardcoded.
         providers: agentProviders(),
@@ -95,6 +106,20 @@
       origin,
     );
   }
+
+  // Follow the app's appearance live: a light/dark, theme or accent change
+  // after load re-sends the vars as `otto:theme` so an open plugin never stays
+  // in the old scheme. (The attributes/vars are applied synchronously by the
+  // ui store, so computed style is already current here.)
+  $effect(() => {
+    const scheme = ui.resolvedScheme;
+    void ui.theme;
+    void ui.accent;
+    if (!frameLoaded) return;
+    untrack(() => {
+      frame?.contentWindow?.postMessage({ type: 'otto:theme', theme: themeVars(), scheme }, origin);
+    });
+  });
 
   function onMessage(ev: MessageEvent) {
     const m = ev.data;
@@ -128,12 +153,29 @@
 <!-- Same chrome as every built-in module: the plugin's name in the shared
      header bar, its own UI below. -->
 <div class="plugin-page">
-  <PageHeader title={name} />
+  <PageHeader title={name}>
+    {#snippet actions()}
+      {#if probe === 'ok'}
+        <!-- A plugin page can wedge or go stale like any web page: reload it
+             in place (re-probes, re-sends otto:init) without leaving. -->
+        <button class="icon-btn" data-icon="refresh" onclick={() => void check()} aria-label="Reload {name}" title="Reload {name}">
+          <Icon name="refresh" size={14} />
+        </button>
+      {/if}
+      <!-- Not while the page is missing: its empty state already offers it. -->
+      {#if auth.isRoot && probe !== 'missing'}
+        <button class="icon-btn" data-icon="gear" data-overflow="-1" onclick={() => router.go('settings/plugins')} aria-label="Plugin settings" title="Plugin settings">
+          <Icon name="gear" size={14} />
+        </button>
+      {/if}
+    {/snippet}
+  </PageHeader>
   {#if probe === 'ok'}
     <div class="pf-host">
       <iframe
         bind:this={frame}
-        title={slug}
+        title={`${name} plugin`}
+        data-plugin={slug}
         {src}
         onload={onload}
         allow="clipboard-write"

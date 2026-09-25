@@ -221,7 +221,7 @@
             <div class="favorite-row">
               <button title={path} disabled={loading} class:current={path === view?.path} onclick={() => load(path)}>{folderName(path)}</button>
               <button class="remove-favorite" aria-label={`Remove ${folderName(path)} from favorites`} title="Remove favorite"
-                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}>×</button>
+                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}><Icon name="x" size={10} /></button>
             </div>
           {:else}<p class="dim">Save a folder with Add favorite.</p>{/each}
         </div>
@@ -317,19 +317,19 @@
   .favorite-action { margin-inline-start: auto; }
   .pick-content { display: flex; gap: 10px; min-width: 0; }
   .shortcuts { flex: 0 0 145px; min-width: 0; }
-  .shortcuts h4 { font-size: 11px; color: var(--text-dim); margin: 5px 6px; }
+  .shortcuts h4 { font-size: var(--fs-xs); color: var(--text-dim); margin: 5px 6px; }
   .shortcuts section + section { margin-top: 10px; }
   .shortcut-list { max-height: 130px; overflow-y: auto; }
-  .shortcut-list p { font-size: 11px; margin: 6px; }
+  .shortcut-list p { font-size: var(--fs-xs); margin: 6px; }
   .shortcut-list button {
     display: block; width: 100%; padding: 5px 6px; border: 0;
     border-radius: var(--radius-s); background: transparent; color: var(--text);
-    text-align: start; font-size: 12px; cursor: pointer;
+    text-align: start; font-size: var(--fs-s); cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .favorite-row { display: flex; align-items: center; min-width: 0; }
   .favorite-row > button:first-child { flex: 1; min-width: 0; }
-  .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; text-align: center; color: var(--text-dim); }
+  .shortcut-list .remove-favorite { width: 24px; flex: 0 0 24px; display: grid; place-items: center; color: var(--text-dim); }
   .shortcut-list button:hover, .shortcut-list button.current { background: var(--surface-2); }
   @media (max-width: 520px) {
     .pick-content { flex-direction: column; }
@@ -344,7 +344,7 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     padding: 2px 2px 10px;
     overflow-x: auto;
@@ -378,7 +378,7 @@
     align-items: center;
     gap: 5px;
     flex-shrink: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
     white-space: nowrap;
@@ -417,7 +417,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 13px;
+    font-size: var(--fs-m);
     cursor: pointer;
     text-align: start;
     min-width: 0;
@@ -433,7 +433,7 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .use-file {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     flex-shrink: 0;
     margin-inline-end: 4px;
   }
@@ -441,7 +441,7 @@
     flex-shrink: 0;
     margin-inline-end: 8px;
     padding: 3px 10px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -463,9 +463,9 @@
   }
   .pad {
     padding: 14px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
-  .last-opened { font-size: 11px; margin-bottom: 3px; }
+  .last-opened { font-size: var(--fs-xs); margin-bottom: 3px; }
   .err {
     overflow-wrap: anywhere;
     color: var(--danger);

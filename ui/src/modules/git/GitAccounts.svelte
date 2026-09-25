@@ -111,6 +111,15 @@
     return `expires ${new Date(iso).toLocaleDateString()}`;
   }
 
+  /** Same rule as Jira accounts: 'expired', 'soon' (within 14 days) or ''. */
+  function expiryWarning(iso: string | null): '' | 'soon' | 'expired' {
+    if (!iso) return '';
+    const days = Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
+    if (days < 0) return 'expired';
+    if (days <= 14) return 'soon';
+    return '';
+  }
+
   const providerHints: Record<GitProviderKind, string> = {
     github: 'Personal access token (classic or fine-grained) with repo scope.',
     bitbucket: 'App password with pullrequest read/write scopes.',
@@ -236,7 +245,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('git-accounts')} subtitle="Keychain tokens for PR actions and HTTPS pushes">
+  <PageHeader title={sectionLabel('git-accounts')} subtitle="Tokens for pull requests and HTTPS pushes">
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
@@ -260,6 +269,7 @@
     {/snippet}
     <div class="acct-list">
       {#each accounts as a (a.id)}
+        {@const warn = expiryWarning(a.token_expires_at)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="acct card"
@@ -275,13 +285,18 @@
             <div class="acct-label">
               <span class="acct-name" title={a.label}>{a.label}</span>
               <span class="chip">{PROVIDER_LABELS[a.provider] ?? a.provider}</span>
+              {#if warn === 'expired'}
+                <span class="chip bad" title="The token has expired — edit the account and paste a new one">Token expired</span>
+              {:else if warn === 'soon'}
+                <span class="chip chip-warn" title="Update the token before it lapses">{expiryLabel(a.token_expires_at!).replace(/^./, (c) => c.toUpperCase())}</span>
+              {/if}
             </div>
             <div class="acct-sub">
               {a.username}
               {#if a.namespace}· <span class="mono">{a.namespace}</span>{/if}
               {#if a.api_base_url}· <span class="mono">{a.api_base_url}</span>{/if}
-              {#if a.token_expires_at}
-                · <span class="expiry" class:expired={new Date(a.token_expires_at).getTime() <= Date.now()}>{expiryLabel(a.token_expires_at)}</span>
+              {#if a.token_expires_at && !warn}
+                · <span class="expiry">{expiryLabel(a.token_expires_at)}</span>
               {/if}
             </div>
             {#if testResults[a.id]}
@@ -426,7 +441,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .acct {
     display: flex;
@@ -467,9 +482,10 @@
     margin-top: 2px;
     overflow-wrap: anywhere;
   }
-  .expiry.expired {
-    color: var(--danger);
-    font-weight: 600;
+  .chip-warn {
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
   }
   /* Inline connection-test verdict (row + form); the provider's own error
      text follows the words. */

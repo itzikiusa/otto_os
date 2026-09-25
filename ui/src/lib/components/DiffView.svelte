@@ -281,7 +281,7 @@
 <style>
   .dv {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.45;
     overflow: auto;
     border: 1px solid var(--border);

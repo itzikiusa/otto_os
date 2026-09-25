@@ -512,7 +512,7 @@
     word-break: break-all;
   }
   .gid.big {
-    font-size: 14px;
+    font-size: var(--fs-l);
   }
   .badges {
     display: flex;

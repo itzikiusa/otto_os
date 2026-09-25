@@ -396,6 +396,8 @@
 
   // ── Stashes (read-only `git stash list`) ──────────────────────────────────
   let stashes: StashInfo[] = $state([]);
+  /** The stash list has been read for the current repo (vs the reset `[]`). */
+  let stashesKnown = $state(false);
 
   // ── Worktrees + submodules (sidebar sections; best-effort like stashes) ───
   let worktrees: WorktreeInfo[] = $state([]);
@@ -468,9 +470,13 @@
 
     // Stashes are best-effort: a failure (or empty list) just leaves the section
     // empty; it must never block the graph from rendering.
+    stashesKnown = false;
     void api
       .get<StashInfo[]>(`/repos/${id}/stashes`)
-      .then((s) => (stashes = s))
+      .then((s) => {
+        stashes = s;
+        stashesKnown = true;
+      })
       .catch(() => (stashes = []));
 
     // Worktrees + submodules: same best-effort contract as stashes.
@@ -587,7 +593,13 @@
         .catch((e) => {
           if (commits.length === 0) commitsError = loadErrorText(e);
         }),
-      api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
+      api
+        .get<StashInfo[]>(`/repos/${repoId}/stashes`)
+        .then((s) => {
+          stashes = s;
+          stashesKnown = true;
+        })
+        .catch(() => {}),
       api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
     ]);
   }
@@ -779,7 +791,7 @@
   async function revertCommit(c: CommitInfo): Promise<void> {
     const ok = await confirmer.ask(
       `Revert commit ${c.short_sha} — "${c.subject}"? This creates a new commit undoing its changes.`,
-      { title: 'Revert commit', confirmLabel: 'Revert', danger: true },
+      { title: 'Revert commit', confirmLabel: 'Revert', danger: false },
     );
     if (!ok) return;
     await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
@@ -1737,6 +1749,13 @@
   // commits (the index/untracked parents = parents[1..]; parents[0] is the base
   // commit = real history, left alone). Commits in the log matching either get a
   // dashed, de-emphasised "stash plumbing" treatment instead of a normal node.
+  // Publish the stash count for the toolbar's Pop (see gitBridge.stashCount).
+  // Only once the list is known for THIS repo — the loader resets it to [].
+  $effect(() => {
+    const id = repoId;
+    const n = stashes.length;
+    if (stashesKnown) gitBridge.stashCount[id] = n;
+  });
   const stashShas = $derived(new Set(stashes.map((s) => s.sha)));
   const stashHelperShas = $derived.by(() => {
     const set = new Set<string>();
@@ -2848,7 +2867,7 @@
              which holds the graph) so the ref gutter isn't read as part of the
              commit text. Sticky so it survives scrolling a long history. -->
         <div class="graph-head" aria-hidden="true">
-          <span class="gh-branch">BRANCH / TAG</span>
+          <span class="gh-branch" title="Branch / tag">BRANCH / TAG</span>
           <!-- The label is hidden (not clipped to "GRA") when a 1-lane gutter is
                too narrow to hold it at the readable size. -->
           <span class="gh-graph" class:gh-label-hidden={gutterWidth < 40} style="width: {gutterWidth}px" title="Graph">GRAPH</span>
@@ -3173,33 +3192,31 @@
       <!-- Header -->
       <div class="detail-header">
         <div class="detail-header-main">
+          <!-- One line that never wraps: sha, the refs (each ellipsizes its own
+               label, the group shrinks first), then close pinned at the end. -->
           <div class="detail-title-row">
             <span class="mono detail-sha">{selectedCommit.short_sha}</span>
-            {#each chipsFor(selectedCommit) as chip}
-              <span
-                class="ref-chip kind-{chip.kind}"
-                class:current-chip={chip.current}
-                class:is-worktree={chip.worktree && !chip.current}
-                title={chip.worktree && !chip.current
-                  ? `Worktree · ${chip.label}`
-                  : chip.current
-                    ? `Checked out · ${chip.label}`
-                    : chip.label}
-              >
-                {#if chip.current}<Icon name="check" size={8} />{/if}
-                {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-                {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-                {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
-                {chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}
-              </span>
-            {/each}
-            {#if selectedBranch}
-              <span class="on-branch-hint" title="On branch {selectedBranch}">
-                <Icon name="branch" size={9} /> {selectedBranch}
-              </span>
-            {/if}
-            <span class="grow"></span>
+            <span class="detail-refs">
+              {#each chipsFor(selectedCommit) as chip}
+                <span
+                  class="ref-chip kind-{chip.kind}"
+                  class:current-chip={chip.current}
+                  class:is-worktree={chip.worktree && !chip.current}
+                  title={chip.worktree && !chip.current
+                    ? `Worktree · ${chip.label}`
+                    : chip.current
+                      ? `Checked out · ${chip.label}`
+                      : chip.label}
+                >
+                  {#if chip.current}<Icon name="check" size={8} />{/if}
+                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
+                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
+                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
+                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                  <span class="chip-label">{chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}</span>
+                </span>
+              {/each}
+            </span>
             <button class="icon-btn detail-close" onclick={clearSelection} title="Close commit detail" aria-label="Close commit detail">
               <Icon name="x" size={14} />
             </button>
@@ -3209,6 +3226,11 @@
             <span class="detail-author">{selectedCommit.author}</span>
             <span class="dim detail-dot">·</span>
             <span class="dim detail-date">{fmtDate(selectedCommit.date)}</span>
+            {#if selectedBranch && !chipsFor(selectedCommit).some((c) => c.label === selectedBranch)}
+              <span class="on-branch-hint" title="On branch {selectedBranch}">
+                <Icon name="branch" size={12} /><span class="chip-label">{selectedBranch}</span>
+              </span>
+            {/if}
           </div>
         </div>
       </div>
@@ -3665,7 +3687,7 @@
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
-    --branch-col-w: 88px;
+    --branch-col-w: 108px;
     flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
     width: auto;
     min-width: 300px;
@@ -3714,6 +3736,7 @@
     padding-inline: 6px;
     overflow: hidden;
     white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .graph-head .gh-graph {
     flex-shrink: 0;
@@ -4167,6 +4190,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
+    min-width: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -4276,7 +4300,22 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .detail-sha {
+    flex-shrink: 0;
+  }
+  .detail-refs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .detail-refs .ref-chip {
+    flex-shrink: 1;
+    min-width: 0;
   }
   .detail-sha {
     font-size: var(--fs-xs);
@@ -4295,6 +4334,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
     font-size: var(--fs-xs);
   }
   .detail-author {
@@ -4311,10 +4351,12 @@
   }
   .detail-date {
     font-size: var(--fs-xs);
+    flex-shrink: 0;
   }
   /* An .icon-btn; only its placement is local. */
   .detail-close {
     margin-inline-start: auto;
+    flex-shrink: 0;
   }
 
   /* Diff area */

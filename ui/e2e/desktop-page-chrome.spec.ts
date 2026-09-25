@@ -130,8 +130,10 @@ test('header actions overflow into a ⋯ menu that stays inside the viewport', a
   // Actions never wrap: the bar keeps its single-row height…
   const row = await header.locator('.ph-row').boundingBox();
   expect(Math.round(row!.height)).toBe(46);
-  // …and the low-priority ones moved behind ⋯.
+  // …and the low-priority ones sit behind ⋯ (the editor keeps its panel
+  // toggles and one-off tools there at every width; exactly one ⋯).
   const more = header.getByRole('button', { name: 'More actions' });
+  await expect(more).toHaveCount(1);
   await expect(more).toBeVisible();
   // Every visible action sits inside the header row (nothing spilled out).
   const actions = header.locator('.ph-actions > :not([data-ph-hidden])');
@@ -153,9 +155,10 @@ test('header actions overflow into a ⋯ menu that stays inside the viewport', a
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
 
-  // Wide enough → no overflow menu at all.
+  // Wide enough → still one ⋯ (the page's own; nothing auto-collapsed beside it).
   await page.setViewportSize({ width: 1800, height: 900 });
-  await expect(more).toHaveCount(0);
+  await expect(more).toHaveCount(1);
+  await expect(header.locator('.ph-actions > [data-ph-hidden]')).toHaveCount(0);
 });
 
 test('a list/detail page opens on its first item and restores the last one', async ({ page }) => {

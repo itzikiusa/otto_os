@@ -4,6 +4,7 @@
 // singleton-class + Svelte-5-runes pattern as database.svelte.ts.
 
 import { api, authedBlobUrl, authedText, ApiError } from '../api/client';
+import { loadErrorText } from '../loadError';
 import { ws } from './workspace.svelte';
 import type { Session, ProductLens } from '../api/types';
 import type {
@@ -184,6 +185,13 @@ class ProductStore {
   loadingLearnings = $state(false);
   loadingTranscripts = $state(false);
 
+  // ── Load errors (human text; see `loadErrorText`) ─────────────────────────
+  /** Last failed story-list load — inline with Retry, never "no stories yet".
+   *  `loadStories` still rethrows so existing callers keep their handling. */
+  error: string | null = $state(null);
+  /** Last failed story-detail load (same contract; `loadDetail` rethrows). */
+  detailError: string | null = $state(null);
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /** Return the current workspace id, or throw if none is active. */
@@ -207,6 +215,10 @@ class ProductStore {
     this.loadingStories = true;
     try {
       this.stories = await api.get<ProductStory[]>(`/workspaces/${wsId}/product/stories`);
+      this.error = null;
+    } catch (e) {
+      this.error = loadErrorText(e);
+      throw e;
     } finally {
       this.loadingStories = false;
     }
@@ -236,7 +248,13 @@ class ProductStore {
       const detail = await api.get<ProductStoryDetail>(`/product/stories/${id}`);
       // A later select() (e.g. a click right after the page auto-selected its
       // first story) owns `detail` now — drop this stale response.
-      if (this.selectedId === id) this.detail = detail;
+      if (this.selectedId === id) {
+        this.detail = detail;
+        this.detailError = null;
+      }
+    } catch (e) {
+      if (this.selectedId === id) this.detailError = loadErrorText(e);
+      throw e;
     } finally {
       this.loadingDetail = false;
     }

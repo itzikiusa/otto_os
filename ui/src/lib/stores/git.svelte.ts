@@ -3,6 +3,7 @@
 // the Git module manages its own deeper state on top).
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type {
   ConflictFile,
   Id,
@@ -146,12 +147,18 @@ class GitStore {
   subTab: Record<string, string> = $state({});
   /** True once the page has loaded the global repo list at least once. */
   allReposLoaded = $state(false);
+  /** Last failed {@link loadAllRepos} (human text). While set, `allRepos` is the
+   *  last KNOWN list (or empty on a first failure) — never "you have no repos". */
+  allReposError: string | null = $state(null);
 
   // ── Per-repo status (single source of truth) ───────────────────────────────
   // Each open tab's branch chip (GitTabs), the active repo's toolbar (RepoView)
   // and the auto-fetch loop all read/write THIS map, so one fetch updates every
   // view. `null` is an in-flight / load-attempted marker.
   statusById: Record<string, RepoStatusResp | null> = $state({});
+  /** Per-repo status-load failure (human text); cleared on the next success. A
+   *  stale `statusById` entry stays in place alongside it. */
+  statusErrorById: Record<string, string> = $state({});
 
   // ── Auto-fetch: a quiet background `git fetch` for the OPEN tabs so each tab's
   // ahead/behind chip stays live. Polls only the repos the user has open
@@ -206,8 +213,10 @@ class GitStore {
     try {
       this.allRepos = await api.get<Repo[]>('/git/repos');
       this.allReposLoaded = true;
-    } catch {
-      this.allRepos = [];
+      this.allReposError = null;
+    } catch (e) {
+      // Keep the last known list; the page shows the error with Retry.
+      this.allReposError = loadErrorText(e);
     } finally {
       this.loading = false;
     }
@@ -429,8 +438,13 @@ class GitStore {
     try {
       const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
       this.setStatus(repoId, s);
-    } catch {
-      /* keep stale status */
+      if (repoId in this.statusErrorById) {
+        const { [repoId]: _cleared, ...rest } = this.statusErrorById;
+        this.statusErrorById = rest;
+      }
+    } catch (e) {
+      // Keep the stale status on screen, but say it couldn't be refreshed.
+      this.statusErrorById = { ...this.statusErrorById, [repoId]: loadErrorText(e) };
     }
   }
 

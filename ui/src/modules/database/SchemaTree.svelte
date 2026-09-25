@@ -403,7 +403,7 @@
 <div class="schema-tree" role="tree" aria-label="Schema" tabindex="0" bind:this={treeEl} onkeydown={onTreeKey}>
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
-      <Icon name="search" size={11} />
+      <Icon name="search" size={12} />
       <input
         class="tree-search-input"
         type="text"
@@ -460,7 +460,7 @@
       <div class="tree-error-head"><Icon name="warning" size={12} />Couldn't connect</div>
       <div class="tree-error-msg">{database.activeConnStatus.error}</div>
       <button class="btn small tree-error-retry" onclick={() => database.retryConnection()}>
-        <Icon name="refresh" size={11} />Retry
+        <Icon name="refresh" size={12} />Retry
       </button>
     </div>
   {:else if database.schemaRoot.length === 0}
@@ -479,7 +479,7 @@
     {:else}
       <div class="hit-head">
         <button class="back-btn" onclick={clearSearch} title="Back to the schema tree (Esc)">
-          <Icon name="chevronLeft" size={11} />Tree
+          <Icon name="chevronLeft" size={12} />Tree
         </button>
         <span>
           {hits.length}{database.objectSearchTruncated ? '+' : ''} match{hits.length === 1
@@ -541,7 +541,7 @@
         {#if database.isLoadingNode(node.id)}
           <span class="spin"><Icon name="refresh" size={10} /></span>
         {:else}
-          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         {/if}
       </button>
     {:else}

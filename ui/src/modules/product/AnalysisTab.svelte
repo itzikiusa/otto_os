@@ -1,5 +1,6 @@
 <script lang="ts">
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
+  import { rel } from '../../lib/stores/now.svelte';
   import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -344,7 +345,7 @@
 
   function fmtDate(s: string | null): string {
     if (!s) return '';
-    try { return new Date(s).toLocaleString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 
   // Separate summarizer agent from regular lens agents
@@ -1081,36 +1082,6 @@
     color: var(--warning);
   }
 
-  /* ── Shared small button — mirror PR review's .btn.small.ghost ── */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border-radius: var(--radius-s);
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    transition: color 100ms, border-color 100ms, background 100ms;
-    white-space: nowrap;
-  }
-  .btn.small {
-    height: 22px;
-    padding: 0 9px;
-    font-size: var(--fs-xs);
-  }
-  .btn.ghost {
-    color: var(--text-dim);
-  }
-  .btn.ghost:hover:not(:disabled) {
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 
   /* ── Inline terminal — mirror PR review's .rp-term ────────────── */
   .rp-term {

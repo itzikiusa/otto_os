@@ -12,6 +12,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import SectionIntro from './SectionIntro.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import type {
     NameThemesResp,
     NameThemeInfo,
@@ -106,10 +107,12 @@
   const customs = $derived((resp?.themes ?? []).filter((t) => t.kind === 'custom'));
   const newNameCount = $derived(newNames.split('\n').filter((n) => n.trim()).length);
   const canCreate = $derived(newLabel.trim() !== '' && newNameCount > 0);
+  // A half-typed custom theme isn't lost to a stray sidebar click.
+  $effect(() => guardUnsaved(() => !creating && (newLabel.trim() !== '' || newNames.trim() !== ''), { what: 'the new custom theme' }));
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('session-names')} subtitle="New agent sessions are auto-named from your theme" />
+  <PageHeader title={sectionLabel('session-names')} subtitle="Auto-names for new agent sessions" />
   <PageBody width="readable">
   <SectionIntro>New agent sessions are named from your active theme (e.g. <strong>Ronaldo</strong>) instead of <code>claude #3</code>, unique among your open sessions. Address one by name from ⌘I or Broadcast: <code>ronaldo: run the tests</code>.</SectionIntro>
 
@@ -216,7 +219,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .theme-card {
     text-align: start;
@@ -280,7 +283,7 @@
     list-style: none;
     margin: 0 0 8px;
     padding: 4px 8px 4px 14px;
-    max-width: 640px;
+    max-width: var(--settings-col);
     box-sizing: border-box;
   }
   .custom-list li {
@@ -311,7 +314,7 @@
     text-overflow: ellipsis;
   }
   .new-form {
-    max-width: 640px;
+    max-width: var(--settings-col);
     box-sizing: border-box;
   }
   .new-title {

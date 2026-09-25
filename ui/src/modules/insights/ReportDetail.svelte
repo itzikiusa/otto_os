@@ -311,7 +311,7 @@
                         <dl class="ledger-row">
                           <div><dt>Entry</dt><dd class="mono">{e.id}</dd></div>
                           <div><dt>Status</dt><dd><span class="chip tone-{statusTone(e.status)}">{statusLabel(e.status)}</span></dd></div>
-                          {#if e.openedPeriod}<div><dt>Opened</dt><dd>{periodKeyLabel(e.openedPeriod)}{#if e.openedValue} · {e.openedValue}{/if}</dd></div>{/if}
+                          {#if e.openedPeriod}<div><dt>Opened</dt><dd>{periodKeyLabel(e.openedPeriod)}{#if e.openedValue}{' · '}{e.openedValue}{/if}</dd></div>{/if}
                           {#if e.latestValue}<div><dt>Latest</dt><dd>{e.latestValue}</dd></div>{/if}
                           {#if e.targetValue}<div><dt>Target</dt><dd>{e.targetValue}</dd></div>{/if}
                         </dl>

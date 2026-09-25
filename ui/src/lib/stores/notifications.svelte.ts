@@ -206,6 +206,11 @@ class NotificationStore {
       this.notices = notices.filter((n) => !this.isChannelSessionNotice(n));
       this.settings = settings;
       this.loaded = true;
+      try {
+        this.restoreNeedsYou();
+      } catch {
+        /* a best-effort re-derivation — never fail the load over it */
+      }
       this.error = null;
     } catch (e) {
       // Backend may not be ready yet (the events WS reloads on connect) — keep
@@ -213,6 +218,28 @@ class NotificationStore {
       this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** The live "needs you" flag is raised from the `:waiting` WS notice (see
+   *  events.svelte.ts), so a reload — or a waiting notice that arrived while
+   *  the app was closed — left the bell saying "Waiting for your input" while
+   *  the sidebar and Home's "Needs you" said nothing. Re-derive it from the
+   *  loaded list: a session whose LATEST notice is an unread `:waiting` one,
+   *  and that isn't working now, still needs the operator. */
+  private restoreNeedsYou(): void {
+    const latest = new Map<string, Notice>();
+    for (const n of this.notices) {
+      const parsed = parseSessionKey(n.source_key);
+      if (!parsed) continue;
+      const prev = latest.get(parsed.id);
+      if (!prev || Date.parse(n.created_at) > Date.parse(prev.created_at)) latest.set(parsed.id, n);
+    }
+    for (const [sid, n] of latest) {
+      if (n.read || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
+      const st = ws.statusMap[sid];
+      if (st === 'working' || st === 'exited') continue;
+      ws.markNeedsYou(sid);
     }
   }
 

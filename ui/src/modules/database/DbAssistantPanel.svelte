@@ -183,14 +183,14 @@
           onclick={() => database.insertAssistSql()}
           title="Put this query into the active editor tab"
         >
-          <Icon name="send" size={11} /> Insert into editor
+          <Icon name="send" size={12} /> Insert into editor
         </button>
         <button
           class="da-sql-btn primary"
           onclick={() => void database.runAssistSql()}
           title="Insert this query into the editor and run it"
         >
-          <Icon name="play" size={11} /> Run
+          <Icon name="play" size={12} /> Run
         </button>
       </div>
       <pre class="da-sql-text mono">{database.assistProposedSql}</pre>
@@ -274,14 +274,14 @@
     border-color: var(--danger);
   }
   .da-empty .sub.warn {
-    color: var(--status-warn, #d9a03f);
+    color: var(--warning);
     opacity: 1;
   }
   .da-close {
     display: inline-flex;
     border: none;
     background: none;
-    color: var(--text-dim, #888);
+    color: var(--text-dim);
     cursor: pointer;
     padding: 4px;
     border-radius: 6px;
@@ -321,7 +321,7 @@
   }
   .da-empty .lead {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
     color: var(--text);
   }
@@ -446,9 +446,9 @@
     border-color: var(--accent);
   }
   .da-sql-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+    background: var(--accent-solid);
+    border-color: var(--accent-solid);
+    color: var(--accent-contrast);
   }
   .da-sql-text {
     margin: 0;

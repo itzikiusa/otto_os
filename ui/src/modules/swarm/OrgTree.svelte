@@ -3,6 +3,7 @@
   // agent, a status dot, task/run counts, and its open sessions (click → open).
   // Supports drag-and-drop to reparent agents within the hierarchy.
   import Icon from '../../lib/components/Icon.svelte';
+  import { sentenceCase } from '../../lib/status';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -167,7 +168,7 @@
 >
   <div class="tree-bar">
     <label class="show-done">
-      <input type="checkbox" bind:checked={showCompleted} /> Show completed
+      <input type="checkbox" bind:checked={showCompleted} /> Show finished sessions
     </label>
   </div>
   {#if roots.length === 0}
@@ -222,10 +223,20 @@
     {:else}
       <span class="twist-spacer"></span>
     {/if}
-    <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
+    <!-- Status sits on the avatar (presence-style) so it reads with the name
+         instead of floating at the far edge of a wide pane. Green only while
+         the agent is actually working; an idle, enabled agent is grey. -->
+    <span class="avatar-wrap">
+      <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
+      {#if a.status === 'paused'}
+        <span class="presence paused" role="img" aria-label="Paused" title="Paused — picks up no new work"><Icon name="pause" size={8} /></span>
+      {:else}
+        <span class="presence state {running > 0 ? 'working' : 'idle'}" role="img" aria-label={running > 0 ? 'Working' : 'Idle'} title={running > 0 ? 'Working' : 'Idle — waiting for work'}></span>
+      {/if}
+    </span>
     <!-- The name opens the agent's editor (the most common action); the rest
          are in ⋯ / right-click. -->
-    <button class="who grow" onclick={() => onedit(a)} title={a.title ? `${a.name} — ${a.title} · Edit agent` : `${a.name} · Edit agent`}>
+    <button class="who" onclick={() => onedit(a)} title={a.title ? `${a.name} — ${a.title} · Edit agent` : `${a.name} · Edit agent`}>
       <span class="name">{a.name}</span>
       {#if a.title}<span class="title dim">{a.title}</span>{/if}
     </button>
@@ -235,7 +246,7 @@
     {#if running > 0}
       <span class="chip runs-chip" title="{running} active run{running === 1 ? '' : 's'}"><span class="run-dot" aria-hidden="true"></span>{running}</span>
     {/if}
-    <span class="state {a.status}" role="img" aria-label={a.status === 'paused' ? 'Paused' : 'Active'} title={a.status === 'paused' ? 'Paused' : 'Active'}></span>
+    <span class="grow"></span>
     <span class="row-tools">
       <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="Add a direct report to {a.name}" title="Add direct report">
         <Icon name="plus" size={12} />
@@ -257,7 +268,7 @@
       >
         <Icon name="terminal" size={12} />
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
-        <span class="state {ws.statusMap[s.id] ?? s.status}" role="img" aria-label={ws.statusMap[s.id] ?? s.status}></span>
+        <span class="state {ws.statusMap[s.id] ?? s.status}" role="img" aria-label={sentenceCase(ws.statusMap[s.id] ?? s.status)} title={sentenceCase(ws.statusMap[s.id] ?? s.status)}></span>
       </button>
     {/each}
     {#each kids as k (k.id)}
@@ -289,8 +300,10 @@
   .org-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    height: 30px;
+    gap: 8px;
+    min-height: 36px;
+    padding-block: 3px;
+    box-sizing: border-box;
     cursor: grab;
   }
   .org-row:hover {
@@ -375,8 +388,8 @@
     flex: none;
   }
   .avatar {
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     display: grid;
     place-items: center;
@@ -389,7 +402,8 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    line-height: 1.15;
+    gap: 1px;
+    line-height: 1.3;
     overflow: hidden;
     min-width: 0;
     border: none;
@@ -422,9 +436,28 @@
   .title {
     font-size: var(--fs-xs);
   }
+  .avatar-wrap {
+    position: relative;
+    flex: none;
+  }
+  .presence {
+    position: absolute;
+    inset-inline-end: -2px;
+    inset-block-end: -2px;
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .presence.paused {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
   .state {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex: none;
     background: var(--text-dim);

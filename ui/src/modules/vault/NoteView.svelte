@@ -259,12 +259,14 @@
         {/each}
       </nav>
       <div class="actions">
-        <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
+        <!-- Save state sits BEFORE the tools, so it appearing/disappearing
+             never shifts the buttons under the pointer. -->
         {#if vault.saving}
           <span class="save-state" role="status">Saving…</span>
         {:else if vault.dirty}
           <span class="save-state" title="Autosaves in a moment">Unsaved</span>
         {/if}
+        <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
         <button
           class="mode-btn"
           class:refine-on={refineShown}
@@ -273,7 +275,7 @@
           aria-pressed={refineShown}
           onclick={toggleRefine}
         >
-          <Icon name="zap" size={14} />
+          <Icon name="sparkle" size={14} />
         </button>
         <button
           class="mode-btn labelled"

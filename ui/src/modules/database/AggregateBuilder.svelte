@@ -191,10 +191,10 @@
               </select>
               {#if errors[i]}<span class="ab-err">{errors[i]}</span>{/if}
               <span class="grow"></span>
-              <button class="icon-btn" title="Run the pipeline up to this stage" aria-label="Run up to stage {i + 1}" disabled={!coll.trim() || errors.slice(0, i + 1).some((e) => e !== null)} onclick={() => runUpTo(i)}><Icon name="play" size={11} /></button>
-              <button class="icon-btn" title="Move up" aria-label="Move stage {i + 1} up" disabled={i === 0} onclick={() => move(i, -1)}><Icon name="arrowUp" size={11} /></button>
-              <button class="icon-btn" title="Move down" aria-label="Move stage {i + 1} down" disabled={i === stages.length - 1} onclick={() => move(i, 1)}><Icon name="arrowDown" size={11} /></button>
-              <button class="icon-btn" title="Remove stage" aria-label="Remove stage {i + 1}" onclick={() => remove(i)}><Icon name="trash" size={11} /></button>
+              <button class="icon-btn" title="Run the pipeline up to this stage" aria-label="Run up to stage {i + 1}" disabled={!coll.trim() || errors.slice(0, i + 1).some((e) => e !== null)} onclick={() => runUpTo(i)}><Icon name="play" size={12} /></button>
+              <button class="icon-btn" title="Move up" aria-label="Move stage {i + 1} up" disabled={i === 0} onclick={() => move(i, -1)}><Icon name="arrowUp" size={12} /></button>
+              <button class="icon-btn" title="Move down" aria-label="Move stage {i + 1} down" disabled={i === stages.length - 1} onclick={() => move(i, 1)}><Icon name="arrowDown" size={12} /></button>
+              <button class="icon-btn" title="Remove stage" aria-label="Remove stage {i + 1}" onclick={() => remove(i)}><Icon name="trash" size={12} /></button>
             </div>
             <textarea class="input mono ab-body" rows={s.op === '$limit' || s.op === '$skip' || s.op === '$count' || s.op === '$unwind' ? 1 : 3} bind:value={s.body} spellcheck="false" aria-label="Stage {i + 1} body"></textarea>
           </li>
@@ -202,7 +202,7 @@
       </ol>
 
       <div class="ab-add">
-        <Icon name="plus" size={11} />
+        <Icon name="plus" size={12} />
         <select class="input ab-op mono" value="" onchange={(e) => { const v = e.currentTarget.value as StageOp | ''; if (v) addStage(v); e.currentTarget.value = ''; }} aria-label="Add stage">
           <option value="" disabled>Add stage…</option>
           {#each OPS as op (op)}<option value={op}>{op === 'raw' ? 'raw stage' : op}</option>{/each}

@@ -28,8 +28,12 @@
     onreview: () => void;
     /** Open one evaluation run in the Evaluator. */
     onopenrun?: (id: string) => void;
+    /** Open one existing review in the Review tab. */
+    onopenreview?: (id: string) => void;
+    /** Switch the detail pane to another tab (Usage → Evals). */
+    onview?: (v: 'evals' | 'usage') => void;
   }
-  let { group, view, wsId, onevaluate, onreview, onopenrun }: Props = $props();
+  let { group, view, wsId, onevaluate, onreview, onopenrun, onopenreview, onview }: Props = $props();
 
   let evals = $state<SkillEval[] | null>(null);
   let reviews = $state<SkillReview[] | null>(null);
@@ -48,9 +52,10 @@
     evals = e.status === 'fulfilled' ? e.value : [];
     reviews = r.status === 'fulfilled' ? r.value : [];
     golden = g.status === 'fulfilled' ? g.value : [];
-    if (e.status === 'rejected' && r.status === 'rejected') {
-      error = e.reason instanceof Error ? e.reason.message : String(e.reason);
-    }
+    // Any failed source is an error, not a zero: "Not evaluated yet" over a
+    // failed load would be a lie.
+    const failed = [e, r, g].find((x) => x.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed) error = failed.reason instanceof Error ? failed.reason.message : String(failed.reason);
   }
   $effect(() => {
     if (!wsId || loadedFor === wsId) return;
@@ -211,12 +216,20 @@
       {#if lastActivity}<span class="dim" title={new Date(lastActivity).toLocaleString()}>Last {rel(lastActivity)}</span>{/if}
     </div>
     <div class="stats">
-      <button class="card stat link" onclick={onreview}>
+      <button
+        class="card stat link"
+        onclick={() => (myReviews[0] && onopenreview ? onopenreview(myReviews[0].id) : onreview())}
+        title={myReviews[0] ? 'Open the latest review' : 'Start a review of this skill'}
+      >
         <div class="stat-label">Reviews</div>
         <div class="stat-value">{myReviews.length}</div>
         <div class="stat-sub dim">{myReviews[0] ? `Latest: ${myReviews[0].static_report?.verdict ?? myReviews[0].status}` : 'Run a multi-agent review'}</div>
       </button>
-      <button class="card stat link" onclick={onevaluate}>
+      <button
+        class="card stat link"
+        onclick={() => (myEvals.length > 0 && onview ? onview('evals') : onevaluate())}
+        title={myEvals.length > 0 ? 'See its evaluation runs' : 'Evaluate this skill on a real task'}
+      >
         <div class="stat-label">Evaluations</div>
         <div class="stat-value">{myEvals.length}</div>
         <div class="stat-sub dim">{latest ? `Last ${rel(latest.created_at)}` : 'Score it on a real task'}</div>

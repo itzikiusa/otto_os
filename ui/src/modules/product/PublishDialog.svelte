@@ -243,7 +243,7 @@
         <label class="label" for="pd-account">Account</label>
         <select
           id="pd-account"
-          class="select"
+          class="input"
           bind:value={accountId}
           onchange={onAccountChange}
           disabled={submitting}
@@ -263,7 +263,7 @@
           {:else}
             <select
               id="pd-project"
-              class="select"
+              class="input"
               bind:value={projectKey}
               onchange={loadIssueTypes}
               disabled={submitting || projects.length === 0}
@@ -287,7 +287,7 @@
           {:else}
             <select
               id="pd-issuetype"
-              class="select"
+              class="input"
               bind:value={issueType}
               disabled={submitting}
             >
@@ -311,7 +311,7 @@
           {:else}
             <select
               id="pd-space"
-              class="select"
+              class="input"
               bind:value={spaceKey}
               disabled={submitting || spaces.length === 0}
             >
@@ -416,42 +416,12 @@
     color: var(--text-dim);
     line-height: 1.5;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 14px;
-  }
-  .label {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
   .dim {
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
     font-size: var(--fs-xs);
   }
-  .select,
-  .input {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 5px 9px;
-    box-sizing: border-box;
-    outline: none;
-  }
-  .select:focus,
-  .input:focus {
-    border-color: var(--accent);
-  }
-  .select:disabled,
   .input:disabled {
     opacity: 0.55;
     cursor: not-allowed;
@@ -502,35 +472,5 @@
     padding: 6px 10px;
     background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
-  }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 16px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    transition: background 110ms, border-color 110ms, color 110ms;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn.ghost:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .btn.primary {
-    background: var(--accent-solid);
-    border-color: var(--accent-solid);
-    color: var(--accent-contrast);
-  }
-  .btn.primary:hover:not(:disabled) {
-    opacity: 0.88;
   }
 </style>

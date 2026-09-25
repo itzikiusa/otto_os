@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage } from './helpers';
+import { openPage, openRightPanelTab } from './helpers';
 
 // Browser ⇄ agent embedding:
 //  - the Browser page hosts an agent dock (attach/start a session, its
@@ -170,7 +170,7 @@ test('agent mode: right panel Browser tab has a v1/v2 switch and v2 embeds the m
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
   const panel = page.locator('.rpanel');
   await expect(panel).toBeVisible();
-  await panel.getByRole('tab', { name: 'Browser', exact: true }).click();
+  await openRightPanelTab(page, 'Browser');
 
   const group = panel.getByRole('group', { name: 'Browser version' });
   await expect(group).toBeVisible();
@@ -197,7 +197,7 @@ test('agent mode: right panel Browser tab has a v1/v2 switch and v2 embeds the m
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
-  await page.locator('.rpanel').getByRole('tab', { name: 'Browser', exact: true }).click();
+  await openRightPanelTab(page, 'Browser');
   await expect(page.locator('.rpanel').getByRole('button', { name: 'v2' })).toHaveAttribute('aria-pressed', 'true');
 
   // Back to v1 restores the original panel.

@@ -1775,30 +1775,39 @@
      four always-on buttons. Touch screens have no hover: always shown. */
   /* Collapsed, not display:none: they stay in the accessibility tree and in
      the Tab order (focusing one opens the row up). */
-  .edit-row .mv,
-  .group-head-row .mv {
+  /* `.row-action.mv` out-specifies the generic `.row-action` sizes/opacity
+     below (and the narrow-sidebar container query) — those used to win,
+     leaving a 0-width button whose arrow was squashed into a sliver. */
+  .edit-row .row-action.mv,
+  .group-head-row .row-action.mv {
     width: 0;
+    min-width: 0;
+    padding: 0;
     opacity: 0;
     overflow: hidden;
   }
-  .edit-row:hover .mv,
-  .edit-row:focus-within .mv,
-  .group-head-row:hover .mv,
-  .group-head-row:focus-within .mv {
+  .edit-row:hover .row-action.mv,
+  .edit-row:focus-within .row-action.mv,
+  .group-head-row:hover .row-action.mv,
+  .group-head-row:focus-within .row-action.mv {
     width: 22px;
     opacity: 1;
   }
-  .edit-row:hover .mv:disabled,
-  .edit-row:focus-within .mv:disabled,
-  .group-head-row:hover .mv:disabled,
-  .group-head-row:focus-within .mv:disabled {
+  .edit-row:hover .row-action.mv:disabled,
+  .edit-row:focus-within .row-action.mv:disabled,
+  .group-head-row:hover .row-action.mv:disabled,
+  .group-head-row:focus-within .row-action.mv:disabled {
     opacity: 0.25;
   }
   @media (hover: none) {
-    .edit-row .mv,
-    .group-head-row .mv {
+    .edit-row .row-action.mv,
+    .group-head-row .row-action.mv {
       width: 22px;
       opacity: 1;
+    }
+    .edit-row .row-action.mv:disabled,
+    .group-head-row .row-action.mv:disabled {
+      opacity: 0.25;
     }
   }
   .edit-row:hover {

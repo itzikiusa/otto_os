@@ -392,6 +392,9 @@
   // ── Keyboard ───────────────────────────────────────────────────────────────
 
   function onKeydown(e: KeyboardEvent): void {
+    // The Delete confirm is up: its keys (Esc, Enter, Tab) belong to it — a
+    // Backspace here must not delete the selected annotation behind it.
+    if (confirmer.open) return;
     if (textDraft) {
       if (e.key === 'Escape') {
         textDraft = null;
@@ -477,21 +480,20 @@
     }
   }
 
-  // Tool icons: the shared `Icon` where the set has a fitting glyph, else a
-  // stroke path drawn exactly like Icon (16-unit viewBox, 1.4 stroke, round
-  // caps) so the rail reads as one set — never a text glyph (they render at
-  // different weights/baselines per font and flip meaning in RTL).
-  const TOOLS: { id: Tool; label: string; icon?: IconName; path?: string; title: string; key: string }[] = [
+  // Tool icons come from the shared `Icon` set (16-unit viewBox, 1.4 stroke,
+  // round caps) so the rail reads as one set — never a text glyph (they render
+  // at different weights/baselines per font and flip meaning in RTL).
+  const TOOLS: { id: Tool; label: string; icon: IconName; title: string; key: string }[] = [
     { id: 'select', label: 'Select', icon: 'cursor', title: 'Select / move (V)', key: 'v' },
-    { id: 'rect', label: 'Box', path: 'M2.5 4h11v8h-11Z', title: 'Rectangle (R)', key: 'r' },
-    { id: 'ellipse', label: 'Ellipse', path: 'M8 3.5c3 0 5.5 2 5.5 4.5S11 12.5 8 12.5 2.5 10.5 2.5 8 5 3.5 8 3.5Z', title: 'Ellipse (O)', key: 'o' },
-    { id: 'arrow', label: 'Arrow', path: 'M3 13 12.5 3.5M7 3.5h5.5V9', title: 'Arrow (A)', key: 'a' },
-    { id: 'line', label: 'Line', path: 'M3 13 13 3', title: 'Line (L)', key: 'l' },
+    { id: 'rect', label: 'Box', icon: 'rectangle', title: 'Rectangle (R)', key: 'r' },
+    { id: 'ellipse', label: 'Ellipse', icon: 'ellipse', title: 'Ellipse (O)', key: 'o' },
+    { id: 'arrow', label: 'Arrow', icon: 'arrow', title: 'Arrow (A)', key: 'a' },
+    { id: 'line', label: 'Line', icon: 'line', title: 'Line (L)', key: 'l' },
     { id: 'pen', label: 'Pen', icon: 'edit', title: 'Freehand (P)', key: 'p' },
-    { id: 'highlight', label: 'Mark', path: 'M2.5 13.5h11M5 11l5.5-7.5 2.3 1.7L7.3 12.7H5Z', title: 'Highlighter (H)', key: 'h' },
-    { id: 'text', label: 'Text', path: 'M3.5 3.5h9M8 3.5v9M6 12.5h4', title: 'Text (T)', key: 't' },
+    { id: 'highlight', label: 'Highlight', icon: 'marker', title: 'Highlighter (H)', key: 'h' },
+    { id: 'text', label: 'Text', icon: 'text', title: 'Text (T)', key: 't' },
     { id: 'pixelate', label: 'Blur', icon: 'grid', title: 'Pixelate region (B)', key: 'b' },
-    { id: 'badge', label: 'Step', path: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4', title: 'Numbered step (N)', key: 'n' },
+    { id: 'badge', label: 'Step', icon: 'step', title: 'Numbered step (N)', key: 'n' },
   ];
   /** Human names for the palette swatches (tooltips/aria — not hex codes). */
   const COLOR_NAMES = ['Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Black', 'White'];
@@ -527,12 +529,7 @@
           aria-pressed={tool === t.id}
           onclick={() => pickTool(t.id)}
         >
-          {#if t.icon}
-            <Icon name={t.icon} size={14} />
-          {:else}
-            <svg class="tool-ic" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-              stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={t.path} /></svg>
-          {/if}
+          <Icon name={t.icon} size={14} />
           <span class="lbl">{t.label}</span>
         </button>
       {/each}
@@ -587,8 +584,8 @@
       >{#if copyState === 'copied' || copyState === 'idle'}<Icon name="check" size={12} />{:else if copyState === 'failed'}<Icon name="warning" size={12} />{/if}{copyLabel}</span
     >
     <div class="group actions">
-      <button class="tb" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
-      <button class="tb primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={13} />Copy</button>
+      <button class="btn small ghost" data-act="close" title="Close the editor (the clipboard keeps the latest copy)" onclick={() => void close()}>Close</button>
+      <button class="btn small primary" data-act="copy" title="Copy now (⌘C)" onclick={() => void copyNow()}><Icon name="copy" size={12} /> Copy</button>
     </div>
   </header>
 
@@ -685,17 +682,6 @@
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
-  /* White-on-fill needs the --accent-solid fill (--text on --accent was dark
-     text on the accent in dark mode). */
-  .tb.primary {
-    color: var(--accent-contrast);
-    border-color: var(--accent-solid);
-    background: var(--accent-solid);
-  }
-  .tb.primary:hover {
-    color: var(--accent-contrast);
-    background: color-mix(in srgb, var(--accent-solid) 88%, var(--text));
-  }
   /* The icon set has no redo glyph: redo is undo, mirrored. */
   .mirror {
     display: inline-flex;
@@ -709,9 +695,6 @@
     opacity: 0.4;
     cursor: default;
   }
-  .tool-ic {
-    flex-shrink: 0;
-  }
   .swatch {
     width: 18px;
     height: 18px;
@@ -719,7 +702,8 @@
     border: 2px solid transparent;
     cursor: pointer;
     padding: 0;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+    /* A token ring, so Black reads on the dark bar and White on the light one. */
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   .swatch.active {
     border-color: var(--text);
@@ -753,8 +737,8 @@
   .snip-canvas {
     max-width: 100%;
     max-height: 100%;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
-    border-radius: 4px;
+    box-shadow: var(--shadow);
+    border-radius: var(--radius-s);
     touch-action: none;
     cursor: crosshair;
   }
@@ -764,7 +748,7 @@
     min-height: 1.4em;
     background: color-mix(in srgb, var(--bg) 70%, transparent);
     border: 1px dashed var(--accent);
-    border-radius: 4px;
+    border-radius: var(--radius-s);
     padding: 2px 4px;
     font-weight: 600;
     line-height: 1.25;

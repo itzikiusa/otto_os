@@ -200,7 +200,7 @@
           placeholder="~/Downloads/data.csv"
         />
         <button class="tb-btn" onclick={() => (pickingFile = true)} title="Browse the daemon host">
-          <Icon name="folder" size={11} />Browse…
+          <Icon name="folder" size={12} />Browse…
         </button>
       </div>
     </div>

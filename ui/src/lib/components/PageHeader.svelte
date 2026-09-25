@@ -168,6 +168,19 @@
         : Infinity;
       wrapEl.style.minWidth = `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`;
       let need = visible.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, visible.length - 1);
+      // The title block's cap: 45% of the row by default, but a header with
+      // only one or two actions lets a long title use the room they leave
+      // instead of ellipsizing next to an empty stretch of toolbar.
+      if (row && rootEl) {
+        const others =
+          48 +
+          (lead ? lead.offsetWidth + 12 : 0) +
+          (inlineTabs ? inlineTabs.offsetWidth + 12 : 0) +
+          (pane ? pane.offsetWidth + 12 : 0) +
+          (visible.length ? need + RING * 2 + 12 : 0);
+        const cap = Math.max(row.clientWidth * 0.45, row.clientWidth - others);
+        rootEl.style.setProperty('--ph-title-max', `${Math.floor(cap)}px`);
+      }
       // clientWidth includes the wrap's focus-ring padding on each side.
       let avail = wrapEl.clientWidth - RING * 2;
       if (need <= avail + 0.5) {
@@ -359,12 +372,13 @@
     align-items: center;
     gap: 8px;
     /* Natural width (no reserved minimum, so short titles don't leave a gap
-       before inline tabs), capped at 45%. When the actions need the room it
-       shrinks — the subtitle ellipsizes — but never below its title line
-       (--ph-title-min, measured in JS). */
+       before inline tabs), capped at --ph-title-max (measured in JS: 45% of
+       the row, or everything the actions leave free when there are few of
+       them). When the actions need the room it shrinks — the subtitle
+       ellipsizes — but never below its title line (--ph-title-min). */
     flex: 0 1 auto;
-    min-width: min(var(--ph-title-min, 0px), 45%);
-    max-width: 45%;
+    min-width: min(var(--ph-title-min, 0px), var(--ph-title-max, 45%));
+    max-width: var(--ph-title-max, 45%);
   }
   /* A snippet whose content is conditional can render nothing; the empty slot
      must not eat a flex gap. */

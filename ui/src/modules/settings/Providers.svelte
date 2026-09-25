@@ -10,7 +10,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { Session } from '../../lib/api/types';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import SectionIntro from './SectionIntro.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -427,103 +428,110 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
+  <SectionIntro>Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
   <div class="providers-body">
-  <p class="section-intro">Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</p>
 
-  {#if loading}
-    <Skeleton rows={4} />
-  {:else if loadError}
-    <LoadState what="provider settings" error={loadError} empty onretry={() => void loadSettings()} />
+  {#if loading || loadError}
+    <LoadState what="provider settings" {loading} error={loadError || null} empty rows={4} onretry={() => void loadSettings()} />
   {:else}
     <section class="section">
       <h2 class="section-title">Default agent</h2>
-      <div class="field">
-        <label for="prov-default">Agent for new sessions and channel replies</label>
-        <select
-          id="prov-default"
-          class="input select"
-          bind:value={defaultProvider}
-          onchange={saveDefaultProvider}
-          disabled={saving}
-        >
-          <option value="">Auto (claude)</option>
-          {#each providers as p (p)}
-            <option value={p}>{p}</option>
-          {/each}
-        </select>
-        <span class="hint">Used unless a session, workflow or channel picks another agent.</span>
-      </div>
-      <div class="field">
-        <label for="prov-draft">PR &amp; commit draft model</label>
-        <select id="prov-draft" class="input select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
-          <option value="">Fastest (haiku)</option>
-          {#each DRAFT_MODELS as m (m)}
-            <option value={m}>{m}</option>
-          {/each}
-        </select>
-        <span class="hint">
-          Only for drafting a PR title/description or a commit message from a diff — a short job that blocks the
-          dialog you're looking at, so it doesn't inherit the agent's model and skips MCP servers and tools. Raise
-          it if drafts come out thin.
-        </span>
+      <div class="card set-card">
+        <div class="field">
+          <label for="prov-default">Agent for new sessions and channel replies</label>
+          <select
+            id="prov-default"
+            class="input select"
+            bind:value={defaultProvider}
+            onchange={saveDefaultProvider}
+            disabled={saving}
+          >
+            <option value="">Auto (claude)</option>
+            {#each providers as p (p)}
+              <option value={p}>{p}</option>
+            {/each}
+          </select>
+          <span class="hint">Used unless a session, workflow or channel picks another agent.</span>
+        </div>
+        <div class="field">
+          <label for="prov-draft">PR &amp; commit draft model</label>
+          <select id="prov-draft" class="input select" bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
+            <option value="">Fastest (haiku)</option>
+            {#each DRAFT_MODELS as m (m)}
+              <option value={m}>{m}</option>
+            {/each}
+          </select>
+          <span class="hint">
+            Only for drafting a PR title/description or a commit message from a diff — a short job that blocks the
+            dialog you're looking at, so it doesn't inherit the agent's model and skips MCP servers and tools. Raise
+            it if drafts come out thin.
+          </span>
+        </div>
       </div>
     </section>
 
     <section class="section">
       <h2 class="section-title">Automatic updates</h2>
-      <SettingToggle
-        label="Update all CLIs automatically, every day"
-        checked={autoUpdate.enabled}
-        disabled={savingAuto}
-        onchange={(v) => { autoUpdate.enabled = v; return saveAutoUpdate(); }}
-      />
-      {#if autoUpdate.enabled}
-        <div class="row wrap indent">
-          <label class="inline" for="prov-time">At</label>
-          <input
-            id="prov-time"
-            class="input time"
-            type="time"
-            bind:value={autoUpdate.time_of_day}
-            onchange={saveAutoUpdate}
-            aria-invalid={timeError ? 'true' : undefined}
-            aria-describedby={timeError ? 'prov-time-err' : undefined}
-          />
-          <select class="input tz" bind:value={autoUpdate.use_utc} onchange={saveAutoUpdate} aria-label="Time zone">
-            <option value={true}>UTC</option>
-            <option value={false}>Local time</option>
-          </select>
-          <label class="checkbox-row reload">
-            <input type="checkbox" bind:checked={autoUpdate.reload_sessions} onchange={saveAutoUpdate} />
-            Reload open sessions onto the new version
-          </label>
-        </div>
-        {#if timeError}<p class="field-err indent" id="prov-time-err" role="alert">{timeError}</p>{/if}
-      {/if}
-      <p class="hint indent">
-        Runs each CLI's update command on a schedule. Default 03:00 UTC, when new versions are usually published;
-        a missed window (Mac asleep or off) runs at the next opportunity. Reloaded sessions resume their
-        conversation on the new binary.
-        {#if lastRun}Last run {new Date(lastRun).toLocaleString()}.{/if}
-      </p>
+      <div class="card set-card tfirst">
+        <SettingToggle
+          label="Update all CLIs automatically, every day"
+          checked={autoUpdate.enabled}
+          disabled={savingAuto}
+          onchange={(v) => { autoUpdate.enabled = v; return saveAutoUpdate(); }}
+        >
+          Runs each CLI's update command on a schedule. Default 03:00 UTC, when new versions are usually
+          published; a missed window (Mac asleep or off) runs at the next opportunity.
+          {#if lastRun}<span title={new Date(lastRun).toLocaleString()}>Last run {rel(lastRun)}.</span>{/if}
+        </SettingToggle>
+        {#if autoUpdate.enabled}
+          <div class="prow wrap indent">
+            <label class="inline" for="prov-time">At</label>
+            <input
+              id="prov-time"
+              class="input time"
+              type="time"
+              bind:value={autoUpdate.time_of_day}
+              onchange={saveAutoUpdate}
+              disabled={savingAuto}
+              aria-invalid={timeError ? 'true' : undefined}
+              aria-describedby={timeError ? 'prov-time-err' : undefined}
+            />
+            <select class="input tz" bind:value={autoUpdate.use_utc} onchange={saveAutoUpdate} disabled={savingAuto} aria-label="Time zone">
+              <option value={true}>UTC</option>
+              <option value={false}>Local time</option>
+            </select>
+          </div>
+          {#if timeError}<p class="field-err indent" id="prov-time-err" role="alert">{timeError}</p>{/if}
+          <div class="indent">
+            <SettingToggle
+              label="Reload open sessions onto the new version"
+              hint="Reloaded sessions resume their conversation on the new binary."
+              checked={autoUpdate.reload_sessions}
+              disabled={savingAuto}
+              onchange={(v) => { autoUpdate.reload_sessions = v; return saveAutoUpdate(); }}
+            />
+          </div>
+        {/if}
+      </div>
     </section>
 
     <section class="section">
       <h2 class="section-title">Permissions</h2>
-      <SettingToggle
-        label="Skip permission prompts — run agents unattended"
-        checked={skipPermissions}
-        disabled={savingSkip}
-        onchange={(v) => { skipPermissions = v; return saveSkipPermissions(); }}
-      />
-      <p class="hint indent">
-        On (default): built-in agents launch with their bypass flag
-        (<code>--dangerously-skip-permissions</code>; codex
-        <code>--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
-        Off: each CLI's own permission mode (ask / auto) — tool use prompts in the session terminal.
-        Applies to new sessions; running ones are unchanged. Background agent runs (workflow steps,
-        scheduled tasks, swarms, self-improvement) still skip prompts — nobody is at their terminal to answer.
-      </p>
+      <div class="card set-card tfirst">
+        <SettingToggle
+          label="Skip permission prompts — run agents unattended"
+          checked={skipPermissions}
+          disabled={savingSkip}
+          onchange={(v) => { skipPermissions = v; return saveSkipPermissions(); }}
+        >
+          On (default): built-in agents launch with their bypass flag
+          (<code class="flag">--dangerously-skip-permissions</code>; codex
+          <code class="flag">--dangerously-bypass-approvals-and-sandbox</code>) so tool use never blocks.
+          Off: each CLI's own permission mode (ask / auto) — tool use prompts in the session terminal.
+          Applies to new sessions; running ones are unchanged. Background agent runs (workflow steps,
+          scheduled tasks, swarms, self-improvement) still skip prompts — nobody is at their terminal to answer.
+        </SettingToggle>
+      </div>
     </section>
 
     <!-- Enable/exclude toggle shared by built-in + custom rows. Excluding a
@@ -573,7 +581,7 @@
     </section>
 
     <section class="section">
-      <div class="row between">
+      <div class="prow between">
         <h2 class="section-title">Custom</h2>
         <button class="btn small" data-icon="plus" onclick={openNew}><Icon name="plus" size={12} /> Add provider…</button>
       </div>
@@ -591,9 +599,7 @@
             <button class="btn small danger" onclick={() => remove(n)} disabled={saving}>Remove…</button>
           </div>
         {:else}
-          <div class="empty">
-            No custom providers yet. <button class="btn small ghost" onclick={openNew}>Add provider…</button>
-          </div>
+          <div class="empty">No custom providers yet — Add provider… registers any other agent CLI.</div>
         {/each}
       </div>
       <p class="hint">
@@ -603,7 +609,7 @@
     </section>
 
     <section class="section">
-      <div class="row between">
+      <div class="prow between">
         <h2 class="section-title">Models catalog</h2>
         <button
           class="btn small"
@@ -623,11 +629,9 @@
             <span class="grow"></span>
             <span
               class="dim sm meta"
-              title={cat.fetched_at ? new Date(cat.fetched_at).toLocaleString() : undefined}
+              title={cat.fetched_at ? `Fetched ${new Date(cat.fetched_at).toLocaleString()}${cat.last_error ? ` · ${cat.last_error}` : ''}` : cat.last_error}
             >
-              {cat.fetched_at
-                ? `Fetched ${new Date(cat.fetched_at).toLocaleString()}`
-                : 'Never fetched'}{#if cat.last_error}&nbsp;· {cat.last_error}{/if}
+              {cat.fetched_at ? `Fetched ${rel(cat.fetched_at)}` : 'Never fetched'}{#if cat.last_error}&nbsp;· {cat.last_error}{/if}
             </span>
             <button
               class="btn small ghost"
@@ -709,18 +713,11 @@
     height: 100%;
     min-height: 0;
   }
-  .section-intro {
-    margin: 0;
-    max-width: 78ch;
-    font-size: var(--fs-s);
-    line-height: 1.5;
-    color: var(--text-dim);
-  }
   .providers-body {
     display: flex;
     flex-direction: column;
-    gap: 24px;
-    max-width: 880px;
+    gap: 18px;
+    max-width: var(--settings-col);
   }
   .dim {
     color: var(--text-dim);
@@ -743,6 +740,18 @@
   .section .field {
     margin: 0;
   }
+  /* Same card as Daemon / Insights / Self-improvement. */
+  .set-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 16px 14px;
+  }
+  /* A card that opens on a SettingToggle: the row brings its own 8px. */
+  .set-card.tfirst {
+    padding-top: 4px;
+    gap: 8px;
+  }
   .hint {
     margin: 0;
     max-width: 78ch;
@@ -754,9 +763,6 @@
      (SettingToggle: 15px box + 10px gap). */
   .indent {
     padding-inline-start: 25px;
-  }
-  .reload {
-    font-size: var(--fs-s);
   }
   .field-err {
     margin: 0;
@@ -819,20 +825,15 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .chip.warn {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-    background: var(--warning-soft);
-  }
-  .row {
+  .prow {
     display: flex;
     align-items: center;
     gap: 8px;
   }
-  .row.between {
+  .prow.between {
     justify-content: space-between;
   }
-  .row.wrap {
+  .prow.wrap {
     flex-wrap: wrap;
   }
   .inline {
@@ -856,6 +857,10 @@
   .mono-in {
     font-family: var(--font-mono);
     font-size: var(--fs-s);
+  }
+  /* A flag is one token — never break it mid-word across lines. */
+  code.flag {
+    white-space: nowrap;
   }
   code {
     font-family: var(--font-mono);

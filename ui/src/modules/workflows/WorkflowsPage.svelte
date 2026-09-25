@@ -32,6 +32,7 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import type {
     Workflow,
     WorkflowGraph,
@@ -347,6 +348,53 @@
       return;
     }
     popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+  }
+
+  /** A workflow row's ⋯ / right-click menu. */
+  function rowMenu(e: MouseEvent, wf: Workflow): void {
+    ctxMenu.show(e, [
+      { label: 'Rename', icon: 'edit', action: () => startRename(wf) },
+      { label: 'Duplicate', icon: 'copy', action: () => void duplicate(wf) },
+      { separator: true },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void del(wf) },
+    ]);
+  }
+
+  /** The header's ⋯ menu: panel toggles (checked rows) and one-off tools. */
+  function wfMenu(e: MouseEvent): void {
+    const items: MenuItem[] = [];
+    if (viewport.isPhone) {
+      items.push(
+        { label: 'Add node…', icon: 'plus', action: () => { popRight = 8; paletteOpen = true; } },
+        { label: 'Save', icon: 'check', disabled: !dirty, title: dirty ? undefined : 'No unsaved changes', action: () => void save() },
+        { label: 'Runs', icon: 'clock', action: () => { popRight = 8; runsOpen = true; void loadRuns(); } },
+        { separator: true },
+      );
+    }
+    items.push(
+      { label: 'Instructions', checked: instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (instructionsOpen = !instructionsOpen) },
+      { label: 'Triggers', checked: triggersOpen, title: 'Configure what starts this workflow', action: () => (triggersOpen = !triggersOpen) },
+      { label: 'Versions', checked: versionsOpen, title: 'Version history', action: () => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); } },
+      {
+        label: 'Inspector on the side',
+        checked: sideDock,
+        title: sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel',
+        action: () => ui.setWfDockSide(!sideDock),
+      },
+      { separator: true },
+      {
+        label: validating ? 'Checking…' : 'Validate',
+        icon: 'shield',
+        disabled: validating,
+        title: 'Check the graph for problems before running',
+        action: async () => { if (await validateGraph()) toasts.success('Preflight passed'); },
+      },
+      { label: 'Tidy', icon: 'grid', title: 'Tidy layout into rows', action: tidy },
+    );
+    if (selectedId) {
+      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected });
+    }
+    ctxMenu.show(e, items);
   }
 
   // The workspace `workflows` belongs to, and a token so a slow load for a
@@ -1538,102 +1586,54 @@
   {/snippet}
   {#snippet actions()}
     {#if current}
-      {#if running}
-        <!-- Same word as the inspector's "Cancel run" and the run's final
-             "Cancelled" status (it used to say Stop here). First in the row so the
-             destructive action never sits next to the primary Run. -->
-        <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run</button>
+      <!-- Four everyday verbs stay in the bar (Node, Save, Runs, Run…); the
+           panel toggles and one-off tools live in the ⋯ menu (wfMenu) so the
+           row stays at ≤ 5 controls. On a phone Node/Save/Runs join the menu
+           too, so there is never a second, auto-generated ⋯ next to ours. -->
+      {#if !viewport.isPhone}
+        <button class="btn small" data-overflow="1" data-icon="plus" aria-expanded={paletteOpen} onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
+          <Icon name="plus" size={12} /> Node
+        </button>
+        <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
+        <button class="btn small" data-overflow="1" data-icon="clock" aria-expanded={runsOpen} onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
+          <Icon name="clock" size={12} /> Runs
+        </button>
       {/if}
-      <button class="btn small" data-overflow="1" data-icon="plus" onclick={(e) => { anchorPop(e, 230); paletteOpen = !paletteOpen; }}>
-        <Icon name="plus" size={12} /> Node
-      </button>
-      {#if selectedId}
-        <!-- Destructive: collapses first (lowest data-overflow). -->
-        <button class="icon-btn" data-overflow="-3" data-label="Delete selected node" data-icon="trash" title="Delete selected node" aria-label="Delete selected node" onclick={removeSelected}><Icon name="trash" size={14} /></button>
-      {/if}
-      <button class="btn small" data-overflow="2" data-icon="check" disabled={!dirty} title={dirty ? 'Save the canvas changes' : 'No unsaved changes'} onclick={save}>Save</button>
-      <button class="btn small" data-overflow="1" data-icon="clock" onclick={(e) => { anchorPop(e, 200); runsOpen = !runsOpen; if (runsOpen) void loadRuns(); }}>
-        <Icon name="clock" size={12} /> Runs
-      </button>
-
-      <!-- Instructions toggle: standing rules every step follows -->
-      <button
-        class="btn small"
-        data-overflow="-1"
-        data-icon="note"
-        aria-pressed={instructionsOpen}
-        onclick={() => (instructionsOpen = !instructionsOpen)}
-        title="Standing rules every step follows, by the letter"
-        data-label="Instructions"
-      >
-        <Icon name="note" size={12} /> Instructions
-      </button>
-
-      <!-- Triggers config toggle -->
-      <button class="btn small" data-overflow="1" data-icon="zap" aria-pressed={triggersOpen} onclick={() => (triggersOpen = !triggersOpen)} title="Configure workflow triggers" data-label="Triggers">
-        <Icon name="zap" size={12} /> Triggers
-      </button>
-
-      <!-- Tidy: reflow the graph into a few readable rows -->
-      <button class="btn small" data-overflow="-2" data-icon="grid" onclick={tidy} title="Tidy layout into rows" data-label="Tidy">
-        <Icon name="grid" size={12} /> Tidy
-      </button>
-
-      <!-- Version history toggle -->
-      <button
-        class="btn small"
-        data-overflow="-1"
-        data-icon="commit"
-        aria-pressed={versionsOpen}
-        onclick={() => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); }}
-        title="Version history"
-        data-label="Versions"
-      >
-        <Icon name="commit" size={12} /> Versions
-      </button>
-
-      <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
-      <button
-        class="btn small"
-        data-overflow="-2"
-        data-icon="sidebar"
-        class:active={sideDock}
-        aria-pressed={sideDock}
-        onclick={() => ui.setWfDockSide(!sideDock)}
-        title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
-        data-label={sideDock ? 'Dock inspector to the bottom' : 'Dock inspector to the side'}
-      >
-        <Icon name="sidebar" size={12} /> Dock
-      </button>
-
       <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
            (no second full-height rail beside the app shell's right rail). -->
       {#if viewport.isDesktop && run && run.context_dir}
         <button
-          class="btn small"
+          class="icon-btn wf-tog"
           data-icon="panel"
-          class:active={ui.wfCtxOpen}
+          class:on={ui.wfCtxOpen}
           aria-pressed={ui.wfCtxOpen}
           onclick={() => ui.toggleWfCtx()}
-          title="Context files & agents panel"
+          title={ui.wfCtxOpen ? 'Hide the context files & agents panel' : 'Show the context files & agents panel'}
+          aria-label="Context panel"
           data-label="Context panel"
           data-testid="ctx-sidebar-toggle"
         >
-          <Icon name="panel" size={12} /> Panel
+          <Icon name="panel" size={14} />
         </button>
       {/if}
-
-      <button class="btn small" data-overflow="0" data-icon="check" title="Check the graph for problems before running" disabled={validating} onclick={async () => { if (await validateGraph()) toasts.success('Preflight passed'); }}>{validating ? 'Checking…' : 'Validate'}</button>
-      <button
-        class="btn primary small"
-        class:active={runInputOpen}
-        disabled={running}
-        onclick={openRunInput}
-        title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
-        aria-expanded={runInputOpen}
-      >
-        {#if running}<span class="spin"></span> Running{:else}<Icon name="play" size={12} /> Run…{/if}
+      <button class="icon-btn" data-keep aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={wfMenu}>
+        <Icon name="more" size={14} />
       </button>
+      {#if running}
+        <!-- While a run is live its Cancel takes the primary's place (same word as
+             the inspector's "Cancel run" and the run's final "Cancelled"). -->
+        <button class="btn small danger" data-keep onclick={stop} title="Cancel this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Cancel run…</button>
+      {:else}
+        <button
+          class="btn primary small"
+          class:active={runInputOpen}
+          onclick={openRunInput}
+          title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
+          aria-expanded={runInputOpen}
+        >
+          <Icon name="play" size={12} /> Run…
+        </button>
+      {/if}
     {/if}
   {/snippet}
 </PageHeader>
@@ -1692,17 +1692,15 @@
               onblur={() => commitRename(wf)}
             />
           {:else}
-            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)}>
+            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
               <Icon name="split" size={13} />
               <span class="row-name">{wf.name}</span>
             </button>
-            <button class="row-edit" title="Rename" aria-label="Rename workflow “{wf.name}”" data-testid="wf-rename-btn" onclick={() => startRename(wf)}>
-              <Icon name="edit" size={12} />
+            <!-- One ⋯ per row (Rename / Duplicate / Delete…), like Scheduled Tasks;
+                 right-click the row opens the same menu. -->
+            <button class="row-edit" title="More actions" aria-label="More actions for “{wf.name}”" aria-haspopup="menu" data-testid="wf-row-more" onclick={(e) => rowMenu(e, wf)}>
+              <Icon name="more" size={13} />
             </button>
-            <button class="row-edit" title="Duplicate" aria-label="Duplicate workflow “{wf.name}”" data-testid="wf-duplicate-btn" onclick={() => duplicate(wf)}>
-              <Icon name="copy" size={12} />
-            </button>
-            <button class="row-del" title="Delete workflow…" aria-label="Delete workflow “{wf.name}”…" data-testid="wf-delete-btn" onclick={() => del(wf)}><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}
@@ -3112,6 +3110,11 @@
 {/if}
 
 <style>
+  /* A pressed header toggle (Context panel) reads as on. */
+  .wf-tog.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
   .ri-err {
     margin: 0;
     font-size: var(--fs-s);
@@ -3388,36 +3391,28 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .row-del,
   .row-edit {
     background: none;
     border: none;
     color: var(--text-dim);
     cursor: pointer;
     padding: 6px;
+    border-radius: var(--radius-s);
     opacity: 0;
   }
-  .wf-row:hover .row-del,
   .wf-row:hover .row-edit,
-  .wf-row:focus-within .row-del,
   .wf-row:focus-within .row-edit,
-  .wf-row.active .row-del,
   .wf-row.active .row-edit {
     opacity: 1;
   }
-  /* No hover on touch: the row actions would otherwise never show. */
+  /* No hover on touch: the row menu would otherwise never show. */
   @media (hover: none) {
-    .row-del,
     .row-edit {
       opacity: 1;
     }
   }
-  .row-del:hover,
-  .row-del:focus-visible {
-    color: var(--danger);
-  }
   .row-edit:hover {
-    color: var(--accent-text);
+    color: var(--text);
   }
   .row-rename {
     flex: 1;

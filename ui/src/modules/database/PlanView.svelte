@@ -34,7 +34,7 @@
       onclick={() => (rawMode = !rawMode)}
       title="Toggle the engine's raw EXPLAIN JSON"
     >
-      <Icon name="grid" size={11} />{rawMode ? 'Tree' : 'Raw JSON'}
+      <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>
     <button class="plan-close" onclick={onclose} aria-label="Close plan"><Icon name="x" size={13} /></button>
   </div>
@@ -53,7 +53,7 @@
   <div class="plan-row" style="padding-inline-start: {depth * 16 + 6}px">
     {#if kids.length > 0}
       <button class="plan-caret" onclick={() => toggle(id)} aria-label="Toggle node">
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} />
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}
       <span class="plan-caret-spacer"></span>

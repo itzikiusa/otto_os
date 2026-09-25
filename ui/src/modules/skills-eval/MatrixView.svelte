@@ -13,6 +13,7 @@
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
   import type { EvalMatrix, MatrixCell, MatrixPrompt, StartMatrixReq } from '../../lib/api/types';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let { onopenrun } = $props<{ onopenrun?: (evalId: string) => void }>();
 
@@ -31,7 +32,13 @@
 
   // --- New-matrix form fields --------------------------------------------
   let fName = $state('');
-  let fProviders = $state('claude'); // comma-separated
+  // Providers are picked from the live registry (a typo'd free-text name used
+  // to fan out cells that could only fail).
+  const providerOpts = $derived(agentProviders());
+  let fProviders = $state<string[]>([defaultAgentProvider()]);
+  function toggleProvider(p: string): void {
+    fProviders = fProviders.includes(p) ? fProviders.filter((x) => x !== p) : [...fProviders, p];
+  }
   let fSkills = $state(''); // comma-separated skill names
   let fTestCmd = $state('');
   let fIterations = $state(1);
@@ -155,7 +162,7 @@
 
   const canCreate = $derived(
     !creating &&
-      parseList(fProviders).length > 0 &&
+      fProviders.length > 0 &&
       parseList(fSkills).length > 0 &&
       fPrompts.some((p) => p.task.trim().length > 0),
   );
@@ -163,7 +170,7 @@
   // Why "Create matrix" is disabled, for its tooltip.
   const createBlock = $derived.by(() => {
     if (creating) return 'Creating…';
-    if (parseList(fProviders).length === 0) return 'Add at least one provider';
+    if (fProviders.length === 0) return 'Pick at least one agent';
     if (parseList(fSkills).length === 0) return 'Add at least one skill';
     if (!fPrompts.some((p) => p.task.trim())) return 'Add at least one prompt with a task';
     return '';
@@ -172,7 +179,7 @@
   async function create(): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId || creating) return;
-    const providers = parseList(fProviders);
+    const providers = providerOpts.filter((p) => fProviders.includes(p));
     const skillNames = parseList(fSkills);
     const prompts: MatrixPrompt[] = fPrompts
       .map((p) => ({
@@ -181,9 +188,8 @@
       }))
       .filter((p) => p.task.length > 0);
 
-    if (providers.length === 0) return void toasts.error('Add at least one provider');
-    if (skillNames.length === 0) return void toasts.error('Add at least one skill');
-    if (prompts.length === 0) return void toasts.error('Add at least one prompt with a task');
+    // Create stays disabled until these hold (see canCreate / createBlock).
+    if (providers.length === 0 || skillNames.length === 0 || prompts.length === 0) return;
 
     const body: StartMatrixReq = {
       name: fName.trim() || 'Untitled matrix',
@@ -316,29 +322,34 @@
         </p>
 
         <section class="card block">
-          <label class="field-label" for="mx-name">Name</label>
-          <input id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
-        </section>
-
-        <section class="card block grid2">
-          <div>
-            <label class="field-label" for="mx-prov">Providers (comma-separated)</label>
-            <input id="mx-prov" class="input" data-testid="matrix-providers" placeholder="claude, codex" bind:value={fProviders} />
+          <div class="fld">
+            <label class="field-label" for="mx-name">Name</label>
+            <input id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
           </div>
-          <div>
-            <label class="field-label" for="mx-skills">Skills (comma-separated)</label>
+          <div class="fld">
+            <span class="field-label" id="mx-prov-lbl">Agents</span>
+            <div class="provider-chips" role="group" aria-labelledby="mx-prov-lbl" data-testid="matrix-providers">
+              {#each providerOpts as p (p)}
+                <label class="chip-toggle" class:on={fProviders.includes(p)}>
+                  <input type="checkbox" checked={fProviders.includes(p)} onchange={() => toggleProvider(p)} />
+                  <span class="mono">{p}</span>
+                </label>
+              {/each}
+            </div>
+          </div>
+          <div class="fld">
+            <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
             <input id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
           </div>
-        </section>
-
-        <section class="card block grid2">
-          <div>
-            <label class="field-label" for="mx-test">Test command (optional)</label>
-            <input id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
-          </div>
-          <div>
-            <label class="field-label" for="mx-iter">Iterations</label>
-            <input id="mx-iter" class="input" type="number" min="1" max="10" bind:value={fIterations} />
+          <div class="grid2">
+            <div class="fld">
+              <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
+              <input id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
+            </div>
+            <div class="fld">
+              <label class="field-label" for="mx-iter">Iterations</label>
+              <input id="mx-iter" class="input" type="number" min="1" max="10" bind:value={fIterations} />
+            </div>
           </div>
         </section>
 
@@ -347,11 +358,11 @@
             <span class="field-label">Prompts</span>
             <span class="grow"></span>
             <button class="btn small" type="button" onclick={addPrompt}>
-              <Icon name="plus" size={13} /> Add prompt
+              <Icon name="plus" size={12} /> Add prompt
             </button>
           </div>
           {#each fPrompts as p, i (i)}
-            <div class="prompt card">
+            <div class="prompt">
               <div class="row">
                 <input class="input grow" data-testid="matrix-prompt-label" aria-label="Prompt {i + 1} label" placeholder="Happy path" bind:value={p.label} />
                 {#if fPrompts.length > 1}
@@ -394,7 +405,7 @@
         <div class="mx-detail-head">
           <div class="mx-detail-title">
             <h2>{selected.name}</h2>
-            <span class="mx-sub" title={selected.repo_key}>{sentenceCase(selected.mode)} · <span class="mono">{selected.repo_key}</span></span>
+            <span class="mx-sub">{sentenceCase(selected.mode)} · {selected.repo_key && selected.repo_key !== ws.currentId ? selected.repo_key : 'This workspace'}</span>
           </div>
           <span class="grow"></span>
           <StatusBadge status={runStatus(selected.status)} />
@@ -563,7 +574,7 @@
     text-align: start;
     border: 1px solid transparent;
     background: transparent;
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 8px 10px;
     cursor: pointer;
     display: flex;
@@ -613,7 +624,7 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   .mx-dot.st-done {
-    background: var(--success);
+    background: var(--status-working);
   }
   .mx-dot.st-error {
     background: var(--status-exited);
@@ -631,6 +642,9 @@
     .mx-main {
       flex: 1;
       min-height: 0;
+    }
+    .grid2 {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -678,26 +692,69 @@
     padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-  }
-  .grid2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
     gap: 12px;
-    align-items: end;
   }
-  .grid2 > div {
+  .fld {
     display: flex;
     flex-direction: column;
     gap: 4px;
     min-width: 0;
   }
+  .grid2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: end;
+  }
+  /* Same field-label style as every other Otto form (app.css .field > label). */
   .field-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
+  }
+  .hint-inline {
+    font-weight: 400;
+    font-size: var(--fs-xs);
+  }
+  .hint-inline::before {
+    content: '· ';
+  }
+  /* Agent picker: the same toggle chips as the evaluation form's validations. */
+  .provider-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    user-select: none;
+  }
+  .chip-toggle.on {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--text);
+  }
+  .chip-toggle input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    border: 0;
+  }
+  .chip-toggle:has(input:focus-visible) {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 1px;
   }
   .block-head {
     display: flex;
@@ -714,6 +771,8 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
     background: var(--surface-2);
   }
   textarea.input {
@@ -791,7 +850,7 @@
     width: 100%;
     padding: 2px 0;
     border: none;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     background: transparent;
     color: inherit;
     font: inherit;
@@ -851,6 +910,6 @@
     flex: 1;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 </style>

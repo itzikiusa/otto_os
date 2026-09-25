@@ -336,7 +336,7 @@
           </div>
           {#if p.format === 'json'}
             <div class="sub-block">
-              <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={11} /> Mapping</button>{/if}</div>
+              <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={12} /> Mapping</button>{/if}</div>
               {#each p.mappings ?? [] as m, j (j)}
                 <div class="map">
                   <input class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
@@ -395,7 +395,7 @@
           <div class="tp" class:bad={!pr.ok} data-testid="k8s-monitor-test-probe">
             <div class="row between">
               <span><b>{pr.name}</b> {#if pr.port}<span class="dim">:{pr.port}</span>{/if}</span>
-              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${pr.sample_count ?? 0} sample(s)` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors} · {pr.parse_errors} parse error(s){/if}{#if pr.capped} · capped{/if}</span>
+              <span class="dim small">{pr.ok ? `HTTP ${pr.status} · ${pr.ms} ms · ${pr.sample_count ?? 0} sample(s)` : (pr.error ?? `HTTP ${pr.status}`)}{#if pr.parse_errors}{' '}· {pr.parse_errors} parse error(s){/if}{#if pr.capped}{' '}· capped{/if}</span>
             </div>
             {#if pr.labels && Object.keys(pr.labels).length}
               <div class="row wrap">{#each Object.entries(pr.labels) as [k, v] (k)}<span class="chip accent">{k}={v}</span>{/each}</div>

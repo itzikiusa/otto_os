@@ -86,7 +86,7 @@
       </span>
       <span class="grow"></span>
       <label class="rd-only"><input type="checkbox" bind:checked={onlyDiff} /> only differences</label>
-      <button class="btn small" disabled={diffCount === 0} onclick={copyPatch} title="Copy the set/unset operations that turn {leftLabel} into {rightLabel}"><Icon name="copy" size={11} />Copy as JSON patch</button>
+      <button class="btn small" disabled={diffCount === 0} onclick={copyPatch} title="Copy the set/unset operations that turn {leftLabel} into {rightLabel}"><Icon name="copy" size={12} />Copy as JSON patch</button>
     </div>
     <div class="rd-scroll">
       <table class="rd-table mono">

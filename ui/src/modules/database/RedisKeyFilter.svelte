@@ -27,7 +27,7 @@
 </script>
 
 <div class="kf" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
-  <Icon name="search" size={11} />
+  <Icon name="search" size={12} />
   <input
     class="kf-input"
     placeholder="filter by prefix…"

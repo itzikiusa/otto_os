@@ -203,98 +203,31 @@ test('graph: sections are a collapsible accordion at mobile/tablet widths', asyn
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// CHANGES
+// LEGACY ROUTES — Changes and History were folded into the graph (WIP row +
+// commit detail). Old deep links must still land somewhere useful.
 // ────────────────────────────────────────────────────────────────────────────
 
-test('changes: renders and fits the viewport', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/changes`);
-  await expect(page.locator('.changes')).toBeVisible({ timeout: 25_000 });
-  // The changed-files accordion header is present at mobile/tablet widths.
-  await expect(page.locator('.changes.mobile .mob-sec-head').first()).toBeVisible({
-    timeout: 10_000,
-  });
-  await expectFitsWidth(page);
-});
-
-test('changes: file-list section collapses', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/changes`);
-  await expect(page.locator('.changes')).toBeVisible({ timeout: 25_000 });
-  const head = page.locator('.changes.mobile .mob-sec-head', { hasText: 'Changed files' });
-  await expect(head).toBeVisible({ timeout: 10_000 });
-  // Collapse → the file list hides.
-  await head.click();
-  await expect(page.locator('.changes-side.mob-files-collapsed')).toHaveCount(1);
-  // Expand again.
-  await head.click();
-  await expect(page.locator('.changes-side.mob-files-collapsed')).toHaveCount(0);
-  await expectFitsWidth(page);
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// HISTORY
-// ────────────────────────────────────────────────────────────────────────────
-
-test('history: lists commits and fits the viewport', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.history')).toBeVisible({ timeout: 25_000 });
-  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 15_000 });
-  expect(await page.locator('.history .commit').count()).toBeGreaterThan(2);
-  await expectFitsWidth(page);
-});
-
-test('history: commit → diff workflow fits + diff code reachable', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
-
-  await page.locator('.history .commit').nth(1).click();
-  const dfile = page.locator('.history .dfile');
-  await expect(dfile.first()).toBeVisible({ timeout: 15_000 });
-  expect(await dfile.count(), 'history diff should show changed files').toBeGreaterThan(0);
-  await expectFitsWidth(page);
-  // HistoryView uses DiffViewer (.code cells) — verify the long lines fit.
-  await expectDiffCodeReachable(page);
-});
-
-test('history: mobile view is a vertical scroll container', async ({ page }, info) => {
-  if (!isPhone(info)) return; // checked on the short phone viewport
-  await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
-  await page.locator('.history .commit').nth(1).click();
-  await expect(page.locator('.history .dfile').first()).toBeVisible({ timeout: 15_000 });
-  // The mobile history view owns its vertical scroll (column flow, overflow-y
-  // auto) so a tall diff is always reachable. Whether it actually overflows
-  // depends on diff size vs viewport height, so assert the scroll-container
-  // PROPERTY (the robust, height-independent invariant) + that it fits width.
-  const overflowY = await page.locator('.history.mobile').first().evaluate(
-    (el) => getComputedStyle(el).overflowY,
-  );
-  expect(overflowY, 'mobile history must be a vertical scroll container').toBe('auto');
-  await expectFitsWidth(page);
+test('legacy changes/history deep links land on the graph', async ({ page }) => {
+  for (const legacy of ['changes', 'history']) {
+    await page.goto(`/#/git/${repoId}/${legacy}`);
+    await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+    await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Graph' })).toHaveAttribute('aria-selected', 'true');
+    await expectFitsWidth(page);
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────
 // PULL REQUESTS (layout only — live data needs a real remote)
 // ────────────────────────────────────────────────────────────────────────────
 
-test('pull requests: list toolbar/chips render and fit', async ({ page }) => {
+test('pull requests: a repo with no remote says so and offers the fix', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/prs`);
-  await expect(page.locator('.prlist')).toBeVisible({ timeout: 25_000 });
-  // Filter chips render (toolbar layout). Live PR data needs a real remote.
-  const chips = page.locator('.prlist .filter-chip');
-  await expect(chips.first()).toBeVisible({ timeout: 10_000 });
-  expect(await chips.count()).toBe(4); // open / merged / declined / all
-  // Switching a filter chip works without overflowing.
-  await chips.nth(1).click();
-  await expect(chips.nth(1)).toHaveClass(/active/);
-  await expectFitsWidth(page);
-});
-
-test('pull requests: empty/unreachable state fits the viewport', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/prs`);
-  await expect(page.locator('.prlist')).toBeVisible({ timeout: 25_000 });
-  // With no remote, the list resolves to either an empty state or a provider-
-  // unreachable empty state — either way it must render and fit.
-  await expect(page.locator('.prlist .empty, .prlist .pr-rows')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  // No remote → an honest empty state with "Add a remote…", not a
+  // "provider unreachable" error whose Retry can never succeed.
+  await expect(page.getByText('No remote yet', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: 'Add a remote…' })).toBeVisible();
   await expectFitsWidth(page);
 });
 
@@ -312,24 +245,16 @@ test('pull requests: detail route renders without overflow', async ({ page }) =>
 // DiffViewer (unified) via the History diff — file nav / unified rows
 // ────────────────────────────────────────────────────────────────────────────
 
-test('diffviewer: unified rows + toolbar fit and wrap (no off-screen cutoff)', async ({ page }) => {
-  await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
-  await page.locator('.history .commit').nth(1).click();
-  // DiffViewer toolbar (Unified / Side by side) renders.
-  await expect(page.locator('.history .diff-toolbar').first()).toBeVisible({ timeout: 15_000 });
-  // Unified table rows are present.
-  await expect(page.locator('.history .dtable').first()).toBeVisible();
-  // The code cells (including the 140-char long lines) fit within the viewport.
+test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page }) => {
+  await page.goto(`/#/git/${dirtyRepoId}/graph`);
+  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
+  await page.locator('.wip-row').click();
+  const panel = page.locator('.wip-panel');
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  await panel.locator('.wp-name').first().click();
+  await expect(panel.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
-
-  // Code cells wrap (white-space pre-wrap) at mobile/tablet widths so long lines
-  // don't push past the screen.
-  const ws = await page.locator('.history .dtable .code').first().evaluate(
-    (el) => getComputedStyle(el).whiteSpace,
-  );
-  expect(ws, 'diff code should wrap at mobile/tablet widths').toBe('pre-wrap');
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -352,15 +277,6 @@ for (const vw of [834, 932]) {
     await expectDiffCodeReachable(page);
   });
 
-  test(`landscape ${vw}: history diff code is reachable (not cut off)`, async ({ page }) => {
-    await page.setViewportSize({ width: vw, height: 430 });
-    await page.goto(`/#/git/${repoId}/history`);
-    await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
-    await page.locator('.history .commit').nth(1).click();
-    await expect(page.locator('.history .dfile').first()).toBeVisible({ timeout: 15_000 });
-    await expectFitsWidth(page);
-    await expectDiffCodeReachable(page);
-  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -403,12 +319,12 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
 test('shell: tapping a sub-route tab navigates without overflow', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/graph`);
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 30_000 });
-  // Tap the History sub-route tab → the History view mounts. Tabs may live in a
-  // horizontally-scrollable strip, so scroll it into view before tapping.
-  const histTab = page.locator('.rv-tabs .rv-tab', { hasText: 'History' });
-  await histTab.scrollIntoViewIfNeeded();
-  await histTab.click();
-  await expect(page.locator('.history')).toBeVisible({ timeout: 20_000 });
+  // Tap the Review view tab → the local-review panel mounts. The switcher may
+  // scroll within its own strip, so scroll the tab into view before tapping.
+  const tab = page.locator('.rv-tabs .rv-tab', { hasText: 'Review' });
+  await tab.scrollIntoViewIfNeeded();
+  await tab.click();
+  await expect(page.locator('.lrp')).toBeVisible({ timeout: 20_000 });
   await expectFitsWidth(page);
 });
 
@@ -429,23 +345,19 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
 // CHANGES — staging / commit flow on a dirty working tree
 // ────────────────────────────────────────────────────────────────────────────
 
-test('changes: dirty tree shows file rows + a touch-friendly commit composer', async ({ page }) => {
-  await page.goto(`/#/git/${dirtyRepoId}/changes`);
-  await expect(page.locator('.changes.mobile')).toBeVisible({ timeout: 25_000 });
+test('WIP: dirty tree shows file rows + a touch-friendly commit composer', async ({ page }) => {
+  await page.goto(`/#/git/${dirtyRepoId}/graph`);
+  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
+  await page.locator('.wip-row').click();
+  const panel = page.locator('.wip-panel');
+  await expect(panel).toBeVisible({ timeout: 15_000 });
   // The seeded dirty tree (1 modified + 1 untracked) yields real change rows.
-  await expect(page.locator('.changes .cs-name').first()).toBeVisible({ timeout: 15_000 });
-  expect(await page.locator('.changes .cs-name').count()).toBeGreaterThanOrEqual(2);
+  expect(await panel.locator('.wp-name').count()).toBeGreaterThanOrEqual(2);
   await expectFitsWidth(page);
-
-  // The commit textarea uses ≥16px on mobile so iOS Safari doesn't auto-zoom on
-  // focus (the regression the Changes polish pass guards).
-  const fs = await page.locator('.changes.mobile .composer textarea').evaluate(
-    (el) => parseFloat(getComputedStyle(el).fontSize),
-  );
-  expect(fs, 'mobile commit textarea must be ≥16px (no iOS zoom)').toBeGreaterThanOrEqual(16);
-
-  // The commit button is a comfortable touch target.
-  const box = await page.locator('.changes.mobile .composer .btn.primary').first().boundingBox();
+  // The commit fields use ≥16px on mobile so iOS Safari doesn't auto-zoom.
+  const fs = await panel.locator('.subject-input').evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(fs, 'mobile commit summary must be ≥16px (no iOS zoom)').toBeGreaterThanOrEqual(16);
+  const box = await panel.locator('.btn.primary').first().boundingBox();
   expect(box?.height ?? 0, 'commit button should be a comfortable tap target').toBeGreaterThanOrEqual(32);
 });
 
@@ -501,11 +413,11 @@ async function expectConflictCodeReachable(page: Page): Promise<void> {
 async function openResolver(page: Page): Promise<void> {
   await page.goto(`/#/git/${conflictRepoId}/changes`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  // The in-progress merge is detected asynchronously → the "Resolve conflicts"
-  // tab appears. Tap it to open the resolver.
-  const tab = page.locator('.rv-tab.conflict-tab');
-  await expect(tab).toBeVisible({ timeout: 20_000 });
-  await tab.click();
+  // The in-progress merge is detected asynchronously → the merge banner
+  // appears. Tap its "Resolve conflicts" to open the resolver.
+  const open = page.locator('.merge-banner .btn', { hasText: 'Resolve conflicts' });
+  await expect(open).toBeVisible({ timeout: 20_000 });
+  await open.click();
   await expect(page.locator('.resolver')).toBeVisible({ timeout: 15_000 });
 }
 
@@ -552,20 +464,16 @@ test('320px: every core view fits with no horizontal overflow', async ({ page })
   await openGraph(page);
   await expectFitsWidth(page);
 
-  // Changes (dirty tree → real rows).
-  await page.goto(`/#/git/${dirtyRepoId}/changes`);
-  await expect(page.locator('.changes.mobile')).toBeVisible({ timeout: 25_000 });
-  await expect(page.locator('.changes .cs-name').first()).toBeVisible({ timeout: 15_000 });
+  // WIP panel (dirty tree → real rows).
+  await page.goto(`/#/git/${dirtyRepoId}/graph`);
+  await expect(page.locator('.wip-row')).toBeVisible({ timeout: 25_000 });
+  await page.locator('.wip-row').click();
+  await expect(page.locator('.wip-panel .wp-name').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
 
-  // History list.
-  await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.history .commit').first()).toBeVisible({ timeout: 20_000 });
-  await expectFitsWidth(page);
-
-  // Pull-request list.
+  // Pull requests (no remote → the add-remote empty state).
   await page.goto(`/#/git/${repoId}/prs`);
-  await expect(page.locator('.prlist')).toBeVisible({ timeout: 25_000 });
+  await expect(page.getByText('No remote yet', { exact: true })).toBeVisible({ timeout: 25_000 });
   await expectFitsWidth(page);
 
   // Local review panel.

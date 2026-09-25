@@ -686,10 +686,10 @@
       <div class="st-head-actions">
         {#if isSql && detail.kind === 'table'}
           <button class="btn small ghost" disabled={!canSchema} onclick={() => (designerOpen = true)} title="Edit columns → generates ALTER TABLE for review">
-            <Icon name="edit" size={11} />Design
+            <Icon name="edit" size={12} />Design
           </button>
         {/if}
-        <button class="btn small ghost" onclick={explain}><Icon name="zap" size={11} />Explain</button>
+        <button class="btn small ghost" onclick={explain}><Icon name="zap" size={12} />Explain</button>
       </div>
     </div>
 
@@ -791,7 +791,7 @@
           <span class="grow"></span>
           {#if canIndex}
             <button class="mini-btn" disabled={!canSchema} onclick={startNewIndex}>
-              <Icon name="plus" size={11} />New index
+              <Icon name="plus" size={12} />New index
             </button>
           {/if}
         </div>
@@ -808,7 +808,7 @@
                     title={defText != null ? 'View full definition' : undefined}
                     onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
                   >
-                    <Icon name="key" size={11} />
+                    <Icon name="key" size={12} />
                     <span class="idx-name mono" title={idx.name}>{idx.name}</span>
                     {#if idx.unique}<span class="tag unique">unique</span>{/if}
                     {#if idx.method}<span class="tag">{idx.method}</span>{/if}
@@ -830,7 +830,7 @@
                           : 'Edit — prepares a drop + recreate for you to review and run'}
                         onclick={() => editIndex(idx)}
                       >
-                        <Icon name="edit" size={11} />
+                        <Icon name="edit" size={12} />
                       </button>
                       <button
                         class="idx-act danger"
@@ -841,7 +841,7 @@
                           : 'Drop — prepares the statement for you to review and run'}
                         onclick={() => dropIndex(idx)}
                       >
-                        <Icon name="trash" size={11} />
+                        <Icon name="trash" size={12} />
                       </button>
                     </div>
                   {/if}
@@ -852,11 +852,11 @@
                     <div class="idx-def-actions">
                       {#if snippet}
                         <button class="copy-ddl" onclick={() => copyText(snippet, 'createIndex')}>
-                          <Icon name="file" size={11} />Copy createIndex
+                          <Icon name="file" size={12} />Copy createIndex
                         </button>
                       {/if}
                       <button class="copy-ddl" onclick={() => copyText(defText, 'definition')}>
-                        <Icon name="file" size={11} />Copy
+                        <Icon name="file" size={12} />Copy
                       </button>
                     </div>
                     <pre class="ddl mono">{defText}</pre>
@@ -974,7 +974,7 @@
                       aria-label="Remove condition {ci + 1}"
                       onclick={() => removeIdxCond(ci)}
                     >
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                 {/each}
@@ -1083,7 +1083,7 @@
           Details
           <span class="grow"></span>
           <button class="copy-ddl" onclick={() => copyText(prettyExtra(detail.extra), 'details')}>
-            <Icon name="file" size={11} />Copy
+            <Icon name="file" size={12} />Copy
           </button>
         </div>
         <!-- Collapsible: `extra.sample` carries a WHOLE document, which for a
@@ -1097,13 +1097,13 @@
       <div class="block">
         <div class="ddl-head">
           <button class="block-title toggle" onclick={() => (ddlOpen = !ddlOpen)}>
-            <Icon name={ddlOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+            <Icon name={ddlOpen ? 'chevronDown' : 'chevronRight'} size={12} />
             DDL
           </button>
           <span class="grow"></span>
           {#if ddlOpen}
             <button class="copy-ddl" onclick={copyDdl}>
-              <Icon name="file" size={11} />Copy
+              <Icon name="file" size={12} />Copy
             </button>
           {/if}
         </div>
@@ -1575,10 +1575,7 @@
     white-space: nowrap;
   }
   .ty {
-    color: #0e8a8a;
-  }
-  :global(html[data-scheme='dark']) .ty {
-    color: #56c8d8;
+    color: var(--info);
   }
   .nullable {
     color: var(--text-dim);

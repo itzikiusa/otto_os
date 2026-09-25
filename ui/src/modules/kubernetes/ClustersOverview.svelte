@@ -82,10 +82,7 @@
   }
 
   function cardKey(e: KeyboardEvent, c: K8sCluster): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      open(c);
-    } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
       menu(e, c);
     }
   }
@@ -139,21 +136,21 @@
     <div class="grid" data-testid="k8s-cluster-grid">
       {#each k8s.clusters as c (c.id)}
         {@const caps = k8s.capabilities[c.id]}
+        <!-- A card, not a button: the name is the one "open" control and its
+             ::after stretches over the card, so the ⋯ button isn't nested
+             inside another interactive element. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="card cluster"
           class:prod={c.environment === 'prod'}
-          role="button"
-          tabindex="0"
           data-testid="k8s-cluster-card"
-          onclick={() => open(c)}
-          onkeydown={(e) => cardKey(e, c)}
-          oncontextmenu={(e) => menu(e, c)}
+          oncontextmenu={(e) => { e.preventDefault(); menu(e, c); }}
         >
           <div class="row1">
             <span class="dot" style="background:{c.color || 'var(--accent)'}"></span>
-            <span class="name" title={c.name}>{c.name}</span>
+            <button class="name open-link" title="Open {c.name}" onclick={() => open(c)} onkeydown={(e) => cardKey(e, c)}>{c.name}</button>
             <EnvBadge env={c.environment} />
-            <button class="icon-btn more" aria-label="Cluster actions" title="Cluster actions" onclick={(e) => { e.stopPropagation(); menu(e, c); }}>
+            <button class="icon-btn more" aria-label="Actions for {c.name}" title="Cluster actions" onclick={(e) => menu(e, c)}>
               <Icon name="more" size={14} />
             </button>
           </div>
@@ -212,6 +209,7 @@
     gap: 12px;
   }
   .cluster {
+    position: relative;
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
@@ -220,7 +218,7 @@
     transition: border-color 130ms ease-out, background 130ms ease-out;
   }
   .cluster:hover,
-  .cluster:focus-visible {
+  .cluster:focus-within {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 4%, var(--surface));
   }
@@ -240,6 +238,14 @@
     flex-shrink: 0;
   }
   .name {
+    /* Reset the button chrome: the title reads as the card's heading. */
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    text-align: start;
+    cursor: pointer;
+    font-family: inherit;
     font-weight: 600;
     font-size: var(--fs-m);
     overflow: hidden;
@@ -248,7 +254,23 @@
     flex: 1;
     min-width: 0;
   }
+  /* The whole card opens the cluster (a click anywhere lands on this). */
+  .open-link::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .open-link:focus-visible {
+    outline: none;
+  }
+  .cluster:has(.open-link:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   .more {
+    position: relative;
+    z-index: 1;
     opacity: 0.5;
   }
   .cluster:hover .more,

@@ -27,7 +27,7 @@ test('subscription picker isolates providers, adds a profile and checks its logi
   await expect(picker.locator('option')).toHaveText(['Default CLI account', 'Work']);
   await picker.selectOption('a');
   await expect(page.getByLabel('Selected account')).toHaveText('a');
-  await page.getByRole('button', { name: 'Add account', exact: true }).click();
+  await page.getByRole('button', { name: 'Add account…', exact: true }).click();
   await page.getByLabel('Account label').fill('Personal');
   await page.getByRole('button', { name: 'Create profile', exact: true }).click();
   await expect(picker).toHaveValue('b');

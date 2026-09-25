@@ -17,7 +17,7 @@
   import ViewToolbar from './ViewToolbar.svelte';
   import AwsDrawer from './AwsDrawer.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
-  import { fmtAgo, fmtDate } from './util';
+  import { fmtAgo, fmtDate, awsErrorText } from './util';
   import type { AwsAccount, RdsInstance, RdsInstanceDetail } from '../../lib/api/types';
 
   interface Props {
@@ -155,9 +155,9 @@
 <div class="body">
 <div class="tbl-wrap">
   {#if loading && !instances}
-    <div class="pad"><Skeleton rows={8} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={error} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="db" title={filter ? 'No matching instances' : `No DB instances in ${region}`} />
   {:else}
@@ -254,6 +254,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }

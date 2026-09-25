@@ -13,6 +13,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
@@ -248,6 +249,8 @@
     }
   }
   const runsLoaded = $derived(personalAgents.runsByAgent[agentId] !== undefined);
+  /** A failed runs load is shown inline with Retry — never as "No runs yet". */
+  const runsErr = $derived(personalAgents.runsError[agentId] ?? null);
 
   const canEditDocuments = $derived(auth.can('scheduled_tasks', 'edit') &&
     (auth.isRoot || ['editor', 'admin'].includes(ws.workspaces.find((w) => w.id === agent?.workspace_id)?.my_role ?? 'viewer')));
@@ -336,7 +339,14 @@
           <dt>Delivery</dt><dd class="clip" title={deliveryLabel()}>{deliveryLabel()}</dd>
           <dt>Browser use</dt><dd>{agent.browser ? 'On' : 'Off'}</dd>
           <dt>Status</dt><dd>{agent.enabled ? 'Enabled' : 'Paused — schedules don’t fire'}</dd>
-          <dt>Working dir</dt><dd class="mono wrap" dir="ltr">{agent.cwd || `…/personal/${agent.id}/ (private default)`}</dd>
+          <dt>Working dir</dt>
+          {#if agent.cwd}
+            <dd class="mono path" dir="ltr" title={agent.cwd}>{agent.cwd}</dd>
+          {:else}
+            <!-- The default is a private per-agent folder; its ULID path is in
+                 the tooltip, not the primary text. -->
+            <dd title={`…/personal/${agent.id}/`}>Its own private folder (default)</dd>
+          {/if}
           <dt>Schedules</dt>
           <dd>
             {schedules.length === 0 ? 'None' : schedules.length}
@@ -351,7 +361,7 @@
   {:else if tab === 'schedules'}
     {#if schedules.length > 0 || schedFormOpen}
       <div class="section-head">
-        <p class="hint">Each schedule has its own cadence, directive and run cursor.{#if !agent.enabled} They don’t fire while the agent is paused.{/if}</p>
+        <p class="hint">Each schedule has its own cadence, directive and run cursor.{#if !agent.enabled}{' They don’t fire while the agent is paused.'}{/if}</p>
         {#if !schedFormOpen}
           <button class="btn small" onclick={openSchedCreate}><Icon name="plus" size={12} /> Add schedule</button>
         {/if}
@@ -448,17 +458,23 @@
       </ul>
     {/if}
   {:else if tab === 'runs'}
-    {#if !runsLoaded}
-      <div aria-busy="true" aria-label="Loading runs"><Skeleton rows={4} height={40} /></div>
-    {:else if runs.length === 0}
-      <EmptyState
-        icon="play"
-        title="No runs yet"
-        body={agent.enabled
-          ? 'Runs appear here with their report and delivery status — from a schedule firing, or from Run now above.'
-          : 'Runs appear here with their report and delivery status. Enable the agent to let its schedules fire, or use Run once above.'}
-      />
-    {:else}
+    <LoadState
+      what="this agent’s runs"
+      loading={!runsLoaded}
+      error={runsErr}
+      empty={runs.length === 0}
+      rows={4}
+      onretry={() => void personalAgents.loadRuns(agentId)}
+    >
+      {#snippet emptyView()}
+        <EmptyState
+          icon="play"
+          title="No runs yet"
+          body={agent.enabled
+            ? 'Runs appear here with their report and delivery status — from a schedule firing, or from Run once above.'
+            : 'Runs appear here with their report and delivery status. Enable the agent to let its schedules fire, or use Run once above.'}
+        />
+      {/snippet}
       <ul class="rows">
         {#each runs as r (r.id)}
           <li class="run">
@@ -480,7 +496,7 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
   {:else if tab === 'chat'}
     {#if chatError}
       <div class="err-block" role="alert">
@@ -530,7 +546,7 @@
   .prov { max-width: 260px; }
   .prov :global(svg) { flex-shrink: 0; }
   .mono { font-family: var(--font-mono); }
-  .wrap { word-break: break-all; }
+  .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tabs { display: flex; gap: 4px; overflow-x: auto; padding-inline: 2px; }
   .tab {
     background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-dim);

@@ -398,41 +398,39 @@
 {:else if run}
   <div class="rd">
     <header class="rd-head">
+      <!-- One row: what this run is, its state, and its actions (the primary
+           — promote — last before the quiet destructive icon). -->
       <div class="rd-title-row">
         <Icon name="zap" size={16} />
         <h2 class="rd-title" title={run.source_skill}>{run.source_skill}</h2>
         <StatusBadge status={evalStatus(run.status)} />
         <span class="grow"></span>
-        {#if run.best_score != null}
-          <span class="score-badge {scoreClass(run.best_score)}">
-            best {run.best_score.toFixed(0)}{run.best_iteration ? ` · iter ${run.best_iteration}` : ''}
-          </span>
-        {/if}
-      </div>
-
-      <div class="rd-actions">
         {#if isActive(run)}
           <button class="btn small" disabled={cancelling} onclick={cancelRun}>
             <Icon name="square" size={12} /> {cancelling ? 'Stopping…' : 'Stop run'}
           </button>
         {/if}
         {#if run.best_iteration != null}
-          <button class="btn small primary" onclick={promoteWinner}>
-            <Icon name="check" size={13} /> Promote winning skill
+          <button class="btn small primary" onclick={promoteWinner} title="Save the best-scoring iteration's skill to the library">
+            <Icon name="check" size={12} /> Promote winning skill
           </button>
         {/if}
-        <span class="grow"></span>
-        <button class="btn small danger" disabled={deleting} onclick={deleteRun} title="Delete this run and its worktrees">
-          <Icon name="trash" size={12} /> {deleting ? 'Deleting…' : 'Delete…'}
+        <button class="icon-btn" disabled={deleting} onclick={deleteRun} aria-label="Delete this evaluation" title="Delete this evaluation and its worktrees">
+          <Icon name="trash" size={14} />
         </button>
       </div>
 
       <p class="rd-task">{run.task}</p>
       <div class="rd-meta">
-        <span class="chip">impl: {run.impl_cli}</span>
+        {#if run.best_score != null}
+          <span class="chip score {scoreClass(run.best_score)}" title="Best composite score">
+            Best {run.best_score.toFixed(0)}{run.best_iteration ? ` · iteration ${run.best_iteration}` : ''}
+          </span>
+        {/if}
+        {#if run.impl_cli}<span class="chip" title="Implementation agent">{run.impl_cli}</span>{/if}
         <span class="chip">{run.target_iterations} iteration{run.target_iterations === 1 ? '' : 's'}</span>
         {#each run.iterations as it (it.id)}
-          <span class="chip score {scoreClass(it.score)}">iter {it.iter}: {it.score.toFixed(0)}</span>
+          <span class="chip score {scoreClass(it.score)}">Iteration {it.iter}: {it.score.toFixed(0)}</span>
         {/each}
       </div>
       {#if run.summary}<p class="rd-summary">{run.summary}</p>{/if}
@@ -444,7 +442,7 @@
       <section class="iter card">
         <div class="iter-head">
           <span class="iter-num">Iteration {it.iter}</span>
-          {#if it.base_iter}<span class="chip subtle">improved from iter {it.base_iter}</span>{/if}
+          {#if it.base_iter}<span class="chip subtle">Improved from iteration {it.base_iter}</span>{/if}
           <span class="chip subtle mono">{it.skill_name}</span>
           {#if reg}
             <span class="reg" class:bad={reg.introduced > reg.fixed}>
@@ -494,6 +492,8 @@
         </div>
 
         <!-- Validations -->
+        <!-- Score-only runs have no validation agents: no empty heading. -->
+        {#if it.agents.length > 0}
         <div class="vals">
           <div class="vals-head">Validations · {findingCount(it)} issue{findingCount(it) === 1 ? '' : 's'} found</div>
           {#each it.agents as a, ai (valKey(it.id, a, ai))}
@@ -547,6 +547,7 @@
             </div>
           {/each}
         </div>
+        {/if}
 
         <!-- Multi-signal scorecard (tests / lint / diff / review / human → proof) -->
         {#if it.scoring}
@@ -585,7 +586,7 @@
 
         <!-- Export / promote this iteration's tested skill -->
         <div class="skill-actions">
-          <span class="lbl">Skill ({it.skill_name})</span>
+          <span class="lbl">Skill <span class="mono lbl-name" title={it.skill_name}>{it.skill_name}</span></span>
           <span class="grow"></span>
           <button class="btn small ghost" onclick={() => copySkill(it, 'tested')}>Copy</button>
           <button class="btn small ghost" onclick={() => downloadSkill(it, 'tested')}>Download</button>
@@ -788,12 +789,21 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .rd-title-row > :global(svg) {
+    color: var(--text-dim);
+    flex: none;
   }
   .rd-title {
     margin: 0;
     font-size: var(--fs-l);
+    font-weight: 600;
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .rd-load-err {
     display: flex;
@@ -810,12 +820,6 @@
     margin: 0 0 6px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-  }
-  .rd-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
   }
   .rd-task {
     margin: 0;
@@ -885,13 +889,17 @@
     border-top: 1px solid var(--border);
     padding-top: 8px;
   }
+  /* Sub-section labels inside an iteration card: sentence case (skill names
+     and providers must read as typed, never upper-cased). */
   .lbl,
   .vals-head {
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
     color: var(--text-dim);
+  }
+  .lbl-name {
+    font-weight: 500;
+    color: var(--text);
   }
   .impl-summary,
   .improve-summary {
@@ -998,7 +1006,7 @@
     margin: 6px 0 0;
     max-height: 360px;
     overflow: auto;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.45;
     background: var(--surface-2);
@@ -1027,7 +1035,7 @@
     font-weight: 600;
     text-transform: uppercase;
     padding: 2px 6px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
   }
   .pf.pass {
     background: var(--success-soft);
@@ -1067,7 +1075,7 @@
   .sev {
     display: inline-block;
     padding: 2px 7px;
-    border-radius: var(--radius-s, 4px);
+    border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.04em;
@@ -1097,11 +1105,10 @@
     color: var(--text-dim);
     line-height: 1.5;
   }
+  /* Same field-label style as every other Otto form (app.css .field > label). */
   .field-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
     display: block;
     margin-bottom: 4px;
@@ -1146,6 +1153,6 @@
     flex: 1;
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
 </style>

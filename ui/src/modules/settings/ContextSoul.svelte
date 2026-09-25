@@ -1,6 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -22,10 +23,10 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ContextPreview from '../agents/ContextPreview.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
   // ---------------------------------------------------------------------------
@@ -118,6 +119,8 @@
   }
   let savedKey = $state('');
   const dirty = $derived(!!cfg && draftKey(cfg) !== savedKey);
+  // Leaving Settings (or this page) with unsaved edits asks first.
+  $effect(() => guardUnsaved(() => dirty && !!editing, { what: 'the workspace context' }));
   let loadError = $state('');
 
   function accept(value: WorkspaceContextConfig) {
@@ -253,12 +256,11 @@
     <LoadState what="workspace context" loading={loading} error={loadError} empty rows={4} onretry={() => wsId && load(wsId)} />
   {:else if cfg}
     <p class="meta">
+      <Icon name="folder" size={12} />
       <span class="path mono" title={ws.current?.root_path}>{ws.current?.root_path}</span>
-      <span aria-hidden="true">·</span>
-      <span>Context version {cfg.context_version}</span>
-      {#if dirty && editing}<span aria-hidden="true">·</span><span class="unsaved">Unsaved changes</span>{/if}
     </p>
     {#if !editing}<p class="readonly"><strong>Read-only.</strong> Workspace administrators can edit shared context.</p>{/if}
+    {#if dirty && editing && !error}<p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>{/if}
     {#if error}
       <div class="save-err" role="alert">
         <p><strong>Couldn’t save workspace context.</strong> <span class="dim">{error}</span></p>
@@ -266,9 +268,13 @@
         <button class="btn small" disabled={saving} onclick={() => wsId && load(wsId)}>Reload saved context</button>
       </div>
     {/if}
-    <!-- Config form -->
-    <fieldset class="card form" disabled={!editing || saving || loading}>
+    <!-- Config form: one fieldset (so read-only / saving disables it all),
+         split into the same section-title + card blocks as every other
+         Settings page. -->
+    <fieldset class="cs-form" disabled={!editing || saving || loading}>
       <legend class="sr-only">Workspace context</legend>
+      <h2 class="section-title">Skills &amp; soul</h2>
+      <div class="card form">
       <!-- Active skills -->
       <div class="field">
         <span class="lbl" id="cs-skills-lbl">Active skills</span>
@@ -279,7 +285,7 @@
           {:else}
             <div class="skill-grid" role="group" aria-labelledby="cs-skills-lbl">
               {#each skills as s (s.name)}
-                <label class="skill-row" title={s.description}>
+                <label class="skill-row" title={s.description ? `${s.name} — ${s.description}` : s.name}>
                   <input
                     type="checkbox"
                     checked={selectedSkills.has(s.name)}
@@ -294,7 +300,7 @@
             </div>
           {/if}
           <span class="hint">
-            Only the checked skills are injected into this workspace's agents.
+            {selectedSkills.size} of {skills.length} checked. Only the checked skills are injected into this workspace's agents.
           </span>
         {/if}
       </div>
@@ -304,7 +310,7 @@
         <label for="cs-soul">Soul</label>
         <select
           id="cs-soul"
-          class="input"
+          class="input soul"
           value={cfg.soul ?? ''}
           onchange={(e) => cfg && (cfg.soul = e.currentTarget.value === '' ? null : e.currentTarget.value)}
         >
@@ -318,10 +324,13 @@
           Settings → Context library.
         </span>
       </div>
+      </div>
 
+      <h2 class="section-title">Project context</h2>
+      <div class="card form">
       <div class="field">
         <label for="cs-goal">Goal</label>
-        <textarea id="cs-goal" class="input mono" rows={3} bind:value={cfg.goal_md} maxlength="32000" placeholder="Ship the v2 billing API by March"></textarea>
+        <textarea id="cs-goal" class="input" rows={2} bind:value={cfg.goal_md} maxlength="32000" placeholder="Ship the v2 billing API by March"></textarea>
         <span class="hint">What this workspace is working toward.</span>
       </div>
       <!-- Extra context -->
@@ -340,26 +349,31 @@
 
       <div class="field">
         <label for="cs-shared-memory">Workspace memory</label>
-        <textarea id="cs-shared-memory" class="input mono" rows={4} bind:value={cfg.memory_md} maxlength="32000" placeholder="The staging database is read-only."></textarea>
+        <textarea id="cs-shared-memory" class="input" rows={4} bind:value={cfg.memory_md} maxlength="32000" placeholder="The staging database is read-only."></textarea>
         <span class="hint">Curated facts every session should know.</span>
       </div>
       <div class="field">
         <label for="cs-decisions">Decisions</label>
-        <textarea id="cs-decisions" class="input mono" rows={3} bind:value={cfg.decisions_md} maxlength="32000" placeholder="Use Postgres, not MySQL — the team already runs it."></textarea>
+        <textarea id="cs-decisions" class="input" rows={3} bind:value={cfg.decisions_md} maxlength="32000" placeholder="Use Postgres, not MySQL — the team already runs it."></textarea>
         <span class="hint">Agreed decisions and their reasons.</span>
       </div>
-      <div class="field">
-        <label for="cs-references">References</label>
-        <textarea id="cs-references" class="input mono" rows={3} bind:value={references} placeholder="docs/architecture.md"></textarea>
-        <span class="hint">Documents, Vault notes or repositories — one per line. Shared as text; listing a path does not read its contents.</span>
+      <div class="grid2">
+        <div class="field">
+          <label for="cs-references">References</label>
+          <textarea id="cs-references" class="input mono" rows={3} bind:value={references} spellcheck="false" placeholder="docs/architecture.md"></textarea>
+          <span class="hint">Documents, Vault notes or repositories — one per line. Shared as text; listing a path does not read its contents.</span>
+        </div>
+        <div class="field">
+          <label for="cs-artifacts">Artifacts</label>
+          <textarea id="cs-artifacts" class="input mono" rows={3} bind:value={artifacts} spellcheck="false" placeholder="https://example.com/design-doc"></textarea>
+          <span class="hint">Links or paths to outputs — one per line.</span>
+        </div>
       </div>
-      <div class="field">
-        <label for="cs-artifacts">Artifacts</label>
-        <textarea id="cs-artifacts" class="input mono" rows={3} bind:value={artifacts} placeholder="https://example.com/design-doc"></textarea>
-        <span class="hint">Links or paths to outputs — one per line.</span>
       </div>
+
+      <h2 class="section-title">Also include</h2>
       <!-- Include memory / repo map -->
-      <div class="field toggles">
+      <div class="card toggles">
         <SettingToggle
           label="Inline the workspace MEMORY.md"
           hint="Adds the workspace's MEMORY.md file to the context, not just the curated memory above."
@@ -378,6 +392,7 @@
 
     <!-- Materialize -->
     <h2 class="section-title">Materialize now</h2>
+    <div class="card form">
     <p class="card-info dim">
       Re-write the Otto-managed context files for this workspace immediately. Normally this happens
       automatically the next time a session spawns. Uses the saved context, not unsaved edits.
@@ -397,19 +412,18 @@
         <span class="dim">No supported agent CLIs are enabled (claude, codex or agy).</span>
       {/if}
     </div>
+    </div>
 
     <!-- Preview (dry-run) -->
     {#if providers.length > 0 && wsId}
       <h2 class="section-title">Preview</h2>
-      <p class="card-info dim">
+      <p class="card-info dim intro-line">
         See exactly what a spawn would write — the skill files, soul, generated
         instruction file and runtime hooks — for the current selection above,
         before saving or materializing.
       </p>
-      <div class="actions">
-        <label class="preview-prov" for="cs-preview-prov">
-          <span class="hint">Provider</span>
-        </label>
+      <div class="field preview-prov">
+        <label for="cs-preview-prov">Preview for</label>
         <select id="cs-preview-prov" class="input" bind:value={previewProvider}>
           {#each providers as p (p)}
             <option value={p}>{p}</option>
@@ -440,12 +454,16 @@
   }
   .meta {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
     margin: 0 0 12px;
     min-width: 0;
+    max-width: var(--settings-col);
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .meta > :global(svg) {
+    flex-shrink: 0;
   }
   .meta .path {
     min-width: 0;
@@ -454,13 +472,11 @@
     white-space: nowrap;
     direction: ltr;
   }
-  .meta > span {
-    flex-shrink: 0;
+  .form-note {
+    margin: 0 0 12px;
+    font-size: var(--fs-s);
   }
-  .meta > .path {
-    flex-shrink: 1;
-  }
-  .unsaved {
+  .form-note.unsaved {
     color: var(--warning);
   }
   .readonly {
@@ -469,7 +485,7 @@
     color: var(--text-dim);
   }
   .save-err {
-    max-width: 760px;
+    max-width: var(--settings-col);
     margin: 0 0 12px;
     padding: 10px 12px;
     border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
@@ -480,14 +496,30 @@
   .save-err p {
     margin: 0 0 6px;
   }
+  .cs-form {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+  /* The same card as the other Settings pages. */
   .form {
     margin: 0;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding: 16px 18px;
-    max-width: 760px;
+    gap: 14px;
+    padding: 14px 16px;
+    max-width: var(--settings-col);
+  }
+  .toggles {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 16px;
+    max-width: var(--settings-col);
+  }
+  .toggles > :global(.st + .st) {
+    border-top: 1px solid var(--border);
   }
   .sr-only {
     position: absolute;
@@ -500,13 +532,15 @@
   .form .field {
     margin: 0;
   }
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
   .lbl {
     font-size: var(--fs-s);
     font-weight: 500;
     color: var(--text-dim);
-  }
-  .toggles {
-    gap: 0;
   }
   .skill-row {
     display: flex;
@@ -551,38 +585,42 @@
     line-height: 1.5;
     font-size: var(--fs-s);
   }
+  .soul {
+    max-width: 320px;
+  }
   .actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
   }
-  .section-title {
-    margin: 24px 0 6px;
-  }
   .card-info {
-    margin: 0 0 10px;
+    margin: 0;
     font-size: var(--fs-s);
-    max-width: 760px;
+    max-width: var(--settings-col);
+  }
+  .card-info.intro-line {
+    margin-bottom: 10px;
   }
   .dim {
     color: var(--text-dim);
   }
   .preview-prov {
-    display: flex;
-    align-items: center;
-  }
-  .actions .input {
-    width: auto;
+    margin: 0 0 10px;
+    max-width: 200px;
   }
   .preview-box {
-    margin-top: 10px;
     padding: 12px 14px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    max-width: 760px;
+    max-width: var(--settings-col);
     min-width: 0;
     overflow-x: auto;
+  }
+  @media (max-width: 640px) {
+    .grid2 {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

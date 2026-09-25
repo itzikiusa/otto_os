@@ -142,7 +142,7 @@
     </select>
 
     {#if canEdit}
-      <button class="btn small" onclick={newDashboard}><Icon name="plus" size={11} />New</button>
+      <button class="btn small" onclick={newDashboard}><Icon name="plus" size={12} />New</button>
     {/if}
 
     {#if dashboard}
@@ -167,7 +167,7 @@
         </select>
       </div>
       {#if canEdit}
-        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={11} />Add widget</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={12} />Add widget</button>
       {/if}
     {/if}
   </div>

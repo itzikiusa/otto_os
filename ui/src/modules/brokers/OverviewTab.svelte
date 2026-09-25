@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
 
@@ -14,6 +15,8 @@
   let loading = $state(true);
   /** Failed overview load — inline with Retry (it used to toast and leave a blank pane). */
   let error = $state<string | null>(null);
+  /** The first load has taken long enough to be worth explaining. */
+  let slow = $state(false);
   /** Bumped by Retry to re-run the load effect. */
   let attempt = $state(0);
 
@@ -63,10 +66,15 @@
         .catch(() => {});
     void poll();
     const timer = setInterval(() => void poll(), 4000);
+    // An unreachable broker can hang the first metadata call for a long time;
+    // say so instead of an open-ended "Connecting…".
+    slow = false;
+    const slowTimer = setTimeout(() => { if (alive) slow = true; }, 8000);
 
     return () => {
       alive = false;
       clearInterval(timer);
+      clearTimeout(slowTimer);
     };
   });
 
@@ -77,7 +85,16 @@
 
 <div class="overview">
   {#if loading && !overview}
-    <p class="muted">Connecting to cluster…</p>
+    <div class="connecting" role="status">
+      <p class="muted">Connecting to the cluster…</p>
+      {#if slow}
+        <p class="muted slow-note">
+          Still waiting on the brokers. Check the bootstrap servers and your network, or
+          <button class="btn small" onclick={() => attempt++}>Try again</button>
+        </p>
+      {/if}
+      <Skeleton rows={2} height={64} />
+    </div>
   {:else if error && !overview}
     <LoadState what="the cluster overview" {loading} {error} empty onretry={() => attempt++} />
   {:else if overview}
@@ -199,6 +216,21 @@
 </div>
 
 <style>
+  .connecting {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .connecting p {
+    margin: 0;
+  }
+  .slow-note {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: var(--fs-s);
+  }
   .overview {
     padding: 16px;
     display: flex;
@@ -233,7 +265,7 @@
     color: var(--text-dim);
   }
   .card .v {
-    font-size: 26px;
+    font-size: var(--fs-2xl);
     font-weight: 600;
   }
   .card .v.warn-v {

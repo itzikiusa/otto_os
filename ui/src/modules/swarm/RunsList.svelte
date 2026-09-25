@@ -10,6 +10,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { formatCount } from '../../lib/metric-format';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { RecruitedAgent, RunStatus, SwarmRun } from './types';
 
   // `onhire` lets a completed recruit run open the Recruiter wizard pre-filled
@@ -38,9 +39,18 @@
 
   const filtering = $derived(!!(agentFilter || projectFilter || statusFilter));
 
-  // A failed stop must surface instead of rejecting silently (the row would
-  // just keep showing Running with no explanation).
+  // Stopping can't be undone (the agent's session is closed and its work in
+  // progress is lost; a new run starts over), so it asks first — the same rule
+  // as Abort all, a workflow's Cancel run and a goal loop's Stop. A failed stop
+  // must surface instead of rejecting silently (the row would just keep
+  // showing Running with no explanation).
   async function stop(r: SwarmRun) {
+    const who = swarm.agentById(r.agent_id)?.name ?? 'this agent';
+    const ok = await confirmer.ask(
+      `Stop ${who}'s ${sentenceCase(r.kind).toLowerCase()} run? Its session is closed and work in progress is lost.`,
+      { title: 'Stop run', confirmLabel: 'Stop run', danger: true },
+    );
+    if (!ok) return;
     try {
       await swarm.stopRun(r.id);
     } catch (e) {
@@ -108,12 +118,15 @@
       <VirtualList items={filtered} estimateHeight={37} class="vlist-runs">
         {#snippet row(r: SwarmRun)}
           {@const agent = swarm.agentById(r.agent_id)}
-          <div class="trow" role="button" tabindex="0" onclick={() => (inspecting = r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (inspecting = r)}>
+          <!-- The Work cell is a real button stretched over the whole row (click
+               anywhere to inspect); the row's own actions sit above it. -->
+          <div class="trow">
             <span class="c-agent" title={agent ? `${agent.name}${agent.title ? ` — ${agent.title}` : ''}` : r.agent_id}>
               <span class="agent-name">{agent?.name ?? r.agent_id.slice(0, 6)}</span>
               {#if agent?.title}<span class="agent-title dim">{agent.title}</span>{/if}
             </span>
-            <span class="c-kind dim" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)}>{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</span>
+            <button class="c-kind dim run-open" title={r.summary ? `${sentenceCase(r.kind)} · ${r.summary}` : sentenceCase(r.kind)} onclick={() => (inspecting = r)}
+              aria-label="Inspect {agent?.name ?? 'agent'}'s {sentenceCase(r.kind).toLowerCase()} run">{sentenceCase(r.kind)}{r.summary ? ` · ${r.summary}` : ''}</button>
             <span class="c-status"><StatusBadge status={runStatus(r.status)} /></span>
             <span class="c-time dim">{rel(r.started_at ?? r.enqueued_at ?? '')}</span>
             <span class="c-tok mono dim" title={r.tokens_input != null || r.tokens_output != null ? tokenTitle(r) : 'No usage recorded'}>
@@ -122,17 +135,16 @@
                 : '—'}
             </span>
             <span class="c-act">
-              <button class="icon-btn" title="Inspect run" aria-label="Inspect run" onclick={(e) => { e.stopPropagation(); inspecting = r; }}>
-                <Icon name="eye" size={14} />
-              </button>
               {#if r.session_id}
-                <button class="btn small ghost" title="Open this run's session beside the view" onclick={(e) => { e.stopPropagation(); swarm.selectedSessionId = r.session_id!; }}>Open session</button>
+                <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                  <Icon name="terminal" size={14} />
+                </button>
               {/if}
               {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
-                <button class="btn small primary" title="Review & hire this proposed agent" onclick={(e) => { e.stopPropagation(); onhire?.(r.result as unknown as RecruitedAgent, r.id); }}>Hire</button>
+                <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
               {/if}
               {#if active(r)}
-                <button class="btn small danger" title="Stop this run; its session is closed" onclick={(e) => { e.stopPropagation(); void stop(r); }}>Stop</button>
+                <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}>Stop…</button>
               {/if}
             </span>
           </div>
@@ -200,11 +212,35 @@
     border-bottom: 1px solid var(--border);
   }
   .trow {
+    position: relative;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    cursor: pointer;
   }
   .trow:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    background: var(--hover);
+  }
+  .run-open {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .run-open::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .run-open:focus-visible {
+    outline: none;
+  }
+  .trow:has(.run-open:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  /* Later in the DOM + positioned → painted above the stretched button. */
+  .c-act > :global(*) {
+    position: relative;
   }
   /* Grid cells default to min-width:auto — without 0 a long agent name/title
      pushes the row wider instead of truncating. */

@@ -122,6 +122,29 @@
     }
   });
 
+  // Open on an item: the first time this device opens a workspace's API client
+  // (no persisted tab slot yet — e.g. requests came from Git sync or another
+  // Mac), land on the most recently edited saved request instead of an empty
+  // "Untitled" draft. Once tabs have been persisted (including "I closed them
+  // all") they are restored as the user left them; this never overrides that.
+  // The slot key mirrors apiClient's `otto_api_tabs_v1:<workspace>`.
+  let autoOpenedFor: string | null = null;
+  $effect(() => {
+    const wid = ws.currentId;
+    const reqs = apiClient.requests;
+    if (!wid || autoOpenedFor === wid || apiClient.loading || reqs.length === 0) return;
+    if (reqs[0].workspace_id !== wid) return;
+    untrack(() => {
+      autoOpenedFor = wid;
+      let persisted = true;
+      try { persisted = localStorage.getItem(`otto_api_tabs_v1:${wid}`) !== null; } catch { /* unknown → leave as is */ }
+      const only = apiClient.tabs.length === 1 ? apiClient.tabs[0] : null;
+      if (persisted || !only || only.requestId || apiClient.isDirty(only)) return;
+      const latest = reqs.reduce((a, b) => ((b.updated_at ?? '') > (a.updated_at ?? '') ? b : a));
+      apiClient.loadRequestIntoDraft(latest);
+    });
+  });
+
   // ── onboarding ─────────────────────────────────────────────────────────────
   // A workspace with nothing in it (no saved requests, collections, history or
   // edited tab) opens on "Create your first request", not an empty editor.

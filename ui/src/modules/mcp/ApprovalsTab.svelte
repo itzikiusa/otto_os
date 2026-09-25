@@ -180,7 +180,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .count {

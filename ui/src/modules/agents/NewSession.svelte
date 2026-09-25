@@ -412,7 +412,7 @@
 
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
-      Provider <span class="dim">(← → to switch, ± for more than one)</span>
+      Provider <span class="dim">· use − / + on a card to start several at once</span>
     </div>
     <div
       bind:this={gridEl}

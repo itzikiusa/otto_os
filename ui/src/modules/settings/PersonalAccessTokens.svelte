@@ -6,7 +6,7 @@
   // Personal Access Tokens (PAT) management — mint long-lived API tokens,
   // view existing ones (prefix + last-seen), and revoke them individually.
   // Routes: POST/GET/DELETE /api/v1/auth/tokens  (api.md #87-89).
-  import { api } from '../../lib/api/client';
+  import { api, baseUrl } from '../../lib/api/client';
   import type { ApiTokenInfo, CreateApiTokenResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -23,6 +23,7 @@
   let revoking: Set<string> = $state(new Set());
   let filter = $state<'all' | 'personal' | 'session' | 'orphaned'>('all');
   const sessionToken = (t: ApiTokenInfo) => !!(t.session_id || t.legacy_session_id);
+  const sessionCount = $derived(tokens.filter(sessionToken).length);
   const orphaned = $derived(tokens.filter((t) => sessionToken(t) && t.session_exists === false));
   const visible = $derived(tokens.filter((t) => filter === 'all'
     || (filter === 'personal' && !sessionToken(t))
@@ -140,7 +141,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('tokens')} subtitle="Long-lived tokens for scripts, CI and the Otto CLI" />
+  <PageHeader title={sectionLabel('tokens')} subtitle="For scripts, CI and the Otto CLI" />
   <PageBody width="readable">
   <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions can't create tokens.</SectionIntro>
 
@@ -187,8 +188,8 @@
     {#if tokens.length}
       <select class="input filter" aria-label="Filter tokens" bind:value={filter}>
         <option value="all">All ({tokens.length})</option>
-        <option value="personal">Personal tokens</option>
-        <option value="session">Session tokens</option>
+        <option value="personal">Personal ({tokens.length - sessionCount})</option>
+        <option value="session">Session ({sessionCount})</option>
         <option value="orphaned">Deleted session ({orphaned.length})</option>
       </select>
     {/if}
@@ -250,7 +251,7 @@
 
   <!-- ── Usage note ── -->
   <div class="section-title">Using a token</div>
-  <pre class="code-block">curl -H "Authorization: Bearer &lt;token&gt;" http://127.0.0.1:7700/api/v1/auth/me</pre>
+  <pre class="code-block">curl -H "Authorization: Bearer &lt;token&gt;" {baseUrl()}/api/v1/auth/me</pre>
   </PageBody>
 </div>
 
@@ -264,10 +265,10 @@
   }
   .s-card {
     padding: 12px 16px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .tok-card {
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .sr-only {
     position: absolute;
@@ -280,7 +281,7 @@
 
   /* ── One-time secret banner ── */
   .secret-banner {
-    max-width: 640px;
+    max-width: var(--settings-col);
     margin-bottom: 16px;
     padding: 12px 14px;
     border-radius: var(--radius-m);
@@ -352,7 +353,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .tokens-head .section-title {
     margin-block: 18px 8px;
@@ -366,7 +367,7 @@
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    max-width: 640px;
+    max-width: var(--settings-col);
     margin-bottom: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -431,14 +432,14 @@
     font-weight: 500;
   }
   .usage-note {
-    max-width: 640px;
+    max-width: var(--settings-col);
     font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-dim);
     margin: 8px 0 0;
   }
   .code-block {
-    max-width: 640px;
+    max-width: var(--settings-col);
     box-sizing: border-box;
     font-size: var(--fs-s);
     font-family: var(--font-mono);

@@ -191,7 +191,7 @@
             aria-expanded={expandedId === s.id}
           >
             <span class="nm">{s.name}</span>
-            {#if s.has_secret}<Icon name="key" size={11} />{/if}
+            {#if s.has_secret}<Icon name="key" size={12} />{/if}
             {#if s.description}<span class="desc" title={s.description}>{s.description}</span>{/if}
             <span class="endpoint mono" title={endpoint}>{endpoint}</span>
           </button>

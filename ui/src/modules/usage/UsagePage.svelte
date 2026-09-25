@@ -350,9 +350,7 @@
 <div class="usage">
   <PageHeader
     title="Usage"
-    subtitle={usage.status?.available
-      ? `Tokens, estimated cost and system load · last ${usage.days} days · ${usage.ottoOnly ? 'Otto sessions only' : 'all agent sessions on this Mac'}`
-      : 'Tokens, estimated cost and system load'}
+    subtitle="Tokens, estimated cost and system load"
   >
     {#snippet tabs()}
       {#if usage.status?.available}
@@ -1075,27 +1073,18 @@
                 <VirtualList items={usage.summary.sessions} estimateHeight={46} class="sess-vlist">
                   {#snippet row(s)}
                     {@const isOttoSession = s.kind != null || s.title != null}
-                    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-                    <div
-                      class="sess-row"
-                      class:sess-clickable={isOttoSession}
-                      role={isOttoSession ? 'button' : undefined}
-                      tabindex={isOttoSession ? 0 : undefined}
-                      aria-label={isOttoSession ? `Open session ${s.title ?? s.session_id}` : undefined}
-                      onclick={isOttoSession ? () => openSession(s.session_id) : undefined}
-                      onkeydown={isOttoSession
-                        ? (e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              openSession(s.session_id);
-                            }
-                          }
-                        : undefined}
-                    >
-                      <!-- Title first; the raw id is secondary (mono, dim, full id on hover). -->
+                    <div class="sess-row">
+                      <!-- Title first; the raw id is secondary (mono, dim, full id on hover).
+                           An Otto session's title is a real button that opens it; a session
+                           run outside Otto has nothing to open, so it stays plain text. -->
                       <div class="sess-cell" title={s.title ? `${s.title}\n${s.session_id}` : s.session_id}>
                         <div class="sess-top">
-                          <span class="sess-name ellip-any">{s.title ?? 'Session outside Otto'}</span>
+                          {#if isOttoSession}
+                            <button class="sess-name sess-open ellip-any" onclick={() => openSession(s.session_id)}
+                              aria-label="Open session {s.title ?? s.session_id}">{s.title ?? s.session_id.slice(0, 12)}</button>
+                          {:else}
+                            <span class="sess-name ellip-any">{s.title ?? 'Session outside Otto'}</span>
+                          {/if}
                           {#if s.kind}<span class="kind-badge">{s.kind}</span>{/if}
                         </div>
                         <div class="sess-id mono">{s.session_id.slice(0, 12)}</div>
@@ -1514,15 +1503,25 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-  .sess-clickable {
-    cursor: pointer;
-  }
-  .sess-clickable:hover {
+  .sess-row:hover {
     background: var(--hover);
   }
-  .sess-clickable:focus-visible {
+  .sess-open {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    border-radius: var(--radius-s);
+  }
+  .sess-open:hover {
+    color: var(--accent-text);
+    text-decoration: underline;
+  }
+  .sess-open:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    outline-offset: 1px;
   }
   .model-cell {
     display: flex;

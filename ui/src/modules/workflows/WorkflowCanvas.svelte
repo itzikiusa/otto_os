@@ -315,7 +315,7 @@
             {/each}
             {#if loopUntil(n)}
               <div class="until" title={loopUntil(n)}>
-                ↻ until <code>{condLabel(loopUntil(n))}</code>{#if loopMax(n)} · max {loopMax(n)}{/if}
+                <Icon name="refresh" size={12} /> until <code>{condLabel(loopUntil(n))}</code>{#if loopMax(n)}{' · max '}{loopMax(n)}{/if}
               </div>
             {/if}
           </div>
@@ -497,6 +497,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .until :global(svg) {
+    vertical-align: -2px;
   }
   .until code {
     color: var(--accent-text);

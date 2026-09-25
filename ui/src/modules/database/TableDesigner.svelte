@@ -452,7 +452,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 14px;
+    font-size: var(--fs-l);
     margin: 0;
   }
   .td-cols {

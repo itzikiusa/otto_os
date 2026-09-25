@@ -212,7 +212,7 @@
                 <input type="checkbox" checked={on} onchange={() => togglePick(c)} />
                 <span class="ctx-main">
                   <span class="ctx-name">{c.name}</span>
-                  <span class="ctx-meta mono">{c.cluster}{#if c.server} · {c.server}{/if}{#if c.namespace} · ns {c.namespace}{/if}</span>
+                  <span class="ctx-meta mono">{c.cluster}{#if c.server}{' '}· {c.server}{/if}{#if c.namespace}{' '}· ns {c.namespace}{/if}</span>
                   <span class="ctx-meta mono dim">{c.kubeconfig_path}</span>
                 </span>
               </label>

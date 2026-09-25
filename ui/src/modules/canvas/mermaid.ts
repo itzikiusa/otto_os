@@ -12,59 +12,79 @@ type MermaidApi = {
 
 let _mermaid: MermaidApi | null = null;
 let _loading: Promise<MermaidApi> | null = null;
+/** The theme mermaid is currently initialized with (initialize is global). */
+let _dark: boolean | null = null;
+/** Renders run one at a time: a light export must never interleave with a
+ *  dark on-screen render between `initialize` and `render`. */
+let _queue: Promise<unknown> = Promise.resolve();
 
-/** Resolve (and one-time-initialize) the mermaid module. Lazy + memoized. */
-async function load(): Promise<MermaidApi> {
-  if (_mermaid) return _mermaid;
-  _loading ??= import('mermaid').then((m) => {
-    const api = m.default as unknown as MermaidApi;
-    // `neutral` reads well on both light/dark surfaces. `strict` (not `loose`):
-    // the SVG is injected with {@html} and its source can be agent-written or
-    // come from a vault note, so labels are sanitized and `click` directives /
-    // javascript: links are refused. startOnLoad:false — we drive render()
-    // manually.
-    //
-    // The per-diagram knobs below de-clutter the output (the chief complaint on
-    // dense sequence diagrams): a UI sans font, generous spacing, NO mirrored
-    // actors at the bottom, wrapped labels, and useMaxWidth so the SVG fits the
-    // node's width instead of overflowing.
-    api.initialize({
-      startOnLoad: false,
-      theme: 'neutral',
-      securityLevel: 'strict',
-      fontFamily: 'ui-sans-serif, -apple-system, system-ui, sans-serif',
-      flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 16 },
-      sequence: {
-        useMaxWidth: true,
-        mirrorActors: false,
-        wrap: true,
-        boxMargin: 12,
-        actorMargin: 64,
-        messageMargin: 44,
-        noteMargin: 12,
-        bottomMarginAdj: 4,
-      },
-      class: { useMaxWidth: true },
-      state: { useMaxWidth: true },
-      er: { useMaxWidth: true },
-    });
-    _mermaid = api;
-    return api;
-  });
-  return _loading;
+// `neutral` on light surfaces, `dark` on dark ones — `neutral` draws dark
+// labels and lines on a transparent background, which vanished on the dark
+// pasteboard. `strict` (not `loose`): the SVG is injected with {@html} and its
+// source can be agent-written or come from a vault note, so labels are
+// sanitized and `click` directives / javascript: links are refused.
+// startOnLoad:false — we drive render() manually.
+//
+// The per-diagram knobs below de-clutter the output (the chief complaint on
+// dense sequence diagrams): a UI sans font, generous spacing, NO mirrored
+// actors at the bottom, wrapped labels, and useMaxWidth so the SVG fits the
+// node's width instead of overflowing.
+function config(dark: boolean): Record<string, unknown> {
+  return {
+    startOnLoad: false,
+    theme: dark ? 'dark' : 'neutral',
+    securityLevel: 'strict',
+    fontFamily: 'ui-sans-serif, -apple-system, system-ui, sans-serif',
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 16 },
+    sequence: {
+      useMaxWidth: true,
+      mirrorActors: false,
+      wrap: true,
+      boxMargin: 12,
+      actorMargin: 64,
+      messageMargin: 44,
+      noteMargin: 12,
+      bottomMarginAdj: 4,
+    },
+    class: { useMaxWidth: true },
+    state: { useMaxWidth: true },
+    er: { useMaxWidth: true },
+  };
 }
+
+/** Resolve the mermaid module (lazy + memoized) initialized for `dark`. */
+async function load(dark: boolean): Promise<MermaidApi> {
+  _loading ??= import('mermaid').then((m) => (_mermaid = m.default as unknown as MermaidApi));
+  const api = _mermaid ?? (await _loading);
+  if (_dark !== dark) {
+    api.initialize(config(dark));
+    _dark = dark;
+  }
+  return api;
+}
+
 
 /** Render `src` to an SVG string. Returns `{ error }` on any parse/render
  *  failure (mermaid leaves a stray error node in the DOM otherwise — caller
- *  renders our message instead). `id` must be unique & DOM-id-safe per node. */
-export async function renderMermaid(
+ *  renders our message instead). `id` must be unique & DOM-id-safe per node.
+ *  `dark: true` draws light-on-transparent for a dark surface (the Canvas
+ *  pasteboard); the default suits a light/white figure (vault notes, Design
+ *  Hall frames and thumbnails, exports). */
+export function renderMermaid(
   id: string,
   src: string,
+  opts: { dark?: boolean } = {},
 ): Promise<{ svg?: string; error?: string }> {
+  const run = _queue.then(() => renderNow(id, src, opts.dark ?? false));
+  _queue = run.catch(() => undefined);
+  return run;
+}
+
+async function renderNow(id: string, src: string, dark: boolean): Promise<{ svg?: string; error?: string }> {
   const text = src.trim();
   if (!text) return { error: 'Empty diagram' };
   try {
-    const api = await load();
+    const api = await load(dark);
     // Pre-validate so a syntax error is reported cleanly rather than as a
     // half-rendered "Syntax error in graph" SVG.
     await api.parse(text);
@@ -91,7 +111,7 @@ export async function parseMermaid(src: string): Promise<boolean> {
   const text = src.trim();
   if (!text) return false;
   try {
-    const api = await load();
+    const api = await load(_dark ?? false);
     await api.parse(text);
     return true;
   } catch {

@@ -14,6 +14,7 @@
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
   import { toasts } from '../lib/toast.svelte';
+  import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
   import { onDestroy, untrack } from 'svelte';
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
@@ -46,16 +47,82 @@
     document.body.style.userSelect = 'none';
   }
 
-  // The tab row scrolls horizontally when the panel is narrow (the labels
-  // don't shrink); keep the active tab in view whenever it changes — e.g.
-  // opened from the collapsed strip or after the user drags the panel small.
+  // A narrow panel can't fit all nine labels. The row used to scroll, so the
+  // edge tab was cut mid-word ("Ou", "Brow"). Now the tabs that don't fit
+  // fold into a "More" menu (the active tab always stays visible), the way
+  // PageHeader folds its actions.
   let tabsEl = $state<HTMLDivElement | null>(null);
+  let overflowIds = $state<RightTab[]>([]);
+  const MORE_W = 34; // the "More" button (+ its gap)
+  let measuring = false;
+  function measureTabs(): void {
+    const el = tabsEl;
+    if (!el || measuring) return;
+    measuring = true;
+    try {
+      const btns = Array.from(el.querySelectorAll<HTMLElement>('.rtab'));
+      for (const b of btns) b.removeAttribute('data-rt-hidden');
+      const widths = btns.map((b) => b.getBoundingClientRect().width + 2);
+      const total = widths.reduce((a, w) => a + w, 0);
+      const avail = el.clientWidth;
+      if (total <= avail + 0.5) {
+        if (overflowIds.length) overflowIds = [];
+        return;
+      }
+      const activeIdx = tabs.findIndex((t) => t.id === ui.rightTab);
+      // With the button already shown, clientWidth has room for it taken.
+      let used = (overflowIds.length ? 0 : MORE_W) + (activeIdx >= 0 ? widths[activeIdx] : 0);
+      // Keep the row in order: once one tab doesn't fit, every later one
+      // folds too (a short later tab slipping in would reorder the strip).
+      const hidden: RightTab[] = [];
+      let full = false;
+      tabs.forEach((t, i) => {
+        if (i === activeIdx) return;
+        if (!full && used + widths[i] <= avail) used += widths[i];
+        else {
+          full = true;
+          hidden.push(t.id);
+        }
+      });
+      btns.forEach((b, i) => {
+        if (hidden.includes(tabs[i].id)) b.setAttribute('data-rt-hidden', '');
+      });
+      if (hidden.join() !== overflowIds.join()) overflowIds = hidden;
+    } finally {
+      measuring = false;
+    }
+  }
+  let raf = 0;
+  function scheduleMeasure(): void {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      measureTabs();
+    });
+  }
+  $effect(() => {
+    const el = tabsEl;
+    if (!el) return;
+    const ro = new ResizeObserver(scheduleMeasure);
+    ro.observe(el);
+    scheduleMeasure();
+    return () => {
+      ro.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    };
+  });
+  // Picking a folded tab makes it the active one — re-fit so it swaps in.
   $effect(() => {
     void ui.rightTab;
-    queueMicrotask(() =>
-      tabsEl?.querySelector('.rtab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }),
-    );
+    untrack(scheduleMeasure);
   });
+  function openMore(e: MouseEvent): void {
+    const items: MenuItem[] = tabs
+      .filter((t) => overflowIds.includes(t.id))
+      .map((t) => ({ label: t.label, icon: t.icon, action: () => (ui.rightTab = t.id) }));
+    ctxMenu.show(e, items);
+  }
 
   const tabs: { id: RightTab; icon: IconName; label: string }[] = [
     { id: 'git', icon: 'branch', label: 'Git' },
@@ -145,7 +212,10 @@
     else return;
     e.preventDefault();
     ui.rightTab = tabs[next].id;
-    queueMicrotask(() => tabsEl?.querySelector<HTMLElement>('.rtab.active')?.focus());
+    // After the re-fit (a folded tab swaps in on the next frame).
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => tabsEl?.querySelector<HTMLElement>('.rtab.active')?.focus()),
+    );
   }
 </script>
 
@@ -181,6 +251,17 @@
           </button>
         {/each}
       </div>
+      {#if overflowIds.length > 0}
+        <button
+          class="icon-btn rtab-more"
+          onclick={openMore}
+          title="More panels: {tabs.filter((t) => overflowIds.includes(t.id)).map((t) => t.label).join(', ')}"
+          aria-label="More panels"
+          aria-haspopup="menu"
+        >
+          <Icon name="chevronDown" size={13} />
+        </button>
+      {/if}
       {#if !forceOpen}
         <button
           class="icon-btn"
@@ -308,6 +389,12 @@
     width: 100%;
     border-inline-start: none;
   }
+  /* …and leave the drawer's floating close button (32px + 8px inset) its own
+     corner instead of sitting over the tab row's "More" control. */
+  .rpanel.embedded .rpanel-head {
+    padding-inline-end: 48px;
+    min-height: 48px;
+  }
   .resize-handle {
     position: absolute;
     inset-inline-start: -3px;
@@ -337,15 +424,18 @@
   .rpanel-tabs {
     display: flex;
     gap: 2px;
-    /* Narrow panel: the row scrolls instead of shoving the expand/collapse
-       buttons off the edge (they're flex-pinned below). */
+    /* Narrow panel: tabs that don't fit fold into the "More" menu (measured
+       in JS) — never a half-visible label cut at the edge. */
     flex: 1;
     min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none; /* wheel/trackpad + active-tab scroll-into-view */
+    overflow: hidden;
   }
-  .rpanel-tabs::-webkit-scrollbar {
+  .rtab:global([data-rt-hidden]) {
     display: none;
+  }
+  .rtab-more {
+    flex-shrink: 0;
+    margin-inline-end: 4px;
   }
   .rpanel-head > :global(.icon-btn) {
     flex-shrink: 0;

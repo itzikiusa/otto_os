@@ -179,7 +179,7 @@
 
             {#if r.drift.length}
               <div class="drift" title={r.drift.map((d) => `${d.workload}: ${d.versions.join(', ')}`).join('\n')}>
-                <Icon name="branch" size={11} /> {r.drift.length} workload{r.drift.length === 1 ? '' : 's'} running mixed versions
+                <Icon name="branch" size={12} /> {r.drift.length} workload{r.drift.length === 1 ? '' : 's'} running mixed versions
               </div>
             {/if}
 

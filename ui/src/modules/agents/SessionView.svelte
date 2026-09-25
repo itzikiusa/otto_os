@@ -186,6 +186,12 @@
   let attachProductOpen = $state(false);
   let handoverOpen = $state(false);
   let shareOpen = $state(false);
+  /** ⋯ → Network profile…: show the network strip for a session without a
+   *  profile (it is hidden then — see the markup). */
+  let netOpen = $state(false);
+  const networkProfileId = $derived(
+    typeof session?.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : '',
+  );
 
   const attachedIssue = $derived(
     (session?.meta?.issue as AttachedIssue | undefined) ?? null,
@@ -631,6 +637,9 @@
             ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue } as MenuItem] : []),
             { label: 'Attach product story…', icon: 'file', action: openAttachProductStory } as MenuItem,
             { label: 'Canvas…', icon: 'shapes', action: openCanvas } as MenuItem,
+            ...(auth.can('connections', 'view') && !networkProfileId
+              ? [{ label: netOpen ? 'Hide network profile' : 'Network profile…', icon: 'globe', action: () => (netOpen = !netOpen) } as MenuItem]
+              : []),
             ...(isAgent
               ? [
                   { separator: true } as MenuItem,
@@ -865,8 +874,11 @@
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
-  {#if session && auth.can('connections', 'view')}
-    {#key sessionId}<SessionNetworkStatus {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
+  <!-- The network strip only takes a row when the session HAS a profile (or
+       the person asked for it from ⋯ → Network profile…) — "Network: none ·
+       Direct" in every session header was chrome with nothing to say. -->
+  {#if session && auth.can('connections', 'view') && (networkProfileId || netOpen)}
+    {#key sessionId}<SessionNetworkStatus defaultOpen={netOpen && !networkProfileId} {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
   {/if}
   {#if session?.meta?.handover}<HandoverDeliveryPanel {session} readonly={readOnly} />{/if}
   <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>

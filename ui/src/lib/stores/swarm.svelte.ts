@@ -3,6 +3,7 @@
 // (swarm_run_updated / swarm_task_updated / swarm_message_posted / swarm_status).
 
 import { api } from '../api/client';
+import { loadErrorText } from '../loadError';
 import type { OttoEvent } from '../api/types';
 import type {
   CreateAgentReq,
@@ -45,6 +46,15 @@ class SwarmStore {
    *  from an empty workspace, so a hiccup reads as "my swarms are gone" — the rail
    *  shows this + a retry instead of the "no swarms" empty state. */
   swarmsError: string | null = $state(null);
+  /** True while a swarm-LIST load is in flight (`loading` is the open swarm's). */
+  loadingSwarms = $state(false);
+  /** Last failed {@link openSwarm} (human text) — render inline with Retry. */
+  detailError: string | null = $state(null);
+  /** Standing-goals / triggers load failures for the open swarm. While set, the
+   *  lists are NOT known — a Save built from them would clobber real data, so
+   *  editors must block saving and show the error with Retry instead. */
+  standingGoalsError: string | null = $state(null);
+  triggersError: string | null = $state(null);
   /** Other workspaces that DO have swarms, filled on demand by
    *  {@link findSwarmsElsewhere}. Swarms are per-workspace, so an empty rail is
    *  far more often "wrong workspace" than "none created". */
@@ -98,6 +108,7 @@ class SwarmStore {
       this.elsewhere = [];
       this.elsewhereChecked = false;
     }
+    this.loadingSwarms = true;
     try {
       const list = await api.get<Swarm[]>(`/workspaces/${workspaceId}/swarm/swarms`);
       if (this.wsId !== workspaceId) return; // a newer switch won the race
@@ -108,7 +119,9 @@ class SwarmStore {
       if (this.wsId !== workspaceId) return;
       // Keep whatever is on screen (if it's this workspace's) and say what went
       // wrong — blanking the rail on a transient failure looks like data loss.
-      this.swarmsError = e instanceof Error ? e.message : String(e);
+      this.swarmsError = loadErrorText(e);
+    } finally {
+      if (this.wsId === workspaceId) this.loadingSwarms = false;
     }
   }
 
@@ -180,8 +193,14 @@ class SwarmStore {
       this.selectedProjectId = null;
       this.selectedSessionId = null;
     }
+    this.detailError = null;
     try {
-      this.detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+      try {
+        this.detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+      } catch (e) {
+        this.detailError = loadErrorText(e);
+        throw e;
+      }
       this.selectedProjectId = this.detail.projects[0]?.id ?? null;
       this.selectedSessionId = null;
       await Promise.all([
@@ -643,11 +662,17 @@ class SwarmStore {
 
   // -- Standing goals (swarm-level templates) --------------------------------
 
+  private standingGoalsFor: string | null = null;
   async loadStandingGoals(sid: string): Promise<void> {
     try {
       this.standingGoals = await api.get<SwarmGoal[]>(`/swarm/swarms/${sid}/standing-goals`);
-    } catch {
-      this.standingGoals = [];
+      this.standingGoalsFor = sid;
+      this.standingGoalsError = null;
+    } catch (e) {
+      // Never let a failure read as "no standing goals": keep this swarm's last
+      // known list (another swarm's never belongs here) and flag the error.
+      if (this.standingGoalsFor !== sid) this.standingGoals = [];
+      this.standingGoalsError = loadErrorText(e);
     }
   }
 
@@ -655,6 +680,8 @@ class SwarmStore {
     this.standingGoals = await api.put<SwarmGoal[]>(`/swarm/swarms/${sid}/standing-goals`, {
       goals,
     });
+    this.standingGoalsFor = sid;
+    this.standingGoalsError = null;
   }
 
   // -- Verification ----------------------------------------------------------
@@ -694,11 +721,16 @@ class SwarmStore {
 
   // -- Channel triggers ------------------------------------------------------
 
+  private triggersFor: string | null = null;
   async loadTriggers(sid: string): Promise<void> {
     try {
       this.triggers = await api.get<SwarmChannelTrigger[]>(`/swarm/swarms/${sid}/triggers`);
-    } catch {
-      this.triggers = [];
+      this.triggersFor = sid;
+      this.triggersError = null;
+    } catch (e) {
+      // Same rule as standing goals: a failure is not "no triggers".
+      if (this.triggersFor !== sid) this.triggers = [];
+      this.triggersError = loadErrorText(e);
     }
   }
 

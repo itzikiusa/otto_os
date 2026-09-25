@@ -380,10 +380,10 @@
         {#if brokers.clusters.length > 0}<span class="hcount">{brokers.clusters.length}</span>{/if}
       </button>
       <div class="head-btns">
-        <button class="btn small" onclick={() => newSection(null)} aria-label="New section" title="New section">
+        <button class="icon-btn" onclick={() => newSection(null)} aria-label="New section" title="New section">
           <Icon name="folder" size={13} />
         </button>
-        <button class="btn small" onclick={openAdd} aria-label="Add cluster" title="Add cluster"><Icon name="plus" size={13} /></button>
+        <button class="icon-btn" onclick={openAdd} aria-label="Add cluster" title="Add cluster"><Icon name="plus" size={13} /></button>
       </div>
     </div>
     <div class="cluster-list">
@@ -464,7 +464,7 @@
                 brokers.close(c.id);
               }}
             >
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -505,8 +505,9 @@
           actionIcon="plus"
           onaction={openAdd}
         />
-      {:else if !brokers.loading}
-        <!-- Clusters exist: the list pane (with its own "+") is right there, so
+      {:else if !brokers.loading && !viewport.isPhone}
+        <!-- (Phone: the list above IS the page — no second "pick one" pane.)
+             Clusters exist: the list pane (with its own "+") is right there, so
              no duplicate "Add a cluster" CTA. -->
         <EmptyState
           variant="page"
@@ -573,6 +574,8 @@
 {/snippet}
 
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
+  <!-- The row drags; its name button opens the cluster and ⋯ holds the same
+       menu as right-click (no button nested inside a button). -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="cluster"
@@ -584,15 +587,16 @@
       e.stopPropagation();
     }}
     ondragend={() => (draggedClusterId = null)}
-    onclick={() => brokers.select(c.id)}
-    onkeydown={(e) => e.key === 'Enter' && brokers.select(c.id)}
     oncontextmenu={(e) => openMenu(e, 'cluster', c.id)}
-    role="button"
-    tabindex="0"
   >
-    <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-    <span class="cn" title={c.name}>{c.name}</span>
+    <button class="cluster-open" onclick={() => brokers.select(c.id)} aria-current={brokers.selectedId === c.id ? 'true' : undefined} title={c.name}>
+      <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
+      <span class="cn">{c.name}</span>
+    </button>
     <EnvBadge env={c.environment} />
+    <button class="icon-btn cluster-more" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => openMenu(e, 'cluster', c.id)}>
+      <Icon name="more" size={14} />
+    </button>
   </div>
 {/snippet}
 
@@ -722,21 +726,45 @@
   }
   .cluster {
     width: 100%;
-    text-align: start;
-    border: none;
-    background: transparent;
-    padding: 8px 12px;
+    padding-block: 4px;
+    padding-inline-end: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-inline-start: 2px solid transparent;
+  }
+  .cluster-open {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 4px 6px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
     cursor: pointer;
-    border-inline-start: 2px solid transparent;
+  }
+  .cluster-more {
+    flex-shrink: 0;
+    opacity: 0;
+  }
+  .cluster:hover .cluster-more,
+  .cluster:focus-within .cluster-more {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .cluster-more {
+      opacity: 1;
+    }
   }
   .cluster:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .cluster.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .dot {
@@ -960,9 +988,9 @@
       border-radius: 9px;
       padding: 1px 8px;
     }
-    .head-btns .btn.small {
-      font-size: var(--fs-m);
-      padding: 6px 8px;
+    .head-btns .icon-btn {
+      width: 36px;
+      height: 36px;
     }
     /* Expanded: scroll within a capped height. Collapsed: hidden. */
     .cluster-list {
@@ -975,7 +1003,7 @@
     }
     /* Bigger sidebar text + roomier tap targets. */
     .cluster {
-      padding: 11px 14px;
+      padding-block: 7px;
     }
     .cn {
       font-size: var(--fs-l);

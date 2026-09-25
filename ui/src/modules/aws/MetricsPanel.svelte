@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { awsErrorText } from './util';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
   // instance): range picker (1h … 30d), refresh + auto-refresh every 60 s
@@ -125,7 +126,7 @@
     </div>
     <span class="meta dim">
       {#if resp}period {periodLabel}{/if}
-      {#if updatedAt} · updated {fmtUpdated(updatedAt)}{/if}
+      {#if updatedAt}{' '}· updated {fmtUpdated(updatedAt)}{/if}
       · auto-refresh 60 s
     </span>
     <button class="icon-btn" class:spin={loading} onclick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh metrics">
@@ -146,13 +147,13 @@
       <EmptyState
         icon="chart"
         title="Couldn't load metrics"
-        body={error}
+        body={awsErrorText(error)}
         actionLabel={loginNeeded && onsignin ? 'Sign in' : 'Retry'}
         onaction={loginNeeded && onsignin ? onsignin : () => void load()}
       />
     {/if}
   {:else if !resp}
-    <div class="pad"><Skeleton rows={4} height={120} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading metrics…</p><Skeleton rows={4} height={120} /></div>
   {:else}
     {#if error}
       <p class="stale">Showing the last successful load — refresh failed: {error}</p>
@@ -187,6 +188,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .mp {
     display: flex;
     flex-direction: column;

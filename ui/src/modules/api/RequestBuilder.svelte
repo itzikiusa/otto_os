@@ -1222,6 +1222,9 @@
     flex-direction: column;
     min-height: 0;
     gap: 10px;
+    /* The builder also lives in the ~300 px Agents right panel: its layout
+       follows its own width (container query below), not the viewport. */
+    container-type: inline-size;
   }
   .name-row {
     display: flex;
@@ -1788,7 +1791,9 @@
     white-space: nowrap;
   }
 
-  @media (max-width: 640px) {
+  /* Narrow builder (right panel, phone): URL gets its own full row, Send
+     sits under it; the name row wraps its location line. */
+  @container (max-width: 560px) {
     .urlbar {
       flex-wrap: wrap;
     }
@@ -1827,6 +1832,18 @@
     .where {
       order: 3;
       flex: 1 1 100%;
+    }
+  }
+  @container (max-width: 360px) {
+    /* Wrap instead of a hidden-scrollbar strip that clips the last tabs. */
+    .tabstrip {
+      flex-wrap: wrap;
+    }
+    .tab {
+      padding: 0 7px;
+    }
+    .send {
+      padding: 0 12px;
     }
   }
 </style>

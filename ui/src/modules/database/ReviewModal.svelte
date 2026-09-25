@@ -98,7 +98,7 @@
       <span class="grow"></span>
       <button class="tb-btn" onclick={onclose} disabled={running}>Cancel</button>
       <button class="tb-btn primary" onclick={onrun} disabled={running || !sql.trim()}>
-        <Icon name="play" size={11} />{running ? 'Running…' : 'Run'}
+        <Icon name="play" size={12} />{running ? 'Running…' : 'Run'}
       </button>
     </div>
   </div>

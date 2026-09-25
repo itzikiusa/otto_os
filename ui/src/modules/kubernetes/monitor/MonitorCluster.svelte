@@ -237,7 +237,7 @@
       <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
       {cluster.name}
       <EnvBadge env={cluster.environment} />
-      <Icon name="chevronDown" size={11} />
+      <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}
   {#snippet actions()}
@@ -356,7 +356,7 @@
                   {#if r.mem_sampled > 0}
                     <span title="average per pod">{formatBytes(r.mem_avg)}</span>
                     {#if r.pods > 1}<span class="dim"> · max </span><span title="hungriest pod: {r.mem_max_pod}">{formatBytes(r.mem_max)}</span>{/if}
-                    <div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of limit{#if r.pods > 1} (worst pod){/if}{#if r.mem_sampled < r.pods} · {r.mem_sampled}/{r.pods} sampled{/if}</div>
+                    <div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of limit{#if r.pods > 1}{' '}(worst pod){/if}{#if r.mem_sampled < r.pods}{' '}· {r.mem_sampled}/{r.pods} sampled{/if}</div>
                   {:else}
                     <span class="dim" title="No memory sample yet — configure a memory probe (e.g. the Go actuator preset) or grant metrics-server">—</span>
                     {#if r.mem_limit > 0}<div class="pct">limit {formatBytes(r.mem_limit / Math.max(1, r.pods))}/pod</div>{/if}
@@ -416,7 +416,7 @@
                         <div class="chart">
                           <div class="ct">Requests/s</div>
                           <Sparkline points={series.rps?.points.map((p) => p.v) ?? []} width={420} height={80} stroke="var(--status-working)" label="requests" />
-                          <div class="dim small">baseline {fmtRate(r.rps_baseline)} · 5xx baseline {fmtPct(r.err_pct_baseline, 2)}{#if r.latency_baseline_ms} · latency baseline {fmtMs(r.latency_baseline_ms)}{/if}</div>
+                          <div class="dim small">baseline {fmtRate(r.rps_baseline)} · 5xx baseline {fmtPct(r.err_pct_baseline, 2)}{#if r.latency_baseline_ms}{' '}· latency baseline {fmtMs(r.latency_baseline_ms)}{/if}</div>
                         </div>
                       </div>
                     {/if}

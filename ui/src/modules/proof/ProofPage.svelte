@@ -27,9 +27,7 @@
     createProofPack,
     deleteArtifact,
     deleteProofPack,
-    getProofPack,
     getRepoProofConfig,
-    listProofPacks,
     proofReport,
     runPrCheck,
     setRepoProofConfig,
@@ -46,6 +44,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { sentenceCase } from '../../lib/status';
+  import { rel } from '../../lib/stores/now.svelte';
 
   /** Enum → words for kinds and statuses (self_review → "Self review",
    *  pr_check → "PR check", ci → "CI", api → "API", db → "Database"). */
@@ -67,24 +66,12 @@
   const ARTIFACT_STATUSES = ['info', 'passed', 'failed', 'pending'];
 
   // Load the list (for the active filter) + the summary roll-up for this ws.
-  // The store swallows a failed list load into an empty list; an empty result
-  // is re-checked here so a failure shows inline (with Retry) instead of the
-  // "No proof packs yet" empty state.
-  let listError = $state<string | null>(null);
+  // A failed load lands in `proof.error` (never an empty list), so the page
+  // shows it inline with Retry instead of "No proof packs yet".
+  const listError = $derived(proof.error);
   let listLoaded = $state(false);
   async function loadList(id: string, f: StatusFilter): Promise<void> {
-    const q = f === 'all' ? undefined : { status: f };
-    await proof.loadPacks(id, q);
-    if (proof.packs.length === 0) {
-      try {
-        await listProofPacks(id, q);
-        listError = null;
-      } catch (e) {
-        listError = loadErrorText(e);
-      }
-    } else {
-      listError = null;
-    }
+    await proof.loadPacks(id, f === 'all' ? undefined : { status: f });
     listLoaded = true;
   }
   function retryList(): void {
@@ -178,18 +165,22 @@
     }
   }
 
-  // Opens a pack into the detail pane. The store's own open() drops a failure
-  // silently (the pane just stays as it was), so load here and say so.
+  // Opens a pack into the detail pane. A failure lands in `proof.detailError`
+  // and shows inline in the pane (with Retry), never as a vanished click.
   let openingId = $state<string | null>(null);
+  let lastOpenId: string | null = null;
   async function open(id: string): Promise<void> {
     openingId = id;
+    lastOpenId = id;
     try {
-      proof.detail = await getProofPack(id);
-    } catch (e) {
-      toasts.error("Couldn't open the proof pack", loadErrorText(e));
+      await proof.open(id);
     } finally {
       if (openingId === id) openingId = null;
     }
+  }
+  function retryOpen(): void {
+    const id = lastOpenId ?? detail?.pack.id;
+    if (id) void open(id);
   }
 
   // ---- inline media (R4): object URLs for screenshot/video artifacts --------
@@ -259,7 +250,7 @@
       addOpen = false;
       resetAdd();
     } catch (e) {
-      toasts.error("Couldn't add the artifact", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the artifact", loadErrorText(e));
     }
   }
 
@@ -271,7 +262,7 @@
       await deleteArtifact(id);
       await proof.refreshDetail();
     } catch (e) {
-      toasts.error("Couldn't delete the artifact", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the artifact", loadErrorText(e));
     }
   }
 
@@ -302,7 +293,7 @@
       await proof.refreshDetail();
       toasts.success('Proof assembled', 'Re-assembled from the working directory.');
     } catch (e) {
-      toasts.error("Couldn't assemble proof", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't assemble proof", loadErrorText(e));
     }
   }
 
@@ -319,7 +310,7 @@
       waiveReason = '';
       toasts.success('Proof gate waived', 'Recorded with you as the approver.');
     } catch (e) {
-      toasts.error("Couldn't waive the proof gate", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't waive the proof gate", loadErrorText(e));
     }
   }
 
@@ -367,7 +358,7 @@
       mediaOpen = false;
       resetMedia();
     } catch (e) {
-      toasts.error("Couldn't attach the media", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't attach the media", loadErrorText(e));
     }
   }
 
@@ -449,7 +440,7 @@
       evidenceOpen = false;
       resetEvidence();
     } catch (e) {
-      toasts.error("Couldn't add the evidence", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't add the evidence", loadErrorText(e));
     }
   }
 
@@ -461,7 +452,7 @@
       await proof.refreshDetail();
       toasts.success('CI refreshed', 'Live CI status pulled into a CI artifact.');
     } catch (e) {
-      toasts.error("Couldn't refresh CI", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't refresh CI", loadErrorText(e));
     }
   }
 
@@ -492,7 +483,7 @@
       prOpen = false;
       resetPr();
     } catch (e) {
-      toasts.error("Couldn't run the PR check", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't run the PR check", loadErrorText(e));
     }
   }
 
@@ -507,8 +498,15 @@
         format === 'md' ? 'text/markdown' : 'text/html',
       );
     } catch (e) {
-      toasts.error("Couldn't export the report", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't export the report", loadErrorText(e));
     }
+  }
+
+  function openExportMenu(e: MouseEvent): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: 'Markdown (.md)', icon: 'download', action: () => void exportReport('md') },
+      { label: 'HTML (.html)', icon: 'download', action: () => void exportReport('html') },
+    ]);
   }
 
   // ---- per-repo proof requirements (R3) ------------------------------------
@@ -559,7 +557,7 @@
       cfgOpen = false;
       toasts.success('Requirements saved', 'Proof requirements updated for this repo.');
     } catch (e) {
-      toasts.error("Couldn't save the requirements", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't save the requirements", loadErrorText(e));
     }
   }
 
@@ -578,7 +576,7 @@
       // Land on the next pack instead of an empty "pick one" pane.
       if (!viewport.isPhone && proof.packs.length > 0) void open(proof.packs[0].id);
     } catch (e) {
-      toasts.error("Couldn't delete the proof pack", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't delete the proof pack", loadErrorText(e));
     }
   }
 
@@ -603,7 +601,7 @@
       await loadList(ws.currentId, filter);
       await open(created.id);
     } catch (e) {
-      toasts.error("Couldn't create the proof pack", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn't create the proof pack", loadErrorText(e));
     }
   }
 
@@ -679,8 +677,9 @@
       {/each}
     </div>
     <div class="rail-list">
-      {#if listError && proof.packs.length === 0}
-        <LoadState what="proof packs" error={listError} empty variant="compact" loading={proof.loading} onretry={retryList} />
+      {#if listError}
+        <!-- Nothing loaded → the error; stale packs → a slim "refresh failed" bar. -->
+        <LoadState what="proof packs" error={listError} empty={proof.packs.length === 0} variant="compact" loading={proof.loading} onretry={retryList} />
       {/if}
       {#each proof.packs as p (p.id)}
         <button class="pack-item" class:active={detail?.pack.id === p.id} aria-current={detail?.pack.id === p.id ? 'true' : undefined} aria-busy={openingId === p.id} onclick={() => open(p.id)}>
@@ -697,7 +696,7 @@
       {/each}
       {#if proof.packs.length === 0 && !listError}
         {#if proof.loading && !listLoaded}
-          <p class="dim empty" role="status">Loading proof packs…</p>
+          <LoadState what="proof packs" loading empty variant="compact" />
         {:else}
           <div class="empty">
             <p class="dim">No {words(filter).toLowerCase()} proof packs.</p>
@@ -712,17 +711,21 @@
   <!-- Right: detail. -->
   <section class="main">
     {#if !detail}
-      {#if listError && !showRail}
+      {#if proof.detailError && !openingId}
+        <LoadState what="the proof pack" error={proof.detailError} empty variant="page" onretry={retryOpen} />
+      {:else if listError && !showRail}
         <LoadState what="proof packs" error={listError} empty variant="page" loading={proof.loading} onretry={retryList} />
+      {:else if openingId}
+        <LoadState what="the proof pack" loading empty variant="page" />
       {:else if showRail}
         <EmptyState
           variant="page"
           icon="check"
-          title={openingId ? 'Opening the proof pack…' : 'No proof pack open'}
+          title="No proof pack open"
           body="Verified evidence — tests, diffs, CI, reviews, approvals — assembled for each piece of work. Open a pack from the list to inspect its artifacts and badges."
         />
       {:else if proof.loading || !listLoaded}
-        <p class="dim empty" role="status">Loading proof packs…</p>
+        <LoadState what="proof packs" loading empty variant="page" />
       {:else}
         <EmptyState
           variant="page"
@@ -736,13 +739,16 @@
       {/if}
     {:else}
       <div class="detail-body">
+        {#if proof.detailError && !openingId}
+          <!-- A refresh of the open pack failed: keep it, say so, offer Retry. -->
+          <LoadState what="the proof pack" error={proof.detailError} onretry={retryOpen} />
+        {/if}
         <!-- Done contract (R8): explainable readiness score + checklist. -->
         <DoneContractMeter contract={detail.done_contract} />
 
         <!-- Pack-level tools: report export (R9) + repo requirements (R3). -->
         <div class="tools-row">
-          <button class="btn small ghost" onclick={() => exportReport('md')}><Icon name="download" size={12} /> Export Markdown</button>
-          <button class="btn small ghost" onclick={() => exportReport('html')}><Icon name="download" size={12} /> Export HTML</button>
+          <button class="btn small ghost" onclick={openExportMenu} aria-haspopup="menu"><Icon name="download" size={12} /> Export report <Icon name="chevronDown" size={11} /></button>
           {#if detail.pack.repo_id}
             <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Requirements</button>
           {/if}
@@ -758,7 +764,7 @@
 
         {#if detail.pack.waived_reason}
           <p class="waived-note">
-            <Icon name="info" size={12} /> Waived{detail.pack.waived_by ? ` by ${detail.pack.waived_by}` : ''}{detail.pack.waived_at ? ` · ${new Date(detail.pack.waived_at).toLocaleString()}` : ''}: {detail.pack.waived_reason}
+            <Icon name="info" size={12} /> Waived{detail.pack.waived_by ? ` by ${detail.pack.waived_by}` : ''}{detail.pack.waived_at ? ` · ${rel(detail.pack.waived_at)}` : ''}: {detail.pack.waived_reason}
           </p>
         {/if}
 
@@ -785,13 +791,18 @@
                       <span class="sha-chip" title={`content sha256: ${a.content_sha256}`}>sha:{a.content_sha256.slice(0, 8)}…</span>
                     {/if}
                     <span class="art-status-label {a.status}">{words(a.status)}</span>
+                    <!-- Two row actions at most: the disclosure and Delete. A
+                         truncated preview offers "Load full" inside the pane. -->
                     {#if a.preview != null}
                       <button class="link-btn" aria-expanded={!!expanded[a.id]} onclick={() => toggleExpand(a.id)}>
                         {expanded[a.id] ? 'Hide' : 'Show'}
                       </button>
-                    {/if}
-                    {#if a.preview == null || a.truncated}
-                      <button class="link-btn" onclick={() => loadFull(a.id)}>Load full</button>
+                    {:else if fullContent[a.id] == null}
+                      <button class="link-btn" onclick={() => loadFull(a.id)}>Load content</button>
+                    {:else}
+                      <button class="link-btn" aria-expanded={!!expanded[a.id]} onclick={() => toggleExpand(a.id)}>
+                        {expanded[a.id] ? 'Hide' : 'Show'}
+                      </button>
                     {/if}
                     <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact {a.title}" title="Delete artifact"><Icon name="trash" size={12} /></button>
                   </div>

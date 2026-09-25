@@ -227,7 +227,7 @@
         {#each pods as p (p)}<option value={p}>{p}</option>{/each}
       </select>
       {#if podFilter && onopenpod}
-        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={11} /> Open pod</button>
+        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={12} /> Open pod</button>
       {/if}
     {/if}
     {#if containers.length > 1 || (multi && containers.length)}
@@ -243,10 +243,10 @@
       {#each SINCES as s (s.v)}<option value={s.v}>since {s.l}</option>{/each}
     </select>
     <button class="pill-toggle" class:on={follow} onclick={() => (follow = !follow)} aria-pressed={follow} title="Stream new lines (kubectl logs -f)">
-      <Icon name="play" size={11} /> Follow
+      <Icon name="play" size={12} /> Follow
     </button>
     <button class="pill-toggle" class:on={timestamps} onclick={() => (timestamps = !timestamps)} aria-pressed={timestamps}>
-      <Icon name="clock" size={11} /> Timestamps
+      <Icon name="clock" size={12} /> Timestamps
     </button>
     <button class="pill-toggle" class:on={previous} onclick={() => (previous = !previous)} aria-pressed={previous} title="Logs of the previous (crashed) container instance">
       Previous

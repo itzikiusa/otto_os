@@ -14,6 +14,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { formatSeconds } from '../../lib/metric-format';
   import type { GoalLoop } from '../../lib/api/types';
+  import { tick } from 'svelte';
 
   let { id, onback }: { id: string; onback: () => void } = $props();
 
@@ -23,6 +24,13 @@
   let acting = $state(false);
 
   let openSessionId = $state<string | null>(null);
+  let sessEl = $state<HTMLElement | null>(null);
+  /** Open an agent's session in the pane above the timeline and bring it into view. */
+  async function openSession(sid: string): Promise<void> {
+    openSessionId = sid;
+    await tick();
+    sessEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
 
   // Load + poll the open detail; stop polling when this view goes away.
   $effect(() => {
@@ -125,8 +133,8 @@
   {#snippet actions()}
     {#if loop}
       {#if loop.status === 'running'}
-        <button class="btn small" data-icon="square" disabled={acting} onclick={() => act(() => loops.pause(id), 'Couldn’t pause the goal loop')}>Pause</button>
-        <button class="btn small danger" data-overflow="-1" data-icon="x" disabled={acting} onclick={stop}>Stop…</button>
+        <button class="btn small danger" data-overflow="-1" data-icon="square" disabled={acting} onclick={stop}>Stop…</button>
+        <button class="btn small" data-icon="pause" disabled={acting} onclick={() => act(() => loops.pause(id), 'Couldn’t pause the goal loop')}><Icon name="pause" size={12} /> Pause</button>
       {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
         <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions" onclick={moreMenu}
           aria-label="More actions" title="More actions" aria-haspopup="menu">
@@ -134,6 +142,11 @@
         </button>
         <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Continue iterating toward the goal'}
           onclick={() => act(() => loops.resume(id), 'Couldn’t resume the goal loop')}><Icon name="play" size={12} /> Resume</button>
+      {:else if loop.status === 'draft'}
+        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
+          aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
+        <button class="btn small primary" disabled={acting} title="Start iterating toward the goal"
+          onclick={() => act(() => loops.start(id), 'Couldn’t start the goal loop')}><Icon name="play" size={12} /> Start</button>
       {:else}
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
           aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
@@ -149,7 +162,7 @@
     what="this goal loop"
     variant="page"
     loading={loops.loadingDetail}
-    error={!loop && !loops.loadingDetail ? 'The daemon didn’t return it — it may have been deleted, or the daemon is unreachable.' : null}
+    error={loops.detailError}
     empty={!loop}
     onretry={() => void loops.loadDetail(id)}
   >
@@ -253,7 +266,7 @@
     {/if}
 
     {#if openSessionId}
-      <section class="sess">
+      <section class="sess" bind:this={sessEl} aria-label="Agent session">
         <SessionView
           sessionId={openSessionId}
           focused={true}
@@ -277,7 +290,7 @@
             executorCount={loop.config.executors.length}
             criteria={critText}
             open={i === 0}
-            onopensession={(sid) => (openSessionId = sid)}
+            onopensession={(sid) => void openSession(sid)}
           />
         {/each}
       {/if}

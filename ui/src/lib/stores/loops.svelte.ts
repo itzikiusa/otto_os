@@ -21,6 +21,10 @@ class LoopsStore {
   /** Last list-load failure (human text) — shown inline with Retry, never as "no loops". */
   listError = $state<string | null>(null);
   loadingDetail = $state(false);
+  /** Last detail-load failure (human text) — shown inline with Retry. A prior
+   *  detail for the SAME loop stays in place (transient failure); a failure
+   *  opening a DIFFERENT loop clears it so the page never shows the wrong loop. */
+  detailError = $state<string | null>(null);
   /** Bumped whenever the open detail should be considered stale (event tick). */
   tick = $state(0);
 
@@ -50,8 +54,11 @@ class LoopsStore {
     this.loadingDetail = true;
     try {
       this.detail = await api.get<GoalLoopDetail>(`/goal-loops/${id}`);
-    } catch {
-      // leave the prior detail in place on a transient failure
+      this.detailError = null;
+    } catch (e) {
+      // Leave the prior detail in place on a transient failure of the same loop.
+      if (this.detail && this.detail.loop.id !== id) this.detail = null;
+      this.detailError = loadErrorText(e);
     } finally {
       this.loadingDetail = false;
     }
@@ -59,6 +66,7 @@ class LoopsStore {
 
   closeDetail(): void {
     this.detail = null;
+    this.detailError = null;
     this.stopPoll();
   }
 

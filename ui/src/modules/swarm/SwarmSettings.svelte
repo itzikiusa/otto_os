@@ -7,6 +7,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -30,25 +31,36 @@
   let goalEditorOpen = $state(false);
   let goalEditIndex = $state<number>(-1);
 
+  let goalsLoading = $state(false);
+  /** (Re)load the saved set into the draft. A failed load leaves the draft NOT
+   *  ready (Save stays off): saving a list we never loaded would clobber it. */
+  async function loadGoals(sid: string): Promise<void> {
+    goalsLoading = true;
+    await swarm.loadStandingGoals(sid);
+    goalsLoading = false;
+    if (swarm.standingGoalsError) {
+      goalsReady = false;
+      return;
+    }
+    draftGoals = swarm.standingGoals.map((g) => ({
+      title: g.title,
+      description: g.description,
+      metric: g.metric ?? undefined,
+      comparator: g.comparator ?? undefined,
+      target_value: g.target_value ?? undefined,
+      block_value: g.block_value ?? undefined,
+      verify_cmd: g.verify_cmd ?? undefined,
+      max_retries: g.max_retries,
+      blocking: g.blocking,
+      order_idx: g.order_idx,
+    }));
+    goalsReady = true;
+  }
   $effect(() => {
     const sid = detail?.id;
     if (!sid || goalsLoaded) return;
     goalsLoaded = true;
-    void swarm.loadStandingGoals(sid).then(() => {
-      draftGoals = swarm.standingGoals.map((g) => ({
-        title: g.title,
-        description: g.description,
-        metric: g.metric ?? undefined,
-        comparator: g.comparator ?? undefined,
-        target_value: g.target_value ?? undefined,
-        block_value: g.block_value ?? undefined,
-        verify_cmd: g.verify_cmd ?? undefined,
-        max_retries: g.max_retries,
-        blocking: g.blocking,
-        order_idx: g.order_idx,
-      }));
-      goalsReady = true;
-    });
+    void loadGoals(sid);
   });
 
   function addGoal() {
@@ -96,12 +108,18 @@
   let triggerForm = $state<CreateTriggerReq | null>(null);
   let triggerEditId = $state<string | null>(null);
   let savingTrigger = $state(false);
+  let triggersLoading = $state(false);
+  async function loadTriggers(sid: string): Promise<void> {
+    triggersLoading = true;
+    await swarm.loadTriggers(sid);
+    triggersLoading = false;
+  }
 
   $effect(() => {
     const sid = detail?.id;
     if (!sid || triggersLoaded) return;
     triggersLoaded = true;
-    void swarm.loadTriggers(sid);
+    void loadTriggers(sid);
   });
 
   function newTrigger() {
@@ -202,12 +220,14 @@
     <div class="bar">
       <button class="btn small" onclick={addGoal}><Icon name="plus" size={12} /> Add standing goal</button>
       <span class="grow"></span>
-      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals || !goalsReady} title={goalsReady ? undefined : 'Loading the saved standing goals…'}>
+      <button class="btn small primary" onclick={saveGoals} disabled={savingGoals || !goalsReady}
+        title={goalsReady ? undefined : swarm.standingGoalsError ? 'Load the saved standing goals first — saving now would replace them' : 'Loading the saved standing goals…'}>
         {savingGoals ? 'Saving…' : 'Save standing goals'}
       </button>
     </div>
     {#if !goalsReady}
-      <p class="hint">Loading standing goals…</p>
+      <LoadState what="standing goals" variant="compact" loading={goalsLoading || !swarm.standingGoalsError} error={swarm.standingGoalsError} empty
+        onretry={() => detail && void loadGoals(detail.id)} />
     {:else if draftGoals.length === 0}
       <EmptyState icon="check" title="No standing goals" body="Add goals the whole swarm must hit — e.g. tests pass, no new clippy warnings." />
     {:else}
@@ -261,7 +281,8 @@
         </div>
         <div class="form-actions">
           <button class="btn small ghost" onclick={() => { triggerForm = null; triggerEditId = null; }}>Cancel</button>
-          <button class="btn small primary" onclick={saveTrigger} disabled={savingTrigger}>
+          <button class="btn small primary" onclick={saveTrigger} disabled={savingTrigger || !!swarm.triggersError}
+            title={swarm.triggersError ? 'Reload the triggers first' : undefined}>
             {triggerEditId ? 'Save trigger' : 'Add trigger'}
           </button>
         </div>
@@ -271,14 +292,16 @@
         <span class="grow"></span>
         <button class="btn small" onclick={newTrigger}><Icon name="plus" size={12} /> Add trigger</button>
       </div>
-      {#if swarm.triggers.length === 0}
-        <EmptyState icon="comment" title="No triggers" body="Add a trigger to launch swarm work from a Slack/Telegram message or a webhook." />
-      {:else}
+      <LoadState what="triggers" variant="compact" loading={triggersLoading} error={swarm.triggersError} empty={swarm.triggers.length === 0}
+        onretry={() => detail && void loadTriggers(detail.id)}>
+        {#snippet emptyView()}
+          <EmptyState icon="comment" title="No triggers" body="Add a trigger to launch swarm work from a Slack/Telegram message or a webhook." />
+        {/snippet}
         <div class="list">
           {#each swarm.triggers as t (t.id)}
             <div class="row-item">
               <div class="ri-main">
-                <span class="tchip">{t.channel === 'webhook' ? 'Webhook' : t.channel === 'slack' ? 'Slack' : t.channel === 'telegram' ? 'Telegram' : t.channel}</span>
+                <span class="chip">{t.channel === 'webhook' ? 'Webhook' : t.channel === 'slack' ? 'Slack' : t.channel === 'telegram' ? 'Telegram' : t.channel}</span>
                 <span class="ri-title">{t.keyword || 'Any message'}</span>
                 <span class="dim">{t.match_chat ? `in ${t.match_chat}` : 'any chat'}</span>
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
@@ -292,7 +315,7 @@
             </div>
           {/each}
         </div>
-      {/if}
+      </LoadState>
     {/if}
   {/if}
 
@@ -376,15 +399,6 @@
     font-size: var(--fs-xs);
     color: var(--danger);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-    border-radius: 999px;
-    padding: 0 6px;
-  }
-  .tchip {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
   }

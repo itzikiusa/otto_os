@@ -2,6 +2,7 @@
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
+  import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -140,7 +141,7 @@
                 onclick={() => (product.tab = 'rewrite')}
                 title="Switch to Rewrite tab to review the suggested version"
               >
-                ✓ Story updated → v{versionNo}
+                <Icon name="check" size={12} /> Story updated to v{versionNo}
               </button>
             {/if}
           </div>
@@ -311,6 +312,9 @@
 
   /* Story-updated chip */
   .story-updated-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     align-self: flex-start;
     margin-top: 4px;
     padding: 2px 8px;

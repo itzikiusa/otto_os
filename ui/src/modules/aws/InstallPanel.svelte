@@ -169,7 +169,7 @@
     padding: 10px;
     border-radius: var(--radius-m);
     background: var(--term-bg);
-    color: #ddd;
+    color: var(--text);
     font-family: var(--font-mono);
     font-size: var(--fs-s);
     white-space: pre-wrap;

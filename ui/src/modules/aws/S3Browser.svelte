@@ -18,7 +18,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
-  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment } from './util';
+  import { fmtAgo, fmtBytes, fmtDate, splitBucketSegment, awsErrorText } from './util';
   import type { AwsAccount, S3Object, S3PreviewResp } from '../../lib/api/types';
 
   interface Props {
@@ -232,9 +232,9 @@
     onrefresh={() => void loadBuckets()}
   />
   {#if bucketsLoading && !buckets}
-    <div class="pad"><Skeleton rows={6} /></div>
+    <div class="pad" role="status"><p class="load-note">Loading buckets…</p><Skeleton rows={6} /></div>
   {:else if bucketsError}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list buckets" body={bucketsError} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list buckets" body={awsErrorText(bucketsError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
   {:else if bucketsShown.length === 0}
     <EmptyState icon="archive" title={bucketFilter ? 'No matching buckets' : 'No buckets'} body={bucketFilter ? '' : 'This account has no S3 buckets (or s3:ListAllMyBuckets is denied).'} />
   {:else}
@@ -285,9 +285,9 @@
   <div class="split" class:with-drawer={preview !== null && !viewport.isMobile}>
     <div class="tbl-wrap">
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
-        <div class="pad"><Skeleton rows={8} /></div>
+        <div class="pad" role="status"><p class="load-note">Loading objects…</p><Skeleton rows={8} /></div>
       {:else if objError}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list objects" body={objError} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list objects" body={awsErrorText(objError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
       {:else if rowsShown.length === 0}
         <EmptyState icon="folder" title="Empty" body={objFilter ? 'Nothing matches the filter.' : 'No objects under this prefix.'} />
       {:else}
@@ -392,6 +392,11 @@
 {/snippet}
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .pad {
     padding: 12px;
   }

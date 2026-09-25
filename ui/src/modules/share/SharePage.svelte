@@ -51,6 +51,9 @@
   let extendBusy = $state(false);
   let extendSent = $state(false);
 
+  /** Why the OTP card shows: the first visit, or a lapsed access window. */
+  let otpReason = $state<'first' | 'lapsed'>('first');
+
   // ── load session (or detect OTP gate) ────────────────────────────────────
   async function loadSession(): Promise<void> {
     const t = token;
@@ -58,6 +61,7 @@
     viewState = 'loading';
     loadError = null;
     session = null;
+    liveStatus = null;
 
     try {
       session = await getSharedSession(sessionId, t);
@@ -106,6 +110,41 @@
     void loadSession();
   });
 
+  // While attached, re-check access quietly (every minute, and when the tab
+  // comes back into focus): an OTP window that lapsed needs a fresh code, and
+  // a revoked/expired link must say so — not leave a terminal that silently
+  // stopped updating.
+  async function recheckAccess(): Promise<void> {
+    const t = token;
+    if (!t || viewState !== 'ok') return;
+    try {
+      await getSharedSession(sessionId, t);
+    } catch (e: unknown) {
+      if (viewState !== 'ok') return;
+      if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
+        otpReason = 'lapsed';
+        otpInput = '';
+        otpError = null;
+        viewState = 'otp';
+      } else if (e instanceof ApiError && [401, 403, 404, 410].includes(e.status)) {
+        loadError = null;
+        loadCause = shareErrorCause(e);
+        viewState = 'error';
+      }
+      // A network blip keeps the terminal (it reconnects on its own).
+    }
+  }
+  $effect(() => {
+    if (viewState !== 'ok') return;
+    const timer = setInterval(() => void recheckAccess(), 60_000);
+    const onFocus = (): void => void recheckAccess();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  });
+
   // ── OTP verification ───────────────────────────────────────────────────────
   async function submitOtp(): Promise<void> {
     const t = token;
@@ -122,15 +161,20 @@
       if (resp.verified) {
         // OTP accepted — reload the session (now unblocked).
         otpInput = '';
+        otpReason = 'first';
         await loadSession();
       } else {
-        otpError = 'Incorrect code. Please try again.';
+        otpError = 'That code didn’t match. Check the latest email and try again.';
       }
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 429) {
-        otpError = 'Too many attempts. Please wait before trying again.';
+        otpError = 'Too many attempts. Wait a minute, then try again.';
+      } else if (e instanceof ApiError && e.status === 401) {
+        otpError = 'That code is wrong or has expired. Check the latest email, or re-send a code.';
+      } else if (e instanceof TypeError) {
+        otpError = 'Can’t reach the host. Check your connection, then try again.';
       } else {
-        otpError = e instanceof Error ? e.message : 'Verification failed. Please try again.';
+        otpError = 'Couldn’t verify the code. Try again in a moment.';
       }
     } finally {
       otpBusy = false;
@@ -152,9 +196,11 @@
       viewState = 'otp';
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 429) {
-        otpError = 'Too many extend attempts. Please wait before trying again.';
+        otpError = 'Too many requests. Wait a minute, then re-send the code.';
+      } else if (e instanceof ApiError && e.status === 400) {
+        otpError = 'A new code can’t be sent for this link. Ask the person who shared it for a new link.';
       } else {
-        otpError = e instanceof Error ? e.message : 'Could not re-send the code. Please try again.';
+        otpError = 'Couldn’t send a new code. Try again in a moment.';
       }
     } finally {
       extendBusy = false;
@@ -167,9 +213,10 @@
     liveStatus = s;
   }
 
-  // When the terminal emits 'exited' or 'reconnectable', offer the Extend
-  // control so the guest can request a fresh window.
-  const termEnded = $derived(liveStatus === 'exited' || liveStatus === 'reconnectable');
+  // The shared PROCESS stopped (not the access window — that is caught by
+  // recheckAccess and routed to the OTP card). A new code can't bring an ended
+  // session back, so the overlay only says what happened and offers Reload.
+  const termEnded = $derived(liveStatus === 'exited');
 
   // Effective status for the header badge.
   const status = $derived<SessionStatus>(liveStatus ?? session?.status ?? 'idle');
@@ -219,9 +266,13 @@
   <div class="share-error" style={`zoom:${ui.zoom}`}>
     <div class="error-card otp-card">
       <div class="otp-icon"><Icon name="mail" size={26} /></div>
-      <h2>Enter your access code</h2>
+      <h2>{otpReason === 'lapsed' ? 'Your access window ended' : 'Enter your access code'}</h2>
       <p>
-        A 6-digit code was emailed to you. Enter it below to access the shared session.
+        {#if otpReason === 'lapsed'}
+          Re-send a code to the email this link was shared with, then enter it here to keep watching.
+        {:else}
+          A 6-digit code was emailed to you. Enter it below to open the shared session.
+        {/if}
         {#if extendSent}
           <br /><strong>A fresh code has been sent.</strong>
         {/if}
@@ -279,7 +330,13 @@
         </span>
       {/if}
       <!-- Read-only is shown once, by the Terminal's own chip (it sits on the
-           surface it applies to); a second header pill only repeated it. -->
+           surface it applies to). An Editor link says the opposite, up here:
+           what they type runs on the host. -->
+      {#if session && !isViewer}
+        <span class="role-chip" title="This link lets you type into the shared terminal. What you type runs on the host.">
+          <Icon name="edit" size={12} /> You can type
+        </span>
+      {/if}
     </header>
 
     <div class="terminal-fill">
@@ -300,22 +357,19 @@
         </div>
       {/if}
 
-      <!-- Extend overlay — shown when the terminal session has ended so the
-           guest can request a fresh OTP window without reloading the page. -->
+      <!-- The shared session's process ended. Its output stays readable
+           underneath; Reload re-attaches if the owner restarts it. -->
       {#if termEnded}
-        <div class="extend-overlay">
+        <div class="extend-overlay" role="status">
           <div class="extend-card">
             <div class="extend-icon"><Icon name="clock" size={26} /></div>
-            <h3>Session window ended</h3>
+            <h3>This session has ended</h3>
             <p>
-              Request a new access code to be emailed to the original recipient.
-              Once you receive it, enter it below to re-attach.
+              The shared terminal stopped on the host. If the person who shared it restarts it,
+              reload to pick it up again.
             </p>
-            {#if otpError}
-              <p class="otp-error" role="alert">{otpError}</p>
-            {/if}
-            <button class="btn primary" disabled={extendBusy} onclick={requestExtend}>
-              {extendBusy ? 'Sending…' : 'Extend session'}
+            <button class="btn primary" onclick={() => void loadSession()}>
+              <Icon name="refresh" size={13} /> Reload
             </button>
           </div>
         </div>
@@ -482,6 +536,18 @@
   }
   .header-spacer {
     flex: 1;
+  }
+  .role-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+    font-size: var(--fs-s);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
 
   /* Status pill — mirrors the palette chip colours. */

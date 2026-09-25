@@ -13,6 +13,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { copyAsJson } from '../../lib/components/exporters';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { router } from '../../lib/router.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
@@ -136,14 +138,33 @@
     return `${y}-${m}-${day}`;
   }
 
-  function applyPreset(days: number): void {
+  // Presets are whole calendar days (the date inputs have day granularity):
+  // "Last 7 days" is today plus the six days before it — a "Last 24h" label
+  // over a two-calendar-day range claimed a precision the filter doesn't have.
+  const PRESETS: { days: number; label: string }[] = [
+    { days: 1, label: 'Today' },
+    { days: 7, label: 'Last 7 days' },
+    { days: 30, label: 'Last 30 days' },
+  ];
+  function presetRange(days: number): { from: string; to: string } {
     const now = new Date();
     const from = new Date(now);
-    from.setDate(from.getDate() - days);
-    fromDate = toYmd(from);
-    toDate = toYmd(now);
+    from.setDate(from.getDate() - (days - 1));
+    return { from: toYmd(from), to: toYmd(now) };
+  }
+  function applyPreset(days: number): void {
+    const r = presetRange(days);
+    fromDate = r.from;
+    toDate = r.to;
     offset = 0;
   }
+  // The preset the current range matches (so the segment shows as selected).
+  const activePreset = $derived(
+    PRESETS.find((p) => {
+      const r = presetRange(p.days);
+      return r.from === fromDate && r.to === toDate;
+    })?.days ?? null,
+  );
 
   // Per-entry copy: tracks which entry is being copied (for brief feedback).
   let copyingId: string | null = $state(null);
@@ -193,7 +214,7 @@
 </script>
 
 <div class="settings-section trust-section">
-  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and the append-only audit log">
+  <PageHeader title={sectionLabel('trust-safety')} subtitle="Security posture and audit log">
     {#snippet actions()}
       <button
         class="btn small"
@@ -228,7 +249,10 @@
               <StatusBadge tone="success" label="Off" />
             {/if}
           </div>
-          <div class="card-note">{posture.network_listener ? 'Reachable from your network' : 'Only this Mac can connect'}</div>
+          <div class="card-note">
+            {posture.network_listener ? 'Reachable from your network' : 'Only this Mac can connect'} ·
+            <button class="link-btn" onclick={() => router.go('settings/daemon')}>Daemon settings</button>
+          </div>
         </div>
         <div class="card">
           <div class="card-label">Binding</div>
@@ -238,7 +262,10 @@
         <div class="card">
           <div class="card-label">Active API tokens</div>
           <div class="card-value num">{posture.active_api_tokens}</div>
-          <div class="card-note">Personal access tokens that can call the API</div>
+          <div class="card-note">
+            Personal access tokens that can call the API ·
+            <button class="link-btn" onclick={() => router.go('settings/tokens')}>Manage</button>
+          </div>
         </div>
       </div>
     {/if}
@@ -264,9 +291,11 @@
     </label>
     <!-- Quick time-range presets -->
     <div class="segmented presets" role="group" aria-label="Quick range">
-      <button onclick={() => applyPreset(1)}>Last 24h</button>
-      <button onclick={() => applyPreset(7)}>Last 7 days</button>
-      <button onclick={() => applyPreset(30)}>Last 30 days</button>
+      {#each PRESETS as p (p.days)}
+        <button class:active={activePreset === p.days} aria-pressed={activePreset === p.days} onclick={() => applyPreset(p.days)}>
+          {p.label}
+        </button>
+      {/each}
     </div>
     {#if filtered}
       <button class="btn small ghost" onclick={resetFilters}>Clear filters</button>
@@ -300,12 +329,20 @@
       <LoadState what="the audit log" error={logError} empty onretry={() => void loadLog()} />
     {:else if entries.length === 0}
       {#if filtered}
-        <div class="empty">
-          No audit entries match these filters.
-          <button class="btn small ghost" onclick={resetFilters}>Clear filters</button>
-        </div>
+        <EmptyState
+          icon="filter"
+          title="No entries match these filters"
+          body="Widen the date range or pick another action."
+          actionLabel="Clear filters"
+          actionKind="secondary"
+          onaction={resetFilters}
+        />
       {:else}
-        <div class="empty">No audit entries yet. Sign-ins, token changes and security settings changes are recorded here.</div>
+        <EmptyState
+          icon="shield"
+          title="No audit entries yet"
+          body="Sign-ins, API token changes and security settings changes are recorded here, and can't be edited or deleted."
+        />
       {/if}
     {:else}
       <table class="audit-table">
@@ -454,13 +491,16 @@
     overflow: auto;
     padding: 4px 20px 32px;
   }
-  .empty {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 24px 4px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
+  .link-btn {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
   }
   .audit-table {
     width: 100%;

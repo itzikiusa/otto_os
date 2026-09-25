@@ -123,8 +123,13 @@ the iframe loads, the parent hands it everything it needs via a `postMessage`
   slug,
   apiBase: '<baseUrl>/api/v1/plugins/<slug>',  // call your backend through here
   token:   '<the user's bearer>',              // for the gated proxy calls
-  theme:   { '--bg', '--text', '--text-dim', '--accent', '--border' } }
+  theme:   { '--bg', '--text', '--text-dim', '--accent', '--border' },
+  scheme:  'light' | 'dark' }
 ```
+
+When the person later switches light/dark, the theme or the accent, the parent
+posts `{ type: 'otto:theme', theme, scheme }` with the fresh values — apply it
+the same way so an open plugin follows the app.
 
 So the iframe's data calls go to `${apiBase}/<rest>` → through the RBAC-gated
 reverse-proxy → the sidecar. The theme vars let the plugin match Otto's

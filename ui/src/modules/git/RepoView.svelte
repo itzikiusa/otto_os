@@ -23,8 +23,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { api } from '../../lib/api/client';
-  import { loadErrorText } from '../../lib/loadError';
+  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { toasts } from '../../lib/toast.svelte';
 
   interface Props {
     repo: Repo;
@@ -77,25 +77,16 @@
   );
 
   // A failed FIRST status load (folder moved or deleted, daemon down) used to
-  // leave the toolbar and graph skeletons pulsing forever. Load it here so the
-  // cause can be shown with Retry; once any status exists, later failures keep
-  // the stale one (the store's behaviour).
-  let statusError = $state<string | null>(null);
+  // leave the toolbar and graph skeletons pulsing forever. The store records the
+  // failure (`statusErrorById`); it only replaces the view while there is no
+  // status at all — once any status exists, a later failure keeps the stale one.
+  const statusError = $derived(status ? null : (git.statusErrorById[repo.id] ?? null));
   let statusLoading = $state(false);
   function loadStatus(id: string): void {
-    statusError = null;
     statusLoading = true;
-    api
-      .get<RepoStatusResp>(`/repos/${id}/status`)
-      .then((s) => {
-        if (id === repo.id) git.setStatus(id, s);
-      })
-      .catch((e) => {
-        if (id === repo.id && !git.statusById[id]) statusError = loadErrorText(e);
-      })
-      .finally(() => {
-        if (id === repo.id) statusLoading = false;
-      });
+    void git.refreshStatus(id).finally(() => {
+      if (id === repo.id) statusLoading = false;
+    });
   }
 
   $effect(() => {
@@ -202,6 +193,24 @@
   // per-branch one).
   let remotesOpen = $state(false);
 
+  /** ⋯ in the toolbar row: the repo-level tools that don't earn a permanent
+   *  button (remotes are a setting; recovery is rare and deliberate). */
+  function openMoreMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Remotes…', icon: 'globe', action: () => (remotesOpen = true) },
+      { label: 'Recovery tools…', icon: 'undo', action: () => gitBridge.openRecovery(repo.id) },
+      { separator: true },
+      {
+        label: 'Copy repository path',
+        icon: 'copy',
+        action: () =>
+          void copyTextOrThrow(repo.path)
+            .then(() => toasts.success('Copied', repo.path))
+            .catch(() => toasts.error('Copy failed', 'The clipboard is unavailable.')),
+      },
+    ]);
+  }
+
   // History / blame open as a right-side drawer over the graph. The request
   // comes through `gitBridge` from whichever diff header asked for it, so a
   // stale request for ANOTHER repo never renders here.
@@ -288,76 +297,77 @@
       others.length > 8 ? { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 } : undefined,
     );
   }
-
-  /** Display name for the forge chip (the enum is lowercase: "bitbucket"). */
-  const PROVIDER_LABEL: Record<string, string> = {
-    github: 'GitHub',
-    bitbucket: 'Bitbucket',
-    gitlab: 'GitLab',
-  };
 </script>
 
 <div class="repoview">
+  <!-- ONE toolbar row: the view switcher, then the git verbs, then ⋯ for the
+       repo-level tools. On the Git page the repo tab already names the repo, so
+       the switcher only shows where there are no tabs (the agent right panel).
+       It wraps (never overflows) when a long branch name or a narrow pane
+       doesn't leave room. -->
   <header class="rv-head">
     {#if !embedded}
       <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
-    <button
-      class="rv-name rv-switch"
-      title="{repo.name} · {repo.path} — switch repository{repoPool.length > 1 ? ` (${repoPool.length} registered)` : ''}"
-      onclick={openRepoSwitcher}
-      oncontextmenu={openRepoSwitcher}
-    >
-      <Icon name="branch" size={14} />
-      <span class="rv-name-text">{repo.name}</span>
-      {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
-      <Icon name="chevronDown" size={12} />
-    </button>
-    {#if repo.provider}<span class="chip rv-provider" title="Hosted on {PROVIDER_LABEL[repo.provider] ?? repo.provider}">{PROVIDER_LABEL[repo.provider] ?? repo.provider}</span>{/if}
-    <button class="btn ghost small rv-headbtn" onclick={() => (remotesOpen = true)} title="Add, rename or remove this repository’s remotes">
-      <Icon name="globe" size={12} /> Remotes
-    </button>
-    <button class="btn ghost small rv-headbtn" onclick={() => gitBridge.openRecovery(repo.id)} title="Reflog recovery, interactive rebase and bisect">
-      <Icon name="undo" size={12} /> Recovery tools
-    </button>
+    {#if !onopenrepo}
+      <button
+        class="rv-name rv-switch"
+        title="{repo.name} · {repo.path} — switch repository{repoPool.length > 1 ? ` (${repoPool.length} registered)` : ''}"
+        onclick={openRepoSwitcher}
+        oncontextmenu={openRepoSwitcher}
+      >
+        <Icon name="branch" size={14} />
+        <span class="rv-name-text">{repo.name}</span>
+        {#if repoPool.length > 1}<span class="rv-count">{repoPool.length}</span>{/if}
+        <Icon name="chevronDown" size={12} />
+      </button>
+    {/if}
+    <div class="rv-tabs segmented" role="tablist" aria-label="{repo.name} views">
+      {#each tabs as t (t.id)}
+        <button
+          class="rv-tab"
+          role="tab"
+          aria-selected={effTab === t.id && !resolving}
+          tabindex={effTab === t.id && !resolving ? 0 : -1}
+          class:active={effTab === t.id && !resolving}
+          onclick={() => selectTab(t.id)}
+          onkeydown={onTabKey}
+        >
+          {t.label}
+          {#if t.id === 'graph' && status && status.changes.length > 0}
+            <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
+          {/if}
+          {#if t.id === 'graph' && conflictedPaths.length > 0}
+            <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={12} />{conflictedPaths.length}</span>
+          {/if}
+        </button>
+      {/each}
+      <!-- The resolver is a view of its own while it's open (the banner below is
+           the way in), so it only takes a tab slot then. -->
+      {#if resolving}
+        <button class="rv-tab conflict-tab active" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>
+          <Icon name="merge" size={12} />
+          Resolve conflicts
+          {#if conflictSeed.files.length > 0}
+            <span class="count conflict-count">{conflictSeed.files.length}</span>
+          {/if}
+        </button>
+      {/if}
+    </div>
     <span class="grow"></span>
     {#if status}
       <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
     {:else if !statusError}
       <div class="toolbar-skeleton" aria-label="Loading repository status"></div>
     {/if}
+    <button
+      class="icon-btn rv-more"
+      title="More repository actions"
+      aria-label="More repository actions"
+      aria-haspopup="menu"
+      onclick={openMoreMenu}
+    ><Icon name="more" size={16} /></button>
   </header>
-
-  <div class="rv-tabs" role="tablist" aria-label="{repo.name} views">
-    {#each tabs as t (t.id)}
-      <button
-        class="rv-tab"
-        role="tab"
-        aria-selected={effTab === t.id && !resolving}
-        tabindex={effTab === t.id && !resolving ? 0 : -1}
-        class:active={effTab === t.id && !resolving}
-        onclick={() => selectTab(t.id)}
-        onkeydown={onTabKey}
-      >
-        {t.label}
-        {#if t.id === 'graph' && status && status.changes.length > 0}
-          <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
-        {/if}
-        {#if t.id === 'graph' && conflictedPaths.length > 0}
-          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}"><Icon name="warning" size={12} />{conflictedPaths.length}</span>
-        {/if}
-      </button>
-    {/each}
-    {#if merging}
-      <button class="rv-tab conflict-tab" role="tab" aria-selected={resolving} tabindex={resolving ? 0 : -1} class:active={resolving} onclick={openResolver} onkeydown={onTabKey}>
-        <Icon name="merge" size={12} />
-        Resolve conflicts
-        {#if conflictSeed.files.length > 0}
-          <span class="count conflict-count">{conflictSeed.files.length}</span>
-        {/if}
-      </button>
-    {/if}
-  </div>
 
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
@@ -365,13 +375,12 @@
       <Icon name="merge" size={13} />
       <span>
         {#if opLabel}
-          A {opLabel} is in progress{#if conflictSeed.source}
-            (<span class="mono">{conflictSeed.source}</span>){/if}.
+          A {opLabel} is in progress{#if conflictSeed.source}{' '}(<span class="mono">{conflictSeed.source}</span>){/if}.
         {:else}
           Conflicted files need resolution (e.g. from a stash pop).
         {/if}
         {#if conflictSeed.files.length > 0}
-          {conflictSeed.files.length} file{conflictSeed.files.length === 1 ? '' : 's'} need resolution.
+          {conflictSeed.files.length === 1 ? '1 file needs' : `${conflictSeed.files.length} files need`} resolution.
         {/if}
       </span>
       <span class="grow"></span>
@@ -389,13 +398,25 @@
         onleave={leaveResolver}
       />
     {:else if effTab === 'prs'}
-      {#if repo.forge === 'unrecognized'}
+      {#if repo.forge === null && !repo.remote_url}
+        <!-- A local-only repo: nothing to open a PR against. Say so and offer
+             the fix, instead of a "provider unreachable" error whose Retry
+             can never succeed. -->
+        <EmptyState
+          icon="pr"
+          title="No remote yet"
+          body="Pull requests need a remote on GitHub, Bitbucket Cloud or GitLab. Add one, then publish your branch."
+          actionLabel="Add a remote…"
+          actionIcon="globe"
+          onaction={() => (remotesOpen = true)}
+        />
+      {:else if repo.forge === 'unrecognized'}
         <!-- Honest dead-end instead of a silent one: the remote host isn't a
              forge Otto can open PRs on (e.g. Bitbucket Server / Data Center). -->
         <EmptyState
           icon="pr"
-          title="Pull requests aren't available for {remoteHost(repo.remote_url)}"
-          body="Otto supports GitHub, Bitbucket Cloud, and GitLab. This repository's remote isn't one of them, so there's no PR surface here."
+          title="Pull requests aren’t available for {remoteHost(repo.remote_url)}"
+          body="Otto supports GitHub, Bitbucket Cloud, and GitLab. This repository’s remote isn’t one of them, so there’s no pull request view here."
         />
       {:else}
         <PrList repoId={repo.id} />
@@ -459,7 +480,15 @@
 </div>
 
 {#if remotesOpen}
-  <RemotesPanel repoId={repo.id} onclose={() => (remotesOpen = false)} />
+  <RemotesPanel
+    repoId={repo.id}
+    onclose={() => {
+      remotesOpen = false;
+      // The repo record's remote/forge are derived from origin — re-read them
+      // so an added or changed remote lights up the PR view without a reload.
+      void git.loadAllRepos(true);
+    }}
+  />
 {/if}
 
 {#if mergeReq}
@@ -480,26 +509,24 @@
     height: 100%;
     min-height: 0;
   }
-  /* Wraps rather than overflowing: on a narrow desktop window the toolbar used
-     to run off the trailing edge (Stash / Pop clipped, unreachable). When it
-     wraps, the toolbar keeps to the trailing edge of its own line. */
+  /* The one toolbar row under the page header. Wraps rather than overflowing:
+     on a narrow window (or a long branch name) the verbs drop to a second line
+     that keeps to the trailing edge, instead of Stash / Pop running off-screen. */
   .rv-head {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px 10px;
-    padding: 10px 14px;
+    min-height: 46px;
+    padding: 7px 14px;
+    box-sizing: border-box;
     border-bottom: 1px solid var(--border);
   }
   .rv-head :global(.toolbar) {
     margin-inline-start: auto;
     min-width: 0;
   }
-  .rv-headbtn {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .rv-provider {
+  .rv-more {
     flex-shrink: 0;
   }
   .rv-name {
@@ -541,32 +568,23 @@
     background: var(--surface-2);
     color: var(--text-dim);
   }
+  /* View switcher: the shared segmented control (app.css), sized for the
+     toolbar row. */
   .rv-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 6px 14px 0;
-    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    max-width: 100%;
   }
-  .rv-tab {
+  .rv-tabs > .rv-tab {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 30px;
-    padding: 0 12px;
-    border: none;
-    background: transparent;
-    border-bottom: 2px solid transparent;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-    transition: color 130ms ease-out, border-color 130ms ease-out;
+    height: 24px;
+    white-space: nowrap;
   }
-  .rv-tab:hover {
+  .rv-tabs > .rv-tab:hover:not(.active) {
     color: var(--text);
   }
-  .rv-tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .rv-tabs > .rv-tab.active {
     font-weight: 500;
   }
   .count {
@@ -583,17 +601,10 @@
     justify-content: center;
     gap: 3px;
   }
-  .conflict-tab {
-    margin-inline-start: auto;
+  .rv-tabs > .conflict-tab,
+  .rv-tabs > .conflict-tab.active {
     color: var(--warning);
     gap: 5px;
-  }
-  .conflict-tab:hover {
-    color: var(--warning);
-  }
-  .conflict-tab.active {
-    color: var(--warning);
-    border-bottom-color: var(--warning);
   }
   .conflict-count {
     background: var(--warning-soft);
@@ -684,37 +695,35 @@
     .rv-head {
       gap: 8px;
       padding: 8px 10px;
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      scrollbar-width: none;
     }
-    .rv-head::-webkit-scrollbar { display: none; }
     .rv-name { font-size: var(--fs-l); flex-shrink: 0; }
-    /* The toolbar is the wide part — give it its own horizontal scroll so it
-       never forces the page wider than the viewport. */
-    .rv-head :global(.toolbar) {
-      overflow-x: auto;
-      scrollbar-width: none;
-      flex-shrink: 0;
-    }
-    .rv-head :global(.toolbar)::-webkit-scrollbar { display: none; }
-
+    /* The view switcher gets its own full-width line (scrolling if it must);
+       the toolbar + ⋯ share the next line, the toolbar scrolling
+       horizontally so it never forces the page wider than the viewport. */
     .rv-tabs {
-      gap: 2px;
-      padding: 4px 8px 0;
+      flex: 1 1 100%;
       overflow-x: auto;
       scrollbar-width: none;
-      flex-wrap: nowrap;
     }
     .rv-tabs::-webkit-scrollbar { display: none; }
-    .rv-tab {
-      height: 38px;
-      padding: 0 12px;
-      font-size: var(--fs-l);
-      white-space: nowrap;
-      flex-shrink: 0;
+    .rv-tabs > .rv-tab {
+      flex: 1 0 auto;
+      justify-content: center;
+      height: 34px;
+      font-size: var(--fs-m);
     }
-    .conflict-tab { margin-inline-start: 0; }
+    .rv-head .grow { display: none; }
+    .rv-head :global(.toolbar) {
+      flex: 1 1 0;
+      margin-inline-start: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .rv-head :global(.toolbar)::-webkit-scrollbar { display: none; }
+    .rv-more {
+      min-width: 36px;
+      min-height: 36px;
+    }
   }
 </style>
 

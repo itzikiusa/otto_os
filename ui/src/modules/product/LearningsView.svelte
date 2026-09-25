@@ -11,11 +11,14 @@
   import { loadErrorText } from '../../lib/loadError';
   import type { ProductLearning, NewLearningReq, UpdateLearningReq } from './types';
 
-  // ── Props ─────────────────────────────────────────────────────────────────────
-  interface Props {
-    filter?: 'all' | 'pattern' | 'avoid';
-  }
-  let { filter = 'all' }: Props = $props();
+  // ── Filter (the view's own segmented control — no side rail) ─────────────────
+  type LearningFilter = 'all' | 'pattern' | 'avoid';
+  let filter = $state<LearningFilter>('all');
+  const FILTERS: { value: LearningFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: 'pattern', label: 'Patterns to follow' },
+    { value: 'avoid', label: 'Cases to avoid' },
+  ];
 
   // Ref shape parsed from refs_json.
   interface LearningRef {
@@ -242,7 +245,11 @@
   <!-- ── Header ────────────────────────────────────────────────────────────── -->
   <div class="lv-header">
     <div class="lv-title-row">
-      <h2 class="lv-title">Knowledge Base</h2>
+      <div class="segmented" role="group" aria-label="Show learnings">
+        {#each FILTERS as f (f.value)}
+          <button class:active={filter === f.value} aria-pressed={filter === f.value} onclick={() => (filter = f.value)}>{f.label}</button>
+        {/each}
+      </div>
       <span class="lv-count">{product.learnings.length} learning{product.learnings.length !== 1 ? 's' : ''}</span>
       <span class="spacer"></span>
       <button
@@ -264,9 +271,6 @@
       </button>
     </div>
 
-    {#if product.loadingLearnings}
-      <div class="dim-sm">Loading learnings…</div>
-    {/if}
   </div>
 
   <!-- ── Add form ───────────────────────────────────────────────────────────── -->
@@ -305,13 +309,11 @@
     </div>
   {/if}
 
-  <!-- ── Confirm delete overlay ─────────────────────────────────────────────── -->
-  {#if loadError && product.learnings.length === 0}
+  <!-- ── First load / failed load (nothing to show yet) ────────────────────── -->
+  {#if (loadError || (product.loadingLearnings && !loaded)) && product.learnings.length === 0}
     <LoadState what="learnings" loading={product.loadingLearnings} error={loadError} empty onretry={() => void loadAll()} />
-  {/if}
-
+  {:else}
   <!-- ── Two-column layout ─────────────────────────────────────────────────── -->
-  {#if !(loadError && product.learnings.length === 0)}
   <div class="two-col" class:single-col={!showPatterns || !showAvoids}>
 
     <!-- Patterns to follow -->
@@ -603,51 +605,7 @@
   .spacer { flex: 1; }
   .dim-sm { font-size: var(--fs-xs); color: var(--text-dim); }
 
-  /* Buttons */
-  .icon-btn {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .icon-btn:hover { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text); }
-  .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 100ms, border-color 100ms;
-  }
-  .btn.primary {
-    border-color: var(--accent);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-  }
-  .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-  .btn.ghost:hover { background: color-mix(in srgb, var(--text-dim) 10%, transparent); }
-  .btn.danger {
-    border-color: var(--danger);
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
-  .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 20%, transparent); }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn.small { height: 24px; padding: 0 9px; font-size: var(--fs-xs); }
 
   .accept-btn {
     border-color: var(--success);

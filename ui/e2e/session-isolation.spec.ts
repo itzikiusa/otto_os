@@ -131,9 +131,7 @@ test('toggle in Settings flips isolation live (other-device session disappears)'
 
   // Go to Appearance settings and turn isolation on.
   await page.goto('/#/settings/appearance');
-  const toggle = page
-    .locator('label.switch-row', { hasText: 'Isolate sessions to this device' })
-    .locator('input[type="checkbox"]');
+  const toggle = page.getByTestId('session-isolation-toggle');
   await expect(toggle).toBeVisible({ timeout: 15_000 });
   await toggle.check();
   // Persisted to localStorage for this device.

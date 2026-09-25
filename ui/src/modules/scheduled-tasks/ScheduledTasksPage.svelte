@@ -23,6 +23,8 @@
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
   import type { Workflow } from '../../lib/api/types';
+  import { renderMarkdownGfm } from '../../lib/md';
+  import { copyText } from '../../lib/clipboard';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -40,6 +42,11 @@
   let reportError = $state('');
   let reportRun = $state<ScheduledTaskRun | null>(null);
   let reportTaskName = $state('');
+  /** Reports are markdown (an agent's write-up, or the daemon's Command /
+   *  stdout / stderr wrapper for a shell task) — rendered by default, with a
+   *  Plain text toggle for the raw file. */
+  let reportRaw = $state(false);
+  const reportHtml = $derived(reportRaw || !reportText ? '' : renderMarkdownGfm(reportText));
 
   /** Form snapshot taken when the form opens — Back/Cancel only asks before
    *  discarding when something actually changed. */
@@ -444,7 +451,7 @@
   function rowMenu(e: MouseEvent, t: ScheduledTask): void {
     const items: MenuItem[] = [
       { label: 'Edit…', icon: 'edit', action: () => startEdit(t) },
-      { label: t.enabled ? 'Pause' : 'Resume', icon: t.enabled ? 'square' : 'play', action: () => void toggle(t) },
+      { label: t.enabled ? 'Pause' : 'Resume', icon: t.enabled ? 'pause' : 'play', action: () => void toggle(t) },
       { label: 'Convert to workflow', icon: 'split', disabled: busy, action: () => void convertToWorkflow(t) },
       { separator: true },
       { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(t) },
@@ -466,9 +473,10 @@
     if (sessionId) ws.navigateToSession(sessionId);
   }
 
-  async function viewReport(run: ScheduledTaskRun, taskName: string): Promise<void> {
+  async function viewReport(run: ScheduledTaskRun, taskName: string, plain = false): Promise<void> {
     reportRun = run;
     reportTaskName = taskName;
+    reportRaw = plain;
     reportOpen = true;
     reportLoading = true;
     reportText = '';
@@ -530,7 +538,7 @@
 <div class="sched-page">
 <PageHeader
   title={creating || editId ? (editId ? `Edit “${list.find((t) => t.id === editId)?.name ?? 'task'}”` : 'New scheduled task') : 'Scheduled Tasks'}
-  subtitle={creating || editId ? undefined : 'Recurring agent jobs — run a prompt on a cadence, produce a report, and deliver it to Slack, email, or a webhook. Also driveable over MCP.'}
+  subtitle={creating || editId ? undefined : 'Run an agent on a cadence and deliver its report'}
 >
   {#snippet leading()}
     {#if creating || editId}
@@ -807,7 +815,7 @@
                 <div class="task-title">
                   <strong class="name" title={t.name}>{t.name}</strong>
                   {#if !t.enabled}
-                    <span class="pill">Paused</span>
+                    <StatusBadge tone="neutral" label="Paused" />
                   {:else if t.last_status}
                     <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed. -->
                     <StatusBadge status={runStatus(t.last_status)} />
@@ -881,12 +889,27 @@
       {:else if reportError}
         <div class="err" role="alert">
           <Icon name="warning" size={12} /> Couldn't load the report. {reportError}
-          <button class="btn small" onclick={() => reportRun && viewReport(reportRun, reportTaskName)}>Retry</button>
+          <button class="btn small" onclick={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}>Retry</button>
         </div>
-      {:else}
+      {:else if !reportText.trim()}
+        <div class="muted">This run wrote an empty report.</div>
+      {:else if reportRaw}
         <pre class="report">{reportText}</pre>
+      {:else}
+        <!-- renderMarkdownGfm output goes through the allowlist sanitizer. -->
+        <div class="md-body report-md">{@html reportHtml}</div>
       {/if}
       {#snippet footer()}
+        {#if reportText.trim() && !reportLoading && !reportError}
+          <div class="segmented" role="group" aria-label="Report view">
+            <button type="button" class:active={!reportRaw} aria-pressed={!reportRaw} onclick={() => (reportRaw = false)}>Formatted</button>
+            <button type="button" class:active={reportRaw} aria-pressed={reportRaw} onclick={() => (reportRaw = true)}>Plain text</button>
+          </div>
+          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn't copy the report")}>
+            <Icon name="copy" size={12} /> Copy
+          </button>
+          <span class="grow"></span>
+        {/if}
         <button class="btn" onclick={() => (reportOpen = false)}>Close</button>
       {/snippet}
     </Modal>
@@ -953,6 +976,14 @@
   .adv-body { display: flex; flex-direction: column; gap: 12px; margin-block-start: 12px; }
   .hint { font-size: var(--fs-s); color: var(--text-dim); margin: 0 0 4px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-block-start: 8px; padding-block-start: 12px; border-block-start: 1px solid var(--border); }
+  .report-md { color: var(--text); overflow-wrap: anywhere; }
+  .report-md :global(h1), .report-md :global(h2), .report-md :global(h3) { font-size: var(--fs-m); font-weight: 600; margin: 16px 0 6px; }
+  .report-md :global(h1:first-child), .report-md :global(h2:first-child), .report-md :global(h3:first-child) { margin-block-start: 0; }
+  .report-md :global(ul), .report-md :global(ol) { padding-inline: 22px 0; }
+  .report-md :global(table) { border-collapse: collapse; display: block; overflow-x: auto; font-size: var(--fs-s); margin: 8px 0; }
+  .report-md :global(th), .report-md :global(td) { border: 1px solid var(--border); padding: 4px 8px; text-align: start; }
+  .report-md :global(a) { color: var(--accent-text); }
+  .report-md :global(hr) { border: none; border-block-start: 1px solid var(--border); margin: 12px 0; }
   .report { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: var(--fs-s); line-height: 1.5; color: var(--text); }
   @media (max-width: 640px) {
     .task-main { flex-direction: column; align-items: stretch; gap: 8px; }

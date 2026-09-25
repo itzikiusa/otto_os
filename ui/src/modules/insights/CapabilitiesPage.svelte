@@ -110,24 +110,30 @@
     <div class="cap-list">
       {#each sorted as cap (cap.feature)}
         {@const open = expanded.has(cap.feature)}
-        <div class="cap-card" class:has-issues={cap.status !== 'ready'}>
+        <div class="cap-card" class:has-issues={cap.status === 'degraded'}>
           <div class="cap-head">
             <button class="cap-toggle" aria-expanded={open} aria-controls="deps-{cap.feature}" onclick={() => toggle(cap.feature)}>
               <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
               <span class="feature-label" title={featureLabel(cap.feature)}>{featureLabel(cap.feature)}</span>
               <StatusBadge tone={tone(cap.status)} label={statusLabel(cap.status)} />
-              <span class="dep-count dim">
-                {cap.deps.length} {cap.deps.length !== 1 ? 'checks' : 'check'}
-              </span>
+              {#if cap.deps.length > 0}
+                <span class="dep-count dim">
+                  {cap.deps.length} {cap.deps.length !== 1 ? 'checks' : 'check'}
+                </span>
+              {/if}
             </button>
-            {#if cap.status !== 'ready'}
-              <!-- Quick link to the relevant settings surface -->
-              <button class="btn small" title="Open the settings that fix {featureLabel(cap.feature)}"
-                      onclick={() => router.go(settingsRoute(cap.feature))}>
-                <Icon name="gear" size={12} />
-                Fix…
-              </button>
-            {/if}
+            <!-- A fixed-width slot, so every row's badge lines up whether or not
+                 it has a Fix link. -->
+            <span class="fix-slot">
+              {#if cap.status !== 'ready'}
+                <!-- Quick link to the relevant settings surface -->
+                <button class="btn small" title="Open the settings that fix {featureLabel(cap.feature)}"
+                        onclick={() => router.go(settingsRoute(cap.feature))}>
+                  <Icon name="gear" size={12} />
+                  Fix in Settings
+                </button>
+              {/if}
+            </span>
           </div>
 
           <!-- Issues (reasons + fixes) -->
@@ -192,6 +198,8 @@
     padding-inline-end: 12px;
   }
   .cap-head:hover { background: var(--hover); }
+  .fix-slot { display: flex; justify-content: flex-end; min-width: 124px; flex: none; }
+  @media (max-width: 640px) { .fix-slot { min-width: 0; } }
   .cap-toggle {
     flex: 1;
     min-width: 0;

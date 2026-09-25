@@ -65,7 +65,8 @@
           {#each cols as c (c.run.id)}
             <th scope="col" title={c.run.task}>
               <div class="col-skill">{c.run.source_skill}</div>
-              <div class="col-cli mono">{c.run.impl_cli}</div>
+              <div class="col-cli mono">{c.run.impl_cli || 'score only'}</div>
+              {#if c.run.task}<div class="col-task">{c.run.task}</div>{/if}
             </th>
           {/each}
         </tr>
@@ -199,6 +200,17 @@
     color: var(--text-dim);
   }
   .mono {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
+  }
+  /* Runs of the same skill differ by task: show it (clipped, full text in the header's title). */
+  .col-task {
+    max-width: 180px;
+    margin: 2px auto 0;
+    font-size: var(--fs-xs);
+    font-weight: 400;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

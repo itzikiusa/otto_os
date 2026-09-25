@@ -168,7 +168,11 @@
   </select>
 {:else}
   <div class="ns" class:has-error={!!error} data-testid="k8s-ns-picker">
-    <Icon name="layers" size={13} />
+    {#if error}
+      <span class="ns-warn" title="Namespaces couldn't be listed — type one to use it"><Icon name="warning" size={13} /></span>
+    {:else}
+      <Icon name="layers" size={13} />
+    {/if}
     <input
       bind:this={inputEl}
       class="ns-input"
@@ -243,8 +247,13 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
+  /* Degraded, not broken: the list failed (often RBAC) but typing still works. */
   .ns.has-error {
-    border-color: color-mix(in srgb, var(--status-exited) 50%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  }
+  .ns-warn {
+    display: inline-flex;
+    color: var(--warning);
   }
   .ns-input {
     flex: 1;

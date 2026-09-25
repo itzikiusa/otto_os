@@ -181,7 +181,7 @@
     min-height: 0;
   }
   .snip-card {
-    max-width: 720px;
+    max-width: var(--settings-col);
     padding: 14px 16px;
     margin-bottom: 12px;
   }

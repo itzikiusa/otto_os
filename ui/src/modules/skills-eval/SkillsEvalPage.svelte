@@ -335,8 +335,7 @@
               <span class="se-task" title={r.task}>{r.task}</span>
             </div>
             <div class="se-item-meta">
-              <span>{r.impl_cli}</span>
-              {#if r.best_score != null}<span class="se-score">· best {r.best_score.toFixed(0)}</span>{/if}
+              <span class="se-meta-main">{[r.impl_cli || 'Score only', r.best_score != null ? `best ${r.best_score.toFixed(0)}` : ''].filter(Boolean).join(' · ')}</span>
               <span class="grow"></span>
               <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
             </div>
@@ -415,13 +414,13 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 34px;
+    height: 32px;
     margin-bottom: -1px;
     border: none;
     border-bottom: 2px solid transparent;
     background: transparent;
     color: var(--text-dim);
-    font-size: var(--fs-m);
+    font: inherit;
     font-weight: 500;
     padding: 0 12px;
     cursor: pointer;
@@ -521,7 +520,7 @@
     text-align: start;
     border: 1px solid transparent;
     background: transparent;
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 8px 10px;
     cursor: pointer;
     display: flex;
@@ -564,8 +563,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .se-score {
-    color: var(--text);
+  .se-meta-main {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .se-dot {
     width: 8px;

@@ -23,6 +23,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { downloadJson, downloadText } from '../../lib/components/exporters';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -112,7 +114,7 @@
       reports = await insightsApi.listReports();
       void loadIndex();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -550,15 +552,8 @@
           <section class="detail-pane"><p class="dim loading-text" role="status">Loading insight reports…</p></section>
         </div>
       {:else if loadError && reports.length === 0}
-        <div class="load-error" role="alert">
-          <Icon name="warning" size={16} />
-          <div>
-            <strong>Couldn't load insight reports.</strong>
-            <p class="dim">Otto couldn't read the reports from the daemon. Retry, or check Settings → Logs.</p>
-            <p class="dim mono err-detail">{loadError}</p>
-          </div>
-          <button class="btn small" onclick={load}>Retry</button>
-        </div>
+        <!-- Same inline error + Retry as every other module's failed load. -->
+        <LoadState what="insight reports" variant="page" {loading} error={loadError} empty onretry={load} />
       {:else if reports.length === 0}
         <EmptyState
           variant="page"
@@ -862,33 +857,6 @@
   .list-empty {
     padding: 12px;
     font-size: var(--fs-s);
-  }
-
-  .load-error {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin: 20px;
-    padding: 14px 16px;
-    max-width: 720px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .load-error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .load-error > div {
-    flex: 1;
-    min-width: 0;
-  }
-  .load-error p {
-    margin: 4px 0 0;
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
-    overflow-wrap: anywhere;
   }
 
   @media (max-width: 1024px) {

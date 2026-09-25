@@ -106,7 +106,7 @@
     gap: 2px;
   }
   .tot .val {
-    font-size: 16px;
+    font-size: var(--fs-l);
     font-weight: 600;
   }
   .lbl {

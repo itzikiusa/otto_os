@@ -101,6 +101,15 @@
       { label: 'Sign out', icon: 'logout', action: () => auth.logout() },
     ]);
   }
+
+  /** The badge, spoken: ", 2 waiting on you" / ", 3 working" (the badge
+   *  itself is only a title for pointer users). */
+  function railCount(id: string): string {
+    if (id === 'agents' && ws.needsYouCount > 0) return `, ${ws.needsYouCount} waiting on you`;
+    if (id === 'agents' && ws.workingCount > 0) return `, ${ws.workingCount} working`;
+    if (id === 'assistant' && assistant.needsYouCount > 0) return `, ${assistant.needsYouCount} waiting on you`;
+    return '';
+  }
 </script>
 
 <nav class="rail sidebar-material" aria-label="Modules">
@@ -128,11 +137,15 @@
           onclick={(e) => navClick(e, m.id, m.label)}
           oncontextmenu={(e) => moduleMenu(e, m.id, m.label)}
           title={`${m.label} · ${sec.group.label}${inSide ? ' · in the side pane' : sidePane.supported ? ` — ${SPLIT_HINT}` : ''}`}
-          aria-label={inSide ? `${m.label} (in the side pane)` : m.label}
+          aria-label={`${m.label}${inSide ? ' (in the side pane)' : ''}${railCount(m.id)}`}
           data-testid={`rail-${m.id}`}
         >
           <Icon name={m.icon} />
-          {#if m.id === 'agents' && ws.workingCount > 0}
+          <!-- A session waiting on you outranks "working": the expanded sidebar
+               shows it as the Needs-you pill, the rail as a warning badge. -->
+          {#if m.id === 'agents' && ws.needsYouCount > 0}
+            <span class="rail-badge needs" title={`${ws.needsYouCount} waiting on you`}>{ws.needsYouCount}</span>
+          {:else if m.id === 'agents' && ws.workingCount > 0}
             <span class="rail-badge" title={`${ws.workingCount} working`}>{ws.workingCount}</span>
           {/if}
           {#if m.id === 'assistant' && assistant.needsYouCount > 0}

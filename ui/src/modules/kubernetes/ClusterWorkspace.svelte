@@ -370,7 +370,7 @@
     </span>
     <button class="icon-btn" onclick={() => void k8s.loadResources()} title="Refresh (r)" aria-label="Refresh"><Icon name="refresh" size={14} /></button>
     <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
-      <Icon name="clock" size={11} /> Auto
+      <Icon name="clock" size={12} /> Auto
     </button>
     <button class="btn small" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/workloads`)} title="Monitoring dashboard for this cluster" data-testid="k8s-monitor-cluster-btn">
       <Icon name="gauge" size={12} /> Monitor
@@ -522,7 +522,7 @@
   <div class="filter">
     <Icon name="search" size={12} />
     <input bind:this={filterEl} class="filter-in" placeholder="Filter  ( / )" bind:value={k8s.filter} aria-label="Filter rows" data-testid="k8s-filter" />
-    {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={11} /></button>{/if}
+    {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
   </div>
 {/snippet}
 

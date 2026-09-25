@@ -23,6 +23,13 @@
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const readOnly = $derived(ws.myRole === 'viewer');
   const open = $derived(ui.browserAgentOpen);
+  /** Sentence-case status words (the same ones the share view and session rows use). */
+  const STATUS_LABEL: Record<string, string> = {
+    running: 'Running',
+    idle: 'Idle',
+    exited: 'Ended',
+    reconnectable: 'Disconnected — resume it in Agents',
+  };
 
   // Drop a stale binding once the session list is loaded: the session was
   // archived/deleted, or isn't an agent session any more.
@@ -131,7 +138,7 @@
     <span class="title"><Icon name="terminal" size={14} /> Agent</span>
     {#if session}
       <span class="name" title={session.title}>{session.title}</span>
-      {#if status === 'working'}<span class="working">Working…</span>{:else if status}<span class="dim">{status}</span>{/if}
+      {#if status === 'working'}<span class="working">Working…</span>{:else if status}<span class="dim">{STATUS_LABEL[status] ?? status}</span>{/if}
       <span class="spacer"></span>
       <button class="btn small" onclick={pick} title="Attach a different session">
         <Icon name="swap" size={12} /> Switch
@@ -170,7 +177,7 @@
     </div>
   {/if}
 
-  <AskBar {sessionId} unboundHint="Attach or start an agent to ask about this page." />
+  <AskBar {sessionId} terminalVisible={open && !!sessionId} unboundHint="Attach or start an agent to ask about this page." />
 </aside>
 
 <style>

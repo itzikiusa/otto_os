@@ -26,6 +26,9 @@ class PersonalAgentsStore {
   schedulesByAgent: Record<string, PersonalAgentSchedule[]> = $state({});
   /** agent_id → its recent runs (loaded on demand when the Runs tab opens). */
   runsByAgent: Record<string, PersonalAgentRun[]> = $state({});
+  /** agent_id → its last runs-load failure (human text); cleared on success. A
+   *  failed load keeps the last known runs, so it never reads as "no runs yet". */
+  runsError: Record<string, string> = $state({});
   rooms: AgentRoomWithMembers[] = $state([]);
   /** room_id → its messages, oldest first (appended via `after` paging). */
   messagesByRoom: Record<string, AgentRoomMessage[]> = $state({});
@@ -79,8 +82,12 @@ class PersonalAgentsStore {
   async loadRuns(agentId: string): Promise<void> {
     try {
       this.runsByAgent = { ...this.runsByAgent, [agentId]: await personalAgentsApi.runs(agentId) };
-    } catch {
-      this.runsByAgent = { ...this.runsByAgent, [agentId]: [] };
+      if (agentId in this.runsError) {
+        const { [agentId]: _cleared, ...rest } = this.runsError;
+        this.runsError = rest;
+      }
+    } catch (e) {
+      this.runsError = { ...this.runsError, [agentId]: loadErrorText(e) };
     }
   }
 

@@ -13,6 +13,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import SettingToggle from './SettingToggle.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
 
   interface NetworkListener {
     enabled: boolean;
@@ -57,6 +58,8 @@
   $effect(() => {
     void load();
   });
+  // An un-Saved listener/sandbox change would be dropped silently on leave.
+  $effect(() => guardUnsaved(() => dirty, { what: 'the daemon settings' }));
 
   async function load(): Promise<void> {
     loading = true;
@@ -248,14 +251,16 @@
     flex-direction: column;
     gap: 8px;
     padding: 8px 16px 14px;
-    max-width: 760px;
+    max-width: var(--settings-col);
   }
   /* Sub-controls line up with the toggle's label text (15px box + 10px gap). */
   .indent {
     margin-inline-start: 25px;
   }
+  /* margin-block only: a `margin: 0` here out-ranked `.indent` and pulled
+     Port / Network back under the checkbox instead of under its label. */
   .dm-card .field {
-    margin: 0;
+    margin-block: 0;
   }
   .field.port {
     max-width: 160px;

@@ -435,6 +435,14 @@ impl DbViewerService {
             self.authorize(conn_id, user_id, req.node.as_deref(), operation)
                 .await?;
         }
+        // A lexer-classified (not parser-proven) statement needs editor trust
+        // even when it reads — see `access::unparsed_read_requires`.
+        if let Some(extra) = crate::access::unparsed_read_requires(engine) {
+            if !operations.contains(&extra) {
+                self.authorize(conn_id, user_id, req.node.as_deref(), extra)
+                    .await?;
+            }
+        }
         if conn.read_only && operations.iter().any(|op| *op != "db_query") {
             return Err(Error::Forbidden(
                 "read-only connection cannot perform database mutations".into(),

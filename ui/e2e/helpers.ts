@@ -169,3 +169,18 @@ export async function runBarCommand(page: Page, title: string): Promise<void> {
     timeout: 10_000,
   });
 }
+
+/** Select a right-panel tab by name. A narrow panel folds the tabs that
+ *  don't fit into its "More panels" menu, so pick from there when needed. */
+export async function openRightPanelTab(page: Page, name: string): Promise<void> {
+  const panel = page.locator('.rpanel');
+  await expect(panel.locator('.rtab').first()).toBeVisible();
+  const tab = panel.getByRole('tab', { name, exact: true });
+  if (await tab.isVisible()) {
+    await tab.click();
+  } else {
+    await panel.getByRole('button', { name: 'More panels' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name, exact: true }).click();
+  }
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+}

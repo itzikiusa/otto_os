@@ -17,8 +17,11 @@
     sessionId: string | null;
     /** Hint shown when no session is bound (differs per host). */
     unboundHint?: string;
+    /** The bound session's terminal is on screen right above the bar (no
+     *  "sent" toast needed — the answer is visibly arriving). */
+    terminalVisible?: boolean;
   }
-  let { sessionId, unboundHint = 'Attach an agent session to ask about this page.' }: Props = $props();
+  let { sessionId, unboundHint = 'Attach an agent session to ask about this page.', terminalVisible = false }: Props = $props();
 
   let text = $state('');
   let includeMarks = $state(true);
@@ -72,6 +75,9 @@
       await browser.ask({ session_id: sessionId, url, text: q, annotation_ids: ids });
       text = '';
       justMarked = false;
+      // The answer streams into the agent's terminal; when that isn't on
+      // screen (collapsed dock, or the embedded bar) say where it went.
+      if (!terminalVisible) toasts.success('Sent to the agent', session?.title ?? undefined);
     } catch (e) {
       toasts.error('Ask failed', e instanceof Error ? e.message : undefined);
     } finally {
@@ -106,11 +112,13 @@
     spellcheck="false"
     aria-label="Ask the agent about this page"
   ></textarea>
+  {#if url}
   <label class="marks-chip" class:off={!includeMarks || marks.length === 0} title={marks.length === 0 ? 'No marks on this page yet — use Mark passage to add one' : "Include this page's marks in the question so the agent knows which elements you mean"}>
     <input type="checkbox" bind:checked={includeMarks} disabled={marks.length === 0} />
     <Icon name="target" size={11} />
     <span>{marks.length} mark{marks.length === 1 ? '' : 's'}</span>
   </label>
+  {/if}
   <button class="send" onclick={send} disabled={!canSend} title="Send to the agent (⏎)" aria-label="Send">
     <Icon name="send" size={13} />
   </button>

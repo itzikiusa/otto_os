@@ -49,6 +49,8 @@ async function typeInEditor(scope: ReturnType<Page['locator']>, text: string): P
 
 test('scripts/docs/settings persist with the saved request (server-side)', async ({ page }) => {
   await openApiEditor(page);
+  // A workspace with saved requests opens on the latest one — start a draft.
+  await page.locator('.req-tab-new').click();
   const name = `durability-${Date.now()}`;
 
   await urlInput(page).fill('https://example.com/durable');
@@ -114,6 +116,8 @@ test('scripts/docs/settings persist with the saved request (server-side)', async
 
 test('saved bearer token is Keychain-migrated and rendered masked', async ({ page }) => {
   await openApiEditor(page);
+  // A workspace with saved requests opens on the latest one — start a draft.
+  await page.locator('.req-tab-new').click();
   const name = `secret-${Date.now()}`;
 
   await urlInput(page).fill('https://example.com/secret');

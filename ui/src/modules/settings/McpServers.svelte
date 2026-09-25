@@ -22,6 +22,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
 
   // The first-party `otto` MCP server (Otto's read-only tools + the read-only DB
   // connection tools), attached to agent sessions per WORKSPACE through the same
@@ -264,7 +265,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('mcp-servers')} subtitle="Per-workspace Model Context Protocol servers">
+  <PageHeader title={sectionLabel('mcp-servers')} subtitle="Extra agent tools for this workspace">
     {#snippet actions()}
       {#if wsId && servers.length > 0}
         <button
@@ -327,16 +328,20 @@
       <div class="server-list">
         {#each servers as s (s.id)}
           {@const locked = busyId === s.id || !canConfigure(s.id)}
-          <div class="card server" class:off={!s.enabled}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="card server"
+            class:off={!s.enabled}
+            oncontextmenu={(e) => ctxMenu.show(e, [
+              { label: s.enabled ? 'Disable' : 'Enable', icon: s.enabled ? 'eyeOff' : 'eye', disabled: locked, action: () => toggleEnabled(s) },
+              { label: 'Edit…', icon: 'edit', disabled: locked, action: () => openEdit(s) },
+              { separator: true },
+              { label: 'Remove…', icon: 'trash', danger: true, disabled: locked, action: () => remove(s) },
+            ])}
+          >
+            <span class="server-icon"><Icon name="server" size={14} /></span>
             <div class="server-main">
-              <div class="server-head">
-                <span class="server-name mono" title={s.name}>{s.name}</span>
-                {#if s.enabled}
-                  <span class="chip accent">Enabled</span>
-                {:else}
-                  <span class="chip">Off</span>
-                {/if}
-              </div>
+              <span class="server-name mono" title={s.name}>{s.name}</span>
               <div class="server-cmd mono" title={`${s.command} ${s.args.join(' ')}`.trim()}>
                 {s.command}{s.args.length ? ' ' + s.args.join(' ') : ''}
               </div>
@@ -350,14 +355,32 @@
               {/if}
             </div>
             <div class="server-actions">
-              <button class="btn small" disabled={locked} title={!canConfigure(s.id) ? "You can't configure this server" : undefined} onclick={() => toggleEnabled(s)}>
-                {s.enabled ? 'Disable' : 'Enable'}
-              </button>
-              <button class="btn small" disabled={locked} title={!canConfigure(s.id) ? "You can't configure this server" : undefined} onclick={() => openEdit(s)}>
-                Edit…
+              <!-- The same inline "Enabled" switch as a Channels row. -->
+              <label class="checkbox-row srv-enabled" title={!canConfigure(s.id) ? "You can't configure this server" : s.enabled ? `Stop writing ${s.name} to .mcp.json` : `Write ${s.name} to .mcp.json for new sessions`}>
+                <input
+                  type="checkbox"
+                  checked={s.enabled}
+                  disabled={locked}
+                  onchange={async (e) => {
+                    const el = e.currentTarget;
+                    await toggleEnabled(s);
+                    // A failed save leaves the saved value — show it, not the click.
+                    el.checked = servers.find((x) => x.id === s.id)?.enabled ?? false;
+                  }}
+                />
+                Enabled
+              </label>
+              <button
+                class="icon-btn srv-tool"
+                disabled={locked}
+                title={!canConfigure(s.id) ? "You can't configure this server" : `Edit ${s.name}`}
+                aria-label="Edit {s.name}"
+                onclick={() => openEdit(s)}
+              >
+                <Icon name="edit" size={14} />
               </button>
               <button
-                class="icon-btn"
+                class="icon-btn srv-tool"
                 disabled={locked}
                 title="Remove {s.name}"
                 aria-label="Remove {s.name}"
@@ -474,13 +497,10 @@
     font-size: 0.92em;
   }
   .mcp-card {
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .otto {
     padding: 4px 16px;
-  }
-  .section-title:first-of-type {
-    margin-top: 0;
   }
   .otto-error {
     display: flex;
@@ -511,29 +531,34 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 640px;
+    max-width: var(--settings-col);
   }
   .server {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
     padding: 12px 14px;
   }
-  .server.off .server-main {
-    opacity: 0.7;
+  .server.off .server-main,
+  .server.off .server-icon {
+    opacity: 0.6;
+  }
+  .server-icon {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    display: grid;
+    place-items: center;
   }
   .server-main {
+    flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-  .server-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
   }
   .server-name {
     font-size: var(--fs-m);
@@ -560,6 +585,18 @@
     gap: 6px;
     flex-shrink: 0;
   }
+  .srv-enabled {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+    margin-inline-end: 4px;
+    cursor: pointer;
+  }
+  .srv-enabled input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--accent);
+  }
   @media (max-width: 640px) {
     .server {
       flex-wrap: wrap;
@@ -567,6 +604,10 @@
     .server-actions {
       width: 100%;
       justify-content: flex-end;
+    }
+    .srv-tool {
+      min-width: 36px;
+      min-height: 36px;
     }
   }
 </style>

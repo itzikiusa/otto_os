@@ -1,6 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -20,7 +21,6 @@
   import { toasts } from '../../lib/toast.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { improvementBus } from '../../lib/events.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -59,6 +59,8 @@
     ]);
   }
   const dirty = $derived(cfg != null && formKey(cfg, allowlistText) !== savedKey);
+  // Leaving Settings (or this page) with unsaved edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: 'the self-improvement settings' }));
   // number inputs bind `null` when cleared; the daemon would answer with a raw
   // deserialize error.
   const formError = $derived.by(() => {
@@ -351,17 +353,40 @@
       title="No workspace selected"
       body="Self-improvement is per workspace. Pick one from the workspace menu at the top of the sidebar to configure it."
     />
-  {:else if loading && !cfg}
-    <Skeleton rows={2} height={88} />
   {:else if !cfg}
-    <LoadState what="self-improvement settings" error={loadError || 'Nothing came back.'} empty onretry={() => wsId && void load(wsId)} />
+    <LoadState what="self-improvement settings" loading={loading || !loadError} error={loadError || null} empty rows={3} onretry={() => wsId && void load(wsId)} />
   {:else}
     {#if loadError}
       <LoadState what="self-improvement" error={loadError} onretry={() => wsId && void load(wsId)} />
     {/if}
+    {#if formError}
+      <p class="form-note error" role="alert">{formError}</p>
+    {:else if dirty}
+      <p class="form-note unsaved" role="status">Unsaved changes — Save to apply them.</p>
+    {/if}
+    <!-- Evolve result — shown after an Evolve now completes. -->
+    {#if evolveResult !== null}
+      <div class="evolve-badge" class:no-change={evolveResult.length === 0} role="status">
+        <Icon name={evolveResult.length === 0 ? 'info' : 'check'} size={14} />
+        <span class="grow">
+          {#if evolveResult.length === 0}
+            Evolve finished — no skill changes this session.
+          {:else}
+            {evolveResult.length} skill{evolveResult.length === 1 ? '' : 's'} updated:
+            <span class="evolve-skills mono">{evolveResult.join(', ')}</span>
+          {/if}
+        </span>
+        <button
+          class="icon-btn"
+          aria-label="Dismiss evolve result"
+          title="Dismiss evolve result"
+          onclick={() => (evolveResult = null)}
+        ><Icon name="x" size={12} /></button>
+      </div>
+    {/if}
     <!-- Pending approvals — first, since they need you. -->
     {#if pending.length > 0}
-      <h2 class="section-title first">Pending approvals <span class="count">{pending.length}</span></h2>
+      <h2 class="section-title">Pending approvals <span class="count">{pending.length}</span></h2>
       <div class="edit-list">
         {#each pending as e (e.id)}
           <div class="edit-card card">
@@ -399,38 +424,39 @@
       </div>
     {/if}
 
-    <h2 class="section-title" class:first={pending.length === 0}>Schedule</h2>
-    <!-- Config form -->
-    <div class="card form">
-      <div class="toggles">
-        <SettingToggle
-          label="Review recent sessions on a schedule"
-          checked={cfg.enabled}
-          testid="si-enabled"
-          onchange={(v) => { if (cfg) cfg.enabled = v; }}
-        >
-          {#if cfg.enabled && cfg.next_run_at}Next run {rel(cfg.next_run_at)} ({fmtDate(cfg.next_run_at)}).{:else if cfg.enabled}Runs after you save.{:else}Off — Run now still works on demand.{/if}
-        </SettingToggle>
-        <SettingToggle
-          label="Live evolve"
-          hint="Improve skills right after each interaction, using the first provider below."
-          checked={cfg.live_evolve}
-          testid="si-live-evolve"
-          onchange={(v) => { if (cfg) cfg.live_evolve = v; }}
-        />
-      </div>
-
-      <div class="grid2">
+    <h2 class="section-title">Schedule</h2>
+    <div class="card form tfirst">
+      <SettingToggle
+        label="Review recent sessions on a schedule"
+        checked={cfg.enabled}
+        testid="si-enabled"
+        onchange={(v) => { if (cfg) cfg.enabled = v; }}
+      >
+        {#if cfg.enabled && cfg.next_run_at}<span title={fmtDate(cfg.next_run_at)}>Next run {rel(cfg.next_run_at)}.</span>{:else if cfg.enabled}Runs after you save.{:else}Off — Run now still works on demand.{/if}
+      </SettingToggle>
+      <div class="grid2 indent">
         <div class="field">
           <label for="si-cadence">Run every (minutes)</label>
-          <input id="si-cadence" class="input" type="number" min="1" bind:value={cfg.cadence_minutes} />
+          <input
+            id="si-cadence"
+            class="input"
+            type="number"
+            min="1"
+            bind:value={cfg.cadence_minutes}
+            disabled={!cfg.enabled}
+            title={cfg.enabled ? undefined : 'Turn on the schedule to change how often it runs'}
+          />
         </div>
         <div class="field">
           <label for="si-lookback">Look back (hours)</label>
           <input id="si-lookback" class="input" type="number" min="1" bind:value={cfg.lookback_hours} />
+          <span class="hint">Also used by Run now.</span>
         </div>
       </div>
+    </div>
 
+    <h2 class="section-title">What may change</h2>
+    <div class="card form">
       <div class="field">
         <label for="si-autonomy">Autonomy</label>
         <select id="si-autonomy" class="input" bind:value={cfg.autonomy}>
@@ -439,28 +465,6 @@
           <option value="auto">Auto — apply every allow-listed edit</option>
         </select>
       </div>
-
-      <div class="field">
-        <span class="field-label" id="si-providers-lbl">Providers</span>
-        <div class="provider-grid" role="group" aria-labelledby="si-providers-lbl">
-          {#each providerChoices as p (p)}
-            <label class="provider-chip pill-toggle" class:on={cfg.providers.includes(p)}>
-              <input
-                type="checkbox"
-                checked={cfg.providers.includes(p)}
-                onchange={() => toggleProvider(p)}
-              />
-              <span class="mono">{p}</span>
-            </label>
-          {/each}
-        </div>
-        <span class="hint">
-          Each selected agent CLI runs the scheduled / Run-now analysis independently with its own
-          default model, so you get a separate set of suggestions per provider (labeled in the
-          results). Evolve now and Live evolve use only the first one. At least one is required.
-        </span>
-      </div>
-
       <div class="field">
         <label for="si-allow">Skill allow-list</label>
         <input
@@ -476,39 +480,47 @@
           list always queue for approval. Memory edits follow the autonomy policy directly.
         </span>
       </div>
+    </div>
 
-      {#if formError}
-        <p class="form-note error" role="alert">{formError}</p>
-      {:else if dirty}
-        <p class="form-note unsaved">Unsaved changes — Save to apply them.</p>
-      {/if}
-
-      <!-- Evolve result — shown after an Evolve now completes. -->
-      {#if evolveResult !== null}
-        <div class="evolve-badge" class:no-change={evolveResult.length === 0} role="status">
-          <Icon name={evolveResult.length === 0 ? 'info' : 'check'} size={14} />
-          <span class="grow">
-            {#if evolveResult.length === 0}
-              Evolve finished — no skill changes this session.
-            {:else}
-              {evolveResult.length} skill{evolveResult.length === 1 ? '' : 's'} updated:
-              <span class="evolve-skills mono">{evolveResult.join(', ')}</span>
-            {/if}
-          </span>
-          <button
-            class="icon-btn"
-            aria-label="Dismiss evolve result"
-            title="Dismiss evolve result"
-            onclick={() => (evolveResult = null)}
-          ><Icon name="x" size={12} /></button>
+    <h2 class="section-title">Agents</h2>
+    <div class="card form">
+      <div class="field">
+        <span class="field-label" id="si-providers-lbl">Providers</span>
+        <div class="provider-grid" role="group" aria-labelledby="si-providers-lbl">
+          {#each providerChoices as p (p)}
+            {@const on = cfg.providers.includes(p)}
+            <button
+              type="button"
+              class="provider-chip pill-toggle"
+              class:on
+              aria-pressed={on}
+              disabled={on && cfg.providers.length === 1}
+              title={on && cfg.providers.length === 1 ? 'At least one provider is required' : undefined}
+              onclick={() => toggleProvider(p)}
+            >
+              {#if on}<Icon name="check" size={12} />{/if}<span class="mono">{p}</span>
+            </button>
+          {/each}
         </div>
-      {/if}
+        <span class="hint">
+          Each selected agent CLI runs the scheduled / Run-now analysis independently with its own
+          default model, so you get a separate set of suggestions per provider (labeled in the
+          results). Evolve now and Live evolve use only the first one. At least one is required.
+        </span>
+      </div>
+      <SettingToggle
+        label="Live evolve"
+        hint="Improve skills right after each interaction, using the first provider above."
+        checked={cfg.live_evolve}
+        testid="si-live-evolve"
+        onchange={(v) => { if (cfg) cfg.live_evolve = v; }}
+      />
     </div>
 
     <!-- Recent runs -->
     <h2 class="section-title">Recent runs</h2>
     {#if runs.length === 0}
-      <div class="card-info dim">No runs yet. Turn on the schedule and save, or use Run now.</div>
+      <p class="card-info dim">No runs yet. Turn on the schedule and save, or use Run now.</p>
     {:else}
       <div class="run-list">
         {#each runs as r (r.id)}
@@ -533,7 +545,7 @@
 
 <style>
   .form-note {
-    margin: 0;
+    margin: 0 0 12px;
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
@@ -550,12 +562,22 @@
     height: 100%;
     min-height: 0;
   }
+  /* The same card as the other Settings pages. */
   .form {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 16px 18px;
-    max-width: 760px;
+    padding: 14px 16px;
+    max-width: var(--settings-col);
+  }
+  /* Opens on a SettingToggle, which brings its own 8px. */
+  .form.tfirst {
+    padding-top: 6px;
+    gap: 8px;
+  }
+  /* Sub-controls line up with the toggle's label text (15px box + 10px gap). */
+  .indent {
+    margin-inline-start: 25px;
   }
   .form .field {
     margin: 0;
@@ -570,18 +592,13 @@
     font-weight: 500;
     color: var(--text-dim);
   }
-  .toggles {
-    display: flex;
-    flex-direction: column;
-    margin: -8px 0 -4px;
-  }
   .provider-grid {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
   }
-  .provider-chip input {
-    margin: 0;
+  .provider-chip :global(svg) {
+    flex-shrink: 0;
   }
   .hint {
     font-size: var(--fs-xs);
@@ -595,13 +612,9 @@
     flex-wrap: wrap;
   }
   .section-title {
-    margin: 24px 0 8px;
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .section-title.first {
-    margin-top: 0;
   }
   .count {
     color: var(--warning);
@@ -615,7 +628,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-width: 760px;
+    max-width: var(--settings-col);
   }
   .edit-card,
   .run-card {
@@ -678,6 +691,7 @@
     color: var(--danger);
   }
   .card-info {
+    margin: 0;
     font-size: var(--fs-s);
   }
   .dim {
@@ -689,6 +703,9 @@
   }
   /* Evolve-now result */
   .evolve-badge {
+    max-width: var(--settings-col);
+    box-sizing: border-box;
+    margin: 0 0 12px;
     display: flex;
     align-items: center;
     gap: 8px;

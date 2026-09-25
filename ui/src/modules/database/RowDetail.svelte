@@ -53,7 +53,7 @@
     </button>
   </header>
   <div class="rd-search">
-    <Icon name="search" size={11} />
+    <Icon name="search" size={12} />
     <input
       class="rd-search-input"
       type="text"
@@ -80,9 +80,9 @@
               onclick={() => copyText(v === null || v === undefined ? '' : cellStr(v))}
               aria-label="Copy {c.name}"
               title="Copy value"
-            ><Icon name="copy" size={11} /></button>
+            ><Icon name="copy" size={12} /></button>
             <button class="icon-btn rd-act" onclick={() => onopen(ci)} aria-label="Open {c.name} in the viewer" title="Open in the viewer">
-              <Icon name="maximize" size={11} />
+              <Icon name="maximize" size={12} />
             </button>
           </dt>
           <dd class="mono" class:num={kind === 'num'}>

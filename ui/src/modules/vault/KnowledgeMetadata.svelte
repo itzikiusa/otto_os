@@ -11,7 +11,7 @@
 </script>
 <div class="knowledge" aria-label="Knowledge provenance">
   <div class="badges"><span>{meta.tier}</span><span>{cap(meta.status)}</span>{#if meta.stale}<span class="warning">Stale</span>{/if}</div>
-  {#if meta.generatedAt}<p>Content updated <time datetime={meta.generatedAt} title={meta.generatedAt}>{rel(meta.generatedAt) || meta.generatedAt}</time>{#if meta.generatedBy} by {meta.generatedBy}{/if}</p>{/if}
+  {#if meta.generatedAt}<p>Content updated <time datetime={meta.generatedAt} title={meta.generatedAt}>{rel(meta.generatedAt) || meta.generatedAt}</time>{#if meta.generatedBy}{' by '}{meta.generatedBy}{/if}</p>{/if}
   {#if meta.staleAt}<p class:warning={meta.stale || meta.invalidDeadline} title={meta.staleAt}>{#if meta.invalidDeadline}Stale-after date “{meta.staleAt}” isn’t a valid timestamp{:else}{meta.stale ? 'Went stale' : 'Goes stale'} {rel(meta.staleAt)}{/if}</p>{/if}
   {#if meta.changedSinceVerification}<p class="warning">Content changed after the latest recorded verification.</p>{/if}
   {#each meta.verified as event, i (i)}<p>Verified by {event.by} · <time datetime={event.at} title={event.at}>{rel(event.at)}</time></p>{/each}

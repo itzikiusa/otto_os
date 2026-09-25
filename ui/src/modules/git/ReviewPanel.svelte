@@ -947,7 +947,7 @@
     <div class="rp-precheck" role="status">
       <span class="rp-precheck-icon"><Icon name="warning" size={14} /></span>
       <span class="rp-precheck-msg">
-        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0} · {/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
+        {#if missingReviewSkills > 0}{missingReviewSkills} review skill{missingReviewSkills === 1 ? " isn't" : "s aren't"} installed{/if}{#if missingReviewSkills > 0 && outdatedReviewSkills > 0}{' · '}{/if}{#if outdatedReviewSkills > 0}{outdatedReviewSkills} {outdatedReviewSkills === 1 ? 'has an update' : 'have updates'}{/if}
       </span>
       <button class="btn small ghost rp-precheck-btn" onclick={openSkillSettings}>
         Open skill settings

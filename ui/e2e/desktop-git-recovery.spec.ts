@@ -22,7 +22,8 @@ async function fixture(page: Page) {
   expect(response.ok()).toBeTruthy();
   const { id } = await response.json(); await ctx.dispose();
   await openPage(page, `git/${id}/graph`);
-  await page.getByRole('button', { name: 'Recovery tools', exact: true }).click();
+  await page.getByRole('button', { name: 'More repository actions', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Recovery tools…' }).click();
   await expect(page.locator('.tools .entry').first()).toBeVisible();
   return { git, id: id as string, dir };
 }
@@ -63,7 +64,8 @@ test('bisect resumes after closing tools and returns to original branch', async 
   await expect(page.getByRole('button', { name: 'Works (good)', exact: true })).toBeVisible();
   const candidate = git('rev-parse', 'HEAD'); expect(candidate).not.toBe(head);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Recovery tools', exact: true }).click();
+  await page.getByRole('button', { name: 'More repository actions', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Recovery tools…' }).click();
   await page.getByRole('button', { name: 'Bisect', exact: true }).click();
   await expect(page.locator('.tools code', { hasText: candidate })).toBeVisible();
   await page.getByRole('button', { name: 'End bisect / return to branch', exact: true }).click();

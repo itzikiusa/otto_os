@@ -19,7 +19,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
-  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs } from './util';
+  import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
   import type {
     AthenaExecution,
     AthenaQueryState,
@@ -334,16 +334,16 @@
         {/if}
       </div>
       {#if catLoading && !catalog}
-        <div class="pad"><Skeleton rows={6} /></div>
+        <div class="pad" role="status"><p class="load-note">Loading the data catalog…</p><Skeleton rows={6} /></div>
       {:else if catError && !catalog}
-        <EmptyState icon="db" title="Catalog unavailable" body={catError} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't load the catalog" body={awsErrorText(catError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
       {:else}
         <ul class="dbs">
           {#each treeDbs as db (db)}
             {@const open = openDbs[db] === true || treeFilter.trim() !== ''}
             <li>
               <button class="node" class:cur={db === database} onclick={() => void toggleDb(db)} aria-expanded={open}>
-                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} />
+                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
                 <Icon name="db" size={12} />
                 <span class="nlabel">{db}</span>
               </button>
@@ -366,7 +366,7 @@
                           aria-expanded={topen}
                           title={`${tk} · double-click to SELECT`}
                         >
-                          <Icon name={topen ? 'chevronDown' : 'chevronRight'} size={11} />
+                          <Icon name={topen ? 'chevronDown' : 'chevronRight'} size={12} />
                           <Icon name="grid" size={12} />
                           <span class="nlabel">{t.name}</span>
                           <span class="dim cnt">{t.columns.length}</span>
@@ -464,9 +464,9 @@
           <ResultsGrid {result} error={resultError} statement={ranSql} connectionId={null} running={running} oncancel={() => void cancel()} />
         {/if}
       {:else if historyLoading && history.length === 0}
-        <div class="pad"><Skeleton rows={6} /></div>
+        <div class="pad" role="status"><p class="load-note">Loading query history…</p><Skeleton rows={6} /></div>
       {:else if historyError}
-        <EmptyState icon="clock" title="History unavailable" body={historyError} actionLabel="Retry" onaction={() => void loadHistory()} />
+        <EmptyState actionKind="secondary" icon="warning" title="Couldn't load query history" body={awsErrorText(historyError)} actionLabel="Retry" onaction={() => void loadHistory()} />
       {:else if history.length === 0}
         <EmptyState icon="clock" title="No recent executions" body={`Nothing has run in workgroup ${workgroup || '—'} lately.`} />
       {:else}
@@ -495,6 +495,11 @@
 </div>
 
 <style>
+  .load-note {
+    margin: 0 0 10px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .ath {
     flex: 1;
     min-height: 0;

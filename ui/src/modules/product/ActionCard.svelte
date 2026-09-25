@@ -12,6 +12,7 @@
   //                   Undo deletes the created note ids.
   //   create_canvas → lazy Mermaid thumbnail (if any), "Open in Canvas";
   //                   navigates on canvas_id, then toasts.
+  import Icon from '../../lib/components/Icon.svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -240,7 +241,7 @@
 {#if applied}
   <!-- Sticky post-apply confirmation row -->
   <div class="action-card applied-row">
-    <span class="applied-text">✓ {appliedLabel}</span>
+    <span class="applied-text"><Icon name="check" size={12} /> {appliedLabel}</span>
     {#if undoApplicable()}
       <button class="btn small" onclick={onUndo} disabled={undoing}>
         {undoing ? 'Undoing…' : 'Undo'}
@@ -540,6 +541,9 @@
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .applied-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-s);
     font-weight: 600;
     color: var(--success);

@@ -480,12 +480,12 @@
     margin: 0;
   }
   h3 {
-    font-size: 17px;
+    font-size: var(--fs-xl);
   }
   header p,
   .hint {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--fs-s);
     line-height: 1.5;
     max-width: 78ch;
   }
@@ -527,7 +527,7 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   input,
   select,
@@ -574,7 +574,7 @@
     gap: 5px;
     border-block-end: 1px solid var(--border);
     padding: 10px 0;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   .decision p,
   .decision small {
@@ -587,7 +587,7 @@
   }
   details summary {
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--fs-s);
   }
   details[open] {
     display: flex;

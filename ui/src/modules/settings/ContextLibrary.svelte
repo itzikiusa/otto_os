@@ -1,6 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Context Library (root-only): author and edit the Otto-owned library of
@@ -16,7 +17,6 @@
   } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -67,6 +67,8 @@
 
   const meta = $derived(TAB_META[tab]);
   const dirty = $derived(selected !== null && !bodyLoading && (editName !== loadedName || editBody !== loadedBody));
+  // Leaving Settings (or this page) with unsaved edits asks first.
+  $effect(() => guardUnsaved(() => dirty, { what: isNew ? `the new ${meta.singular}` : `“${loadedName}”` }));
 
   // CodeEditor wants a path (for language detection) + a root. The library is not
   // a real workspace dir, so root is empty (LSP simply won't attach — fine for md).
@@ -455,10 +457,8 @@
               {#if dirty}<span class="unsaved">Unsaved changes</span>{/if}
             </div>
             <div class="editor-box">
-              {#if bodyLoading}
-                <Skeleton rows={4} height={40} />
-              {:else if bodyError}
-                <LoadState what={`“${selected}”`} error={bodyError} empty onretry={() => selected && void openEntry(selected)} />
+              {#if bodyLoading || bodyError}
+                <LoadState what={`“${selected}”`} loading={bodyLoading} error={bodyError || null} empty rows={4} onretry={() => selected && void openEntry(selected)} />
               {:else}
                 {#key editorKey}
                   <CodeEditor
@@ -467,6 +467,9 @@
                     content={editBody}
                     language="md"
                     readOnly={false}
+                    placeholder={tab === 'skills'
+                      ? 'Markdown: front matter (name, description), then the instructions'
+                      : `Write the ${meta.singular} in markdown`}
                     onchange={(v) => (editBody = v)}
                   />
                 {/key}

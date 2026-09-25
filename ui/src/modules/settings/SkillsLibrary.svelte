@@ -18,7 +18,7 @@
   import type { BundledSkill, BundledSkillState } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -46,10 +46,17 @@
     'insights',
   ];
 
+  // Name/description filter — two dozen skills in a few categories.
+  let query = $state('');
+  const q = $derived(query.trim().toLowerCase());
+  const shown = $derived(
+    q ? skills.filter((s) => s.name.toLowerCase().includes(q) || (s.description ?? '').toLowerCase().includes(q)) : skills,
+  );
+
   // Skills grouped by category, in CATEGORY_ORDER then alphabetical for the rest.
   const groups = $derived.by(() => {
     const byCat = new Map<string, BundledSkill[]>();
-    for (const s of skills) {
+    for (const s of shown) {
       const list = byCat.get(s.category) ?? [];
       list.push(s);
       byCat.set(s.category, list);
@@ -100,16 +107,18 @@
   // Badge / action labels per state
   // ---------------------------------------------------------------------------
 
-  function badge(s: BundledSkill): { text: string; cls: string } {
+  // Not installed carries no chip: the Install button already says so, and a
+  // grey "Not installed" on every row of a fresh library was pure noise.
+  function badge(s: BundledSkill): { text: string; cls: string } | null {
     switch (s.state) {
       case 'not_installed':
-        return { text: 'Not installed', cls: '' };
+        return null;
       case 'up_to_date':
         return { text: `Installed v${s.installed_version}`, cls: 'ok' };
       case 'update_available':
         return {
           text: `Update available · v${s.installed_version} → v${s.version}`,
-          cls: 'accent',
+          cls: 'info',
         };
       case 'ahead':
         return { text: 'Edited locally', cls: 'warn' };
@@ -240,6 +249,25 @@
         body="This build of Otto doesn't ship any skills. Add your own in Settings → Context library."
       />
     {/snippet}
+    <div class="toolbar">
+      <label class="filter">
+        <Icon name="search" size={12} />
+        <input
+          type="search"
+          class="filter-input"
+          bind:value={query}
+          placeholder="Filter skills"
+          aria-label="Filter skills"
+          autocomplete="off"
+          spellcheck="false"
+          onkeydown={(e) => { if (e.key === 'Escape' && query) { e.preventDefault(); e.stopPropagation(); query = ''; } }}
+        />
+      </label>
+      <span class="summary">{installedCount(skills)} of {skills.length} installed</span>
+    </div>
+    {#if groups.length === 0}
+      <p class="no-match">No skills match “{query.trim()}”.</p>
+    {/if}
     {#each groups as g (g.category)}
       <section class="cat" aria-labelledby={`cat-${g.category}`}>
         <div class="cat-head">
@@ -263,7 +291,7 @@
               <div class="grow">
                 <div class="skill-name">
                   <span class="mono">{s.name}</span>
-                  <span class="chip {b.cls}">{b.text}</span>
+                  {#if b}<span class="chip {b.cls}">{b.text}</span>{/if}
                 </div>
                 {#if s.description}
                   <div class="skill-desc dim" title={s.description}>{s.description}</div>
@@ -313,15 +341,58 @@
     height: 100%;
     min-height: 0;
   }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: var(--settings-col);
+    margin-bottom: 4px;
+  }
+  /* Same quiet search field as the Settings nav filter. */
+  .filter {
+    flex: 0 1 260px;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 27px;
+    padding-inline: 8px;
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  .filter:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .filter-input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: var(--fs-m);
+  }
+  .summary {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .no-match {
+    margin: 12px 0 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
   .cat {
-    max-width: 880px;
-    margin-bottom: 24px;
+    max-width: var(--settings-col);
   }
   .cat-head {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    margin: 18px 0 8px;
   }
   .cat-head .section-title {
     margin: 0;
@@ -383,11 +454,7 @@
   .note.warn {
     color: var(--warning);
   }
-  .chip.warn {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-    background: var(--warning-soft);
-  }
+  /* .chip.info / .chip.warn come from app.css. */
   .skill-actions {
     flex-shrink: 0;
     display: flex;

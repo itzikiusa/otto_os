@@ -5,6 +5,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -191,6 +193,31 @@
     }
   }
 
+  /** Reopen a discarded question (the undo for Discard). */
+  async function reopen(q: ProductQuestion): Promise<void> {
+    savingId = q.id;
+    try {
+      await product.updateQuestion(q.id, { status: 'open' });
+    } catch (e) {
+      toasts.error('Could not reopen question', product.errMsg(e));
+    } finally {
+      savingId = null;
+    }
+  }
+
+  /** The row's ⋯ menu: everything past the one inline verb (Answer) —
+   *  guidelines: more than two row actions go into a menu. */
+  function rowMenu(e: MouseEvent, q: ProductQuestion): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: 'Edit', icon: 'edit', action: () => startEdit(q) },
+      q.status === 'discarded'
+        ? { label: 'Reopen', icon: 'refresh', action: () => void reopen(q) }
+        : { label: 'Discard', icon: 'x', action: () => void discard(q) },
+      { separator: true },
+      { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteQ(q) },
+    ]);
+  }
+
   async function deleteQ(q: ProductQuestion): Promise<void> {
     if (!(await confirmer.ask(`Delete question?\n\n"${q.text}"`, { title: 'Delete question', confirmLabel: 'Delete', danger: true }))) return;
     deletingId = q.id;
@@ -276,7 +303,7 @@
   }
 
   function fmtDate(s: string): string {
-    try { return new Date(s).toLocaleDateString(); } catch { return s; }
+    try { return rel(s); } catch { return s; }
   }
 </script>
 
@@ -429,34 +456,21 @@
               <!-- Per-question action buttons (only in read mode) -->
               {#if editingId !== q.id && answeringId !== q.id}
                 <div class="q-actions">
-                  <button
-                    class="btn small ghost q-act"
-                    onclick={() => startEdit(q)}
-                    disabled={savingId === q.id || deletingId === q.id}
-                    title="Edit"
-                  >Edit</button>
+                  <!-- One inline verb + ⋯ (Edit, Discard/Reopen, Delete). -->
                   <button
                     class="btn small ghost q-act"
                     onclick={() => startAnswer(q)}
                     disabled={savingId === q.id || deletingId === q.id}
                     title="Answer / add context"
-                  >Answer</button>
-                  {#if q.status !== 'discarded'}
-                    <button
-                      class="btn small ghost q-act"
-                      onclick={() => discard(q)}
-                      disabled={savingId === q.id || deletingId === q.id}
-                      title="Discard"
-                    >Discard</button>
-                  {/if}
+                  >{q.answer ? 'Edit answer' : 'Answer'}</button>
                   <button
-                    class="btn small danger q-act"
-                    onclick={() => deleteQ(q)}
+                    class="icon-btn q-more"
+                    onclick={(e) => rowMenu(e, q)}
                     disabled={savingId === q.id || deletingId === q.id}
-                    title="Delete"
-                  >
-                    {deletingId === q.id ? 'Deleting…' : 'Delete'}
-                  </button>
+                    aria-label="More actions for this question"
+                    title="More actions"
+                    aria-haspopup="menu"
+                  ><Icon name="more" size={14} /></button>
                 </div>
               {/if}
             </div>

@@ -91,6 +91,17 @@
     filterKind = id;
     if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, id);
   }
+  // Only offer kinds that exist (plus the active one, so a remembered filter
+  // can always be cleared). One kind or none → no chip row at all: a filter
+  // that can't narrow anything is noise.
+  const presentKinds = $derived.by(() => {
+    const kinds = new Set<string>([...database.connections, ...database.otherConnections].map((c) => c.kind));
+    if (brokers.clusters.length > 0) kinds.add('kafka');
+    return kinds;
+  });
+  const visibleChips = $derived(
+    FILTER_CHIPS.filter((chip) => chip.id === 'all' || chip.id === filterKind || presentKinds.has(chip.id)),
+  );
   const filtering = $derived(filterKind !== 'all');
   const connMatchesKind = (c: Connection): boolean => !filtering || c.kind === filterKind;
   const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
@@ -187,6 +198,16 @@
       ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
+    ]);
+  }
+
+  function clusterMenu(e: MouseEvent, cl: BrokerCluster): void {
+    ctxMenu.show(e, [
+      { label: 'Open', icon: 'split', action: () => openCluster(cl) },
+      { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
+      { separator: true },
+      { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
+      { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
     ]);
   }
 
@@ -1066,7 +1087,7 @@
               aria-label="Close connection tab"
               title="Close"
             >
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1083,7 +1104,7 @@
               {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1094,7 +1115,7 @@
               <span class="conn-tab-name ellipsis">{s.name}</span>
             </button>
             <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
@@ -1154,7 +1175,7 @@
             <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
           {/if}
           {#if database.activeConnStatus?.phase === 'connecting'}
-            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spin"><Icon name="refresh" size={11} /></span><span class="lbl">Connecting…</span></span>
+            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spin"><Icon name="refresh" size={12} /></span><span class="lbl">Connecting…</span></span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
           {:else if database.activeConnStatus?.phase === 'ready'}
@@ -1170,11 +1191,11 @@
           {/if}
           {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}
             <button class="btn small ghost" onclick={()=>changesOpen=true} title="Reviewed schema changes for this connection" aria-label="Schema changes">
-              <Icon name="branch" size={11} /><span class="lbl">Changes</span>
+              <Icon name="branch" size={12} /><span class="lbl">Changes</span>
             </button>
           {/if}
           <button class="btn small ghost" onclick={() => database.testConnection()} disabled={database.testing} title="Test this connection" aria-label={database.testing ? 'Testing connection' : 'Test connection'}>
-            <Icon name="plug" size={11} /><span class="lbl">{database.testing ? 'Testing…' : 'Test'}</span>
+            <Icon name="plug" size={12} /><span class="lbl">{database.testing ? 'Testing…' : 'Test'}</span>
           </button>
           {#if database.testResult}
             <span class="test-dot" class:ok={database.testResult.ok} title={database.testResult.message}></span>
@@ -1272,13 +1293,13 @@
       {#if nodeCount(node) > 0}<span class="count">{nodeCount(node)}</span>{/if}
       <div class="sec-actions">
         <button class="icon-btn" title="Add sub-section" aria-label="Add sub-section" onclick={() => createSection(node.sec.id)}>
-          <Icon name="plus" size={11} />
+          <Icon name="plus" size={12} />
         </button>
         <button class="icon-btn" title="Rename section" aria-label="Rename section" onclick={() => renameSection(node.sec)}>
-          <Icon name="edit" size={11} />
+          <Icon name="edit" size={12} />
         </button>
         <button class="icon-btn" title="Delete section" aria-label="Delete section" onclick={() => deleteSection(node.sec)}>
-          <Icon name="trash" size={11} />
+          <Icon name="trash" size={12} />
         </button>
       </div>
     </div>
@@ -1325,12 +1346,10 @@
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">
-      {#if auth.isRoot || connectionAccess(c,'manage_access','admin')}<button class="icon-btn" aria-label={`Access for ${c.name}`} title="Access" onclick={() => accessFor=c}><Icon name="key" size={11} /></button>{/if}
-      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
-        <Icon name="edit" size={11} />
-      </button>
-      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
-        <Icon name="trash" size={11} />
+      <!-- One ⋯ per row (same menu as right-click), like every other list in
+           Infrastructure — not a row of per-action icons. -->
+      <button class="icon-btn" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => connMenu(e, c)}>
+        <Icon name="more" size={14} />
       </button>
     </div>
   </div>
@@ -1348,16 +1367,7 @@
       e.stopPropagation();
     }}
     ondragend={() => (draggedClusterId = null)}
-    oncontextmenu={(e) => {
-      e.preventDefault();
-      ctxMenu.show(e, [
-        { label: 'Open', icon: 'split', action: () => openCluster(cl) },
-        { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
-        { separator: true },
-        { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-        { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
-      ]);
-    }}
+    oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}
   >
     <button
       class="conn-item"
@@ -1370,11 +1380,8 @@
       {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
-      <button class="icon-btn" aria-label="Edit cluster" title="Edit" onclick={() => editCluster(cl)}>
-        <Icon name="edit" size={11} />
-      </button>
-      <button class="icon-btn" aria-label="Remove cluster" title="Remove cluster" onclick={() => void deleteCluster(cl)}>
-        <Icon name="trash" size={11} />
+      <button class="icon-btn" aria-label={`Actions for ${cl.name}`} title="Actions" onclick={(e) => clusterMenu(e, cl)}>
+        <Icon name="more" size={14} />
       </button>
     </div>
   </div>
@@ -1382,7 +1389,7 @@
 
 {#snippet connSearchBox()}
   <div class="tree-search">
-    <Icon name="search" size={11} />
+    <Icon name="search" size={12} />
     <input
       class="tree-search-input"
       type="text"
@@ -1404,8 +1411,9 @@
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
+  {#if visibleChips.length > 2 || filtering}
   <div class="type-chips" role="group" aria-label="Filter by connection type">
-    {#each FILTER_CHIPS as chip (chip.id)}
+    {#each visibleChips as chip (chip.id)}
       <button
         class="type-chip"
         class:on={filterKind === chip.id}
@@ -1415,6 +1423,7 @@
       >{chip.label}</button>
     {/each}
   </div>
+  {/if}
 {/snippet}
 
 {#snippet connListBody()}
@@ -1502,7 +1511,7 @@
         aria-label="Search saved queries"
       />
       {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     {#if database.savedQueries.length === 0}
@@ -1530,7 +1539,7 @@
               <Icon name="file" size={12} />
               <span class="ellipsis">{q.name}</span>
             </button>
-            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={11} /></button>
+            <button class="icon-btn row-del" onclick={() => startRename(q)} aria-label="Rename saved query" title="Rename"><Icon name="edit" size={12} /></button>
             <button
               class="icon-btn row-del"
               onclick={async () => {
@@ -1541,7 +1550,7 @@
                 if (ok) void database.deleteSavedQuery(q.id);
               }}
               aria-label="Delete saved query “{q.name}”…"
-              title="Delete…"><Icon name="trash" size={11} /></button>
+              title="Delete…"><Icon name="trash" size={12} /></button>
           {/if}
         </div>
       {/each}
@@ -1556,7 +1565,7 @@
         aria-label="Search query history"
       />
       {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     {#if database.history.length === 0}
@@ -1944,6 +1953,16 @@
   .conn-row:hover .conn-actions,
   .conn-row:focus-within .conn-actions {
     opacity: 1;
+  }
+  /* Touch has no hover: keep the ⋯ in the row's flow, always visible. */
+  @media (hover: none) {
+    .conn-actions {
+      position: static;
+      transform: none;
+      background: none;
+      box-shadow: none;
+      opacity: 1;
+    }
   }
   .conn-glyph {
     display: grid;

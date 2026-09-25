@@ -357,10 +357,24 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
     let statements = match engine {
         Engine::Mysql => Parser::parse_sql(&MySqlDialect {}, sql),
         Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        // Redis / MongoDB / ClickHouse have no AST parser here. They used to be
+        // refused outright — which, since a new connection starts Enforced,
+        // meant a freshly created one could run NOTHING, not even for its
+        // owner or root. Classify with the engine's own lexer instead (the
+        // same conservative classifier the MCP read-only gate trusts; unknown
+        // counts as a write). A write needs data AND schema rights (the lexer
+        // can't tell them apart); a read is `db_query`, and the caller
+        // additionally requires `db_data` for any non-parser-proven read
+        // (see [`unparsed_read_requires`]) so viewer-level trust is unchanged.
         _ => {
-            return Err(crate::native_access::setup_error(
-                "restricted scripts are unsupported for this engine",
-            ))
+            if sql.trim().is_empty() {
+                return Err(Error::Invalid("empty statement".into()));
+            }
+            return Ok(if crate::types::statement_is_write(engine, sql) {
+                vec!["db_query", "db_data", "db_schema"]
+            } else {
+                vec!["db_query"]
+            });
         }
     }
     .map_err(|_| {
@@ -418,9 +432,56 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
     Ok(ops)
 }
 
+/// Extra operation an authorizer must hold for a statement whose read-ness
+/// is lexer-classified rather than parser-proven (every engine but MySQL /
+/// PostgreSQL): editor-level trust. Keeps a `db_query`-only viewer exactly as
+/// restricted as before on those engines, while owners and editors can query
+/// their own connections. `None` for the parsed SQL engines.
+pub(crate) fn unparsed_read_requires(engine: Engine) -> Option<&'static str> {
+    match engine {
+        Engine::Mysql | Engine::Postgres => None,
+        _ => Some("db_data"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unparsed_engines_classify_reads_and_writes_instead_of_refusing() {
+        assert_eq!(
+            operations(Engine::Redis, "GET k").unwrap(),
+            vec!["db_query"]
+        );
+        assert_eq!(
+            operations(Engine::Redis, "SET k v").unwrap(),
+            vec!["db_query", "db_data", "db_schema"]
+        );
+        assert_eq!(
+            operations(Engine::Mongodb, "db.users.find({})").unwrap(),
+            vec!["db_query"]
+        );
+        assert_eq!(
+            operations(Engine::Mongodb, "db.users.deleteOne({})").unwrap(),
+            vec!["db_query", "db_data", "db_schema"]
+        );
+        assert_eq!(
+            operations(Engine::Clickhouse, "SELECT 1").unwrap(),
+            vec!["db_query"]
+        );
+        assert_eq!(
+            operations(Engine::Clickhouse, "DROP TABLE t").unwrap(),
+            vec!["db_query", "db_data", "db_schema"]
+        );
+        assert!(matches!(
+            operations(Engine::Redis, "   ").unwrap_err(),
+            Error::Invalid(_)
+        ));
+        // Reads on those engines still need editor trust; parsed SQL does not.
+        assert_eq!(unparsed_read_requires(Engine::Redis), Some("db_data"));
+        assert_eq!(unparsed_read_requires(Engine::Mysql), None);
+    }
 
     /// `run` authorizes with the bare child but hands drivers the canonical
     /// node. They differ exactly for Redis: the child `3` names the keyspace

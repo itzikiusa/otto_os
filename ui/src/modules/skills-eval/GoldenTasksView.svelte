@@ -180,9 +180,13 @@
 </script>
 
 <div class="gt" data-testid="golden-tasks">
+  <!-- The Evaluator tab already names the view; the header row says what a
+       golden task is and holds the one primary action. -->
   <header class="gt-head">
-    <h2>Golden tasks</h2>
-    <span class="grow"></span>
+    <p class="gt-hint">
+      Reusable, per-repo evaluation cases — a prompt plus a test command. Failed evaluations can be
+      saved here as regression cases.
+    </p>
     <!-- While the list is empty its EmptyState owns the one "New" action. -->
     {#if tasks.length > 0 || showForm}
       <button
@@ -197,18 +201,10 @@
     {/if}
   </header>
 
-  <div class="gt-hint">
-    <Icon name="info" size={12} />
-    <span>
-      Golden tasks are reusable, per-repo evaluation cases — a prompt plus a test command.
-      Failed evals can be saved here as regression cases.
-    </span>
-  </div>
-
   {#if showForm}
     <form class="gt-form card" onsubmit={(e: SubmitEvent) => { e.preventDefault(); void submit(); }}>
       <div class="gt-form-head">
-        <span class="field-label">{editingId ? 'Edit golden task' : 'New golden task'}</span>
+        <h3 class="gt-form-title">{editingId ? 'Edit golden task' : 'New golden task'}</h3>
         <span class="grow"></span>
         <button type="button" class="icon-btn" onclick={closeForm} title="Close form" aria-label="Close form">
           <Icon name="x" size={14} />
@@ -366,33 +362,29 @@
   .gt-head {
     display: flex;
     align-items: center;
-    gap: 8px;
-  }
-  .gt-head h2 {
-    margin: 0;
-    font-size: var(--fs-l);
+    gap: 12px;
   }
   .grow {
     flex: 1;
   }
   .gt-hint {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px 11px;
-    font-size: var(--fs-xs);
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: var(--fs-s);
     line-height: 1.45;
     color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    background: var(--surface-2);
   }
+  /* Same field-label style as every other Otto form (app.css .field > label). */
   .field-label {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
+  }
+  .gt-form-title {
+    margin: 0;
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
 
   /* Form */
@@ -480,7 +472,7 @@
   }
   .gt-card {
     border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
+    border-radius: var(--radius-m);
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
@@ -544,11 +536,11 @@
     padding: 1px 8px;
   }
   .gt-code {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text);
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    border-radius: var(--radius-s, 5px);
+    border-radius: var(--radius-s);
     padding: 1px 6px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -572,5 +564,16 @@
     gap: 3px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  @media (max-width: 640px) {
+    .gt {
+      padding: 12px 14px 40px;
+    }
+    .gt-head {
+      flex-wrap: wrap;
+    }
+    .gt-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 </style>

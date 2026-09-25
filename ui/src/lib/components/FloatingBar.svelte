@@ -464,11 +464,35 @@
 
   // Toasts sit bottom-right over the same column: while the pill floats
   // there, lift the stack above it (--toast-lift, read by Toasts.svelte).
+  // While the panel (⌘K results / a reply) is open, the stack goes above the
+  // whole surface — a toast used to sit on top of the panel's right edge.
   $effect(() => {
     if (!inApp) return;
-    const lift = presence === 'full' ? PILL_H + 12 : presence === 'rest' ? 36 + 12 : 0;
-    document.documentElement.style.setProperty('--toast-lift', `${lift}px`);
-    return () => document.documentElement.style.removeProperty('--toast-lift');
+    const base = presence === 'full' ? PILL_H + 12 : presence === 'rest' ? 36 + 12 : 0;
+    const root = document.documentElement;
+    const apply = () => {
+      let lift = base;
+      const surface = showPanel ? rootEl?.querySelector<HTMLElement>('.surface') : null;
+      if (surface) {
+        // Toasts sit at bottom: 38px + lift; keep 12px clear of the surface top.
+        lift = Math.max(base, Math.round(window.innerHeight - surface.getBoundingClientRect().top - 26));
+      }
+      root.style.setProperty('--toast-lift', `${lift}px`);
+    };
+    apply();
+    let ro: ResizeObserver | null = null;
+    if (showPanel) {
+      void tick().then(apply);
+      const surface = rootEl?.querySelector<HTMLElement>('.surface');
+      if (surface) {
+        ro = new ResizeObserver(apply);
+        ro.observe(surface);
+      }
+    }
+    return () => {
+      ro?.disconnect();
+      root.style.removeProperty('--toast-lift');
+    };
   });
 
   // ⌥Space window: report the content height so the native panel grows upward.
