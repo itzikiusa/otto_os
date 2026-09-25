@@ -69,6 +69,7 @@
   let nextToken = $state<string | null>(null);
   let objLoading = $state(false);
   let objError = $state('');
+  let objectRequest = 0;
   let objFilter = $state('');
   const rowsShown = $derived.by(() => {
     const q = objFilter.trim().toLowerCase();
@@ -88,16 +89,19 @@
   async function loadObjects(more = false): Promise<void> {
     if (!bucket) return;
     objLoading = true;
+    const request = ++objectRequest;
     try {
       const r = await awsApi.s3Objects(account.id, bucket, prefix, more ? nextToken : undefined);
+      if (request !== objectRequest) return;
       prefixes = more ? [...prefixes, ...r.prefixes] : r.prefixes;
       objects = more ? [...objects, ...r.objects] : r.objects;
       nextToken = r.is_truncated ? (r.next_token ?? null) : null;
       objError = '';
     } catch (e) {
+      if (request !== objectRequest) return;
       objError = e instanceof Error ? e.message : String(e);
     } finally {
-      objLoading = false;
+      if (request === objectRequest) objLoading = false;
     }
   }
 
@@ -108,6 +112,7 @@
     void prefix;
     untrack(() => {
       if (!buckets && !bucketsLoading) void loadBuckets();
+      objectRequest++;
       if (b) {
         preview = null;
         void loadObjects();
@@ -366,7 +371,7 @@
     {#if preview.loading}
       <Skeleton rows={6} />
     {:else if preview.error}
-      <p class="err">{preview.error}</p>
+      <p class="err" role="alert">{preview.error} <button class="btn small" onclick={() => preview && void openPreview(preview.obj)}>Retry preview</button></p>
     {:else if previewKind === 'binary'}
       <p class="dim">Binary content ({preview.data?.content_type ?? 'unknown type'}) — download to open it.</p>
     {:else if previewKind === 'json' && previewJson !== undefined}

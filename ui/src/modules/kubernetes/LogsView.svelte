@@ -266,7 +266,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="logs-body" bind:this={wrapEl} onscrollcapture={onScroll}>
+  <div class="logs-body" dir="ltr" bind:this={wrapEl} onscrollcapture={onScroll}>
     {#if !lines.length && !error}
       <div class="dim pad">{streaming ? 'Waiting for output…' : 'No log lines.'}</div>
     {:else}

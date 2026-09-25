@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import { ui } from '../../lib/stores/ui.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
@@ -27,6 +27,7 @@
   import WorkloadPods from './WorkloadPods.svelte';
 
   interface Props {
+    modal?: boolean;
     clusterId: string;
     kind: K8sResourceKind;
     ns: string;
@@ -44,7 +45,7 @@
     /** Workloads: jump to one of this object's pods (its own drawer). */
     onopenpod?: (ns: string, pod: string, tab?: K8sDrawerTab) => void;
   }
-  let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
+  let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -185,38 +186,17 @@
 
   let drawerEl = $state<HTMLElement | null>(null);
 
-  // On phones details replace the screen. Register the overlay, keep keyboard
-  // focus inside it, and return focus to the triggering row when it closes.
+  // Compact detail sheets share the same nested-dialog ownership and focus
+  // restoration as other app sheets, including Safari pointer activation.
   $effect(() => {
-    if (!viewport.isPhone) return;
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!modal || !drawerEl) return;
     untrack(() => ui.pushModal());
-    queueMicrotask(() => drawerEl?.querySelector<HTMLElement>('.dr-close')?.focus());
+    const focus = dialogFocus(drawerEl, onclose);
     return () => {
+      focus.destroy();
       untrack(() => ui.popModal());
-      previous?.focus();
     };
   });
-
-  function sheetKey(e: KeyboardEvent): void {
-    if (!viewport.isPhone || e.defaultPrevented) return;
-    // A confirmation or picker above the details owns its keyboard events.
-    if (Array.from(document.querySelectorAll('[aria-modal="true"]')).some(el => el !== drawerEl)) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      onclose();
-    } else if (e.key === 'Tab') {
-      const controls = Array.from(drawerEl?.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]',
-      ) ?? []).filter(el => el.tabIndex >= 0 && el.offsetParent !== null);
-      const i = controls.indexOf(document.activeElement as HTMLElement);
-      if (i < 0 || (e.shiftKey ? i === 0 : i === controls.length - 1)) {
-        e.preventDefault();
-        controls[e.shiftKey ? controls.length - 1 : 0]?.focus();
-      }
-    }
-  }
 
   function tabKey(e: KeyboardEvent, i: number): void {
     if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
@@ -230,9 +210,7 @@
   }
 </script>
 
-<svelte:window onkeydown={sheetKey} />
-
-<aside bind:this={drawerEl} class="drawer" role={viewport.isPhone ? 'dialog' : undefined} aria-modal={viewport.isPhone ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
+<aside bind:this={drawerEl} class="drawer" role={modal ? 'dialog' : undefined} aria-modal={modal ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
   <header class="dr-head">
     <div class="dr-title">
       <span class="dr-kind">{def.singular}</span>
