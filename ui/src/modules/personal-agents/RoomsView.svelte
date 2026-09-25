@@ -84,14 +84,15 @@
   }
 
   async function createRoom(): Promise<void> {
-    const name = newRoomName.trim();
-    if (!name || !ws.currentId) return;
+    const submitted = newRoomName;
+    const name = submitted.trim();
+    if (!name || !ws.currentId || busy) return;
     busy = true;
     createError = '';
     try {
       selectedId = await personalAgents.createRoom(ws.currentId, name);
       showingList = false;
-      newRoomName = '';
+      if (newRoomName === submitted) newRoomName = '';
     } catch (e) {
       createError = `Couldn’t create the room. ${loadErrorText(e)}`;
     } finally {
