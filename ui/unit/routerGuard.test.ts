@@ -3,7 +3,6 @@
 // reverted to the previous hash); replace() is never guarded.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SvelteMap } from 'svelte/reactivity';
 import { loadSource } from './sourceHarness.ts';
 
 const flush = async () => {
@@ -36,7 +35,9 @@ function fixture() {
   const { router } = loadSource(
     new URL('../src/lib/router.svelte.ts', import.meta.url),
     {
-      'svelte/reactivity': { SvelteMap },
+      // Like this harness's identity runes, the map models routing state only.
+      // Same-session token reactivity is exercised by the browser access suite.
+      'svelte/reactivity': { SvelteMap: Map },
       './win': { winKey: (k: string) => k },
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
