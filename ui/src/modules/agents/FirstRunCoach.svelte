@@ -247,9 +247,9 @@
         {:else}
           <div class="step-hint">A workspace maps to a project directory. Sessions run inside it.</div>
           <div class="ws-form">
-            <input class="input" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
+            <input class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
-              <input class="input mono" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
+              <input class="input mono" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
             </div>
             <button class="btn small primary" disabled={!canCreateWs} onclick={createWorkspace}>
@@ -326,7 +326,8 @@
   .coach-wrap {
     height: 100%;
     display: grid;
-    place-items: center;
+    grid-template-columns: minmax(0, 1fr);
+    place-items: safe center;
     overflow: auto;
     padding: 24px;
   }
@@ -334,6 +335,8 @@
     position: relative;
     width: 480px;
     max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 22px 24px 24px;
   }
   .coach-close {
@@ -367,6 +370,9 @@
     place-items: center;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .coach-head > div:last-child {
+    min-width: 0;
   }
   .coach-head h2 {
     margin: 0 0 2px;
@@ -413,6 +419,7 @@
     min-width: 0;
   }
   .step-title {
+    flex-wrap: wrap;
     font-size: var(--fs-m);
     font-weight: 600;
     display: flex;
@@ -451,6 +458,8 @@
     margin-top: 6px;
   }
   .chip {
+    max-width: 100%;
+    white-space: normal;
     display: inline-flex;
     align-items: center;
     gap: 4px;
