@@ -42,7 +42,14 @@ Ratings above describe tested browser behavior, not a guarantee of every applica
 
 ## Round 3 (in progress)
 
-Three fresh reviewers have started: shell, content and settings. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
+Five fresh reviewers have started. Settings and content have completed their repairs and scoped checks; shell, automation and shared accessibility are active. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
+
+| Completed scope | Verified dimensions / 10 | Evidence |
+|---|---:|---|
+| Settings, MCP, Plugins, Skills Lab | 9.1–9.5; per-family means below target | [Review](r3-settings.md) |
+| Product, Vault, Canvas, Design, Reader, Snip | 9.3–9.5 on inspected variants; other variants explicitly unscored | [Review](r3-content.md) |
+
+Content verification passed 73 scoped checks plus four diagnostic reload repetitions. One intermittent Product reload rejection did not reproduce with tracing and remains an explicit next-round investigation. This is not a clean-runtime claim. Mid-round UI checking passed with zero errors or warnings. A full Rust run identified a stale macOS browser-install test, now repaired and verified using a temporary installed fixture; the complete workspace rerun is pending.
 
 ## Integration and broad evidence
 
