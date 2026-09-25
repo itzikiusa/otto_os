@@ -1,6 +1,6 @@
 <script lang="ts">
   // First-run wizard: welcome → root password → first workspace → tools → done.
-  import { api } from '../../lib/api/client';
+  import { api, setToken } from '../../lib/api/client';
   import type { LoginResp, Workspace } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -13,6 +13,9 @@
   let wsPath = $state('');
   let busy = $state(false);
   let error = $state('');
+  // Root creation is irreversible; retain its result if optional workspace
+  // setup fails so Retry cannot attempt to create the account again.
+  let rootLogin = $state<LoginResp | null>(null);
 
   const strength = $derived.by(() => {
     let score = 0;
@@ -46,15 +49,18 @@
     busy = true;
     error = '';
     try {
-      const resp = await api.post<LoginResp>('/onboarding/root', {
-        password,
-        display_name: displayName.trim() === '' ? null : displayName.trim(),
-      });
-      await auth.acceptLogin(resp);
+      if (!rootLogin) {
+        rootLogin = await api.post<LoginResp>('/onboarding/root', {
+          password,
+          display_name: displayName.trim() === '' ? null : displayName.trim(),
+        });
+      }
+      setToken(rootLogin.token);
       if (wsName.trim() !== '' && wsPath.trim() !== '') {
         await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
       }
       if (auth.meta) auth.meta.needs_onboarding = false;
+      await auth.acceptLogin(rootLogin);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       busy = false;
@@ -135,7 +141,7 @@
         </div>
 
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 1)}>Back</button>
+          <button class="btn" disabled={!!rootLogin} title={rootLogin ? 'The root account is already created' : undefined} onclick={() => (step = 1)}>Back</button>
           <button class="btn ghost" onclick={() => (step = 3)}>Skip</button>
           <button
             class="btn primary"
@@ -211,7 +217,7 @@
           {/if}
         </p>
 
-        {#if error}<div class="hint err">{error}</div>{/if}
+        {#if error}<div class="hint err" role="alert">{error}</div>{/if}
 
         <div class="ob-actions">
           <button class="btn" onclick={() => (step = 3)}>Back</button>
@@ -228,7 +234,9 @@
   .ob-wrap {
     height: 100%;
     display: grid;
-    place-items: center;
+    place-items: safe center;
+    overflow-y: auto;
+    padding-block: 16px;
     background: var(--bg);
   }
   .ob-card {
@@ -316,7 +324,7 @@
     background: var(--status-working);
   }
   .hint.err {
-    color: var(--status-exited);
+    color: var(--danger);
   }
   .hint-line {
     font-size: 11.5px;
@@ -338,9 +346,19 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 30px;
-    padding: 0 10px;
+    min-height: 30px;
+    padding: 4px 10px;
     border-radius: var(--radius-s);
+  }
+  .tool-row > .dim {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    text-align: end;
+  }
+  .tool-row > .mono {
+    flex-shrink: 0;
+    direction: ltr;
+    unicode-bidi: isolate;
   }
   .tool-row:nth-child(odd) {
     background: var(--surface-2);
@@ -350,6 +368,7 @@
     place-items: center;
     width: 18px;
     height: 18px;
+    flex-shrink: 0;
     border-radius: 50%;
     background: color-mix(in srgb, var(--status-exited) 18%, transparent);
     color: var(--status-exited);
