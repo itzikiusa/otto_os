@@ -78,14 +78,14 @@
   async function watchPart(start: number): Promise<void> {
     filmRequested = true;
     await tick();
-    mainEl?.scrollTo({ top: 0, behavior: 'smooth' });
+    mainEl?.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
     film?.playAt(start);
   }
 
   async function watchTour(): Promise<void> {
     filmRequested = true;
     await tick();
-    mainEl?.scrollTo({ top: 0, behavior: 'smooth' });
+    mainEl?.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
 
   // ---- "Open <module>" (respects the sidebar's RBAC gate) ----

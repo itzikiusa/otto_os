@@ -119,6 +119,20 @@
     if (t) t.mode = captionsOn ? 'showing' : 'hidden';
   }
 
+  // Native video controls (including fullscreen) also change this track.
+  // Keep the external CC button truthful without resetting a saved preference
+  // while a replacement video is still loading after Retry.
+  $effect(() => {
+    const video = videoEl;
+    const tracks = video?.textTracks;
+    if (!video || !tracks) return;
+    const syncCaptions = () => {
+      if (video.readyState >= 1 && tracks[0]) captionsOn = tracks[0].mode === 'showing';
+    };
+    tracks.addEventListener('change', syncCaptions);
+    return () => tracks.removeEventListener('change', syncCaptions);
+  });
+
   function toggleCaptions(): void {
     captionsOn = !captionsOn;
     applyCaptions();
