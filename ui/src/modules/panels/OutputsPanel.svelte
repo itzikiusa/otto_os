@@ -57,11 +57,17 @@
   let error = $state<string | null>(null);
   let createdUrls: string[] = [];
   let previewRequest = 0;
+  let dismissed = $state(false);
 
   function revokeCreated(): void {
     for (const u of createdUrls.splice(0)) URL.revokeObjectURL(u);
   }
-  $effect(() => () => revokeCreated());
+  $effect(() => () => {
+    // A fetch can resolve after this panel was unmounted. Invalidate it before
+    // releasing the current preview so late blob URLs are revoked too.
+    previewRequest++;
+    revokeCreated();
+  });
 
   /** Extension of the artifact's path/url (lowercase, no dot). */
   function ext(a: Artifact): string {
@@ -100,6 +106,7 @@
   async function select(a: Artifact): Promise<void> {
     const request = ++previewRequest;
     selectedId = a.id;
+    dismissed = false;
     preview = null;
     error = null;
     loading = false;
@@ -159,10 +166,27 @@
     previewRequest++;
     loading = false;
     selectedId = null;
+    dismissed = false;
     preview = null;
     error = null;
     revokeCreated();
   });
+
+  // Open on the first available artifact, including an asynchronously loaded
+  // list. Explicitly closing a preview is respected until the session changes.
+  $effect(() => {
+    const first = list[0];
+    if (first && !selected && !dismissed) untrack(() => void select(first));
+  });
+
+  function closePreview(): void {
+    previewRequest++;
+    dismissed = true;
+    selectedId = null;
+    preview = null;
+    loading = false;
+    revokeCreated();
+  }
 
   function onArtifactKey(e: KeyboardEvent, index: number): void {
     let next: number;
@@ -192,6 +216,35 @@
     if (!iso) return '';
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  }
+
+  // Long identities remain reachable on touch and by keyboard. Ordinary
+  // short names/paths do not add redundant stops to the Tab sequence.
+  function scrollableIdentity(node: HTMLElement) {
+    const update = () => {
+      if (node.scrollHeight > node.clientHeight + 1) node.tabIndex = 0;
+      else node.removeAttribute('tabindex');
+    };
+    // Give focused regions explicit, consistent scrolling across webviews.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target !== node || node.scrollHeight <= node.clientHeight) return;
+      if (event.key === 'ArrowDown') node.scrollTop += 40;
+      else if (event.key === 'ArrowUp') node.scrollTop -= 40;
+      else if (event.key === 'PageDown') node.scrollTop += node.clientHeight;
+      else if (event.key === 'PageUp') node.scrollTop -= node.clientHeight;
+      else if (event.key === 'Home') node.scrollTop = 0;
+      else if (event.key === 'End') node.scrollTop = node.scrollHeight;
+      else return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    node.addEventListener('keydown', onKey);
+    const resize = new ResizeObserver(update);
+    const content = new MutationObserver(update);
+    resize.observe(node);
+    content.observe(node, { childList: true, subtree: true, characterData: true });
+    update();
+    return { destroy() { resize.disconnect(); content.disconnect(); node.removeEventListener('keydown', onKey); } };
   }
 
   function downloadName(a: Artifact): string {
@@ -238,7 +291,7 @@
               aria-selected={selectedId === a.id}
               tabindex={selectedId === a.id || (!selected && index === 0) ? 0 : -1}
               onkeydown={(e) => onArtifactKey(e, index)}
-              onclick={() => void select(a)}
+              onclick={() => selectedId !== a.id && void select(a)}
               title={a.path ?? a.url ?? a.label}
             >
               <span class="aicon"><Icon name={KIND_ICON[a.kind] ?? 'file'} size={12} /></span>
@@ -254,7 +307,7 @@
     {#if selected}
       <div class="preview" data-testid="outputs-preview">
         <div class="phead">
-          <span class="ptitle" title={selected.path ?? selected.url ?? ''}>{selected.label}</span>
+          <span class="ptitle" role="region" aria-label="Output name" use:scrollableIdentity title={selected.path ?? selected.url ?? ''}>{selected.label}</span>
           <span class="pactions">
             <button class="icon-btn" title="Copy path" aria-label="Copy path" onclick={() => void copyPath(selected!)}>
               <Icon name="copy" size={12} />
@@ -264,11 +317,14 @@
                 <Icon name="arrowDown" size={12} />
               </a>
             {/if}
-            <button class="icon-btn" title="Close preview" aria-label="Close preview" onclick={() => (selectedId = null)}>
+            <button class="icon-btn" title="Close preview" aria-label="Close preview" onclick={closePreview}>
               <Icon name="x" size={12} />
             </button>
           </span>
         </div>
+        {#if selected.path ?? selected.url}
+          <div class="pidentity mono" dir="ltr" role="region" aria-label="Output path" use:scrollableIdentity>{selected.path ?? selected.url}</div>
+        {/if}
         {#if loading}
           <div class="pbody dim">Loading preview…</div>
         {:else if error}
@@ -426,9 +482,19 @@
   }
   .ptitle {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-height: 5em;
+    overflow: auto;
+    overflow-wrap: anywhere;
+  }
+  .pidentity {
+    padding: 6px 10px;
+    max-height: 6em;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
   }
   .pactions {
     display: inline-flex;

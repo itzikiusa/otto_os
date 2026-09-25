@@ -27,6 +27,8 @@ async function boot(page: Page) {
   await expect(page.getByTestId('outputs-panel')).toBeVisible();
 }
 test('Outputs distinguishes a failed list from empty and retries in place', async ({ page }) => {
+  // The recovered list opens its first preview automatically.
+  await page.route(`**/sessions/${sessionId}/artifacts/report`, route => route.fulfill({ body: '# Report', contentType: 'text/markdown' }));
   let failed = true;
   await page.route(`**/sessions/${sessionId}/artifacts`, route => route.fulfill(failed
     ? { status: 502, json: { code: 'upstream', message: 'Artifact index is temporarily unavailable' } }
