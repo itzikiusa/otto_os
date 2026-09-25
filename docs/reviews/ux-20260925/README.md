@@ -21,9 +21,9 @@ The audit uses ten fresh reviewers per round, five mandatory rounds. Because onl
 
 Per-page ratings and exact coverage limits are in each report. A group mean does not establish that every page meets the target. All documented feasible residuals are assigned to the next fresh review.
 
-## Round 2 (in progress)
+## Round 2
 
-Nine fresh reviewers have started; six scopes have finished their repairs and verification. The remaining reviewers are queued, not counted as completed.
+All ten fresh reviewers completed their repairs and verification. The combined round gate passed: zero type/style errors or warnings, 454 unit tests, and the production build.
 
 | Scope | Current verified range / 10 | Evidence |
 |---|---:|---|
@@ -33,12 +33,16 @@ Nine fresh reviewers have started; six scopes have finished their repairs and ve
 | Automation and agent coordination | 9.0–9.3 by family | [Review](r2-automation.md) |
 | Shared accessibility | 9.5–9.6 by dimension | [Review](r2-access.md) |
 | Settings, MCP, Plugins, Skills Lab | 9.16–9.44 by family | [Review](r2-settings.md) |
-| Shell, Home, sessions and panels | Review underway | Pending |
-| AWS and Kubernetes | Review underway | Pending |
-| Assistant, History, Usage, Insights | Review underway | Pending |
-| Help and walkthrough player | Queued | Pending |
+| Shell, Home, sessions and panels | 9.3–9.6 by family | [Review](r2-shell.md) |
+| AWS and Kubernetes | 9.38–9.50 by family | [Review](r2-cloud.md) |
+| Assistant, History, Usage, Insights | 9.44–9.52 by family | [Review](r2-insights.md) |
+| Help and walkthrough player | 9.54–9.56 by variant | [Review](r2-help.md) |
 
-Rounds 3, 4 and 5 are still required. Ratings above describe tested browser behavior, not a guarantee of every application path. Current UI unit gate: 454 passed. A broader session test run found one clipboard-fallback failure among 28 cases; the shell reviewer is investigating it. The subsequent full UI check passed with zero errors and zero warnings. Production-build LSP and nested-focus checks passed in both Chromium and WebKit (6 tests).
+Ratings above describe tested browser behavior, not a guarantee of every application path. The broader session test run exposed a real terminal selection loss during resize compaction; the shell reviewer repaired and rechecked it, including delayed responses and native clipboard fallback. Production-build LSP and nested-focus checks passed in both Chromium and WebKit (6 tests). One confirmed terminal readability issue remains assigned to round three: Split view can shrink text below 11px.
+
+## Round 3 (in progress)
+
+Three fresh reviewers have started: shell, content and settings. This round includes terminal sizing, save races, installed plugin routes, Snip editor, auth/share boot states, desktop auxiliary surfaces and complete onboarding flows. Ten fresh reviewers will run before the combined round gate. Rounds four and five are also mandatory.
 
 ## Integration and broad evidence
 
